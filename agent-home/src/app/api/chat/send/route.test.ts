@@ -11,10 +11,13 @@ import { POST } from "@/app/api/chat/send/route";
 import type { Principal } from "@/types";
 
 const getPrincipal = vi.fn<() => Promise<Principal | null>>();
-const sendChat = vi.fn(async (_sessionId: string, _message: string) => ({
-  session_id: "home_2",
-  message: { role: "assistant" as const, content: "ok" },
-}));
+const sendChat = vi.fn(async (...args: [sessionId: string, message: string]) => {
+  void args;
+  return {
+    session_id: "home_2",
+    message: { role: "assistant" as const, content: "ok" },
+  };
+});
 
 vi.mock("@/lib/auth/principal", () => ({
   getPrincipal: () => getPrincipal(),

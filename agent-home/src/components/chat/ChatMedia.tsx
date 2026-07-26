@@ -14,25 +14,30 @@ import type { ChatMediaUrlResponse } from "@/types";
  * signing, so a tampered path simply renders as unavailable.
  */
 export function ChatMedia({ path, alt }: { path: string; alt: string }) {
-  const [url, setUrl] = useState<string | null>(null);
-  const [failed, setFailed] = useState(false);
+  // Keyed by path so a changed path resets to "loading" during render rather
+  // than via a setState in the effect body.
+  const [resolved, setResolved] = useState<{
+    path: string;
+    url: string | null;
+    failed: boolean;
+  }>({ path, url: null, failed: false });
+  const { url, failed } =
+    resolved.path === path ? resolved : { url: null, failed: false };
 
   useEffect(() => {
     let active = true;
-    setUrl(null);
-    setFailed(false);
     (async () => {
       try {
         const res = await fetch(mediaRef(path), { cache: "no-store" });
         const body = (await res.json()) as Partial<ChatMediaUrlResponse>;
         if (!active) return;
-        if (!res.ok || !body.url) {
-          setFailed(true);
-          return;
-        }
-        setUrl(body.url);
+        setResolved({
+          path,
+          url: res.ok && body.url ? body.url : null,
+          failed: !res.ok || !body.url,
+        });
       } catch {
-        if (active) setFailed(true);
+        if (active) setResolved({ path, url: null, failed: true });
       }
     })();
     return () => {
