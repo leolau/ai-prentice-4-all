@@ -73,6 +73,18 @@ export function mediaBucket(): string {
   return process.env.AGENT_HOME_MEDIA_BUCKET || "agent-home-media";
 }
 
+/**
+ * TTL (seconds) of the signed URLs the media read route mints. The bucket is
+ * private, so a leaked URL is only useful for this window — keep it short.
+ * Deploy topology (`AGENT_HOME_MEDIA_URL_TTL`), defaults to 60s and is clamped
+ * to 5s..1h so a typo can never mint a long-lived URL.
+ */
+export function mediaSignedUrlTtlSeconds(): number {
+  const raw = Number(process.env.AGENT_HOME_MEDIA_URL_TTL);
+  if (!Number.isFinite(raw) || raw <= 0) return 60;
+  return Math.min(3600, Math.max(5, Math.floor(raw)));
+}
+
 /** Whether server-side chat-media uploads are configured on this box. */
 export function storageConfigured(): boolean {
   return Boolean(process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_KEY);

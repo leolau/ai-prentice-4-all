@@ -11,7 +11,9 @@ import { NextResponse } from "next/server";
 
 import { HermesApiError } from "@/lib/api/client";
 import { apiClientForRequest, getPrincipal } from "@/lib/auth/principal";
-import type { ChatAttachment } from "@/types";
+import { mediaRef } from "@/lib/chat/media-ref";
+import { canReadMediaPath } from "@/lib/supabase/storage";
+import type { ChatAttachment, Principal } from "@/types";
 
 interface SendBody {
   sessionId?: unknown;
@@ -19,29 +21,38 @@ interface SendBody {
   attachments?: unknown;
 }
 
-/** Append attachment references so the persisted turn carries the media links. */
+/**
+ * Append attachment references so the persisted turn carries the media links.
+ * The bucket is private, so what is persisted is the **path-bearing BFF ref**
+ * (re-signed per read), never a URL.
+ */
 function withAttachments(message: string, attachments: ChatAttachment[]): string {
   if (attachments.length === 0) return message;
   const refs = attachments
-    .map((a) => `![${a.name}](${a.url})`)
+    .map((a) => `![${a.name}](${mediaRef(a.path)})`)
     .join("\n");
   return message ? `${message}\n\n${refs}` : refs;
 }
 
-function readAttachments(raw: unknown): ChatAttachment[] {
+/**
+ * Read the client's attachment list, keeping only objects the principal owns.
+ * A crafted `path` pointing at another member's object is dropped here as well
+ * as refused by the read route — the transcript never references foreign media.
+ */
+function readAttachments(principal: Principal, raw: unknown): ChatAttachment[] {
   if (!Array.isArray(raw)) return [];
   const out: ChatAttachment[] = [];
   for (const item of raw) {
     if (
       item &&
       typeof item === "object" &&
-      typeof (item as ChatAttachment).url === "string" &&
-      typeof (item as ChatAttachment).name === "string"
+      typeof (item as ChatAttachment).path === "string" &&
+      typeof (item as ChatAttachment).name === "string" &&
+      canReadMediaPath(principal, (item as ChatAttachment).path)
     ) {
       const a = item as ChatAttachment;
       out.push({
-        path: typeof a.path === "string" ? a.path : "",
-        url: a.url,
+        path: a.path,
         name: a.name,
         content_type: typeof a.content_type === "string" ? a.content_type : "",
         size: typeof a.size === "number" ? a.size : 0,
@@ -65,7 +76,7 @@ export async function POST(request: Request): Promise<NextResponse> {
   }
 
   const rawMessage = typeof body.message === "string" ? body.message.trim() : "";
-  const attachments = readAttachments(body.attachments);
+  const attachments = readAttachments(principal, body.attachments);
   if (!rawMessage && attachments.length === 0) {
     return NextResponse.json(
       { error: "empty_message", detail: "A message or attachment is required." },

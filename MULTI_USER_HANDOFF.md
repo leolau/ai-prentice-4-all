@@ -52,10 +52,8 @@ From the owner:
 | **PR-1** #55 | Security foundation (a+b): non-BYPASSRLS `hermes_app` role, admin-DSN split, `bind_principal` per request, `_comms_resolve_principal` identity binding, owner alias map, ensure-RLS, real-path DB RLS tests | **merged** |
 | **PR-2** #56 | Supabase (GoTrue) email/password dashboard-auth provider (c): password grant, local JWT verify, `sub`→principal, closed signup | **merged** |
 | **PR-3** #57 | Member-management backend (e-backend): `/api/comms/members` API + `hermes member` CLI, GoTrue admin create → enroll principal, owner/admin guard | **merged** |
-| **PR-4** #58 | agent-home Members management UI (e-frontend): owner/admin screen + BFF routes | **open → `develop`** (this branch) |
-| **PR-5** | Private media bucket + signed URLs (d): private bucket, on-demand signing with ownership/grant check, migrate render path | **not started** |
-
-Branch for PR-4: `devin/1784799589-multiuser-pr4-members-ui`.
+| **PR-4** #58 | agent-home Members management UI (e-frontend): owner/admin screen + BFF routes | **merged** |
+| **PR-5** | Private media bucket + signed URLs (d): no public URLs, `GET /api/chat/media` signs short-lived URLs after a server-side path-ownership check, transcript carries the object path | **open → `develop`** (this branch) |
 
 ---
 
@@ -137,23 +135,30 @@ convenience, **not** the security boundary.
 
 ---
 
-## PR-5 — remaining work (NOT started)
+## PR-5 — code landed (this branch)
 
-Item (d). Do **not** begin without owner go-ahead. Plan:
+Item (d), code half. What shipped:
 
-1. Flip the `agent-home-media` bucket from **public → private**.
-2. Replace `getPublicUrl` (`agent-home/src/lib/supabase/storage.ts`) with
-   `createSignedUrl(path, ttl)` (short TTL, ~5 min).
-3. Add a BFF **read/sign route** that resolves the requesting principal and
-   **verifies it owns the `<user_id>/` prefix** (or holds a grant) *before*
-   signing. The ownership check is the real isolation — signing without it lets
-   any member sign any path.
-4. "Per-member sub-buckets" = the existing `<user_id>/<session>/<uuid>-<name>`
-   prefix, optionally hardened with Storage RLS on `storage.objects` keyed to the
-   authenticated user.
-5. Migrate the render path: history persists the object `path` on
-   `ChatAttachment`, so re-sign by `path` — no object move needed; replace any
-   hard-coded public URLs in history with the signing route.
+1. `getPublicUrl` is **gone**. `uploadChatMedia` returns only the object `path`
+   (`ChatAttachment.url` removed from the shared type).
+2. `canReadMediaPath(principal, path)` — fail-closed path-ownership check: plain
+   relative key, every segment slug-clean, first segment `=== slug(user_id)`.
+   **Own-only for every role**, owner/admin included (documented deviation from
+   "owner may read broader": fail-closed default, easy to widen later).
+3. `createMediaSignedUrl(path, ttl)` + `GET /api/chat/media?path=…` (401 / 400 /
+   403 crafted-or-foreign / 404 unsignable / 501 unconfigured). TTL from
+   `AGENT_HOME_MEDIA_URL_TTL`, default 60s, clamped 5..3600.
+4. Transcript render path: the persisted turn carries
+   `![name](/api/chat/media?path=…)` (`lib/chat/media-ref.ts`), and the client
+   `ChatMedia` component resolves a signed URL per render. Old transcripts with a
+   literal URL still render as a plain `<img>`.
+5. `/api/chat/send` drops any client-supplied attachment path outside the
+   caller's prefix, so a foreign path never enters history.
+
+**Owner-gated box step still pending:** flip the `agent-home-media` bucket from
+**public → private** in the self-hosted Supabase (existing objects keep their
+paths — nothing to move; signing is by `path`). Optionally harden further with
+Storage RLS on `storage.objects` keyed to the authenticated user.
 
 ---
 

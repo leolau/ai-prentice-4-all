@@ -21,6 +21,23 @@ describe("MessageBubble", () => {
     expect(html).toContain("how can I help?");
   });
 
+  it("routes a private-bucket media ref through the signing route", () => {
+    const html = renderToStaticMarkup(
+      <MessageBubble
+        message={{
+          role: "user",
+          content:
+            "look ![shot](/api/chat/media?path=mia_member%2Fhome_2%2Fu1-a.png)",
+        }}
+      />,
+    );
+    expect(html).toContain('data-component="ChatMedia"');
+    // The private object path is never rendered as an image src — the signed
+    // URL is fetched from the BFF after the server-side ownership check.
+    expect(html).not.toContain("<img");
+    expect(html).toContain("Loading shot");
+  });
+
   it("renders inline image attachments as <img> media", () => {
     const html = renderToStaticMarkup(
       <MessageBubble

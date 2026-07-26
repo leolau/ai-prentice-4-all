@@ -384,15 +384,23 @@ export interface SessionCreateResponse {
 
 /**
  * A media attachment uploaded server-side to principal-scoped Supabase Storage
- * (browser never holds the storage key). `url` is the reference the composer
- * appends to the outgoing message and the thread renders inline.
+ * (browser never holds the storage key). The bucket is **private**, so only the
+ * durable object `path` is carried: reads are re-signed on demand through the
+ * BFF media route after a server-side ownership check (PR-5). There is
+ * deliberately no `url` field — a stored URL would either be public or expired.
  */
 export interface ChatAttachment {
   path: string;
-  url: string;
   name: string;
   content_type: string;
   size: number;
+}
+
+/** Response of `GET /api/chat/media?path=…` — a short-lived signed read URL. */
+export interface ChatMediaUrlResponse {
+  path: string;
+  url: string;
+  expires_in: number;
 }
 
 /** Whether a comms item is a consent **approval** (grant/deny) or a proactive **ask** (acknowledge). */
