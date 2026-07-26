@@ -44,8 +44,13 @@ export function hermesApiBaseUrl(): string {
 
 /** Postgres DSN for server-side Supabase reads. Required at read time (secret). */
 export function databaseUrl(): string {
-  // `DATABASE_URL` is the same secret the Python backend points
-  // `datastore.supabase_app.dsn` at; reuse it rather than minting a new name.
+  // `DATABASE_URL` is the same env name the Python backend points
+  // `datastore.supabase_app.dsn` at, but in a multi-user deploy it must NOT be
+  // the privileged (BYPASSRLS) DSN: point it at the least-privilege,
+  // NOBYPASSRLS **login** serving role (`agent_home_app`, provisioned by
+  // `hermes owner read-role`) so this app's direct reads have C2 visibility
+  // enforced by Postgres FORCE'd RLS. The privileged DSN stays with Python
+  // (migrations, writes, background jobs).
   return required("DATABASE_URL");
 }
 

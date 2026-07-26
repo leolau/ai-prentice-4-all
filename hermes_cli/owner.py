@@ -5,10 +5,20 @@ from __future__ import annotations
 import argparse
 import asyncio
 import getpass
+import os
 import sys
 
-from hermes_cli.access import PrincipalStore, Role, ensure_app_role
+from hermes_cli.access import (
+    READ_ROLE_NAME,
+    PrincipalStore,
+    Role,
+    ensure_app_role,
+    ensure_read_role,
+)
 from hermes_cli.datastore import SupabaseAppStore, get_store
+
+#: Env var carrying the serving read role's password (a credential → ``.env``).
+READ_ROLE_PASSWORD_ENV = "HERMES_APP_READ_DB_PASSWORD"
 
 
 def _prod_store() -> PrincipalStore:
@@ -141,6 +151,47 @@ def owner_db_role_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def owner_read_role_command(args: argparse.Namespace) -> int:
+    """Run ``hermes owner read-role`` — provision the read-only serving role.
+
+    Idempotently creates the ``agent_home_app`` ``LOGIN``/NOBYPASSRLS role and
+    grants it ``SELECT`` only on RLS-forced tables, so a read-only surface (the
+    ``agent-home`` app) can connect *as* this role and have Postgres RLS enforce
+    C2 visibility. Crash-safe: it issues no role-membership grant. The role's
+    password is read from ``$HERMES_APP_READ_DB_PASSWORD`` (never printed); put
+    the same value in the app's ``DATABASE_URL``. Run under the privileged admin
+    DSN during a maintenance window.
+    """
+    password = os.environ.get(READ_ROLE_PASSWORD_ENV, "")
+    if not password:
+        print(
+            f"Set {READ_ROLE_PASSWORD_ENV} (the read role's password) first; "
+            "it is read from the environment and never printed.",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+    try:
+        store = _prod_app_store()
+
+        async def _run() -> str:
+            connection = await store.connect()
+            try:
+                await ensure_read_role(
+                    connection, store.schema, password=password
+                )
+            finally:
+                await connection.close()
+            return store.schema
+
+        schema = asyncio.run(_run())
+    except (RuntimeError, ValueError) as error:
+        print(f"Provisioning the read role failed: {error}", file=sys.stderr)
+        raise SystemExit(1) from error
+
+    print(f"Ensured read-only serving role {READ_ROLE_NAME!r} on schema {schema}")
+    return 0
+
+
 def register_owner_subparser(subparsers: argparse._SubParsersAction) -> None:
     """Register ``hermes owner`` and its sub-actions."""
     parser = subparsers.add_parser(
@@ -217,3 +268,17 @@ def register_owner_subparser(subparsers: argparse._SubParsersAction) -> None:
         ),
     )
     db_role.set_defaults(func=owner_db_role_command)
+
+    read_role = owner_sub.add_parser(
+        "read-role",
+        help="Provision the read-only, non-BYPASSRLS LOGIN serving role",
+        description=(
+            "Idempotently create the 'agent_home_app' LOGIN/NOBYPASSRLS role "
+            "and grant it SELECT only on RLS-forced tables, so a read-only "
+            "surface (agent-home) can connect as it and have Postgres RLS "
+            "enforce per-principal visibility. Crash-safe (no role-membership "
+            "grant). The password is read from $HERMES_APP_READ_DB_PASSWORD "
+            "and never printed. Run under the privileged admin DSN."
+        ),
+    )
+    read_role.set_defaults(func=owner_read_role_command)
