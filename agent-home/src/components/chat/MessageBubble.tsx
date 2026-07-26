@@ -1,3 +1,5 @@
+import { ChatMedia } from "@/components/chat/ChatMedia";
+import { mediaRefPath } from "@/lib/chat/media-ref";
 import type { ChatMessage } from "@/types";
 
 interface Segment {
@@ -27,7 +29,9 @@ function segment(content: string): Segment[] {
 
 /**
  * One chat turn rendered as a mobile bubble — user turns align right, the
- * agent's align left. Inline image attachments (`![alt](url)`) render as media.
+ * agent's align left. Inline image attachments (`![alt](ref)`) render as media:
+ * private-bucket refs (`/api/chat/media?path=…`) resolve through the BFF
+ * signing route, while a plain URL (older transcript) renders directly.
  */
 export function MessageBubble({ message }: { message: ChatMessage }) {
   const isUser = message.role === "user";
@@ -44,8 +48,12 @@ export function MessageBubble({ message }: { message: ChatMessage }) {
             : "bg-[var(--color-surface-2)] text-[var(--color-fg)]"
         }`}
       >
-        {segments.map((s, i) =>
-          s.kind === "image" ? (
+        {segments.map((s, i) => {
+          if (s.kind !== "image") return <span key={i}>{s.value}</span>;
+          const path = mediaRefPath(s.value);
+          return path ? (
+            <ChatMedia key={i} path={path} alt={s.alt || "attachment"} />
+          ) : (
             // eslint-disable-next-line @next/next/no-img-element
             <img
               key={i}
@@ -53,10 +61,8 @@ export function MessageBubble({ message }: { message: ChatMessage }) {
               alt={s.alt || "attachment"}
               className="mt-1 max-h-64 rounded-lg"
             />
-          ) : (
-            <span key={i}>{s.value}</span>
-          ),
-        )}
+          );
+        })}
       </div>
     </div>
   );
