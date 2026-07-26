@@ -144,12 +144,18 @@ systemctl restart agent-home.service
 # verify: curl -sS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:3100/   # -> 307
 ```
 
-> ⚠️ **RLS caveat (from `deploy/DEPLOY.md`):** the Supabase Postgres role
-> agent-home connects as (`postgres`, via `DATABASE_URL`) has **BYPASSRLS**, so
-> per-principal RLS is **not** enforced for it. Safe while the **owner is the only
-> login** (owner sees all rows anyway), but **provision a dedicated
-> non-BYPASSRLS role before onboarding other users**. (The multi-user PR-1 work
-> in §6 begins addressing least-privilege DB roles — reconcile these.)
+> ✅ **RLS caveat — RESOLVED (step 7, 2026-07-27):** agent-home no longer
+> connects as `postgres` (BYPASSRLS). Its `DATABASE_URL` now points at a
+> dedicated **`agent_home_app`** login role — `LOGIN NOSUPERUSER NOBYPASSRLS`,
+> granted `SELECT` only on RLS-forced tables (fail-closed on the rest) — so
+> Postgres FORCE'd RLS enforces C2 on its direct reads. Verified live: as the
+> role, `owner`-bound reads see all `app_prod.interactions` (380) while a
+> synthetic member sees 0 (private:leo_owner), and non-RLS identity tables are
+> denied. Python/migrations/CLI keep the privileged DSN. Reproduce the role with
+> `hermes owner read-role` (password from `$HERMES_APP_READ_DB_PASSWORD`).
+> The membership-grant path (`GRANT hermes_app TO CURRENT_USER`) is avoided — it
+> faults the Supabase event trigger; `hermes owner db-role` now takes
+> `grant_membership=False` for such builds.
 
 ---
 
@@ -217,8 +223,10 @@ per-principal DB role is prerequisite to real multi-user RLS enforcement).
 
 1. **FG-20 ECS system-test** on `hermes-systest` (staging/`app_dev`, never
    `app_prod`) — parity + mobile/PWA + negative-access RLS + C6 + cache-safety.
-2. **Provision a dedicated non-BYPASSRLS Supabase role** for agent-home before
-   onboarding non-owner users (see §3 caveat; ties into the §6 multi-user work).
+2. ✅ **DONE (step 7):** dedicated non-BYPASSRLS `agent_home_app` role
+   provisioned and agent-home repointed at it; live RLS enforcement verified
+   (see §3). Onboarding a non-owner member is now unblocked at the DB layer
+   (still gated on PR-5 private storage before real member files).
 3. **Broader prod promotion:** only 10 FGs were promoted in the cutover
    (03/04/05/08/11/12/15/16/17/18); still `develop`-only for prod:
    **FG-01, 06, 07, 09, 10, 13, 14, 19** — remaining work is system-test +

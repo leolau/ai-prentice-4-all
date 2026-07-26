@@ -22,12 +22,14 @@ import asyncpg
 import pytest
 
 from hermes_cli.access import (
+    READ_ROLE_NAME,
     Principal,
     PrincipalStore,
     Role,
     apply_scope_rls,
     bind_principal,
     ensure_app_role,
+    ensure_read_role,
     private,
     resolve_principal,
 )
@@ -469,6 +471,131 @@ async def test_app_role_is_least_privilege_and_enforces_rls(
         assert await visible_ids("root", "owner") == [1, 2, 3]
     finally:
         await conn.close()
+
+
+@pytest.mark.asyncio
+async def test_ensure_app_role_skips_membership_when_disabled(
+    postgres_dsn: str,
+) -> None:
+    """``grant_membership=False`` provisions the role but no role-membership.
+
+    The ``GRANT <role> TO CURRENT_USER`` statement crashes the event trigger on
+    some managed Postgres builds; the flag lets those builds provision the role
+    without it (they use a LOGIN serving role instead of ``SET ROLE``).
+    """
+    await _reset(postgres_dsn)
+    store = get_store("supabase-app", "dev", config=_config(postgres_dsn))
+    conn = await store.connect()
+    # A role name unique to this test: memberships are cluster-wide and survive
+    # the per-test schema reset, and a superuser is an implicit member of every
+    # role — so assert against the explicit-grant catalog for a fresh name.
+    role = "hermes_app_nomem"
+    try:
+        await ensure_app_role(
+            conn, store.schema, role_name=role, grant_membership=False
+        )
+        exists = await conn.fetchval(
+            "SELECT 1 FROM pg_roles WHERE rolname = $1", role
+        )
+        assert exists == 1
+        # No explicit role-membership grant was recorded for the role.
+        member_grants = await conn.fetchval(
+            """
+            SELECT count(*) FROM pg_auth_members m
+            JOIN pg_roles r ON r.oid = m.roleid
+            WHERE r.rolname = $1
+            """,
+            role,
+        )
+        assert member_grants == 0
+        # USAGE grant still applied (provisioning otherwise succeeded).
+        has_usage = await conn.fetchval(
+            "SELECT has_schema_privilege($1, $2, 'USAGE')", role, store.schema
+        )
+        assert has_usage is True
+    finally:
+        await conn.close()
+
+
+@pytest.mark.asyncio
+async def test_read_role_is_login_nobypassrls_and_enforces_rls(
+    postgres_dsn: str,
+) -> None:
+    """``ensure_read_role`` yields a LOGIN/NOBYPASSRLS role RLS binds directly.
+
+    Proves the ``agent-home`` serving path: a process connecting *as* the read
+    role (no ``SET ROLE``, no role-membership grant) has C2 visibility enforced
+    by Postgres, SELECT is granted only on RLS-forced tables (a non-RLS table is
+    denied — fail-closed), and the role genuinely cannot bypass RLS.
+    """
+    await _reset(postgres_dsn)
+    store = get_store("supabase-app", "dev", config=_config(postgres_dsn))
+    conn = await store.connect()
+    try:
+        await conn.execute(
+            """
+            CREATE TABLE memories (
+                id INTEGER PRIMARY KEY,
+                owner_user_id TEXT NOT NULL,
+                visibility TEXT NOT NULL,
+                body TEXT NOT NULL
+            );
+            CREATE TABLE unscoped_secrets (id INTEGER PRIMARY KEY, body TEXT);
+            """
+        )
+        await conn.execute(
+            """
+            INSERT INTO memories (id, owner_user_id, visibility, body) VALUES
+                (1, 'root', 'shared', 'org note'),
+                (2, 'alice', $1, 'alice secret'),
+                (3, 'bob', $2, 'bob secret')
+            """,
+            private("alice"),
+            private("bob"),
+        )
+        await conn.execute(
+            "INSERT INTO unscoped_secrets (id, body) VALUES (1, 'top secret')"
+        )
+        await apply_scope_rls(conn, "memories")
+
+        role_password = "rd-" + uuid.uuid4().hex
+        await ensure_read_role(conn, store.schema, password=role_password)
+
+        flags = await conn.fetchrow(
+            "SELECT rolcanlogin, rolbypassrls, rolsuper "
+            "FROM pg_roles WHERE rolname = $1",
+            READ_ROLE_NAME,
+        )
+        assert flags["rolcanlogin"] is True
+        assert flags["rolbypassrls"] is False
+        assert flags["rolsuper"] is False
+    finally:
+        await conn.close()
+
+    # Connect AS the login role — the real serving path.
+    base = postgres_dsn.rsplit("@", 1)[1]
+    app_dsn = f"postgresql://{READ_ROLE_NAME}:{role_password}@{base}"
+    app_conn = await asyncpg.connect(
+        app_dsn, ssl=False, server_settings={"search_path": store.schema}
+    )
+    try:
+
+        async def visible_ids(user_id: str, role: Role) -> list[int]:
+            principal = Principal(user_id=user_id, display=user_id, role=role)
+            async with app_conn.transaction(readonly=True):
+                await bind_principal(app_conn, principal)
+                rows = await app_conn.fetch("SELECT id FROM memories ORDER BY id")
+                return [r["id"] for r in rows]
+
+        assert await visible_ids("alice", "member") == [1, 2]
+        assert await visible_ids("bob", "member") == [1, 3]
+        assert await visible_ids("root", "owner") == [1, 2, 3]
+
+        # Fail-closed: no SELECT on a table without FORCE'd RLS.
+        with pytest.raises(asyncpg.exceptions.InsufficientPrivilegeError):
+            await app_conn.fetch("SELECT id FROM unscoped_secrets")
+    finally:
+        await app_conn.close()
 
 
 class _FakeQuery:

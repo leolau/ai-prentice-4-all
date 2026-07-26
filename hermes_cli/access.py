@@ -477,24 +477,52 @@ async def bind_principal(
 APP_ROLE_NAME = "hermes_app"
 
 
+#: The dedicated request-serving *login* role for read-only surfaces (e.g. the
+#: ``agent-home`` Next.js app). Unlike :data:`APP_ROLE_NAME` this role is
+#: ``LOGIN`` and is connected to *directly* — no ``SET ROLE`` and, crucially, no
+#: ``GRANT <role> TO CURRENT_USER`` role-membership statement, which faults the
+#: event trigger on some managed Postgres builds (see :func:`ensure_app_role`).
+READ_ROLE_NAME = "agent_home_app"
+
+
+def _quote_literal(value: str) -> str:
+    """Quote a string as a Postgres literal (DDL like ``PASSWORD`` can't bind).
+
+    ``standard_conforming_strings`` is on by default, so only the single quote
+    needs escaping. NUL/newline are rejected outright rather than escaped.
+    """
+    if "\x00" in value or "\n" in value or "\r" in value:
+        raise ValueError("password may not contain NUL or newline characters")
+    return "'" + value.replace("'", "''") + "'"
+
+
 async def ensure_app_role(
     connection: asyncpg.Connection,
     schema: str,
     *,
     role_name: str = APP_ROLE_NAME,
+    grant_membership: bool = True,
 ) -> None:
     """Provision the least-privilege, non-BYPASSRLS app role (idempotent).
 
     Creates ``role_name`` (``NOLOGIN NOSUPERUSER NOBYPASSRLS NOCREATEROLE``),
     grants it ``USAGE`` on ``schema`` and DML on the schema's current + future
-    tables/sequences, and grants membership to the current (privileged) login
-    role so a request-serving connection can ``SET LOCAL ROLE`` to it.
+    tables/sequences, and (when ``grant_membership``) grants membership to the
+    current (privileged) login role so a request-serving connection can
+    ``SET LOCAL ROLE`` to it.
 
     This is the DB half of the security foundation: the RLS policies installed
     by :func:`apply_scope_rls` are inert against a ``BYPASSRLS`` connection, so
     a request must run its queries under this role for the database to enforce
     C2 visibility as defense-in-depth on top of the app-layer
     :func:`scope_filter`.
+
+    ``grant_membership=False`` skips only the ``GRANT {role} TO CURRENT_USER``
+    statement. That statement faults the ``ddl_command_end`` event trigger on
+    some managed Postgres builds (notably self-hosted Supabase), terminating the
+    backend. On such builds provision a *login* serving role with
+    :func:`ensure_read_role` and connect to it directly instead of dropping to
+    a ``NOLOGIN`` role via ``SET ROLE``.
     """
     if not _VALID_COLUMN.fullmatch(role_name):
         raise ValueError(f"Invalid role name: {role_name!r}")
@@ -518,7 +546,84 @@ async def ensure_app_role(
             GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO {role_name};
         ALTER DEFAULT PRIVILEGES IN SCHEMA {schema}
             GRANT USAGE, SELECT ON SEQUENCES TO {role_name};
-        GRANT {role_name} TO CURRENT_USER;
+        """
+    )
+    if grant_membership:
+        await connection.execute(f"GRANT {role_name} TO CURRENT_USER;")
+
+
+async def ensure_read_role(
+    connection: asyncpg.Connection,
+    schema: str,
+    *,
+    password: str,
+    role_name: str = READ_ROLE_NAME,
+    extra_schemas: tuple[str, ...] = (),
+) -> None:
+    """Provision a read-only ``LOGIN`` serving role (idempotent, crash-safe).
+
+    Creates ``role_name`` as ``LOGIN NOSUPERUSER NOBYPASSRLS NOCREATEDB
+    NOCREATEROLE NOINHERIT`` and grants it ``CONNECT`` on the current database,
+    ``USAGE`` on ``schema`` (plus ``extra_schemas``), and ``SELECT`` **only on
+    tables that have ``FORCE`` row-level security** — so a table without RLS is
+    unreadable (fail-closed) rather than fully exposed to this non-BYPASSRLS
+    role. A request-serving process (e.g. ``agent-home``) connects *as* this
+    role directly, so Postgres RLS enforces C2 visibility on its reads.
+
+    Unlike :func:`ensure_app_role` this never issues a role-membership grant,
+    which is what crashes the event trigger on some managed Postgres builds.
+
+    Re-run after promoting new RLS-forced tables to extend the SELECT grants;
+    the password is reset on every run (attribute changes are avoided on the
+    idempotent path because altering role attributes needs superuser on some
+    builds).
+    """
+    if not _VALID_COLUMN.fullmatch(role_name):
+        raise ValueError(f"Invalid role name: {role_name!r}")
+    schemas = (schema, *extra_schemas)
+    for name in schemas:
+        if not _VALID_SCHEMA.fullmatch(name):
+            raise ValueError(f"Invalid schema name: {name!r}")
+    if not password:
+        raise ValueError("read role requires a non-empty password")
+    literal = _quote_literal(password)
+    attrs = "LOGIN NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOINHERIT"
+    exists = await connection.fetchval(
+        "SELECT 1 FROM pg_roles WHERE rolname = $1", role_name
+    )
+    if exists:
+        # Password-only ALTER: restating attributes needs superuser on some
+        # builds, and the attributes are already correct from CREATE.
+        await connection.execute(f"ALTER ROLE {role_name} PASSWORD {literal};")
+    else:
+        await connection.execute(
+            f"CREATE ROLE {role_name} {attrs} PASSWORD {literal};"
+        )
+    current_db = await connection.fetchval("SELECT current_database()")
+    await connection.execute(
+        f'GRANT CONNECT ON DATABASE "{current_db}" TO {role_name};'
+    )
+    schema_list = ", ".join(f"'{name}'" for name in schemas)
+    await connection.execute(
+        f"""
+        GRANT USAGE ON SCHEMA {", ".join(schemas)} TO {role_name};
+        DO $$
+        DECLARE r record;
+        BEGIN
+            FOR r IN
+                SELECT n.nspname AS ns, c.relname AS rn
+                FROM pg_class c
+                JOIN pg_namespace n ON n.oid = c.relnamespace
+                WHERE n.nspname IN ({schema_list})
+                    AND c.relkind = 'r'
+                    AND c.relrowsecurity
+                    AND c.relforcerowsecurity
+            LOOP
+                EXECUTE format(
+                    'GRANT SELECT ON %I.%I TO {role_name}', r.ns, r.rn
+                );
+            END LOOP;
+        END $$;
         """
     )
 
