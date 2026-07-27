@@ -1,9 +1,10 @@
 # Multi-User / Member Enablement — Handoff
 
 Handoff for another agent (or a returning human) picking up the multi-user work
-on the shared Hermes brain. Captures the agreed plan, what has shipped, what
-remains, and the exact production-rollout steps that are deliberately **not**
-done yet.
+on the shared Hermes brain. Captures the agreed plan, what has shipped, and the
+production rollout — which is now **complete and verified in production**
+(2026-07-27; see "Production rollout — COMPLETED" below). All five requests
+(a–e) plus the step-7 DB-role hardening are shipped, deployed, and E2E-tested.
 
 - **Repo:** `leolau/ai-prentice-4-all`
 - **Base branch:** `develop`
@@ -53,7 +54,9 @@ From the owner:
 | **PR-2** #56 | Supabase (GoTrue) email/password dashboard-auth provider (c): password grant, local JWT verify, `sub`→principal, closed signup | **merged** |
 | **PR-3** #57 | Member-management backend (e-backend): `/api/comms/members` API + `hermes member` CLI, GoTrue admin create → enroll principal, owner/admin guard | **merged** |
 | **PR-4** #58 | agent-home Members management UI (e-frontend): owner/admin screen + BFF routes | **merged** |
-| **PR-5** | Private media bucket + signed URLs (d): no public URLs, `GET /api/chat/media` signs short-lived URLs after a server-side path-ownership check, transcript carries the object path | **open → `develop`** (this branch) |
+| **PR-5** #60 (+lint #61) | Private media bucket + signed URLs (d): no public URLs, `GET /api/chat/media` signs short-lived URLs after a server-side path-ownership check, transcript carries the object path | **merged** |
+| **Step 7** #62 | Crash-safe non-BYPASSRLS `agent_home_app` **login** read-role for agent-home direct reads (`hermes owner read-role`); avoids the event-trigger-faulting membership grant | **merged** |
+| **Rollout + isolation verification** | Owner Supabase login enrolled, signup closed, DB-role switched, bucket flipped private, synthetic-member DB+storage isolation proven end-to-end, then cleaned up | **done in prod (2026-07-27)** |
 
 ---
 
@@ -155,34 +158,68 @@ Item (d), code half. What shipped:
 5. `/api/chat/send` drops any client-supplied attachment path outside the
    caller's prefix, so a foreign path never enters history.
 
-**Owner-gated box step still pending:** flip the `agent-home-media` bucket from
-**public → private** in the self-hosted Supabase (existing objects keep their
-paths — nothing to move; signing is by `path`). Optionally harden further with
-Storage RLS on `storage.objects` keyed to the authenticated user.
+**Owner-gated box step — DONE (2026-07-27):** the `agent-home-media` bucket was
+flipped **public → private** in the self-hosted Supabase (0 objects at the time,
+so zero-risk). Verified on the box: a public object URL returns **400 (denied)**
+while a service-role signed URL returns **200**. Optional further hardening
+(Storage RLS on `storage.objects` keyed to the authenticated user) is not
+required — the BFF path-ownership check (`canReadMediaPath`) + private bucket +
+short-lived signed URLs already fail-close cross-principal reads (proven below).
 
 ---
 
-## Production rollout — deliberately deferred (needs a maintenance window)
+## Production rollout — COMPLETED (2026-07-27)
 
-None of the merged PRs changed production. Members cannot log in end-to-end
-until these run on the box (owner-approved):
+All owner-gated production steps have been executed on `hermes-systest` and the
+full multi-user boundary is verified end-to-end. History (chronological):
 
-1. Determine the owner's real Supabase subject UUID and alias it:
-   `hermes owner alias <subject-uuid>` (maps `sub` → `leo_owner`).
-2. Configure the Supabase auth provider server-side: set `dashboard.supabase_auth`
-   (`url` / `anon_key` / `jwt_secret`) — secrets in the env file, not `config.yaml`.
-3. Close signup at GoTrue: `GOTRUE_DISABLE_SIGNUP=true`.
-4. Maintenance-window DB-role switch: repoint the serving DSN from `postgres`
-   (BYPASSRLS) → `hermes_app` (NOBYPASSRLS). **Audit every `DATABASE_URL`
-   consumer first** — any request path that misses `bind_principal` sees zero
-   rows (fails safe but breaks features). Background/system paths that need broad
-   reads must run as the **owner principal** (RLS `owner` branch = full
-   visibility) or use the admin DSN deliberately. The messaging pipeline is
-   SQLite (unaffected) but confirm service-by-service.
-5. Verify dashboard, agent-home login, gateway/background services, and RLS
-   (owner sees all; member sees only shared + own; cross-member read empty).
-6. Create members through the new UI (PR-4) or `hermes member` CLI.
-7. Do PR-5 (private media + signed URLs) before/with onboarding real members.
+1. ✅ **Owner Supabase enrollment:** created the owner GoTrue account for
+   `leolau@snappopapp.com` and aliased its `sub` → `leo_owner`
+   (`hermes owner alias <uuid>`, targets `app_prod`). Owner data untouched
+   (1 principal, 380 interactions preserved throughout).
+2. ✅ **Supabase auth provider** configured server-side (`dashboard.supabase_auth`);
+   JWT secret + service-role key in the env file, not `config.yaml`. Basic-auth
+   login retained as a fallback (no lockout risk).
+3. ✅ **Signup closed** at GoTrue (`GOTRUE_DISABLE_SIGNUP=true`).
+4. ✅ **DB-role switch (step 7):** agent-home's `DATABASE_URL` repointed from
+   `postgres` (BYPASSRLS) → the dedicated **`agent_home_app`** login role
+   (`LOGIN NOSUPERUSER NOBYPASSRLS`, SELECT only on RLS-forced tables).
+   Python/migrations/CLI keep the privileged DSN. NOTE: the naive
+   `GRANT hermes_app TO CURRENT_USER` membership path faults this Supabase
+   build's event trigger — avoided via `grant_membership=False` +
+   `hermes owner read-role` (PR #62).
+5. ✅ **agent-home redeployed** to `develop` (`db68f75`, PR-5 code) and rebuilt;
+   media route + storage.ts present, services healthy.
+6. ✅ **Bucket flipped private** (`agent-home-media`; see PR-5 section above).
+7. ✅ **End-to-end isolation verified** with a **throwaway synthetic member**,
+   then fully removed. Results:
+
+   **DB-level RLS** (connected as `agent_home_app`, principal bound via GUCs,
+   real `app_prod.goals` with marked test rows):
+   | principal | sees | result |
+   |---|---|---|
+   | owner | shared + owner-private + member-private | PASS |
+   | member | shared + own only (NOT owner-private) | PASS |
+   | stranger | shared only | PASS |
+
+   **Storage** (real `GET /api/chat/media`, logged in as the member over HTTPS):
+   - member → own object: **200** (signed URL returns the real bytes) — PASS
+   - member → owner's object: **403** fail-closed — PASS
+   - path-traversal (`../`, embedded `..`): **403** — PASS
+   - member own-prefix missing object: **404** (authorized, absent) — PASS
+   - unauthenticated: **401** — PASS
+
+   **Cleanup:** member deactivated via `hermes member deactivate` (login then
+   blocked, 401), then GoTrue account + principal + seeded rows/objects
+   hard-deleted. End state: owner-only principal, 380 interactions intact, 0
+   residue, bucket still private, all services active. No secrets printed.
+
+**Onboarding a real member is now fully unblocked** (DB + storage isolation
+proven). Use the agent-home Members UI (PR-4) or `hermes member add <email>
+--role member` (temp password prompted). The GoTrue admin config the CLI needs
+(`SUPABASE_URL` + service-role key) lives in the agent-home env file
+(`/opt/data/agent-home-app/agent-home/agent-home.env`), **not** in
+`hermes-staging.env` — export both before running the CLI on the box.
 
 Env var names for the service-role key (env-only, never `config.yaml`, never
 browser), in precedence order: `HERMES_DASHBOARD_SUPABASE_SERVICE_ROLE_KEY`,
