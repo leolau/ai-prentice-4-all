@@ -27,13 +27,16 @@
   URLs auto-redirect). Local checkout is still `/home/ubuntu/repos/hermes-agent`.
 - **Dashboard owner password was rotated** (the earlier exposed-in-chat item is
   resolved; plaintext never stored — scrypt hash + fresh signing secret).
-- **NEW frontier (parallel workstream, not FG-20):** a **multi-user** PR series
-  (**PR-1..PR-5**) is landing — PR-1 security foundation (identity binding +
-  least-privilege DB role, #55), PR-2 Supabase/GoTrue email-password
-  dashboard-auth provider (#56), PR-3 member management (`hermes member` CLI,
-  #57), PR-4 agent-home Members UI (#58) — all merged; **PR-5 (private storage /
-  signed URLs) is still pending** (a fresh child session was spun up for it after
-  the original driving session hit `out_of_quota`). See §6.
+- **Multi-user is COMPLETE + verified in prod (2026-07-27).** The full
+  **PR-1..PR-5** series is merged (identity binding + least-privilege DB role
+  #55, Supabase/GoTrue email-password provider #56, member management #57,
+  agent-home Members UI #58, private storage / signed URLs #60+#61) plus the
+  **step-7** crash-safe `agent_home_app` read-role (#62). The owner Supabase
+  login is live, signup is closed, the serving DB role is switched, the media
+  bucket is private, and end-to-end member isolation (DB + storage) was proven
+  with a throwaway synthetic member and then cleaned up. See §6 and
+  [`MULTI_USER_HANDOFF.md`](../../MULTI_USER_HANDOFF.md) → "Production rollout
+  — COMPLETED". **Onboarding a real 2nd member is now fully unblocked.**
 - **Owner-gated, NOT done:** FG-20 ECS system-test; broader prod promotion of the
   still-`develop`-only FGs; live WhatsApp/email round-trip.
 
@@ -191,11 +194,12 @@ recreate/commit if needed in future sessions.
 
 ---
 
-## 6. NEW frontier — multi-user workstream (PR-1..PR-5, #55–#58 + pending PR-5; NOT FG-20)
+## 6. Multi-user workstream — COMPLETE + verified in prod (PR-1..PR-5 + step-7; NOT FG-20)
 
-A separate **PR-1..PR-5** multi-user sequence moves toward true multi-user
-(beyond the single-owner deployment). Confirm its own driving session/plan before
-extending it:
+The **PR-1..PR-5** multi-user sequence (plus step-7) is fully merged, deployed,
+and verified end-to-end in production (2026-07-27). Full detail lives in
+[`MULTI_USER_HANDOFF.md`](../../MULTI_USER_HANDOFF.md). Summary of the shipped
+pieces:
 - **PR-1 (#55) — security foundation:** login→own-principal identity binding +
   idempotent non-`BYPASSRLS` `hermes_app` DB role (`hermes owner db-role` /
   `hermes owner alias`). Unenrolled subject fails closed (409), never upgraded to owner.
@@ -205,36 +209,52 @@ extending it:
 - **PR-3 (#57) — member management:** GoTrue admin backend + `hermes member` CLI.
 - **PR-4 (#58) — agent-home Members UI:** owner/admin `/members` screen + BFF
   routes (double-guarded: BFF UX gate + Python authority 403).
-- **PR-5 — private storage / signed URLs (PENDING):** per-principal Supabase
-  Storage isolation so users fetch only their own objects via short-lived signed
-  URLs instead of relying on the shared service-role key. A fresh child session
-  was created for this (the original driving session `a7a37d33…` is suspended
-  `out_of_quota`).
+- **PR-5 (#60, +lint #61) — private storage / signed URLs (MERGED + DEPLOYED):**
+  the `agent-home-media` bucket is **private**; `GET /api/chat/media?path=…`
+  mints short-lived signed URLs only after a server-side path-ownership check
+  (`canReadMediaPath`, own-only for every role, fail-closed on traversal /
+  foreign prefixes). The browser never holds a storage key.
+- **Step 7 (#62) — crash-safe `agent_home_app` read-role (MERGED + DEPLOYED):**
+  see §3; provisioned by `hermes owner read-role`.
 
-**Owner-gated multi-user deploy steps still outstanding** (from PR-4/PR-1 notes):
-create the owner Supabase alias, set `dashboard.supabase_auth` config,
-`GOTRUE_DISABLE_SIGNUP=true`, and a maintenance-window switch of the serving DB
-role to `hermes_app`. This intersects the §3 BYPASSRLS caveat (a non-BYPASSRLS
-per-principal DB role is prerequisite to real multi-user RLS enforcement).
+**Owner-gated deploy steps — ALL DONE (2026-07-27):** owner Supabase alias set,
+`dashboard.supabase_auth` configured, `GOTRUE_DISABLE_SIGNUP=true`, serving DB
+role switched to the non-BYPASSRLS `agent_home_app`, and the media bucket flipped
+private. Isolation verification (throwaway synthetic member) passed on both the
+DB path (owner sees all; member sees shared+own only; stranger sees shared only)
+and the storage path (member 200 on own object with real bytes; 403 on owner's
+object; 403 traversal; 404 own-missing; 401 unauth), then the member was
+deactivated and hard-deleted. Owner data intact (380 interactions).
 
 ---
 
 ## 7. Open follow-ups (owner-gated)
 
+0. ✅ **DONE (2026-07-27) — full multi-user rollout + isolation verification.**
+   PR-1..PR-5 + step-7 deployed to prod; owner Supabase login live; signup
+   closed; serving DB role switched to `agent_home_app`; media bucket private;
+   DB + storage member isolation proven E2E with a throwaway member (then
+   removed). See §6 and `MULTI_USER_HANDOFF.md`. **Onboarding a real 2nd member
+   is unblocked** — `hermes member add <email> --role member` or the agent-home
+   Members UI.
 1. **FG-20 ECS system-test** on `hermes-systest` (staging/`app_dev`, never
    `app_prod`) — parity + mobile/PWA + negative-access RLS + C6 + cache-safety.
 2. ✅ **DONE (step 7):** dedicated non-BYPASSRLS `agent_home_app` role
    provisioned and agent-home repointed at it; live RLS enforcement verified
-   (see §3). Onboarding a non-owner member is now unblocked at the DB layer
-   (still gated on PR-5 private storage before real member files).
-3. **Broader prod promotion:** only 10 FGs were promoted in the cutover
+   (see §3). Onboarding a non-owner member is now fully unblocked (PR-5 private
+   storage is also deployed + verified — item 0).
+3. **Rotate the owner's temp Supabase password** — the temp password issued
+   during enrollment passed through Aliyun Cloud Assistant once; change it on
+   first login (`hermes member set-password` exists for members; owner sets it
+   via GoTrue).
+4. **Broader prod promotion:** only 10 FGs were promoted in the cutover
    (03/04/05/08/11/12/15/16/17/18); still `develop`-only for prod:
    **FG-01, 06, 07, 09, 10, 13, 14, 19** — remaining work is system-test +
    promotion, not new code.
-4. **Live WhatsApp/email round-trip** + auto-reply/SMTP — pending channel creds.
-5. Decide keep/decommission the stopped old box (`8.217.86.90`, kept for rollback).
-6. **FG-02 blockchain** stays ON HOLD unless the owner resumes it.
-7. Reconcile agent-home's C1 bridge auth with the new GoTrue email/password
+5. **Live WhatsApp/email round-trip** + auto-reply/SMTP — pending channel creds.
+6. Decide keep/decommission the stopped old box (`8.217.86.90`, kept for rollback).
+7. **FG-02 blockchain** stays ON HOLD unless the owner resumes it.
+8. Reconcile agent-home's C1 bridge auth with the new GoTrue email/password
    provider (§6) so there's one coherent auth story.
 
 ---
