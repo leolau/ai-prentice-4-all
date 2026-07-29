@@ -1,16 +1,19 @@
 #!/usr/bin/env python3
 """Generate a repeatable monthly AWS cost report: per account, per service, per instance.
 
-Two data sources, because Cost Explorer alone cannot do per-resource monthly costs:
+Cost Explorer alone cannot do per-resource monthly costs, so the report combines
+sources and always labels which one produced the instance table:
 
 * Account x service totals come from Cost Explorer ``GetCostAndUsage`` (MONTHLY,
   grouped by LINKED_ACCOUNT + SERVICE). Works for any month in the CE retention
   window.
-* Per-instance costs come from a Cost and Usage Report (CUR) table in Athena when
-  one is configured (``--athena-*``), otherwise from Cost Explorer
-  ``GetCostAndUsageWithResources``, which AWS only serves for the last 14 days.
-  The fallback is labelled PARTIAL in the report so a 14-day slice is never
-  mistaken for a full month.
+* Per-instance costs come from, in order of preference: the CUR CSVs in S3 read
+  directly (``--cur-s3``, needs only s3 read — no Athena, no query cost), a CUR
+  table in Athena (``--athena-*``), or Cost Explorer
+  ``GetCostAndUsageWithResources``, which AWS only serves for the last 14 days
+  and only after the payer account opts into resource-level granularity. That
+  last fallback is labelled PARTIAL so a 14-day slice is never mistaken for a
+  full month.
 
 Usage:
 
@@ -19,7 +22,11 @@ Usage:
       --account "egobid:env=EGOBID_AWS" \\
       --out-dir ~/reports
 
-    # full-month per-instance costs from a CUR table
+    # full-month per-instance costs straight from the CUR in S3
+    aws_cost_report.py --month 2026-06 --account "egobid:env=EGOBID_AWS" \\
+      --cur-s3 s3://my-cost-report-bucket-2023/cost-report --cur-report-name cost-report
+
+    # ...or from a CUR table registered in Athena
     aws_cost_report.py --month 2026-06 --account "payer:profile=default" \\
       --athena-database athenacurcfn_cur --athena-table cur \\
       --athena-output s3://my-athena-results/cost-report/
@@ -41,6 +48,8 @@ from __future__ import annotations
 import argparse
 import calendar
 import csv
+import gzip
+import io
 import json
 import os
 import re
@@ -57,6 +66,11 @@ DEFAULT_METRIC = "UnblendedCost"
 RESOURCE_LOOKBACK_DAYS = 14
 EC2_COMPUTE_SERVICE = "Amazon Elastic Compute Cloud - Compute"
 INSTANCE_ID_RE = re.compile(r"^i-[0-9a-f]+$")
+# CUR CSV column names (CUR v1 / "legacy" schema).
+CUR_COST_COLUMN = "lineItem/UnblendedCost"
+CUR_RESOURCE_COLUMN = "lineItem/ResourceId"
+CUR_ACCOUNT_COLUMN = "lineItem/UsageAccountId"
+CUR_TYPE_COLUMNS = ("product/instanceType", "product/instance_type")
 
 
 class ReportError(RuntimeError):
@@ -218,6 +232,83 @@ def aggregate_resource_groups(
     return sorted(rows, key=lambda r: (-r.amount, r.resource_id))
 
 
+def parse_s3_uri(uri: str) -> tuple[str, str]:
+    """Split ``s3://bucket/prefix`` into ``(bucket, prefix)`` without a trailing slash."""
+    if not uri.startswith("s3://"):
+        raise ReportError(f"expected an s3:// URI, got {uri!r}")
+    bucket, _, prefix = uri[len("s3://") :].partition("/")
+    if not bucket:
+        raise ReportError(f"s3 URI has no bucket: {uri!r}")
+    return bucket, prefix.strip("/")
+
+
+def cur_manifest_key(prefix: str, report_name: str, month: str) -> str:
+    """Key of the billing-period manifest CUR writes for ``month``.
+
+    Layout is ``<prefix>/<report>/<YYYYMMDD>-<YYYYMMDD>/<report>-Manifest.json``,
+    where the range is the billing period, not the delivery date. The manifest
+    always names the current assembly, so following it avoids double-counting
+    superseded assemblies when ReportVersioning is CREATE_NEW_REPORT.
+    """
+    start, end = parse_month(month)
+    period = f"{start.replace('-', '')}-{end.replace('-', '')}"
+    head = f"{prefix}/" if prefix else ""
+    return f"{head}{report_name}/{period}/{report_name}-Manifest.json"
+
+
+def aggregate_cur_rows(
+    rows: Iterable[Sequence[str]], spec_name: str, min_cost: float = 0.0
+) -> list[InstanceRow]:
+    """Sum hourly CUR line items into one row per resource id.
+
+    The first row must be the CSV header — CUR column order is not stable across
+    months (new products add columns), so everything is resolved by name.
+    """
+    header: dict[str, int] | None = None
+    cost_idx = account_idx = resource_idx = -1
+    type_idx = -1
+    totals: dict[str, InstanceRow] = {}
+    for row in rows:
+        if header is None:
+            header = {name: i for i, name in enumerate(row)}
+            missing = [c for c in (CUR_COST_COLUMN, CUR_RESOURCE_COLUMN) if c not in header]
+            if missing:
+                raise ReportError(f"CUR csv is missing column(s) {missing}")
+            cost_idx = header[CUR_COST_COLUMN]
+            resource_idx = header[CUR_RESOURCE_COLUMN]
+            account_idx = header.get(CUR_ACCOUNT_COLUMN, -1)
+            for candidate in CUR_TYPE_COLUMNS:
+                if candidate in header:
+                    type_idx = header[candidate]
+                    break
+            continue
+        if len(row) <= max(cost_idx, resource_idx):
+            continue
+        resource = row[resource_idx]
+        if not resource:
+            continue
+        try:
+            cost = float(row[cost_idx] or 0.0)
+        except ValueError:
+            continue
+        existing = totals.get(resource)
+        if existing is None:
+            totals[resource] = InstanceRow(
+                account=row[account_idx] if 0 <= account_idx < len(row) else spec_name,
+                resource_id=resource,
+                instance_type=row[type_idx] if 0 <= type_idx < len(row) else "",
+                name="",
+                amount=cost,
+                unit="USD",
+            )
+        else:
+            existing.amount += cost
+            if not existing.instance_type and 0 <= type_idx < len(row):
+                existing.instance_type = row[type_idx]
+    rows_out = [row for row in totals.values() if row.amount > min_cost]
+    return sorted(rows_out, key=lambda r: -r.amount)
+
+
 def build_cur_query(database: str, table: str, month: str, min_cost: float = 0.0) -> str:
     """Athena SQL for per-resource monthly cost from a CUR table.
 
@@ -322,6 +413,7 @@ def render_markdown(month: str, reports: Sequence[AccountReport], generated_at: 
             ]
             lines.append("")
         label = {
+            "cur-s3": "CUR CSVs in S3 (full month)",
             "athena": "CUR via Athena (full month)",
             "cost-explorer-14d": "Cost Explorer resource-level — PARTIAL, last 14 days only",
             "none": "unavailable",
@@ -341,8 +433,9 @@ def render_markdown(month: str, reports: Sequence[AccountReport], generated_at: 
             ]
         else:
             lines.append(
-                "No per-instance data. Configure a CUR table with `--athena-database/"
-                "--athena-table/--athena-output` for full-month instance costs."
+                "No per-instance data. Point `--cur-s3` at the CUR prefix in S3 (or use "
+                "`--athena-database/--athena-table/--athena-output`) for full-month "
+                "instance costs."
             )
         lines.append("")
     return "\n".join(lines) + "\n"
@@ -511,6 +604,48 @@ def fetch_resource_costs_athena(
     return parse_athena_rows(pages, spec_name)
 
 
+def fetch_resource_costs_cur_s3(
+    session,
+    *,
+    bucket: str,
+    prefix: str,
+    report_name: str,
+    month: str,
+    spec_name: str,
+    min_cost: float = 0.0,
+) -> list[InstanceRow]:
+    """Read the month's CUR CSVs straight out of S3 and sum them per resource.
+
+    Needs only ``s3:GetObject`` on the CUR prefix — no Athena, no Glue, no
+    resource-level Cost Explorer opt-in. Each gzip member is streamed and folded
+    into the running totals so a multi-GB month never lands in memory.
+    """
+    s3 = session.client("s3")
+    manifest_key = cur_manifest_key(prefix, report_name, month)
+    try:
+        manifest = json.loads(s3.get_object(Bucket=bucket, Key=manifest_key)["Body"].read())
+    except Exception as exc:  # noqa: BLE001 — turn any S3/JSON failure into an actionable message
+        raise ReportError(f"cannot read CUR manifest s3://{bucket}/{manifest_key}: {exc}") from exc
+    keys = manifest.get("reportKeys") or []
+    if not keys:
+        raise ReportError(f"CUR manifest s3://{bucket}/{manifest_key} lists no reportKeys")
+    merged: dict[str, InstanceRow] = {}
+    for key in keys:
+        body = s3.get_object(Bucket=bucket, Key=key)["Body"]
+        stream: Any = body
+        if key.endswith(".gz"):
+            stream = gzip.GzipFile(fileobj=body)
+        text = io.TextIOWrapper(stream, encoding="utf-8", newline="")
+        for row in aggregate_cur_rows(csv.reader(text), spec_name, min_cost):
+            existing = merged.get(row.resource_id)
+            if existing is None:
+                merged[row.resource_id] = row
+            else:
+                existing.amount += row.amount
+                existing.instance_type = existing.instance_type or row.instance_type
+    return sorted(merged.values(), key=lambda r: -r.amount)
+
+
 def fetch_instance_names(session, regions: Sequence[str]) -> dict[str, str]:
     """Map instance id -> Name tag across regions, skipping unreachable ones."""
     names: dict[str, str] = {}
@@ -554,8 +689,26 @@ def collect_account(
     if args.instances == "none":
         return report
 
+    if args.cur_s3 and args.instances in ("auto", "cur-s3"):
+        try:
+            bucket, prefix = parse_s3_uri(args.cur_s3)
+            report.instances = fetch_resource_costs_cur_s3(
+                session,
+                bucket=bucket,
+                prefix=prefix,
+                report_name=args.cur_report_name,
+                month=args.month,
+                spec_name=spec.name,
+            )
+            report.instance_source = "cur-s3"
+            report.instance_window = f"{start} → {end} (full month)"
+        except Exception as exc:  # noqa: BLE001
+            report.errors.append(f"cur in s3: {exc}")
+    if args.instances == "cur-s3":
+        return _with_names(session, report, args)
+
     use_athena = bool(args.athena_database and args.athena_table and args.athena_output)
-    if use_athena and args.instances in ("auto", "athena"):
+    if not report.instances and use_athena and args.instances in ("auto", "athena"):
         try:
             report.instances = fetch_resource_costs_athena(
                 session,
@@ -613,9 +766,20 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--out-dir", default=".", help="Directory for the report files")
     parser.add_argument(
         "--instances",
-        choices=("auto", "athena", "ce", "none"),
+        choices=("auto", "cur-s3", "athena", "ce", "none"),
         default="auto",
-        help="Per-instance source: auto (Athena then CE 14-day), athena, ce, none",
+        help="Per-instance source: auto (CUR in S3, then Athena, then CE 14-day), cur-s3, athena, ce, none",
+    )
+    parser.add_argument(
+        "--cur-s3",
+        default=os.environ.get("CUR_S3_URI", ""),
+        metavar="S3URI",
+        help="CUR delivery prefix, e.g. s3://my-cost-bucket/cost-report (needs s3:GetObject only)",
+    )
+    parser.add_argument(
+        "--cur-report-name",
+        default=os.environ.get("CUR_REPORT_NAME", ""),
+        help="CUR report name as shown by 'cur describe-report-definitions' (default: last path segment of --cur-s3)",
     )
     parser.add_argument("--athena-database", default=os.environ.get("CUR_ATHENA_DATABASE", ""))
     parser.add_argument("--athena-table", default=os.environ.get("CUR_ATHENA_TABLE", ""))
@@ -635,6 +799,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     today = datetime.now(timezone.utc).date()
     args.month = args.month or previous_month(today)
     args.ec2_regions = [r.strip() for r in args.ec2_regions.split(",") if r.strip()]
+    if args.cur_s3 and not args.cur_report_name:
+        args.cur_report_name = args.cur_s3.rstrip("/").rsplit("/", 1)[-1]
     if not args.account:
         args.account = ["default:env="]
     try:

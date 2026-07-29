@@ -51,13 +51,19 @@ It does not tune, right-size, or delete anything — it reports.
 - Credentials per account, either an AWS shared-config profile or an env-var
   prefix in `${HERMES_HOME:-~/.hermes}/.env` (e.g. `EGOBID_AWS_ACCESS_KEY_ID`,
   `EGOBID_AWS_SECRET_ACCESS_KEY`).
-- IAM permissions: `ce:GetCostAndUsage`, `ce:GetCostAndUsageWithResources`,
-  `sts:GetCallerIdentity`, and `ec2:DescribeInstances` for Name tags.
-  Cost Explorer must be enabled once in the console per account.
-- **For full-month per-instance costs:** a Cost and Usage Report delivered to S3
-  with the Athena integration enabled, plus `athena:StartQueryExecution`,
-  `athena:GetQueryExecution`, `athena:GetQueryResults`, `glue:GetTable`, and S3
-  read/write on the CUR bucket and the Athena results prefix.
+- IAM permissions: `ce:GetCostAndUsage`, `sts:GetCallerIdentity`, and
+  `ec2:DescribeInstances` for Name tags. Cost Explorer must be enabled once in
+  the console per account.
+- **For full-month per-instance costs**, either:
+  - a Cost and Usage Report with the `RESOURCES` schema element delivered to S3,
+    plus `cur:DescribeReportDefinitions` and `s3:GetObject` on its prefix
+    (`--cur-s3` — cheapest, no Athena); or
+  - the same CUR registered in Athena, plus `athena:StartQueryExecution`,
+    `athena:GetQueryExecution`, `athena:GetQueryResults`, `glue:GetTable`, and S3
+    read/write on the CUR bucket and the Athena results prefix (`--athena-*`).
+- **For the 14-day fallback:** `ce:GetCostAndUsageWithResources` **and**
+  resource-level granularity opted into in the payer account's Cost Explorer
+  settings. See `references/enabling-per-instance-data.md`.
 
 ## How to Run
 
@@ -75,7 +81,11 @@ python aws_cost_report.py --month 2026-06 --out-dir ~/reports \
   --account "storytellar:env=STORYTELLAR_AWS" \
   --ec2-regions ap-east-1,ap-southeast-1
 
-# full-month per-instance costs from a CUR table in Athena
+# full-month per-instance costs straight from the CUR CSVs in S3
+python aws_cost_report.py --month 2026-06 --account "egobid:env=EGOBID_AWS" \
+  --cur-s3 s3://my-cost-report-bucket/cost-report --cur-report-name cost-report
+
+# ...or from the same CUR registered as an Athena table
 python aws_cost_report.py --month 2026-06 --account "payer:profile=default" \
   --athena-database athenacurcfn_cur --athena-table cur \
   --athena-output s3://my-athena-results/cost-report/
@@ -88,7 +98,9 @@ python aws_cost_report.py --month 2026-06 --account "payer:profile=default" \
 | `--month YYYY-MM` | Billing month (default: previous calendar month) |
 | `--account NAME:profile=P` | Credentials from shared-config profile `P` |
 | `--account NAME:env=PREFIX` | Credentials from `PREFIX_ACCESS_KEY_ID` / `PREFIX_SECRET_ACCESS_KEY` (also accepts `PREFIX_AWS_…`); `env=` alone uses ambient `AWS_*` |
-| `--instances auto\|athena\|ce\|none` | Per-instance source; `auto` tries Athena, falls back to the CE 14-day window |
+| `--instances auto\|cur-s3\|athena\|ce\|none` | Per-instance source; `auto` tries the CUR in S3, then Athena, then the CE 14-day window |
+| `--cur-s3 s3://bucket/prefix` | CUR delivery prefix (env: `CUR_S3_URI`) |
+| `--cur-report-name NAME` | CUR report name (env: `CUR_REPORT_NAME`; default: last segment of `--cur-s3`) |
 | `--athena-database/-table/-output/-region` | CUR table location and Athena results prefix (env: `CUR_ATHENA_DATABASE`, `CUR_ATHENA_TABLE`, `CUR_ATHENA_OUTPUT`, `CUR_ATHENA_REGION`) |
 | `--ec2-regions a,b` | Regions to resolve instance `Name` tags in |
 | `--quiet` | Write files only, don't print the report |
@@ -102,10 +114,14 @@ Exit codes: `0` complete, `3` report written but some account errored, `2` bad a
 1. Confirm which accounts to report on and how each one authenticates. One
    `--account` per credential set; a payer account covers its whole
    organization in a single call because costs are grouped by `LINKED_ACCOUNT`.
-2. Decide the per-instance source. If a CUR table exists, pass the `--athena-*`
-   flags — that is the only way to get full-month per-resource cost. Without it,
-   the script falls back to Cost Explorer resource-level data, which AWS serves
-   for the **last 14 days only**; the report marks that section `PARTIAL`.
+2. Decide the per-instance source. Check for an existing CUR first —
+   `cur:DescribeReportDefinitions` names the bucket and prefix to pass to
+   `--cur-s3`, which is the cheapest full-month path. `--athena-*` is the
+   equivalent when the CUR is registered in Athena. Without a CUR the script
+   falls back to Cost Explorer resource-level data, which AWS serves for the
+   **last 14 days only** and only after a payer opt-in; the report marks that
+   section `PARTIAL`. Setup for all three lives in
+   `references/enabling-per-instance-data.md`.
 3. Run the script for the target month.
 4. Read the generated Markdown and summarize: grand total, per-account totals,
    biggest movers by service, and the top instances by cost.
@@ -117,8 +133,9 @@ Exit codes: `0` complete, `3` report written but some account errored, `2` bad a
 
 1. **Expecting per-instance costs for an old month without CUR.** Cost Explorer
    resource-level data is capped at 14 days and needs the resource-level setting
-   enabled in Cost Explorer preferences. For "June by instance" in September,
-   only a CUR/Athena query can answer.
+   enabled in the payer account's Cost Explorer preferences. For "June by
+   instance" in September, only the CUR can answer — and only if it already
+   existed in June, since CUR never backfills.
 2. **Assuming one credential set sees every account.** Cost Explorer only
    returns data for the calling account and, if it is a payer, its
    organization's members. Standalone accounts each need their own `--account`.
@@ -131,7 +148,10 @@ Exit codes: `0` complete, `3` report written but some account errored, `2` bad a
    support appear in the per-service table but never in the per-instance table —
    the two tables do not sum to the same number.
 6. **Athena costs money and scans a lot.** The query is partition-filtered to
-   one billing period; do not widen it to a full-table scan.
+   one billing period; do not widen it to a full-table scan. `--cur-s3` avoids
+   the charge entirely by streaming the same CSVs.
+7. **A CUR without `RESOURCES` is useless here.** The schema element is optional
+   and cannot be added retroactively to already-delivered months.
 
 ## Verification
 

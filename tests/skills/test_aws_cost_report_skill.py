@@ -1,6 +1,8 @@
 """Tests for optional-skills/devops/aws-cost-report/scripts/aws_cost_report.py"""
 
 import csv
+import gzip
+import io
 import json
 import re
 import sys
@@ -148,6 +150,116 @@ class TestNameTags:
         ]
         acr.apply_instance_names(rows, {"i-123": "egobid-prod", "i-456": "ebid-prod"})
         assert [r.name for r in rows] == ["egobid-prod", "ebid-prod", ""]
+
+
+CUR_HEADER = [
+    "identity/LineItemId",
+    "lineItem/UsageAccountId",
+    "lineItem/ResourceId",
+    "lineItem/UnblendedCost",
+    "product/instanceType",
+]
+
+
+class TestCurFromS3:
+    def test_parses_bucket_and_prefix(self):
+        assert acr.parse_s3_uri("s3://bkt/cost-report/") == ("bkt", "cost-report")
+        assert acr.parse_s3_uri("s3://bkt") == ("bkt", "")
+
+    @pytest.mark.parametrize("bad", ["bkt/prefix", "https://bkt", "s3://"])
+    def test_rejects_non_s3_uri(self, bad):
+        with pytest.raises(acr.ReportError):
+            acr.parse_s3_uri(bad)
+
+    def test_manifest_key_uses_billing_period(self):
+        key = acr.cur_manifest_key("cost-report", "cost-report", "2026-06")
+        assert key == "cost-report/cost-report/20260601-20260701/cost-report-Manifest.json"
+
+    def test_manifest_key_without_prefix(self):
+        assert acr.cur_manifest_key("", "cur", "2026-12") == "cur/20261201-20270101/cur-Manifest.json"
+
+    def test_sums_hourly_line_items_per_resource(self):
+        rows = [
+            CUR_HEADER,
+            ["1", "444", "i-abc", "0.5", "t4g.small"],
+            ["2", "444", "i-abc", "0.25", "t4g.small"],
+            ["3", "444", "i-def", "1.0", "t3.small"],
+        ]
+        out = acr.aggregate_cur_rows(rows, "egobid")
+        assert [(r.resource_id, r.amount, r.instance_type) for r in out] == [
+            ("i-def", 1.0, "t3.small"),
+            ("i-abc", 0.75, "t4g.small"),
+        ]
+        assert {r.account for r in out} == {"444"}
+
+    def test_resolves_columns_by_name_not_position(self):
+        shuffled = ["lineItem/UnblendedCost", "lineItem/ResourceId", "lineItem/UsageAccountId"]
+        out = acr.aggregate_cur_rows([shuffled, ["2.0", "i-xyz", "999"]], "s")
+        assert (out[0].resource_id, out[0].amount, out[0].account) == ("i-xyz", 2.0, "999")
+
+    def test_skips_untagged_and_unparseable_rows(self):
+        rows = [
+            CUR_HEADER,
+            ["1", "444", "", "9.0", ""],
+            ["2", "444", "i-abc", "not-a-number", ""],
+            ["3", "444", "i-abc", "3.0", "t3.micro"],
+        ]
+        out = acr.aggregate_cur_rows(rows, "s")
+        assert [(r.resource_id, r.amount) for r in out] == [("i-abc", 3.0)]
+
+    def test_missing_cost_column_is_actionable(self):
+        with pytest.raises(acr.ReportError, match="lineItem/UnblendedCost"):
+            acr.aggregate_cur_rows([["identity/LineItemId", "lineItem/ResourceId"]], "s")
+
+    def test_min_cost_drops_dust_rows(self):
+        rows = [CUR_HEADER, ["1", "444", "i-dust", "0.0", ""], ["2", "444", "i-real", "5.0", ""]]
+        out = acr.aggregate_cur_rows(rows, "s", min_cost=0.0)
+        assert [r.resource_id for r in out] == ["i-real"]
+
+    def test_streams_gzipped_report_keys_from_manifest(self):
+        def gz(rows):
+            buf = io.BytesIO()
+            with gzip.GzipFile(fileobj=buf, mode="wb") as handle:
+                handle.write("\n".join(",".join(r) for r in rows).encode())
+            return io.BytesIO(buf.getvalue())
+
+        manifest = json.dumps(
+            {"reportKeys": ["cost-report/p/asm/cost-report-1.csv.gz", "cost-report/p/asm/cost-report-2.csv.gz"]}
+        ).encode()
+        bodies = {
+            "cost-report/cost-report/20260601-20260701/cost-report-Manifest.json": io.BytesIO(manifest),
+            "cost-report/p/asm/cost-report-1.csv.gz": gz([CUR_HEADER, ["1", "444", "i-abc", "1.5", "t4g.small"]]),
+            "cost-report/p/asm/cost-report-2.csv.gz": gz([CUR_HEADER, ["2", "444", "i-abc", "2.5", "t4g.small"]]),
+        }
+        s3 = mock.Mock()
+        s3.get_object.side_effect = lambda Bucket, Key: {"Body": bodies[Key]}
+        session = mock.Mock()
+        session.client.return_value = s3
+
+        rows = acr.fetch_resource_costs_cur_s3(
+            session,
+            bucket="bkt",
+            prefix="cost-report",
+            report_name="cost-report",
+            month="2026-06",
+            spec_name="egobid",
+        )
+        assert [(r.resource_id, r.amount) for r in rows] == [("i-abc", 4.0)]
+
+    def test_unreadable_manifest_names_the_key(self):
+        s3 = mock.Mock()
+        s3.get_object.side_effect = RuntimeError("AccessDenied")
+        session = mock.Mock()
+        session.client.return_value = s3
+        with pytest.raises(acr.ReportError, match="cost-report-Manifest.json"):
+            acr.fetch_resource_costs_cur_s3(
+                session,
+                bucket="bkt",
+                prefix="cost-report",
+                report_name="cost-report",
+                month="2026-06",
+                spec_name="egobid",
+            )
 
 
 class TestCurQuery:
@@ -313,6 +425,8 @@ class TestCollectAccount:
         defaults = dict(
             month="2026-07",
             instances="auto",
+            cur_s3="",
+            cur_report_name="",
             athena_database="",
             athena_table="",
             athena_output="",
@@ -335,6 +449,47 @@ class TestCollectAccount:
         assert report.instance_source == "cost-explorer-14d"
         assert "partial month" in report.instance_window
         assert ce_fetch.call_args.args[1:3] == ("2026-07-15", "2026-07-29")
+
+    def test_cur_s3_wins_over_athena_and_ce(self):
+        spec = acr.AccountSpec("egobid", "env", "X")
+        args = self.args(
+            cur_s3="s3://bkt/cost-report",
+            cur_report_name="cost-report",
+            athena_database="db",
+            athena_table="t",
+            athena_output="s3://out/",
+        )
+        with mock.patch.object(acr, "make_session", return_value=mock.Mock()), \
+             mock.patch.object(acr, "account_id_of", return_value="444"), \
+             mock.patch.object(acr, "fetch_account_service_costs", return_value=[]), \
+             mock.patch.object(
+                 acr, "fetch_resource_costs_cur_s3",
+                 return_value=[acr.InstanceRow("444", "i-abc", "t4g.small", "", 42.0, "USD")],
+             ), \
+             mock.patch.object(acr, "fetch_resource_costs_athena") as athena_fetch, \
+             mock.patch.object(acr, "fetch_resource_costs_ce") as ce_fetch:
+            report = acr.collect_account(spec, args, "2026-07-01", "2026-08-01", date(2026, 7, 29))
+        assert report.instance_source == "cur-s3"
+        assert "full month" in report.instance_window
+        athena_fetch.assert_not_called()
+        ce_fetch.assert_not_called()
+
+    def test_cur_s3_failure_falls_back_to_ce_window(self):
+        spec = acr.AccountSpec("egobid", "env", "X")
+        args = self.args(cur_s3="s3://bkt/cost-report", cur_report_name="cost-report")
+        with mock.patch.object(acr, "make_session", return_value=mock.Mock()), \
+             mock.patch.object(acr, "account_id_of", return_value="444"), \
+             mock.patch.object(acr, "fetch_account_service_costs", return_value=[]), \
+             mock.patch.object(
+                 acr, "fetch_resource_costs_cur_s3", side_effect=acr.ReportError("AccessDenied")
+             ), \
+             mock.patch.object(
+                 acr, "fetch_resource_costs_ce",
+                 return_value=[acr.InstanceRow("444", "i-abc", "", "", 1.0, "USD")],
+             ):
+            report = acr.collect_account(spec, args, "2026-07-01", "2026-08-01", date(2026, 7, 29))
+        assert report.instance_source == "cost-explorer-14d"
+        assert any("cur in s3" in err for err in report.errors)
 
     def test_athena_wins_when_cur_is_configured(self):
         spec = acr.AccountSpec("payer", "profile", "default")
