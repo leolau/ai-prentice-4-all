@@ -232,6 +232,34 @@ def aggregate_resource_groups(
     return sorted(rows, key=lambda r: (-r.amount, r.resource_id))
 
 
+def _env_cur_s3() -> list[str]:
+    uri = os.environ.get("CUR_S3_URI", "")
+    return [uri] if uri else []
+
+
+def parse_cur_s3_args(values: Sequence[str]) -> dict[str, str]:
+    """Map ``[NAME=]s3://...`` arguments to account names.
+
+    An unqualified URI is stored under ``""`` and applies to every account that
+    has no entry of its own — one payer CUR usually covers a whole organization,
+    while standalone accounts each need their own.
+    """
+    mapping: dict[str, str] = {}
+    for value in values:
+        name, sep, uri = value.partition("=")
+        if not sep or name.startswith("s3:"):
+            name, uri = "", value
+        if not uri.startswith("s3://"):
+            raise ReportError(f"--cur-s3 expects [NAME=]s3://bucket/prefix, got {value!r}")
+        mapping[name] = uri
+    return mapping
+
+
+def cur_report_name_of(uri: str) -> str:
+    """CUR report name defaults to the last path segment of its delivery prefix."""
+    return uri.rstrip("/").rsplit("/", 1)[-1]
+
+
 def parse_s3_uri(uri: str) -> tuple[str, str]:
     """Split ``s3://bucket/prefix`` into ``(bucket, prefix)`` without a trailing slash."""
     if not uri.startswith("s3://"):
@@ -689,14 +717,15 @@ def collect_account(
     if args.instances == "none":
         return report
 
-    if args.cur_s3 and args.instances in ("auto", "cur-s3"):
+    cur_uri = args.cur_s3.get(spec.name) or args.cur_s3.get("", "")
+    if cur_uri and args.instances in ("auto", "cur-s3"):
         try:
-            bucket, prefix = parse_s3_uri(args.cur_s3)
+            bucket, prefix = parse_s3_uri(cur_uri)
             report.instances = fetch_resource_costs_cur_s3(
                 session,
                 bucket=bucket,
                 prefix=prefix,
-                report_name=args.cur_report_name,
+                report_name=args.cur_report_name or cur_report_name_of(cur_uri),
                 month=args.month,
                 spec_name=spec.name,
             )
@@ -772,9 +801,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--cur-s3",
-        default=os.environ.get("CUR_S3_URI", ""),
-        metavar="S3URI",
-        help="CUR delivery prefix, e.g. s3://my-cost-bucket/cost-report (needs s3:GetObject only)",
+        action="append",
+        default=[],
+        metavar="[NAME=]S3URI",
+        help="CUR delivery prefix, e.g. s3://my-cost-bucket/cost-report (needs s3:GetObject only). "
+        "Prefix with an account name to scope it: egobid=s3://.../cost-report. Repeatable",
     )
     parser.add_argument(
         "--cur-report-name",
@@ -799,8 +830,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     today = datetime.now(timezone.utc).date()
     args.month = args.month or previous_month(today)
     args.ec2_regions = [r.strip() for r in args.ec2_regions.split(",") if r.strip()]
-    if args.cur_s3 and not args.cur_report_name:
-        args.cur_report_name = args.cur_s3.rstrip("/").rsplit("/", 1)[-1]
+    try:
+        args.cur_s3 = parse_cur_s3_args(args.cur_s3 or _env_cur_s3())
+    except ReportError as exc:
+        parser.error(str(exc))
     if not args.account:
         args.account = ["default:env="]
     try:

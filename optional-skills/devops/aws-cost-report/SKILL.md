@@ -67,7 +67,13 @@ python aws_cost_report.py --month 2026-06 --out-dir ~/reports \
 
 # full-month per-instance costs straight from the CUR CSVs in S3
 python aws_cost_report.py --month 2026-06 --account "egobid:env=EGOBID_AWS" \
-  --cur-s3 s3://my-cost-report-bucket/cost-report --cur-report-name cost-report
+  --cur-s3 s3://my-cost-report-bucket/cost-report
+
+# one CUR per standalone account: scope each prefix to its account name
+python aws_cost_report.py --month 2026-06 \
+  --account "egobid:env=EGOBID_AWS" --account "storytellar:env=STORYTELLAR_AWS" \
+  --cur-s3 "egobid=s3://cost-report-444.../cost-report" \
+  --cur-s3 "storytellar=s3://cost-report-520.../cost-report"
 
 # ...or from the same CUR registered as an Athena table
 python aws_cost_report.py --month 2026-06 --account "payer:profile=default" \
@@ -83,7 +89,7 @@ python aws_cost_report.py --month 2026-06 --account "payer:profile=default" \
 | `--account NAME:profile=P` | Credentials from shared-config profile `P` |
 | `--account NAME:env=PREFIX` | Credentials from `PREFIX_ACCESS_KEY_ID` / `PREFIX_SECRET_ACCESS_KEY` (also accepts `PREFIX_AWS_…`); `env=` alone uses ambient `AWS_*` |
 | `--instances auto\|cur-s3\|athena\|ce\|none` | Per-instance source; `auto` tries the CUR in S3, then Athena, then the CE 14-day window |
-| `--cur-s3 s3://bucket/prefix` | CUR delivery prefix (env: `CUR_S3_URI`) |
+| `--cur-s3 [NAME=]s3://bucket/prefix` | CUR delivery prefix; scope it to one `--account` name with `NAME=`, repeatable (env: `CUR_S3_URI`) |
 | `--cur-report-name NAME` | CUR report name (env: `CUR_REPORT_NAME`; default: last segment of `--cur-s3`) |
 | `--athena-database/-table/-output/-region` | CUR table location and Athena results prefix (env: `CUR_ATHENA_DATABASE`, `CUR_ATHENA_TABLE`, `CUR_ATHENA_OUTPUT`, `CUR_ATHENA_REGION`) |
 | `--ec2-regions a,b` | Regions to resolve instance `Name` tags in |

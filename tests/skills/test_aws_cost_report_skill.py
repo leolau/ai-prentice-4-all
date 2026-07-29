@@ -171,6 +171,22 @@ class TestCurFromS3:
         with pytest.raises(acr.ReportError):
             acr.parse_s3_uri(bad)
 
+    def test_unqualified_uri_applies_to_every_account(self):
+        assert acr.parse_cur_s3_args(["s3://bkt/cost-report"]) == {"": "s3://bkt/cost-report"}
+
+    def test_named_uris_are_scoped_per_account(self):
+        mapping = acr.parse_cur_s3_args(
+            ["egobid=s3://a/cost-report", "storytellar=s3://b/cost-report"]
+        )
+        assert mapping == {"egobid": "s3://a/cost-report", "storytellar": "s3://b/cost-report"}
+
+    def test_rejects_value_that_is_not_an_s3_uri(self):
+        with pytest.raises(acr.ReportError, match="NAME="):
+            acr.parse_cur_s3_args(["egobid=/local/path"])
+
+    def test_report_name_defaults_to_last_prefix_segment(self):
+        assert acr.cur_report_name_of("s3://bkt/exports/cost-report/") == "cost-report"
+
     def test_manifest_key_uses_billing_period(self):
         key = acr.cur_manifest_key("cost-report", "cost-report", "2026-06")
         assert key == "cost-report/cost-report/20260601-20260701/cost-report-Manifest.json"
@@ -425,7 +441,7 @@ class TestCollectAccount:
         defaults = dict(
             month="2026-07",
             instances="auto",
-            cur_s3="",
+            cur_s3={},
             cur_report_name="",
             athena_database="",
             athena_table="",
@@ -453,7 +469,7 @@ class TestCollectAccount:
     def test_cur_s3_wins_over_athena_and_ce(self):
         spec = acr.AccountSpec("egobid", "env", "X")
         args = self.args(
-            cur_s3="s3://bkt/cost-report",
+            cur_s3={"egobid": "s3://bkt/cost-report"},
             cur_report_name="cost-report",
             athena_database="db",
             athena_table="t",
@@ -476,7 +492,7 @@ class TestCollectAccount:
 
     def test_cur_s3_failure_falls_back_to_ce_window(self):
         spec = acr.AccountSpec("egobid", "env", "X")
-        args = self.args(cur_s3="s3://bkt/cost-report", cur_report_name="cost-report")
+        args = self.args(cur_s3={"": "s3://bkt/cost-report"}, cur_report_name="cost-report")
         with mock.patch.object(acr, "make_session", return_value=mock.Mock()), \
              mock.patch.object(acr, "account_id_of", return_value="444"), \
              mock.patch.object(acr, "fetch_account_service_costs", return_value=[]), \
