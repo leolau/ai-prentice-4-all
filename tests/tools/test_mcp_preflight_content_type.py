@@ -56,12 +56,17 @@ def _serve(handler_cls):
 
 def _handler(status: int = 200,
              content_type: "str | None" = "text/html; charset=utf-8",
-             body: bytes = b"<html>x</html>", head_status=None, record=None):
+             body: bytes = b"<html>x</html>", head_status=None, record=None,
+             post_status=None, post_content_type=None, post_body=b""):
     """Build a BaseHTTPRequestHandler that replies with the given shape.
 
     ``head_status`` lets HEAD return a different status than GET (to exercise
     the HEAD->GET fallback). ``record`` is an optional list that captures the
-    HTTP methods the server actually saw.
+    HTTP methods the server actually saw. The ``post_*`` arguments give POST its
+    own shape (for the ``initialize`` confirmation probe); when
+    ``post_content_type`` is None the handler has no ``do_POST`` at all, so
+    stdlib answers ``501 Unsupported method`` with an HTML body — exactly what a
+    plain web app does.
     """
 
     class _H(http.server.BaseHTTPRequestHandler):
@@ -87,6 +92,21 @@ def _handler(status: int = 200,
 
         def log_message(self, format, *args):  # noqa: A002
             pass
+
+    if post_content_type is not None:
+        def do_POST(self):  # noqa: N802
+            if record is not None:
+                record.append("POST")
+            length = int(self.headers.get("Content-Length") or 0)
+            if length:
+                self.rfile.read(length)
+            self._write(
+                post_status if post_status is not None else 200,
+                post_content_type,
+                post_body,
+            )
+
+        _H.do_POST = do_POST
 
     return _H
 
@@ -183,6 +203,71 @@ def test_cancelled_error_is_not_swallowed():
             httpx.AsyncClient = orig
 
     asyncio.run(_run())
+
+
+# ---------------------------------------------------------------------------
+# initialize-POST confirmation: HTML on GET, MCP on POST
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("post_status, post_content_type", [
+    (200, "application/json"),          # AWS Knowledge MCP: HTML on GET, JSON on POST
+    (200, "text/event-stream"),         # SSE-streaming Streamable HTTP endpoint
+    (400, "application/json"),          # rejects the probe's session/protocol
+    (401, "application/json"),          # bearer token required
+])
+def test_html_on_get_but_mcp_on_post_passes(post_status, post_content_type):
+    """A POST-only Streamable-HTTP endpoint must not be rejected.
+
+    ``https://knowledge-mcp.global.api.aws/mcp`` serves a landing page to
+    HEAD/GET and JSON-RPC to POST; the content-type-only verdict flagged it as
+    "not an MCP endpoint" and blocked the connection outright.
+    """
+    task = _make_task("aws_knowledge")
+    record: list[str] = []
+    with _serve(_handler(
+        status=200, content_type="text/html", record=record,
+        post_status=post_status, post_content_type=post_content_type,
+        post_body=b"{}",
+    )) as base:
+        asyncio.run(task._preflight_content_type(f"{base}/mcp", timeout=5.0))
+    assert "POST" in record, "the confirmation probe must actually POST"
+
+
+def test_html_on_get_and_html_on_post_still_raises():
+    """The guard's original job: a plain web page is rejected on both verbs."""
+    task = _make_task("web_page")
+    with _serve(_handler(
+        status=200, content_type="text/html",
+        post_status=200, post_content_type="text/html", post_body=b"<html>x</html>",
+    )) as base:
+        with pytest.raises(NonMcpEndpointError):
+            asyncio.run(task._preflight_content_type(f"{base}/", timeout=5.0))
+
+
+def test_post_transport_error_passes():
+    """A POST that fails at the transport level must not raise NonMcpEndpoint.
+
+    Best-effort contract: only an affirmative "web page on both verbs" verdict
+    rejects. Here the server closes the connection on POST.
+    """
+    task = _make_task()
+
+    class _H(http.server.BaseHTTPRequestHandler):
+        def do_HEAD(self):  # noqa: N802
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def do_POST(self):  # noqa: N802
+            self.close_connection = True
+            self.wfile.close()
+
+        def log_message(self, format, *args):  # noqa: A002
+            pass
+
+    with _serve(_H) as base:
+        asyncio.run(task._preflight_content_type(f"{base}/mcp", timeout=5.0))
 
 
 # ---------------------------------------------------------------------------
