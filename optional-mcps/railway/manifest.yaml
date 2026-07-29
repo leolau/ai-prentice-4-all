@@ -1,0 +1,36 @@
+# Nous-approved MCP catalog entry.
+# Presence in this directory = approval. Merged via PR review.
+manifest_version: 1
+
+name: railway
+description: Manage Railway projects, services, deployments, variables, and logs.
+source: https://docs.railway.com/guides/mcp
+
+# Railway's official remote MCP server: Streamable HTTP with native OAuth 2.1 +
+# Dynamic Client Registration (authorization server: backboard.railway.com).
+# The endpoint is the bare host — https://mcp.railway.com/mcp returns 404.
+transport:
+  type: http
+  url: https://mcp.railway.com
+
+auth:
+  type: oauth
+  # Native MCP OAuth (case 1). Scopes come from the protected-resource
+  # document; `workspace:member` is what grants access to the workspaces the
+  # authorizing user belongs to.
+
+post_install: |
+  On first connection, Hermes opens a browser to authorize Railway. On a
+  headless host the redirect to http://127.0.0.1:<port>/callback cannot reach
+  your browser — paste the failing redirect URL back at the prompt, or set up an
+  SSH port forward. See docs/guides/oauth-over-ssh.md.
+
+  Note: Railway rate-limits its dynamic client registration endpoint, and its
+  metadata/registration endpoints sit behind bot protection that rejects some
+  default user agents. If `hermes mcp login railway` fails at registration, wait
+  and retry rather than re-registering in a loop — the client registration is
+  cached at ~/.hermes/mcp-tokens/railway.client.json and reused.
+
+  After auth, restart your Hermes session so the Railway tools are loaded, or
+  re-run the tool checklist with:
+    hermes mcp configure railway

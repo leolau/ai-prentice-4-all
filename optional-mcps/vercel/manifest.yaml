@@ -1,0 +1,37 @@
+# Nous-approved MCP catalog entry.
+# Presence in this directory = approval. Merged via PR review.
+manifest_version: 1
+
+name: vercel
+description: Inspect and manage Vercel projects, deployments, and logs; search Vercel docs.
+source: https://vercel.com/docs/mcp/vercel-mcp
+
+# Vercel's official remote MCP server: Streamable HTTP with native OAuth 2.1 +
+# Dynamic Client Registration, so Hermes's MCP client + mcp_oauth_manager do
+# discovery, PKCE, token exchange, and refresh. Note the endpoint is the bare
+# host (no /mcp path) — https://mcp.vercel.com/mcp returns 404.
+transport:
+  type: http
+  url: https://mcp.vercel.com
+
+auth:
+  type: oauth
+  # Native MCP OAuth (case 1), not a third-party provider. Vercel's
+  # authorization server advertises only `openid` + `offline_access`; project and
+  # deployment authorization is carried by the account/team the user approves,
+  # not by scopes.
+
+post_install: |
+  On first connection, Hermes opens a browser to authorize Vercel. On a headless
+  host the redirect to http://127.0.0.1:<port>/callback cannot reach your
+  browser — paste the failing redirect URL back at the prompt, or set up an SSH
+  port forward. See docs/guides/oauth-over-ssh.md.
+
+  Tools are scoped to the team/projects you approve at authorization time. To
+  point Hermes at a single project, Vercel also serves a project-scoped endpoint
+  (https://mcp.vercel.com/<team-slug>/<project-slug>) you can set as `url:` in
+  ~/.hermes/config.yaml.
+
+  After auth, restart your Hermes session so the Vercel tools are loaded, or
+  re-run the tool checklist with:
+    hermes mcp configure vercel
