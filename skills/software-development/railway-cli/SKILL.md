@@ -54,11 +54,16 @@ Token types matter, and the failure mode looks identical for both:
 ## Verify the token
 
 ```bash
-railway api '{ projects { edges { node { id name } } } }'
+railway whoami                                            # account token: prints the email
+railway api '{ projects { edges { node { id name } } } }'  # team token: lists the team's projects
 ```
 
-A `data.projects` payload means the token works. If this fails too, the token is
-genuinely invalid or revoked — ask for a new one rather than retrying.
+These are complementary — each returns an auth-shaped failure for the other
+token type, so try both before judging a token. One quirk: that flat `projects`
+query returns `{"edges": []}` for an *account* token even when projects exist;
+there, use `railway list` or `{ me { workspaces { id name } } }` instead. Only
+when all of these fail is the token genuinely invalid or revoked — ask for a new
+one rather than retrying.
 
 ## Query and mutate through GraphQL
 
