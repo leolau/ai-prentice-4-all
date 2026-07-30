@@ -49,7 +49,7 @@ from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, parse_qsl, urlencode, urlparse, urlsplit, urlunsplit
 from hermes_constants import secure_parent_dir
 
 logger = logging.getLogger(__name__)
@@ -461,12 +461,44 @@ def _make_callback_handler() -> tuple[type, dict]:
 # ---------------------------------------------------------------------------
 
 
+def _normalize_authorization_url(url: str) -> str:
+    """Repair an authorization URL whose endpoint already carried a query.
+
+    The SDK builds the authorization URL as
+    ``f"{authorization_endpoint}?{urlencode(params)}"`` (mcp
+    ``client/auth/oauth2.py``), which yields a second ``?`` when the
+    authorization server publishes an endpoint that already has query
+    parameters — Railway's is ``.../oauth/auth?resource=https://backboard.railway.com``.
+    Everything after that second ``?`` then parses as part of the endpoint's
+    last parameter value, so the request arrives with no ``client_id``,
+    ``state``, or PKCE challenge at all.
+
+    Re-splitting the flattened query and letting the last occurrence of each
+    key win puts the SDK's parameters back in force (they are appended after
+    the endpoint's own), including the ``resource`` that must name the MCP
+    server rather than the authorization server.
+    """
+    parts = urlsplit(url)
+    pairs: list[tuple[str, str]] = []
+    for key, value in parse_qsl(parts.query, keep_blank_values=True):
+        head, sep, tail = value.partition("?")
+        pairs.append((key, head))
+        if sep:
+            pairs.extend(parse_qsl(tail, keep_blank_values=True))
+
+    merged: dict[str, str] = {}
+    for key, value in pairs:
+        merged[key] = value
+    return urlunsplit(parts._replace(query=urlencode(merged)))
+
+
 async def _redirect_handler(authorization_url: str) -> None:
     """Show the authorization URL to the user.
 
     Opens the browser automatically when possible; always prints the URL
     as a fallback for headless/SSH/gateway environments.
     """
+    authorization_url = _normalize_authorization_url(authorization_url)
     msg = (
         f"\n  MCP OAuth: authorization required.\n"
         f"  Open this URL in your browser:\n\n"
