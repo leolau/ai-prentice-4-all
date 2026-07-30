@@ -1,10 +1,17 @@
 ---
 name: supabase-cli
 description: "Inspect and manage hosted supabase.com projects and a self-hosted Supabase stack with the `supabase` CLI and Management API — list projects, run SQL, manage migrations, functions, and secrets. Triggers: supabase, supabase.com, project ref, postgres migration, edge function, RLS policy"
-version: 1.0.0
+version: 1.1.0
 author: joyaether
 license: MIT
 platforms: [linux, macos]
+prerequisites:
+  env_vars: [SUPABASE_ACCESS_TOKEN]
+  commands: [supabase, curl]
+required_environment_variables:
+  - name: SUPABASE_ACCESS_TOKEN
+    prompt: Supabase personal access token (starts with sbp_)
+    help: "https://supabase.com/dashboard/account/tokens → Generate new token. Account-wide admin over every project; shown once. Not an anon/service_role key."
 metadata:
   hermes:
     tags: [supabase, postgres, database, migrations, edge-functions, devops]
@@ -42,6 +49,8 @@ supabase --version                  # install: see references/setup.md
 The PAT is a credential, so it lives in `~/.hermes/.env` as
 `SUPABASE_ACCESS_TOKEN=sbp_…` — not in `config.yaml`. A gateway restart is
 needed after adding it, because `.env` is read into the environment at startup.
+This skill declares the var under `required_environment_variables`, which is
+what allowlists it through the terminal sandbox's env filter.
 `supabase login` is *not* needed when the env var is set; skip it (it wants a
 browser).
 
