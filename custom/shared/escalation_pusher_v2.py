@@ -35,9 +35,15 @@ FAMILY_CONTACTS = {
 }
 
 
+def _dict_row(cursor, row):
+    return {d[0]: row[i] for i, d in enumerate(cursor.description)}
+
+
 def get_db():
     conn = sqlite3.connect(DB_PATH, timeout=10)
-    conn.row_factory = sqlite3.Row
+    # dict rows, not sqlite3.Row: the formatters below read optional columns
+    # with row.get(...), which sqlite3.Row does not implement.
+    conn.row_factory = _dict_row
     conn.execute("PRAGMA journal_mode=WAL")
     return conn
 
