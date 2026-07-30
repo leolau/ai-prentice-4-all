@@ -13,7 +13,8 @@
 ## 0. TL;DR
 
 Five MCP servers are configured on the live box (`hermes-systest`,
-`HERMES_HOME=/opt/data/hermes-home-staging`):
+`HERMES_HOME=/opt/data/hermes-home-staging`); the sixth is catalogued and
+verified locally but deliberately not installed there yet (§2.5):
 
 | Server | Endpoint | Auth | Status | Notes |
 |--------|----------|------|--------|-------|
@@ -22,6 +23,7 @@ Five MCP servers are configured on the live box (`hermes-systest`,
 | `vercel` | `https://mcp.vercel.com` | native OAuth (DCR) | 31 tools | purchase tools excluded |
 | `railway` | `https://mcp.railway.com` | native OAuth (DCR) | 26 tools | **token expires hourly, no refresh** |
 | `aws_knowledge` | `https://knowledge-mcp.global.api.aws/mcp` | none | 5 tools | docs/reference only |
+| `aws-api` | `uvx awslabs.aws-api-mcp-server==1.3.47` (stdio) | IAM access key | 2 tools | catalogued, **not yet on the box**; reaches real resources, read-only by default |
 
 Writable **Figma** is not an MCP server here — it is a skill
 (`skills/creative/figma-write`) that shells out to Claude Code, because Figma's
@@ -181,10 +183,30 @@ currently holds an **account** token in
   explicitly so nobody expects otherwise.
 - **AWS account access** is a different integration: awslabs' local stdio servers
   (`uvx awslabs.aws-api-mcp-server`) driving the AWS CLI, requiring IAM
-  credentials on the box. Not set up — the operator was asked for a
-  least-privilege key (`aws iam create-user … attach ReadOnlyAccess …
-  create-access-key`) plus a default region and did not provide one. Pick this up
-  by asking again; nothing else blocks it.
+  credentials on the box. Now catalogued as `aws-api` (class 3 — no hosted
+  server) and verified end-to-end against account `454267863464`: 2 tools
+  (`call_aws`, `suggest_aws_commands`), with `aws sts get-caller-identity`
+  returning 200 through Hermes' own stdio spawn path.
+  - The server's own defaults are permissive: mutations are **allowed**
+    (`READ_OPERATIONS_ONLY` defaults false) and it tags its AWS user-agent with
+    the MCP client name and config flags (`AWS_API_MCP_TELEMETRY` defaults
+    true). The manifest collects both with safe defaults instead. With read-only
+    on, a mutating command is refused before it reaches AWS ("Execution of this
+    operation is denied by security policy" — verified with `ec2 create-tags`).
+  - `READ_OPERATIONS_ONLY` is a client-side guard, not a permission boundary.
+    The key still wants a least-privilege IAM policy; the two working keys the
+    agent holds are `full-admin` (454267863464) and `devin-egobid`
+    (444643374336), so neither is a good fit for the box yet.
+  - **Catalogued stdio servers with `auth: api_key` could not work at all**
+    before this: a stdio child gets a *filtered* environment
+    (`tools/mcp_tool.py:_build_safe_env` — PATH/HOME/XDG_* only), and the
+    catalog wrote the credentials to `.env` without naming them in the server
+    config, so the server started with none (`n8n` had the same hole). The
+    install now writes `env: {VAR: "${VAR}"}` per collected var; the plaintext
+    stays in `.env`.
+  - Ambient `AWS_*` variables in the parent process shadow `$HERMES_HOME/.env`
+    when `${VAR}` is resolved. On a dev box that already exports AWS keys, a
+    `SignatureDoesNotMatch` is that shadowing, not a broken manifest.
 
 ---
 
@@ -278,8 +300,9 @@ cd /home/ubuntu && ./run.sh '<shell command>'      # ECS RunCommand + poll, on t
    authorize endpoint re-auths through plain `hermes mcp login`.
 2. **Fail fast on expired tokens** (§3) — the 40-second hang is a real
    papercut on every session that has a stale Railway token.
-3. **AWS account access** — ask again for a least-privilege IAM key and region;
-   wire `uvx awslabs.aws-api-mcp-server` as a stdio server if wanted.
+3. ~~**AWS account access**~~ — done: `optional-mcps/aws-api`, verified live
+   (§2.5). Remaining: install it on `hermes-systest` with a **least-privilege**
+   key rather than the `full-admin` one, and decide which account.
 4. **Prune tool lists.** figma + canva + vercel + railway + aws_knowledge ship
    ~97 tools into every prompt. Prompt caching is sacred (`AGENTS.md`); trim per
    server with `hermes mcp configure <name>` to what the operator actually uses.

@@ -76,7 +76,11 @@ merging a PR.
 Catalog entries can require:
 
 - **API key** — Hermes prompts at install time and writes the value to
-  `~/.hermes/.env`. Non-secret values (base URLs) go to the same file.
+  `~/.hermes/.env`. Non-secret values (base URLs) go to the same file. For a
+  stdio server, each variable is also referenced from your config as
+  `env: {VAR: "${VAR}"}`, since stdio servers are launched with a filtered
+  environment and only see what the config names. The plaintext stays in
+  `.env`; the config holds the reference.
 - **OAuth** (remote MCP) — written as `auth: oauth` in your config; the MCP
   client opens a browser on first connection.
 - **OAuth** (third-party provider like Google/GitHub) — Hermes points you at
