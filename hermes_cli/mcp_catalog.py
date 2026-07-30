@@ -458,16 +458,30 @@ def _prompt_env_vars(specs: List[EnvVarSpec]) -> Dict[str, str]:
 
 
 def _build_server_config(
-    entry: CatalogEntry, install_dir: Optional[Path]
+    entry: CatalogEntry,
+    install_dir: Optional[Path],
+    env_names: Optional[List[str]] = None,
 ) -> dict:
     """Translate a manifest into the ``mcp_servers.<name>`` block format used
-    by hermes_cli/mcp_config.py."""
+    by hermes_cli/mcp_config.py.
+
+    *env_names* are the manifest env vars that hold a value in ``.env``. A
+    stdio subprocess is spawned with a filtered environment
+    (``tools/mcp_tool.py:_build_safe_env``), so a credential in ``.env`` only
+    reaches the server when the config names it; each one is written as a
+    ``${VAR}`` placeholder, resolved at connect time. Names with no value are
+    skipped — an unresolved placeholder is passed through literally, which the
+    server would read as a real value.
+    """
     cfg: dict = {}
     t = entry.transport
     if t.type == "stdio":
         cfg["command"] = _expand_install_dir(t.command or "", install_dir)
         if t.args:
             cfg["args"] = [_expand_install_dir(a, install_dir) for a in t.args]
+        passthrough = [s.name for s in entry.auth.env if s.name in (env_names or [])]
+        if passthrough:
+            cfg["env"] = {name: "${" + name + "}" for name in passthrough}
     elif t.type == "http":
         cfg["url"] = t.url
         if entry.auth.type == "oauth":
@@ -671,7 +685,9 @@ def install_entry(entry: CatalogEntry, *, enable: bool = True) -> None:
 
     Steps:
         1. If ``install.type == git``, clone + run bootstrap commands.
-        2. If ``auth.type == api_key``, prompt for env vars, save to .env.
+        2. If ``auth.type == api_key``, prompt for env vars, save to .env, and
+           name them in the server's ``env`` block so a stdio subprocess (which
+           gets a filtered environment) actually receives them.
         3. If ``auth.type == oauth`` (remote MCP / case 1), write the
            ``auth: oauth`` marker (MCP client handles browser on first connect
            in the non-pre-authenticated case).
@@ -696,10 +712,11 @@ def install_entry(entry: CatalogEntry, *, enable: bool = True) -> None:
         install_dir = _do_git_install(entry)
 
     # Auth
+    env_names: List[str] = []
     if entry.auth.type == "api_key":
         print()
         print(color("  Configure credentials:", Colors.CYAN))
-        _prompt_env_vars(entry.auth.env)
+        env_names = list(_prompt_env_vars(entry.auth.env))
     elif entry.auth.type == "oauth":
         if entry.auth.provider:
             # Case 2: provider-mediated (Google, GitHub, etc.). We rely on
@@ -727,7 +744,7 @@ def install_entry(entry: CatalogEntry, *, enable: bool = True) -> None:
 
     # Build and write the mcp_servers entry (without tools filter yet;
     # _apply_tool_selection() finalizes it below).
-    server_cfg = _build_server_config(entry, install_dir)
+    server_cfg = _build_server_config(entry, install_dir, env_names)
     server_cfg["enabled"] = enable
 
     from hermes_cli.mcp_config import _save_mcp_server
