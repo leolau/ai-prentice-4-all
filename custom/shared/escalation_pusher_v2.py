@@ -23,7 +23,7 @@ CHECK_INTERVAL = 5
 
 def load_config():
     try:
-        with open(WA_CONFIG_PATH) as f:
+        with open(WA_CONFIG_PATH, encoding='utf-8') as f:
             return json.load(f)
     except Exception:
         return {}
