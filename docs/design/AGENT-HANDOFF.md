@@ -102,6 +102,10 @@ plan this is D1 multi-user-not-multi-tenant + FG-03 one-brain gateway.)
 - [`SESSION-HANDOFF-2026-07-prod-cutover.md`](./SESSION-HANDOFF-2026-07-prod-cutover.md)
   — **operational** hand-off: the live ai-prentice-4-all prod cutover (public URL, hosts,
   DNS/TLS, Telegram gateway, promotion, rollback runbook, open follow-ups).
+- [`SESSION-HANDOFF-2026-07-mcp-integrations.md`](./SESSION-HANDOFF-2026-07-mcp-integrations.md)
+  — **operational** hand-off: writable Figma, Canva, Vercel, Railway, and AWS MCP
+  access on the live box (which providers allow open client registration, the
+  headless OAuth procedure, Railway's token traps, two Hermes bugs found).
 - [`architecture-design-number-one.md`](./architecture-design-number-one.md) — frozen design #1 (read-only history).
 - `AGENT-HANDOFF.md` — this note (now just a pointer to the plan).
 - `../WHATSAPP_IMPLEMENTATION.md`, `../EMAIL_IMPLEMENTATION.md`,
