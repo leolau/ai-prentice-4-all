@@ -13,24 +13,37 @@ transport:
   type: http
   url: https://mcp.railway.com
 
+# The server also accepts a Railway account token as a bearer credential, which
+# is what this entry uses: native OAuth needs a browser on the same host, and
+# Railway's dynamic client registration is rate-limited and bot-protected, so
+# the OAuth path routinely fails on the headless hosts Hermes runs on.
 auth:
-  type: oauth
-  # Native MCP OAuth (case 1). Scopes come from the protected-resource
-  # document; `workspace:member` is what grants access to the workspaces the
-  # authorizing user belongs to.
+  type: api_key
+  header: Authorization
+  header_value: "Bearer ${RAILWAY_API_TOKEN}"
+  env:
+    - name: RAILWAY_API_TOKEN
+      prompt: "Railway account token (railway.com → Account Settings → Tokens)"
+      secret: true
 
 post_install: |
-  On first connection, Hermes opens a browser to authorize Railway. On a
-  headless host the redirect to http://127.0.0.1:<port>/callback cannot reach
-  your browser — paste the failing redirect URL back at the prompt, or set up an
-  SSH port forward. See docs/guides/oauth-over-ssh.md.
+  Create an *account* token (Account Settings → Tokens), not a project token —
+  a project token is scoped to one environment and the MCP server rejects it.
+  Verify it independently with:
+    curl -s -X POST https://backboard.railway.com/graphql/v2 \
+      -H "Authorization: Bearer $RAILWAY_API_TOKEN" \
+      -H 'Content-Type: application/json' \
+      -d '{"query":"query { me { email } }"}'
 
-  Note: Railway rate-limits its dynamic client registration endpoint, and its
-  metadata/registration endpoints sit behind bot protection that rejects some
-  default user agents. If `hermes mcp login railway` fails at registration, wait
-  and retry rather than re-registering in a loop — the client registration is
+  To use native OAuth 2.1 instead, replace the `headers` block on
+  `mcp_servers.railway` with `auth: oauth` and run `hermes mcp login railway`
+  from a host with a browser; on a headless host the redirect to
+  http://127.0.0.1:<port>/callback cannot reach your browser — paste the failing
+  redirect URL back at the prompt, or set up an SSH port forward. See
+  docs/guides/oauth-over-ssh.md. Railway rate-limits its registration endpoint,
+  so retry rather than re-registering in a loop; the client registration is
   cached at ~/.hermes/mcp-tokens/railway.client.json and reused.
 
-  After auth, restart your Hermes session so the Railway tools are loaded, or
-  re-run the tool checklist with:
+  Restart your Hermes session so the Railway tools are loaded, or re-run the
+  tool checklist with:
     hermes mcp configure railway
