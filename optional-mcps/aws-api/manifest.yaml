@@ -32,11 +32,12 @@ auth:
   #     --policy-arn arn:aws:iam::aws:policy/ReadOnlyAccess
   #   aws iam create-access-key --user-name hermes-mcp
   #
-  # READ_OPERATIONS_ONLY and AWS_API_MCP_TELEMETRY are read from the
-  # environment by the server at startup, so they are collected here with
-  # safe defaults rather than left to the server's own (permissive) ones:
-  # the server defaults to allowing mutations, and to tagging its AWS
-  # user-agent with your MCP client name and configuration flags.
+  # READ_OPERATIONS_ONLY, REQUIRE_MUTATION_CONSENT and AWS_API_MCP_TELEMETRY
+  # are read from the environment by the server at startup, so they are
+  # collected here with safe defaults rather than left to the server's own
+  # (permissive) ones: the server defaults to allowing mutations without
+  # asking, and to tagging its AWS user-agent with your MCP client name and
+  # configuration flags.
   env:
     - name: AWS_ACCESS_KEY_ID
       prompt: "AWS access key ID"
@@ -56,6 +57,11 @@ auth:
       default: "true"
       required: true
       secret: false
+    - name: REQUIRE_MUTATION_CONSENT
+      prompt: "Ask you to approve each mutating call? (true recommended)"
+      default: "true"
+      required: true
+      secret: false
     - name: AWS_API_MCP_TELEMETRY
       prompt: "Send client/config telemetry to AWS in the user-agent?"
       default: "false"
@@ -67,20 +73,33 @@ auth:
 # command shape. No default_enabled list; the install-time checklist shows both.
 
 post_install: |
-  This server reaches your real AWS account. Two things to know:
+  This server reaches your real AWS account. Three things to know:
 
     1. READ_OPERATIONS_ONLY=true makes the server refuse any mutating command
       ("Execution of this operation is denied by security policy") before it is
       sent to AWS. It is the default here. Change it in ~/.hermes/.env only if
-      you intend the agent to create, modify, or delete resources — and prefer
-      REQUIRE_MUTATION_CONSENT=true alongside if you do.
-    2. The key is only as safe as its IAM policy. READ_OPERATIONS_ONLY is a
-      client-side guard, not a permission boundary; an admin key with a
-      client-side guard is still an admin key.
+      you intend the agent to create, modify, or delete resources.
+    2. With READ_OPERATIONS_ONLY=false, REQUIRE_MUTATION_CONSENT=true (also the
+      default here) is what keeps a human in the loop: the server asks over MCP
+      elicitation before each mutating call, and Hermes surfaces that as a
+      dangerous-command approval on whatever surface the session is on
+      (CLI, Telegram, Slack). Declining returns "User rejected the execution of
+      the command." and nothing is sent to AWS.
+    3. The key is only as safe as its IAM policy. Both flags are client-side
+      guards, not permission boundaries; an admin key behind a client-side
+      guard is still an admin key.
 
   Credentials come from ~/.hermes/.env. To use an existing profile from
   ~/.aws/credentials instead, replace the two key vars with
   AWS_API_MCP_PROFILE_NAME in mcp_servers.aws-api.env.
+
+  One account per server. Credentials are resolved once at startup, so a
+  `--profile other` inside a call_aws command is parsed but does NOT switch
+  accounts — it fails with InvalidClientTokenId. For a second account, add
+  another mcp_servers entry with the same command/args and its own key vars
+  (e.g. ${AWS_ACCESS_KEY_ID_PROD}); `tools: {include: [call_aws], prompts:
+  false, resources: false}` keeps the extra server down to one tool, since
+  suggest_aws_commands is account-agnostic.
 
   Requires `uv` on PATH (https://docs.astral.sh/uv/); the first connect
   downloads the server package.
