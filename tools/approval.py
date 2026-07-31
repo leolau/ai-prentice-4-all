@@ -2125,7 +2125,8 @@ def _format_tirith_description(tirith_result: dict) -> str:
 
 
 def _await_gateway_decision(session_key: str, notify_cb, approval_data: dict,
-                            *, surface: str = "gateway") -> dict:
+                            *, surface: str = "gateway",
+                            timeout_seconds: int | None = None) -> dict:
     """Enqueue *approval_data*, notify the user, and block the calling agent
     thread until the request is resolved or the gateway approval timeout
     elapses — firing pre/post approval hooks and cleaning up the queue entry.
@@ -2133,6 +2134,9 @@ def _await_gateway_decision(session_key: str, notify_cb, approval_data: dict,
     Shared by the terminal command guard (``check_all_command_guards``) and
     the execute_code guard (``check_execute_code_guard``) so the fiddly
     heartbeat-polling wait loop lives in one place.
+
+    *timeout_seconds* overrides ``approvals.gateway_timeout`` for callers that
+    carry their own deadline (e.g. ``approvals.tools_timeout``).
 
     Returns ``{"resolved": bool, "choice": str|None}`` on completion, or
     ``{"resolved": False, "choice": None, "notify_failed": True}`` if the
@@ -2180,7 +2184,10 @@ def _await_gateway_decision(session_key: str, notify_cb, approval_data: dict,
     # slices so we can fire activity heartbeats every ~10s to the agent's
     # inactivity tracker — otherwise the gateway watchdog kills the agent
     # while the user is still responding. Mirrors _wait_for_process() cadence.
-    timeout = _get_approval_config().get("gateway_timeout", 300)
+    timeout = (
+        timeout_seconds if timeout_seconds is not None
+        else _get_approval_config().get("gateway_timeout", 300)
+    )
     try:
         timeout = int(timeout)
     except (ValueError, TypeError):
@@ -2888,6 +2895,7 @@ def request_elicitation_consent(
         try:
             decision = _await_gateway_decision(
                 session_key, notify_cb, approval_data, surface=surface,
+                timeout_seconds=timeout_seconds,
             )
         except Exception as exc:
             logger.error(
