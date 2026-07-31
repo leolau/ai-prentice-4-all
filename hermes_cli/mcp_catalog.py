@@ -64,6 +64,10 @@ class EnvVarSpec:
 class AuthSpec:
     type: str  # "api_key" | "oauth" | "none"
     env: List[EnvVarSpec] = field(default_factory=list)
+    # api_key over an http transport: the request header carrying the
+    # credential. ``value`` is a template resolved at connect time.
+    header: str = "Authorization"
+    header_value: Optional[str] = None
     # OAuth-specific (case 2: third-party provider like Google)
     provider: Optional[str] = None
     scopes: List[str] = field(default_factory=list)
@@ -206,9 +210,26 @@ def _parse_manifest(path: Path) -> CatalogEntry:
     if not isinstance(env_list_raw, list):
         raise CatalogError(f"{path}: auth.env must be a list")
     env_list = [_parse_env_spec(e) for e in env_list_raw]
+    header = auth_raw.get("header") or "Authorization"
+    if not isinstance(header, str):
+        raise CatalogError(f"{path}: auth.header must be a string")
+    header_value = auth_raw.get("header_value")
+    if header_value is not None and not isinstance(header_value, str):
+        raise CatalogError(f"{path}: auth.header_value must be a string")
+    if header_value:
+        declared = {s.name for s in env_list}
+        referenced = set(re.findall(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}", header_value))
+        unknown = referenced - declared
+        if unknown:
+            raise CatalogError(
+                f"{path}: auth.header_value references undeclared env var(s): "
+                f"{', '.join(sorted(unknown))}"
+            )
     auth = AuthSpec(
         type=a_type,
         env=env_list,
+        header=header,
+        header_value=header_value,
         provider=auth_raw.get("provider"),
         scopes=list(auth_raw.get("scopes") or []),
         env_var=auth_raw.get("env_var"),
@@ -486,7 +507,33 @@ def _build_server_config(
         cfg["url"] = t.url
         if entry.auth.type == "oauth":
             cfg["auth"] = "oauth"
+        elif entry.auth.type == "api_key":
+            header_value = _api_key_header_value(entry.auth, env_names or [])
+            if header_value:
+                cfg["headers"] = {entry.auth.header: header_value}
     return cfg
+
+
+def _api_key_header_value(auth: AuthSpec, env_names: List[str]) -> Optional[str]:
+    """Return the auth header value for an http api_key server, or None.
+
+    An http transport spawns no subprocess, so a credential in ``.env`` only
+    reaches the server through a request header. The value is written as a
+    ``${VAR}`` template, resolved at connect time — the same contract as the
+    stdio ``env`` block, so the key never lands in ``config.yaml``.
+
+    Returns None when no declared credential has a value in ``.env``, so an
+    unresolved placeholder is never sent as a literal Authorization header.
+    """
+    have = [s.name for s in auth.env if s.name in env_names]
+    if not have:
+        return None
+    if auth.header_value:
+        referenced = set(re.findall(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}", auth.header_value))
+        if not referenced.issubset(set(have)):
+            return None
+        return auth.header_value
+    return "Bearer ${" + have[0] + "}"
 
 
 def _read_prior_tool_selection(name: str) -> Optional[List[str]]:

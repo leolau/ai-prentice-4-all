@@ -158,6 +158,32 @@ Note this is distinct from `${INSTALL_DIR}` in catalog manifests, which is
 substituted at install-time with the path the catalog cloned the entry's
 repo into.
 
+### How a catalog credential reaches the server
+
+`auth.type: api_key` prompts for the manifest's `env:` vars and saves them to
+`~/.hermes/.env`. Where the install writes the reference depends on the
+transport:
+
+- **stdio** — an `env:` block naming each var (`FOO: "${FOO}"`), since the
+  subprocess is spawned with a filtered environment and only sees what the
+  config names.
+- **http** — a request header, since there is no subprocess. The default is
+  `Authorization: Bearer ${FIRST_VAR}`; a manifest can override it:
+
+  ```yaml
+  auth:
+    type: api_key
+    header: X-Api-Key                 # default: Authorization
+    header_value: "${ACME_TOKEN}"     # default: "Bearer ${<first env var>}"
+    env:
+      - name: ACME_TOKEN
+        prompt: "Acme API token"
+  ```
+
+  `header_value` may only reference vars declared in `env:`. If none of them
+  has a value in `.env`, no header is written at all — an unresolved `${VAR}`
+  would otherwise be sent to the server as a literal credential.
+
 ### Updating tool selection later
 
 ```bash
