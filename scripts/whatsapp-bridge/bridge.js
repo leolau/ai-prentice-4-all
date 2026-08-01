@@ -6,7 +6,8 @@
  * and exposes HTTP endpoints for the Python gateway adapter.
  *
  * Endpoints (matches gateway/platforms/whatsapp.py expectations):
- *   GET  /messages       - Long-poll for new incoming messages
+ *   GET  /messages       - Drain queued incoming messages (returns immediately,
+ *                          possibly empty — clients must pace their polling)
  *   POST /send           - Send a message { chatId, message, replyTo? }
  *   POST /edit           - Edit a sent message { chatId, messageId, message }
  *   POST /send-media     - Send media natively { chatId, filePath, mediaType?, caption?, fileName? }
@@ -574,7 +575,8 @@ app.use((req, res, next) => {
   next();
 });
 
-// Poll for new messages (long-poll style)
+// Drain the queue. This returns immediately, empty queue included — a client
+// looping on it without a delay will spin at this endpoint's response rate.
 app.get('/messages', (req, res) => {
   const msgs = messageQueue.splice(0, messageQueue.length);
   res.json(msgs);
