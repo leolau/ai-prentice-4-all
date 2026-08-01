@@ -34,6 +34,9 @@ def load_config():
 
 config = load_config()
 BATCH_WINDOW_SEC = config.get('batching', {}).get('window_seconds', 5)
+# The bridge's GET /messages drains its queue and answers immediately, so the
+# poll loop must pace itself or it spins at the bridge's response rate.
+POLL_INTERVAL_SEC = config.get('batching', {}).get('poll_interval_seconds', 1.0)
 
 # Ensure directories
 os.makedirs(MEDIA_DIR, exist_ok=True)
@@ -297,6 +300,8 @@ def poll_bridge(port, source_phone):
         except Exception as e:
             print(f"[batcher] Unexpected error polling {port}: {e}")
             time.sleep(2)
+        else:
+            time.sleep(POLL_INTERVAL_SEC)
 
 
 # Health check HTTP server
