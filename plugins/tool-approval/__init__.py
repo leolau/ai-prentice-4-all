@@ -125,6 +125,47 @@ def _format_args(args: Any) -> str:
     return rendered
 
 
+def _block_message(tool_name: str, reason: str) -> str:
+    """Explain the block to the model in terms of what actually happened.
+
+    A prompt that never reached the user is not a refusal.  Told "the user
+    declined", a model apologises for a decision nobody made and the user is
+    left insisting they approved it — so undeliverable and no-surface say so,
+    and tell the model the workaround (a channel that can prompt) instead of
+    "wait to be asked again".
+    """
+    tail = (
+        "The call was NOT executed. Do not retry it — tell the user what you "
+        "wanted to run and why, and wait for them to ask again."
+    )
+    if reason == "timeout":
+        return (
+            f"'{tool_name}' requires user approval before it runs and the user "
+            f"did not respond in time. {tail}"
+        )
+    if reason in ("no_surface", "undeliverable", "error"):
+        detail = {
+            "no_surface": (
+                "this session has no way to prompt them (no approval surface "
+                "is attached to it)"
+            ),
+            "undeliverable": "the prompt could not be delivered to them",
+            "error": "the approval system failed",
+        }[reason]
+        return (
+            f"'{tool_name}' requires user approval before it runs, and {detail}. "
+            "The call was NOT executed. The user did NOT decline — they were "
+            "never asked, so do not apologise for a refusal or ask them to "
+            "approve again here. Say the approval prompt could not reach them, "
+            "and that this needs looking at in the logs (approval surface for "
+            "this session), then offer another way to get what they wanted."
+        )
+    return (
+        f"'{tool_name}' requires user approval before it runs and the user "
+        f"declined. {tail}"
+    )
+
+
 def _on_pre_tool_call(
     tool_name: str = "",
     args: Any = None,
@@ -150,7 +191,7 @@ def _on_pre_tool_call(
             logger.warning("tool-approval: bypass check failed: %s", exc)
 
     try:
-        from tools.approval import request_elicitation_consent
+        from tools.approval import request_elicitation_consent_detailed
     except Exception as exc:  # pragma: no cover -- defensive
         logger.error("tool-approval: approval system unavailable: %s", exc)
         return {
@@ -162,7 +203,7 @@ def _on_pre_tool_call(
             ),
         }
 
-    decision = request_elicitation_consent(
+    decision, reason = request_elicitation_consent_detailed(
         f"{tool_name}\n{_format_args(args)}",
         f"Tool '{tool_name}' requires your approval before it runs (approvals.tools).",
         timeout_seconds=_timeout(cfg),
@@ -173,17 +214,12 @@ def _on_pre_tool_call(
         logger.info("tool-approval: user approved %s", tool_name)
         return None
 
-    logger.info("tool-approval: %s not approved (%s)", tool_name, decision)
-    reason = (
-        "did not respond in time" if decision == "cancel" else "declined"
+    logger.info(
+        "tool-approval: %s not approved (%s/%s)", tool_name, decision, reason,
     )
     return {
         "action": "block",
-        "message": (
-            f"'{tool_name}' requires user approval before it runs and the user "
-            f"{reason}. The call was NOT executed. Do not retry it — tell the "
-            "user what you wanted to run and why, and wait for them to ask again."
-        ),
+        "message": _block_message(tool_name, reason),
     }
 
 

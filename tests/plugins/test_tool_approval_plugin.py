@@ -67,8 +67,8 @@ class TestPatternMatching:
         _write_config(_hermes_home, {})
         called = []
         monkeypatch.setattr(
-            "tools.approval.request_elicitation_consent",
-            lambda *a, **k: called.append(a) or "accept",
+            "tools.approval.request_elicitation_consent_detailed",
+            lambda *a, **k: called.append(a) or ("accept", "approved"),
         )
         assert plugin._on_pre_tool_call("mcp_aws_api_call_aws", {"x": 1}) is None
         assert called == []
@@ -76,7 +76,7 @@ class TestPatternMatching:
     def test_non_matching_tool_is_untouched(self, plugin, _hermes_home, monkeypatch):
         _write_config(_hermes_home, {"approvals": {"tools": ["mcp_aws_api_*"]}})
         monkeypatch.setattr(
-            "tools.approval.request_elicitation_consent",
+            "tools.approval.request_elicitation_consent_detailed",
             lambda *a, **k: pytest.fail("must not prompt for a non-matching tool"),
         )
         assert plugin._on_pre_tool_call("terminal", {"command": "ls"}) is None
@@ -88,9 +88,9 @@ class TestPatternMatching:
         def _consent(message, description, **kwargs):
             seen["message"] = message
             seen["description"] = description
-            return "accept"
+            return "accept", "approved"
 
-        monkeypatch.setattr("tools.approval.request_elicitation_consent", _consent)
+        monkeypatch.setattr("tools.approval.request_elicitation_consent_detailed", _consent)
         assert plugin._on_pre_tool_call(
             "mcp_aws_api_call_aws", {"cli_command": "aws sts get-caller-identity"}
         ) is None
@@ -100,7 +100,7 @@ class TestPatternMatching:
     def test_matching_is_case_sensitive(self, plugin, _hermes_home, monkeypatch):
         _write_config(_hermes_home, {"approvals": {"tools": ["MCP_AWS_*"]}})
         monkeypatch.setattr(
-            "tools.approval.request_elicitation_consent",
+            "tools.approval.request_elicitation_consent_detailed",
             lambda *a, **k: pytest.fail("case-insensitive match"),
         )
         assert plugin._on_pre_tool_call("mcp_aws_api_call_aws", {}) is None
@@ -113,14 +113,18 @@ class TestDecisions:
 
     def test_accept_allows_the_call(self, plugin, monkeypatch):
         monkeypatch.setattr(
-            "tools.approval.request_elicitation_consent", lambda *a, **k: "accept"
+            "tools.approval.request_elicitation_consent_detailed", lambda *a, **k: ("accept", "approved")
         )
         assert plugin._on_pre_tool_call("mcp_aws_api_call_aws", {}) is None
 
-    @pytest.mark.parametrize("decision", ["decline", "cancel", "anything-else"])
+    @pytest.mark.parametrize(
+        "decision",
+        [("decline", "user_denied"), ("cancel", "timeout"), ("decline", "no_surface")],
+    )
     def test_non_accept_blocks(self, plugin, monkeypatch, decision):
         monkeypatch.setattr(
-            "tools.approval.request_elicitation_consent", lambda *a, **k: decision
+            "tools.approval.request_elicitation_consent_detailed",
+            lambda *a, **k: decision,
         )
         result = plugin._on_pre_tool_call("mcp_aws_api_call_aws", {})
         assert result["action"] == "block"
@@ -129,7 +133,7 @@ class TestDecisions:
 
     def test_timeout_wording_distinguishes_no_answer(self, plugin, monkeypatch):
         monkeypatch.setattr(
-            "tools.approval.request_elicitation_consent", lambda *a, **k: "cancel"
+            "tools.approval.request_elicitation_consent_detailed", lambda *a, **k: ("cancel", "timeout")
         )
         result = plugin._on_pre_tool_call("mcp_aws_api_call_aws", {})
         assert "did not respond in time" in result["message"]
@@ -138,7 +142,7 @@ class TestDecisions:
         def _boom(*a, **k):
             raise RuntimeError("no approval channel")
 
-        monkeypatch.setattr("tools.approval.request_elicitation_consent", _boom)
+        monkeypatch.setattr("tools.approval.request_elicitation_consent_detailed", _boom)
         with pytest.raises(RuntimeError):
             # The approval helper itself is documented to fail closed rather
             # than raise; if it ever raises, the executor's try/except around
@@ -156,9 +160,9 @@ class TestDecisions:
 
         def _consent(message, description, *, timeout_seconds=None, **kwargs):
             seen["timeout"] = timeout_seconds
-            return "accept"
+            return "accept", "approved"
 
-        monkeypatch.setattr("tools.approval.request_elicitation_consent", _consent)
+        monkeypatch.setattr("tools.approval.request_elicitation_consent_detailed", _consent)
         plugin._on_pre_tool_call("mcp_aws_api_call_aws", {})
         assert seen["timeout"] == 120
 
@@ -171,9 +175,9 @@ class TestDecisions:
 
         def _consent(message, description, *, timeout_seconds=None, **kwargs):
             seen["timeout"] = timeout_seconds
-            return "accept"
+            return "accept", "approved"
 
-        monkeypatch.setattr("tools.approval.request_elicitation_consent", _consent)
+        monkeypatch.setattr("tools.approval.request_elicitation_consent_detailed", _consent)
         plugin._on_pre_tool_call("mcp_aws_api_call_aws", {})
         assert seen["timeout"] is None
 
@@ -184,7 +188,7 @@ class TestBypass:
             _hermes_home, {"approvals": {"mode": "off", "tools": ["mcp_aws_api_*"]}}
         )
         monkeypatch.setattr(
-            "tools.approval.request_elicitation_consent", lambda *a, **k: "decline"
+            "tools.approval.request_elicitation_consent_detailed", lambda *a, **k: ("decline", "user_denied")
         )
         result = plugin._on_pre_tool_call("mcp_aws_api_call_aws", {})
         assert result["action"] == "block"
@@ -201,7 +205,7 @@ class TestBypass:
             },
         )
         monkeypatch.setattr(
-            "tools.approval.request_elicitation_consent",
+            "tools.approval.request_elicitation_consent_detailed",
             lambda *a, **k: pytest.fail("bypass should skip the prompt"),
         )
         assert plugin._on_pre_tool_call("mcp_aws_api_call_aws", {}) is None
@@ -214,9 +218,9 @@ class TestPromptRendering:
 
         def _consent(message, description, **kwargs):
             seen["message"] = message
-            return "accept"
+            return "accept", "approved"
 
-        monkeypatch.setattr("tools.approval.request_elicitation_consent", _consent)
+        monkeypatch.setattr("tools.approval.request_elicitation_consent_detailed", _consent)
         plugin._on_pre_tool_call(
             "demo_tool",
             {
@@ -235,9 +239,9 @@ class TestPromptRendering:
 
         def _consent(message, description, **kwargs):
             seen["message"] = message
-            return "accept"
+            return "accept", "approved"
 
-        monkeypatch.setattr("tools.approval.request_elicitation_consent", _consent)
+        monkeypatch.setattr("tools.approval.request_elicitation_consent_detailed", _consent)
         plugin._on_pre_tool_call("demo_tool", {"body": "x" * 5000})
         assert len(seen["message"]) < 1200
         assert "truncated" in seen["message"]
@@ -267,7 +271,7 @@ class TestIntegration:
             },
         )
         monkeypatch.setattr(
-            "tools.approval.request_elicitation_consent", lambda *a, **k: "decline"
+            "tools.approval.request_elicitation_consent_detailed", lambda *a, **k: ("decline", "user_denied")
         )
         from hermes_cli import plugins as pmod
 
