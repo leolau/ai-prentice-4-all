@@ -309,6 +309,31 @@ def _group(gid: int) -> str:
         return str(gid)
 
 
+def facts_or_note(
+    path: Path, component: str, findings: list[dict[str, str]]
+) -> dict[str, str] | None:
+    """`file_facts`, but an unreadable file is reported instead of fatal.
+
+    The weekly check runs as the unprivileged `hermes` user by design, so it
+    can meet a root-only file. Crashing there would take the whole report down
+    — including the layers it *can* verify — over one file it was never meant
+    to reach.
+    """
+    try:
+        return file_facts(path)
+    except PermissionError:
+        findings.append({
+            "severity": SEVERITY_NOTE,
+            "component": component,
+            "expected": "readable",
+            "actual": "permission denied",
+            "detail": f"cannot inspect {path} as {_user(os.geteuid())} — this "
+            "layer is unverified. Make the file readable, or run this check as "
+            "root",
+        })
+        return None
+
+
 def flatten(node: Any, path: str = "") -> dict[str, Any]:
     """Flatten nested config into ``{dotted.path: scalar}`` for diffing.
 
@@ -549,7 +574,9 @@ def check(deployment: str, state_root: Path | None = None) -> list[dict[str, str
                 "integration using it is silently broken",
             })
             continue
-        facts = file_facts(target)
+        facts = facts_or_note(target, f"credential:{entry['path']}", findings)
+        if facts is None:
+            continue
         for field in ("mode", "owner"):
             if str(entry.get(field)) != facts[field]:
                 findings.append({
@@ -574,7 +601,10 @@ def check(deployment: str, state_root: Path | None = None) -> list[dict[str, str
                 "defined on this box",
             })
             continue
-        actual_hash = file_facts(installed)["sha256"]
+        installed_facts = facts_or_note(installed, f"unit:{name}", findings)
+        if installed_facts is None:
+            continue
+        actual_hash = installed_facts["sha256"]
         if actual_hash != str(expected.get("sha256")):
             reference = (
                 "matches the repo copy"
@@ -604,9 +634,10 @@ def check(deployment: str, state_root: Path | None = None) -> list[dict[str, str
                 "detail": "the deploy tool is not installed on this box",
             })
         elif repo_copy.is_file():
-            installed_hash = file_facts(installed)["sha256"]
+            script_facts = facts_or_note(installed, "deploy-script", findings)
+            installed_hash = script_facts["sha256"] if script_facts else ""
             repo_hash = hashlib.sha256(repo_copy.read_bytes()).hexdigest()
-            if installed_hash != repo_hash:
+            if script_facts is not None and installed_hash != repo_hash:
                 findings.append({
                     "severity": SEVERITY_DRIFT,
                     "component": "deploy-script",

@@ -30,9 +30,9 @@ dashboard reports healthy.
 ```
 repo (public)                       scripts/deploy_state.py     the tooling
                                     deploy/hermes-deploy.sh     the deploy tool
-private state store                 <deployment>/config.snapshot.yaml
-  default: deploy/ in this repo     <deployment>/state.manifest.yaml
-  systest: /opt/data/hermes-deploy-state
+private state repo                  <deployment>/config.snapshot.yaml
+  ai-prentice-4-all-deploy-state    <deployment>/state.manifest.yaml
+  on the box: /opt/data/hermes-deploy-state
                                     <deployment>/systemd/*
 box, root-only                      /opt/data/deploy/state-secrets.env
 box, hermes-only                    $HERMES_HOME/.env, credential files
@@ -128,8 +128,14 @@ The copy in the repo is the reviewed source of truth; the installed copy at
 it, reinstall and re-capture:
 
 ```bash
-sudo install -m 700 -o root -g root deploy/hermes-deploy.sh /opt/data/deploy-hermes.sh
+sudo install -m 755 -o root -g root deploy/hermes-deploy.sh /opt/data/deploy-hermes.sh
 ```
+
+Root-owned and **not** `0700`: what matters is that `hermes` cannot *write* it
+(it runs as root and chowns the tree). The weekly check runs as `hermes` and
+hashes this file, and its contents are in the public repo anyway, so denying
+read buys nothing and costs the verification. A file the checking user cannot
+read is reported as an unverified-layer note rather than crashing the run.
 
 ## Rebuilding a box from nothing
 
@@ -191,15 +197,21 @@ The interpreter check already runs weekly; the state check is a second
 `ExecStart` on the same unit rather than a new timer, so one report covers all
 four layers:
 
+It is added as a drop-in so the captured base unit stays byte-identical —
+editing the unit itself would show up as drift against the snapshot on the very
+next run:
+
 ```ini
-# /etc/systemd/system/hermes-drift-check.service
-ExecStart=/opt/data/hermes-agent/.venv/bin/python \
-    /opt/data/hermes-agent/scripts/check_runtime_drift.py --notify
+# /etc/systemd/system/hermes-drift-check.service.d/10-deploy-state.conf
+[Service]
 ExecStart=/opt/data/hermes-agent/.venv/bin/python \
     /opt/data/hermes-agent/scripts/deploy_state.py \
     --state-root /opt/data/hermes-deploy-state check \
     --deployment hermes-systest --notify
 ```
+
+A `[Service]` drop-in *appends* `ExecStart` lines rather than replacing them,
+so the interpreter check still runs first.
 
 `SuccessExitStatus=0 1` is already set — drift is reported by `--notify`, and a
 non-zero exit is the signal, not a fault. Systemd runs sequential `ExecStart`
@@ -207,9 +219,13 @@ lines in order and stops at the first *failure*, which is why the tolerated
 exit status matters here: without it, drift in the interpreter check would
 prevent the state check from running at all.
 
-The service runs as `hermes`, so the state store must be root-owned but
-world-readable (`0755`); it contains no secrets. The secrets file is not read
-by `check` at all and stays `0600` under a `0700` directory.
+The service runs as `hermes`, so everything `check` reads must be readable by
+that user: the state store (root-owned, `0755` — it contains no secrets) and
+the installed deploy script. The secrets file is not read by `check` at all and
+stays `0600` under a `0700` directory.
+
+A state store that cannot be read at all is exit `2` and a real unit failure —
+"I could not check" must never look like "nothing has changed".
 
 ## Responding to a drift report
 
