@@ -434,6 +434,24 @@ def test_state_can_live_outside_this_repo(tmp_path, monkeypatch):
     )
 
 
+def test_a_file_the_checking_user_cannot_read_is_a_note_not_a_crash(deployment):
+    """The weekly check runs as unprivileged `hermes` and will meet root-only
+    files. Crashing there loses the layers it *can* verify — found the hard way
+    when the deploy script was installed `0700 root`."""
+    home, units = deployment
+    unreadable = units / "hermes-gateway.service"
+    unreadable.chmod(0o000)
+    try:
+        findings = ds.check("systest-fixture")
+    finally:
+        unreadable.chmod(0o644)
+
+    assert [(f["component"], f["severity"]) for f in findings] == [
+        ("unit:hermes-gateway.service", NOTE)
+    ]
+    assert "permission denied" in findings[0]["actual"]
+
+
 def test_check_exit_code_is_the_signal(deployment, capsys):
     assert ds.main(["check", "--deployment", "systest-fixture"]) == 0
     home, _ = deployment
