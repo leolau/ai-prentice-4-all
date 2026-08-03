@@ -78,7 +78,10 @@ def deployment(tmp_path):
         "[Service]\nUser=hermes\n", encoding="utf-8"
     )
 
-    secrets_file = tmp_path / "state-secrets.env"
+    # In its own directory, mirroring the box: the secrets file lives under a
+    # root-only `0700` dir, which is what makes it unreachable to the checker.
+    (tmp_path / "deploy").mkdir()
+    secrets_file = tmp_path / "deploy" / "state-secrets.env"
     secrets_file.write_text(SECRETS_TEXT, encoding="utf-8")
     secrets_file.chmod(0o600)
 
@@ -282,6 +285,29 @@ def test_a_credential_dropped_from_the_manifest_is_a_note(deployment, identity):
     findings = bs.verify("systest-fixture", state_root, repo)
     assert [f["severity"] for f in findings] == [NOTE]
     assert "user@example.com" in findings[0]["component"]
+
+
+def test_a_secrets_file_the_checker_cannot_see_is_a_note_not_a_crash(
+    deployment, identity
+):
+    """`verify` runs as unprivileged `hermes` while the secrets file is
+    root-only, so it *will* meet a file it cannot stat. Crashing there loses the
+    freshness and coverage findings it could have reported — found on the box,
+    the same way #87 was."""
+    home, state_root, repo, secrets_file = deployment
+    _, recipient = identity
+    _backup(deployment, recipient)
+
+    secrets_file.parent.chmod(0o000)
+    try:
+        findings = bs.verify("systest-fixture", state_root, repo)
+    finally:
+        secrets_file.parent.chmod(0o755)
+
+    assert [(f["component"], f["severity"]) for f in findings] == [
+        (f"backup:coverage:{secrets_file.name}", NOTE)
+    ]
+    assert findings[0]["actual"] == "permission denied"
 
 
 def test_backup_refuses_without_a_recipient(deployment, monkeypatch, capsys):
