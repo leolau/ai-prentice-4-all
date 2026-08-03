@@ -170,3 +170,62 @@ def test_aiagent_forwards_warning_callback_to_cli_memory_provider():
     assert provider.init_kwargs["platform"] == "cli"
     assert provider.init_kwargs["warning_callback"] == agent._emit_warning
     assert provider.init_kwargs["status_callback"] == agent._emit_status
+
+
+def _agent_with_role(role):
+    """Build an agent for a gateway session whose principal holds ``role``."""
+    provider = RecordingMemoryProvider()
+    cfg = {"memory": {"provider": "recording"}, "agent": {}}
+
+    with (
+        patch("hermes_cli.config.load_config", return_value=cfg),
+        patch("plugins.memory.load_memory_provider", return_value=provider),
+        patch("agent.model_metadata.get_model_context_length", return_value=204_800),
+        patch("run_agent.get_tool_definitions", return_value=[]),
+        patch("run_agent.check_toolset_requirements", return_value={}),
+        patch("run_agent.OpenAI"),
+    ):
+        from run_agent import AIAgent
+
+        agent = AIAgent(
+            api_key="test-key-1234567890",
+            base_url="https://openrouter.ai/api/v1",
+            quiet_mode=True,
+            skip_context_files=True,
+            skip_memory=False,
+            session_id="sess-role",
+            platform="telegram",
+            user_id="8756039695",
+            internal_user_id="leo_owner",
+            internal_user_role=role,
+        )
+    return agent, provider
+
+
+def test_resolved_owner_role_reaches_the_memory_provider():
+    """The role the principals table holds is the role the provider scopes with.
+
+    Hardcoding ``member`` here made the owner unable to read their own brain
+    from any channel — every gateway session was a member regardless of
+    enrolment.
+    """
+    agent, provider = _agent_with_role("owner")
+
+    assert agent._internal_user_role == "owner"
+    assert provider.init_kwargs["principal_user_id"] == "leo_owner"
+    assert provider.init_kwargs["principal_role"] == "owner"
+
+
+def test_admin_role_is_forwarded_verbatim():
+    _, provider = _agent_with_role("admin")
+
+    assert provider.init_kwargs["principal_role"] == "admin"
+
+
+def test_unresolved_role_degrades_to_member_not_owner():
+    """An identity nothing resolved gets base privilege, never elevation."""
+    for unresolved in (None, "", "OWNER", "root", "superuser"):
+        agent, provider = _agent_with_role(unresolved)
+
+        assert agent._internal_user_role == "member"
+        assert provider.init_kwargs["principal_role"] == "member"

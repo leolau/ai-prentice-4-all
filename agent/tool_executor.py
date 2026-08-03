@@ -1164,7 +1164,9 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
                     todo_principal as _todo_principal,
                     todo_tool as _todo_tool,
                 )
-                principal = _todo_principal(agent._internal_user_id)
+                principal = _todo_principal(
+                    agent._internal_user_id, agent._internal_user_role
+                )
                 if principal is None:
                     return _todo_tool(
                         todos=next_args.get("todos"),

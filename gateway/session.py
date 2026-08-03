@@ -170,6 +170,16 @@ class SessionSource:
     # prompt-cache-friendly core even when several channel identities map to the
     # same person. ``None`` => omitted (byte-stable for existing callers).
     internal_user_id: Optional[str] = None
+    # The resolved principal's C2 ``role`` (owner/admin/member/viewer), stamped
+    # from the ``principals`` table by
+    # :func:`gateway.inbound.bind_channel_principal` alongside
+    # ``internal_user_id``. Role decides what a session may READ of other
+    # users' data, so — like ``delivered_via_upstream_relay`` — it is
+    # deliberately excluded from ``to_dict``/``from_dict``: the role must come
+    # from the database on this turn, never from persisted session state that a
+    # stale or tampered file could replay. ``None`` => unresolved, and every
+    # consumer falls back to the least-privileged role rather than assuming.
+    internal_user_role: Optional[str] = None
     # The task/goal dimension: a long-lived ``(user, task)`` pair gets one
     # stable session so its cached prompt prefix is reused across turns, and
     # different tasks never share a cached prefix. Consumed by FG-06/FG-09.

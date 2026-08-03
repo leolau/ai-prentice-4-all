@@ -646,7 +646,9 @@ def compress_context(
                     )
 
         todo_snapshot = agent._todo_store.format_for_injection(
-            todo_principal(agent._internal_user_id)
+            todo_principal(
+                agent._internal_user_id, agent._internal_user_role
+            )
         )
         if todo_snapshot:
             compressed.append({"role": "user", "content": todo_snapshot})

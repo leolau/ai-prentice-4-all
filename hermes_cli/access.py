@@ -60,6 +60,12 @@ ROLES: tuple[Role, ...] = ("owner", "admin", "member", "viewer")
 #: Roles that may read every private tier (the owner bypasses scope filtering).
 _OWNER_ROLE: Role = "owner"
 
+#: The role assumed for an identity whose principal could not be resolved.
+#: ``member`` — the base rung: its own private data plus what is shared, and
+#: nothing of anyone else's. An unresolved identity must never land on a role
+#: that can read other users' private rows.
+_UNRESOLVED_ROLE: Role = "member"
+
 SHARED: Literal["shared"] = "shared"
 _PRIVATE_PREFIX = "private:"
 
@@ -112,6 +118,22 @@ class Principal:
     def private_visibility(self) -> str:
         """The ``private:<user_id>`` tag for rows only this principal may read."""
         return private(self.user_id)
+
+
+def normalize_role(role: object) -> Role:
+    """Coerce a possibly-unresolved role onto the C2 ladder.
+
+    Callers hand this whatever the identity seam produced — a real role from the
+    ``principals`` table, ``None`` when resolution failed or the identity is not
+    enrolled, or a value read from somewhere less trustworthy. Anything that is
+    not exactly one of :data:`ROLES` becomes :data:`_UNRESOLVED_ROLE`, so a
+    missing or malformed role degrades to base privilege instead of being passed
+    through to a reader that would treat an unexpected string as "not a member,
+    therefore unrestricted".
+    """
+    if isinstance(role, str) and role in ROLES:
+        return role  # type: ignore[return-value]
+    return _UNRESOLVED_ROLE
 
 
 def private(user_id: str) -> str:

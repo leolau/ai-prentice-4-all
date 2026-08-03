@@ -20,6 +20,7 @@ from typing import Dict, Any, List, Optional
 from hermes_cli.access import (
     Principal,
     can_read_row,
+    normalize_role,
     normalize_visibility,
     parse_private_owner,
     private,
@@ -273,10 +274,17 @@ class TodoStore:
         return [todos[i] for i in sorted(last_index.values())]
 
 
-def todo_principal(user_id: Optional[str]) -> Optional[Principal]:
+def todo_principal(
+    user_id: Optional[str],
+    role: Optional[str] = None,
+) -> Optional[Principal]:
     clean = str(user_id or "").strip()
     if clean:
-        return Principal(user_id=clean, display=clean, role="member")
+        return Principal(
+            user_id=clean,
+            display=clean,
+            role=normalize_role(role),
+        )
     return None
 
 

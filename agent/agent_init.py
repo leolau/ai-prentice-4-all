@@ -47,6 +47,7 @@ from agent.tool_guardrails import (
     ToolCallGuardrailController,
     ToolGuardrailDecision,
 )
+from hermes_cli.access import normalize_role
 from hermes_cli.config import cfg_get
 from hermes_cli.timeouts import get_provider_request_timeout
 from hermes_constants import get_hermes_home
@@ -223,6 +224,7 @@ def init_agent(
     thread_id: str = None,
     gateway_session_key: str = None,
     internal_user_id: Optional[str] = None,
+    internal_user_role: Optional[str] = None,
     session_task: Optional[str] = None,
     skip_context_files: bool = False,
     load_soul_identity: bool = False,
@@ -310,6 +312,11 @@ def init_agent(
     agent._thread_id = thread_id
     agent._gateway_session_key = gateway_session_key  # Stable per-chat key (e.g. agent:main:telegram:dm:123)
     agent._internal_user_id = internal_user_id
+    # The C2 role the ``principals`` table holds for ``internal_user_id``,
+    # resolved by the C1 seam at intake. None => unresolved; every consumer
+    # falls back to the least-privileged role, so an unenrolled or
+    # failed-to-resolve identity can never read more than its own data.
+    agent._internal_user_role = normalize_role(internal_user_role)
     agent._session_task = session_task
     # Pluggable print function — CLI replaces this with _cprint so that
     # raw ANSI status lines are routed through prompt_toolkit's renderer
@@ -1287,7 +1294,7 @@ def init_agent(
                         _init_kwargs["user_name"] = agent._user_name
                     if agent._internal_user_id:
                         _init_kwargs["principal_user_id"] = agent._internal_user_id
-                        _init_kwargs["principal_role"] = "member"
+                        _init_kwargs["principal_role"] = agent._internal_user_role
                     if agent._session_task:
                         _init_kwargs["task"] = agent._session_task
                     if agent._chat_id:

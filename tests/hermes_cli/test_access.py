@@ -15,6 +15,7 @@ from hermes_cli.access import (
     SHARED,
     can_read,
     can_read_row,
+    normalize_role,
     normalize_visibility,
     parse_private_owner,
     private,
@@ -28,6 +29,23 @@ def _p(user_id: str, role: str) -> Principal:
 
 def test_role_vocabulary_is_the_locked_set() -> None:
     assert ROLES == ("owner", "admin", "member", "viewer")
+
+
+def test_normalize_role_passes_through_every_real_role() -> None:
+    for role in ROLES:
+        assert normalize_role(role) == role
+
+
+def test_normalize_role_degrades_unknown_values_to_base_privilege() -> None:
+    """Whatever the identity seam could not resolve must not be elevated.
+
+    ``member`` is the base rung — own private tier plus shared, nothing of
+    anyone else's — so a missing, wrongly-cased or invented role can never buy
+    read access to another user's data.
+    """
+    for bogus in (None, "", "  ", "OWNER", "Owner", "root", "superuser", 0, True, ["owner"]):
+        assert normalize_role(bogus) == "member"
+    assert can_read(_p("u", normalize_role("root")), private("someone_else")) is False
 
 
 def test_principal_rejects_unknown_role_and_empty_id() -> None:
