@@ -152,10 +152,25 @@ in place first.
    Build the venv (`uv venv .venv --python 3.11 && uv sync --frozen`), then
    `chown -R hermes:hermes` the tree except `.venv`, which stays root-owned —
    root runs `pip` from it, so a `hermes`-writable venv is a path back to root.
-4. **Restore the private state store** to `$STATE` and the secrets file to
-   `/opt/data/deploy/state-secrets.env` (`0600`, root). Without the secrets
-   file, `render` cannot produce a working config and will tell you exactly
-   which placeholders it is missing.
+4. **Clone the private state store** to `$STATE` and restore the secrets file
+   to `/opt/data/deploy/state-secrets.env` (`0600`, root):
+   ```bash
+   sudo git clone github-hermes-state:<owner>/ai-prentice-4-all-deploy-state.git $STATE
+   sudo chmod -R a+rX $STATE          # check runs as hermes; no secrets in here
+   sudo git config --system --add safe.directory $STATE
+   ```
+   This needs a **second, separate** read-only deploy key — deploy keys are
+   per-repo — created and aliased exactly like the source one
+   (`docs/deployment/deploy-credential.md`), as `/root/.ssh/hermes_state_deploy`
+   behind `Host github-hermes-state`. Read-only on purpose: captures are
+   reviewed and pushed from an operator session, never straight from the box, so
+   a compromised box cannot rewrite the record of what it is supposed to look
+   like. Verify with `sudo git push --dry-run origin main`, which must be
+   refused.
+
+   The secrets file is **not** in the repo and has no backup here — restore it
+   from your credential backup, or `render` will tell you exactly which
+   placeholders it is missing.
 5. **Render the config**:
    ```bash
    sudo $PY scripts/deploy_state.py --state-root $STATE render \

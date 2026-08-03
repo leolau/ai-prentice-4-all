@@ -70,6 +70,20 @@ curl -X POST -H "Authorization: Bearer $GITHUB_TOKEN" \
 A deploy key is scoped to a single repository. That is the point: unlike a
 personal access token, it cannot reach any other repo even if it leaks.
 
+### A second key for the state store
+
+Because of that scoping, the private deployment-state repo needs its own key
+rather than a reuse of this one. Same recipe, different filename and alias:
+
+```
+/root/.ssh/hermes_state_deploy   600 root:root
+Host github-hermes-state         -> /opt/data/hermes-deploy-state
+```
+
+Also read-only, for a different reason: a box that could push would be able to
+rewrite the record of what it is supposed to look like, which is the one thing
+drift detection depends on. See `docs/deployment/deployment-path.md`.
+
 ## Verifying it (all five must hold)
 
 ```bash
