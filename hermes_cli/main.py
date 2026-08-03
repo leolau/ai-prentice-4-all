@@ -12255,6 +12255,11 @@ def cmd_memory(args):
 
         cmd_memory_vectors(args)
         return
+    if sub == "sharing":
+        from hermes_cli.memory_sharing import cmd_memory_sharing
+
+        cmd_memory_sharing(args)
+        return
     if sub == "off":
         from hermes_cli.config import load_config, save_config
 

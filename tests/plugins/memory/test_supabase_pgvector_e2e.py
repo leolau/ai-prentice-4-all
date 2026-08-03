@@ -165,6 +165,11 @@ async def test_negative_access_enforced_by_postgres_rls(postgres_dsn: str) -> No
             END $$;
             GRANT USAGE ON SCHEMA app_dev TO app_reader;
             GRANT SELECT ON app_dev.memories TO app_reader;
+            -- The read policy's per-memory grant clause (FG-21 P3) reads
+            -- item_grants, exactly as ensure_app_role() grants it on a real
+            -- deployment; without the grant the policy errors instead of
+            -- filtering.
+            GRANT SELECT ON app_dev.item_grants TO app_reader;
             """
         )
 

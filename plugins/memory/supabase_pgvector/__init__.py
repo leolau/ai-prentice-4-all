@@ -86,6 +86,11 @@ def _format_recall(records: List[MemoryRecord], max_chars: int) -> str:
     used = 0
     for record in records:
         label = record.topic or record.kind
+        # A memory read out of somebody else's private tier arrives labelled, so
+        # the model attributes the fact to them rather than to the user it is
+        # talking to.
+        if record.provenance:
+            label = f"{label}, {record.provenance}"
         line = f"- ({label}) {record.text}"
         if used + len(line) > max_chars:
             break
@@ -388,6 +393,7 @@ class SupabasePgvectorMemoryProvider(MemoryProvider):
                     top_k=int(self._recall.get("top_k", 5)),
                     min_score=float(self._recall.get("min_score", 0.35)),
                     record_use=True,
+                    session_id=self._session_id or None,
                 )
             )
         except Exception:
@@ -452,6 +458,7 @@ class SupabasePgvectorMemoryProvider(MemoryProvider):
                 top_k=int(args.get("top_k", 10) or 10),
                 kind=args.get("kind") or None,
                 topic=args.get("topic") or None,
+                session_id=self._session_id or None,
             )
         )
         return json.dumps(

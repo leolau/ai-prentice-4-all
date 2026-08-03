@@ -111,7 +111,7 @@ class _FakeStore:
 
     async def query(self, principal, query_text, *, top_k=10, kind=None,
                     topic=None, min_score=0.0, record_use=False,
-                    connection=None):
+                    session_id=None, connection=None):
         self.recorded_use = record_use
         return list(self.rows)[:top_k]
 

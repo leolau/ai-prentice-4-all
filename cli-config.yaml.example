@@ -561,6 +561,27 @@ memory:
   #   min_query_chars: 8       # skip "ok" / "thanks" — no retrievable intent
   #   dedup_threshold: 0.97    # a re-stated fact updates nothing, adds no row
 
+  # Cross-user memory reads (multi-user instances only). Layer-4 memory is owned
+  # per person; with role_reads on, a principal also recalls the private memory
+  # of anyone it ranks STRICTLY ABOVE on owner > admin > member > viewer. Reads
+  # go DOWN only: two admins cannot read each other, and nobody reads upward.
+  #
+  # Off by default, and it stays a deliberate decision because it is the one
+  # setting that lets one person read another's private rows without that person
+  # doing anything. When it is on:
+  #   * every such read is recorded (reader, role, subject, rows, query, session)
+  #     and BOTH sides can see the ledger — 'hermes memory sharing --as <user>
+  #     audit' shows a user what they read and what was read of them;
+  #   * recalled rows are labelled "from <user>'s memory", so a fact is never
+  #     presented as belonging to the person being talked to;
+  #   * Postgres RLS enforces the same matrix independently of the app filter.
+  #
+  # Sideways sharing is never granted by role: to share one memory with a peer,
+  # its OWNER runs 'hermes memory sharing --as <owner> share <memory-id> <user>'
+  # (revocable, and it shares exactly that row).
+  # sharing:
+  #   role_reads: false
+
   # Memory flush: give the agent one turn to save memories before context is
   # lost (compression, /new, /reset, exit). Set to 0 to disable.
   # For exit/reset, only fires if the session had at least this many user turns.

@@ -457,7 +457,7 @@ only.
 | **P0b** | Existing rows — **done** | 28 rows migrated `8756039695` → `leo_owner`; `telegram:8756039695` linked; pre-migration `pg_dump` kept and restore-verified into a scratch schema first | embeddings byte-identical to the pre-migration copy; 0 rows left behind; unlinked sender still resolves to nothing |
 | **P1** | Embedding service — **done, numbers in §7.5** | `scripts/embedding_server.py` + tracked `deploy/hermes-embed.service` (loopback, unprivileged, revision-pinned); `local_http` embedder behind `memory.embedding.*`; hashing stays default | benchmark recorded; wrong-model and wrong-width requests refused, not stored |
 | **P2** | Semantic layer 4 — **done, §8.1** | `embedding_model` per row; mismatch refused at startup; `hermes memory vectors status/reembed` (one transaction, index rebuilt); automatic recall in `prefetch()` with budget; `uses`/`last_used`; opt-in dedup | cross-model rows excluded from recall, not ranked; failed re-embed leaves the old space intact; prompt-prefix byte-stability test green |
-| **P3** | Shared recall | role-scoped elevation (config, default off) + RLS; `item_grants` for memories; provenance labels; `memory_read_elevated` audit | full negative-access matrix (member/member, admin off/on, grantee) at the **RLS** level, not just app level |
+| **P3** | Shared recall — **done, §8.2** | role-scoped downward elevation (`memory.sharing.role_reads`, default off) + matching RLS; `item_grants` extended with a `memory` kind; provenance labels; audit ledger readable by reader *and* subject; `hermes memory sharing audit/share` | full negative-access matrix (member/member, admin/admin, admin→member off and on, grantee, unbound elevation) asserted at the **RLS** level as well as the app level |
 | **P4** | RAG | `rag_documents` / `rag_chunks` + RLS; Drive + session ingestion; nightly timer; `rag_search` with citations | answer-with-citation on 3 real Drive docs; no private→shared laundering (test) |
 | **P5** | Consolidation | layer-1 promotion/demotion; email/WhatsApp ingestion (teams dropped — §10.5) | layer 1 back under budget without losing facts |
 
@@ -510,6 +510,56 @@ Still true after P2: the live column is **256-dim hashing**. Cutover is a
 deliberate two-step act on the box — edit `memory.embedding`, then
 `hermes memory vectors reembed` — and until it is run, `local_http` is
 configured-but-not-cut-over.
+
+### 8.2 P3 as built
+
+The decision was **read down only** (§10.2) and **one person = one role** (§10.5),
+so the whole access rule is a rank comparison: `owner > admin > member > viewer`,
+readable strictly downward. What that left to design was everything around it.
+
+1. **The subject's role is looked up, never carried on the row.** The elevated
+   clause is a correlated `EXISTS` against `principals`, in both the app filter
+   and the policy. Copying a role onto each memory would be faster and wrong: a
+   demotion has to take effect on the next read, not on rows written afterwards.
+   An owner nobody enrolled ranks *last*, so an unknown role can be read and
+   cannot read — the same `ELSE` branch in SQL as in Python, asserted against a
+   real Postgres so the two cannot drift.
+
+2. **Two independent gates, and the second is per transaction.** Installing the
+   policy grants nobody anything: the elevated branch is dead unless
+   `hermes.elevated_reads` is bound `on` for that transaction, by the one code
+   path that also writes the audit row. A path that forgets the binding
+   *under*-reads. A GUC bound on an instance where `role_reads` is off does
+   nothing at all, because the branch was never compiled into the policy.
+
+3. **The audit is visible to the person who was read.** `memory_access_audit`
+   records reader, role, subject, row ids, the (truncated) query and the session,
+   is written in the *same transaction* as the read, and its own policy admits
+   the owner, the reader, or the subject. `hermes memory sharing --as <user>
+   audit` shows both directions. This also closes a pre-P3 gap: the owner-role
+   bypass previously read every private row and left no trace, which is
+   tolerable with one user and not with several.
+
+4. **Provenance, so a fact is never mis-attributed.** An elevated row recalls as
+   `(topic, from mia's memory) …`. Without the label the model reads another
+   person's private fact as if the user in front of it had said so.
+
+5. **Sideways sharing is an act, not a rank.** `item_grants` gained a `memory`
+   kind, so one person can share exactly one row with a peer the ladder does not
+   reach — revocably, and without touching the row's `private:` tag. Only the
+   *owner of the row* may share it: an elevated reader who could re-share would
+   turn a scoped read into redistribution the subject cannot take back.
+
+One latent bug surfaced while wiring the grant clause and is fixed for the GTS
+callers too: `item_grants` has its own `id` column, so an unqualified
+`id_column` bound to *that* one, making the sub-select always false — a grant
+that silently conferred nothing, with no error anywhere. `scope_filter` now
+refuses an unqualified `id_column`.
+
+Still off by default. Enabling it on the box is a config change plus a review,
+and it is worth noting the ladder is currently a hierarchy of one: `leo_owner`
+is the only enrolled principal, so nothing changes behaviourally until a second
+person is enrolled.
 
 ## 9. Operational plan
 
