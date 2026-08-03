@@ -18,6 +18,7 @@ approvals:
     - mcp_aws_api*        # all three AWS account servers, reads included
     - mcp_canva_*
     - mcp_github_*
+    - mcp_google_workspace_*
     - mcp_railway_*
     - mcp_vercel_*
   tools_timeout: 300
@@ -42,10 +43,17 @@ after connecting to every server, not by counting the patterns:
 | `aws-api` | 2 | yes |
 | `aws-api-arprod` | 1 | yes |
 | `aws-api-egobid` | 1 | yes |
+| `google-workspace` | 8 | yes |
 | `aws_knowledge` | 5 | **no** |
 | `figma` | 2 | **no** |
 
-**142 of 149 tools gated.**
+**150 of 157 tools gated.**
+
+`google-workspace` is one server for three Google accounts, so the identity a
+call touches is an argument (`user_google_email`) rather than a property of
+the server. The approval prompt shows it; the gate cannot distinguish the
+accounts. If one account ever needs a different policy than the others, that
+is a second server with its own credentials directory, not a pattern change.
 
 ### Why the remaining seven are not gated
 
@@ -94,6 +102,12 @@ dies with `PermissionError: '.env'` and the connection fails with a bare
 `Connection closed`. The systemd units set `WorkingDirectory`, so services
 are unaffected — but a manual probe inherits whatever cwd it was given, and
 the failure looks like a broken server rather than a broken invocation.
+
+`workspace-mcp` has the same loader and bites harder, because the cwd it
+inherits is a *service's* working directory rather than a probe's. Its entry
+wraps the launch in `/bin/sh -c 'cd … && exec uvx …'` for that reason — both
+to avoid the unreadable-`.env` crash and to keep it from reading Hermes' own
+`.env` as its settings when launched from `HERMES_HOME`.
 
 **Never clean up MCP subprocesses by pattern.** `hermes-gateway` and
 `hermes-dashboard` each keep their own long-lived `uvx`/`npx` MCP children,
