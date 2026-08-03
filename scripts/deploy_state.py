@@ -480,6 +480,10 @@ def capture(
         "credential_files": credentials,
         "units": units,
     }
+    if secrets_out is not None:
+        # Recorded so the offsite backup knows to include it without being told
+        # twice; the path, not the contents.
+        manifest["secrets_file"] = str(secrets_out)
     if deploy_script and deploy_script.is_file():
         manifest["deploy_script"] = {
             "installed_at": str(deploy_script),

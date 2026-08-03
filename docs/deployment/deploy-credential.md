@@ -70,19 +70,28 @@ curl -X POST -H "Authorization: Bearer $GITHUB_TOKEN" \
 A deploy key is scoped to a single repository. That is the point: unlike a
 personal access token, it cannot reach any other repo even if it leaks.
 
-### A second key for the state store
+### The other two keys, and why they are separate
 
-Because of that scoping, the private deployment-state repo needs its own key
-rather than a reuse of this one. Same recipe, different filename and alias:
+Because a deploy key is scoped to one repository, each private repo the box
+touches needs its own. Same recipe, different filename and alias:
 
 ```
-/root/.ssh/hermes_state_deploy   600 root:root
-Host github-hermes-state         -> /opt/data/hermes-deploy-state
+/root/.ssh/hermes_deploy         600 root:root  read-only   source
+/root/.ssh/hermes_state_deploy   600 root:root  read-only   deployment state
+/root/.ssh/hermes_backup_deploy  600 root:root  WRITE       encrypted backups
+Host github-hermes-deploy | github-hermes-state | github-hermes-backup
 ```
 
-Also read-only, for a different reason: a box that could push would be able to
-rewrite the record of what it is supposed to look like, which is the one thing
-drift detection depends on. See `docs/deployment/deployment-path.md`.
+The state key is read-only for a sharper reason than the source key: a box that
+could push would be able to rewrite the record of what it is supposed to look
+like, which is the one thing drift detection depends on.
+
+The backup key is the only one with **write** access, because the box has to
+push the bundles it produces. That is precisely why the backups live in a
+separate repository from the state: a key that can write cannot be confined to
+a subdirectory, so sharing one repo would hand a compromised box the ability to
+rewrite its own baseline. What it can write there is `age` ciphertext it has no
+key to read. See `docs/deployment/deployment-path.md`.
 
 ## Verifying it (all five must hold)
 
