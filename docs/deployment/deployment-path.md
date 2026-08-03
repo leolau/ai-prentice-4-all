@@ -320,10 +320,16 @@ ExecStart=/opt/data/hermes-agent/.venv/bin/python \
     verify --deployment hermes-systest --max-age-days 8 --notify
 ```
 
-`verify` reads the index and the ciphertext header only — no plaintext — so it
-runs as the unprivileged `hermes` user with the rest of the weekly check. It
-reports a missing bundle, a stale one, a bundle that is somehow *not* encrypted,
-and any credential on the box that no bundle covers.
+`verify` reads the index, the ciphertext header and the repo's git state only —
+no plaintext — so it runs as the unprivileged `hermes` user with the rest of the
+weekly check. It reports a missing bundle, a stale one, a bundle that is somehow
+*not* encrypted, any credential on the box that no bundle covers, and — the
+finding that matters most — **a bundle that never left the box**. A written but
+unpushed bundle sits on the same disk as the secrets it protects, so "the file
+exists" must never be mistaken for "there is an offsite backup"; `verify` checks
+that the deployment directory is committed and that HEAD is on a remote branch.
+The secrets file itself is root-only, so the unprivileged run reports it as
+unverified rather than covered — the daily `backup` runs as root and enforces it.
 
 Restoring, and the point of testing it before you need it:
 
