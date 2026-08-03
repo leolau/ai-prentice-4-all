@@ -137,9 +137,13 @@ class PgvectorMemoryStore:
         store: "SupabaseAppStore",
         *,
         embedder: Optional[Embedder] = None,
+        config: Optional[dict] = None,
     ) -> None:
         self._store = store
-        self._embedder = embedder or get_embedder(DEFAULT_DIM)
+        # An explicit embedder wins (tests, callers that already resolved one);
+        # otherwise `memory.embedding` in config.yaml decides, defaulting to the
+        # credential-free hashing embedder.
+        self._embedder = embedder or get_embedder(DEFAULT_DIM, config=config)
 
     @property
     def mode(self) -> str:
