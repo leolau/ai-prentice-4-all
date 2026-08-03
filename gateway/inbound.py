@@ -86,6 +86,10 @@ class InboundEvent:
     # Populated by :func:`bind_channel_principal` once the C1 seam resolves the channel
     # identity to an internal system user; folded into the session key.
     internal_user_id: Optional[str] = None
+    # The resolved principal's C2 role, stamped alongside ``internal_user_id``.
+    # Never folded into the session key: a role change must not fork a user's
+    # conversation (and its cached prefix) into a second session.
+    internal_user_role: Optional[str] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -108,6 +112,7 @@ class InboundEvent:
             thread_id=self.thread_id,
             account_id=str(self.account_id),
             internal_user_id=self.internal_user_id,
+            internal_user_role=self.internal_user_role,
             task=self.task,
         )
 
@@ -131,9 +136,12 @@ async def bind_channel_principal(
     ``gateway/pairing.py``). On success ``source.internal_user_id`` is set to
     the resolved system ``user_id`` so :func:`build_session_key` isolates the
     session per *internal* user — several channel handles for one person share
-    one brain-scoped core. Returns the principal, or ``None`` when the identity
-    is unenrolled/unauthorised (the source is left with ``internal_user_id``
-    unset, so keying falls back to channel identity only).
+    one brain-scoped core. ``source.internal_user_role`` is stamped from the
+    same principal, so downstream consumers scope reads by the role the
+    ``principals`` table actually holds instead of assuming one. Returns the
+    principal, or ``None`` when the identity is unenrolled/unauthorised (the
+    source is left with both fields unset, so keying falls back to channel
+    identity only and consumers use the least-privileged role).
     """
     from hermes_cli.access import resolve_principal
 
@@ -145,6 +153,7 @@ async def bind_channel_principal(
     )
     if principal is not None:
         source.internal_user_id = principal.user_id
+        source.internal_user_role = principal.role
     return principal
 
 
@@ -224,6 +233,7 @@ class InboundRouter:
         if self._principal_store is not None:
             await bind_channel_principal(source, store=self._principal_store)
             event.internal_user_id = source.internal_user_id
+            event.internal_user_role = source.internal_user_role
         # D5/C3: channel origin is always prod. Calling the guard here makes the
         # invariant explicit (and would surface a misconfigured router).
         guard_channel_prod(source)

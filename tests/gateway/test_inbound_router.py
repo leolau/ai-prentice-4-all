@@ -14,6 +14,7 @@ from gateway.config import Platform
 from gateway.inbound import InboundRouter, guard_channel_prod
 from gateway.producers import normalize_whatsapp
 from gateway.session import SessionSource
+from hermes_cli.access import Principal
 
 
 @pytest.mark.asyncio
@@ -123,3 +124,53 @@ def test_channel_prod_only_guard_forces_prod():
 def test_local_origin_is_not_forced_to_prod():
     local = SessionSource(platform=Platform.LOCAL, chat_id="c", chat_type="dm")
     assert guard_channel_prod(local, config={"datastore": {"mode": "dev"}}) == "dev"
+
+
+class _StubPrincipalStore:
+    """PrincipalStore stand-in that resolves one linked channel identity."""
+
+    def __init__(self, channel_user_id: str, user_id: str, role: str) -> None:
+        self._channel_user_id = channel_user_id
+        self._principal = Principal(user_id=user_id, display="", role=role)
+        self._store = self  # resolve_principal reaches through to a connection
+
+    async def connect(self):
+        return self
+
+    async def close(self) -> None:
+        return None
+
+    async def resolve_by_channel(self, platform, channel_user_id, *, connection=None):
+        if channel_user_id == self._channel_user_id:
+            return self._principal
+        return None
+
+
+@pytest.mark.asyncio
+async def test_router_stamps_the_resolved_role_on_the_event():
+    """The role travels with the event, so the agent is built with it.
+
+    Without this the role stopped at the identity seam and every gateway
+    session was constructed as a member — the resolution happened and then had
+    no effect.
+    """
+    events: list[object] = []
+
+    async def handler(event, session_key):
+        events.append(event)
+
+    store = _StubPrincipalStore("sender1", "leo_owner", "owner")
+    router = InboundRouter(handler, principal_store=store)
+    await router.submit(normalize_whatsapp("num_A", "sender1", "hi"))
+    await router.submit(normalize_whatsapp("num_A", "stranger", "hi"))
+    await router.drain_idle()
+
+    assert [e.internal_user_id for e in events] == ["leo_owner", None]
+    # An identity that resolves to nothing carries no role, and consumers then
+    # fall back to base privilege rather than inheriting the previous event's.
+    assert [e.internal_user_role for e in events] == ["owner", None]
+
+    # to_source() carries both, since that is what the gateway hands the agent.
+    source = events[0].to_source()
+    assert source.internal_user_id == "leo_owner"
+    assert source.internal_user_role == "owner"

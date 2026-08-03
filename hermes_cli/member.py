@@ -24,6 +24,7 @@ from hermes_cli.members import (
     ASSIGNABLE_ROLES,
     MemberError,
     MemberService,
+    link_member_channel,
     load_admin_client,
 )
 
@@ -82,10 +83,15 @@ def member_list_command(args: argparse.Namespace) -> int:
     for m in members:
         status = "active" if m.active else "DEACTIVATED"
         email = m.email or "(no email)"
+        # Channels are the reason a member's inbound traffic resolves to this
+        # principal at all, so show them: a member with none is one whose
+        # messages still arrive as an unlinked raw handle.
+        channels = ", ".join(m.channels) if m.channels else "no channels linked"
         print(
             f"{m.role:<6} {m.user_id}  {email}  "
             f"[{status}]  {m.display or ''}".rstrip()
         )
+        print(f"       {channels}")
     return 0
 
 
@@ -128,6 +134,30 @@ def member_set_role_command(args: argparse.Namespace) -> int:
         raise SystemExit(1) from error
 
     print(f"{principal.user_id} is now {principal.role}.")
+    return 0
+
+
+def member_link_channel_command(args: argparse.Namespace) -> int:
+    """Run ``hermes member link-channel`` — map a channel handle to a member."""
+    try:
+        principal = asyncio.run(
+            link_member_channel(
+                _prod_store(),
+                _actor(),
+                user_id=args.user_id,
+                platform=args.platform,
+                channel_user_id=args.channel_user_id,
+            )
+        )
+    except (MemberError, PermissionError, RuntimeError, ValueError) as error:
+        print(f"Could not link the channel: {error}", file=sys.stderr)
+        raise SystemExit(1) from error
+
+    print(
+        f"{args.platform}:{args.channel_user_id} now resolves to "
+        f"{principal.user_id} ({principal.role})."
+    )
+    print(f"Linked channels: {', '.join(principal.channels) or 'none'}")
     return 0
 
 
@@ -221,6 +251,27 @@ def register_member_subparser(subparsers: argparse._SubParsersAction) -> None:
     set_role.add_argument("user_id", help="The member's principal id")
     set_role.add_argument("role", choices=list(ASSIGNABLE_ROLES))
     set_role.set_defaults(func=member_set_role_command)
+
+    link_channel = member_sub.add_parser(
+        "link-channel",
+        help="Map an inbound channel handle onto an enrolled member",
+        description=(
+            "State that messages from (platform, channel_user_id) belong to "
+            "this principal, so the session resolves to that member's "
+            "identity and role instead of the raw channel handle. Needed for "
+            "anyone authorised by an allow-list rather than by pairing, since "
+            "only pairing auto-enrols."
+        ),
+    )
+    link_channel.add_argument("user_id", help="The member's principal id")
+    link_channel.add_argument(
+        "platform", help="Gateway platform name (e.g. telegram, discord, slack)"
+    )
+    link_channel.add_argument(
+        "channel_user_id",
+        help="The platform-native sender id (e.g. a Telegram numeric user id)",
+    )
+    link_channel.set_defaults(func=member_link_channel_command)
 
     set_password = member_sub.add_parser(
         "set-password",

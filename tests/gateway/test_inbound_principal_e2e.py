@@ -25,6 +25,7 @@ from gateway.inbound import bind_channel_principal
 from gateway.session import SessionSource, build_session_key
 from hermes_cli.access import PrincipalStore, can_read, private
 from hermes_cli.datastore import get_store, initialize_supabase_app
+from hermes_cli.members import link_member_channel
 
 
 async def _probe_postgres(dsn: str) -> None:
@@ -155,3 +156,92 @@ async def test_unpaired_identity_leaves_source_unbound(postgres_dsn: str) -> Non
     assert src.internal_user_id is None
     # Falls back to channel-identity-only keying (no :usr: dimension).
     assert ":usr:" not in build_session_key(src)
+
+
+@pytest.mark.asyncio
+async def test_linked_channel_resolves_role_without_pairing(postgres_dsn: str) -> None:
+    """An allow-listed sender resolves onto the principal an owner linked.
+
+    The live gap this closes: access granted through ``telegram.allow_from``
+    never pairs, so the C1 seam never auto-enrolled that sender — the owner's
+    own phone ran as an unenrolled raw handle while their enrolled principal sat
+    unused, splitting one person's memory in two. ``hermes member link-channel``
+    states the mapping, and from then on the sender resolves with their real
+    role even though pairing says no.
+    """
+    config = {"datastore": {"supabase_app": {"dsn": postgres_dsn}}}
+    setup = await get_store("supabase-app", "prod", config=config).connect()
+    try:
+        await initialize_supabase_app(setup)
+    finally:
+        await setup.close()
+
+    store = PrincipalStore(get_store("supabase-app", "prod", config=config))
+    # Only one principal may hold ``owner`` in a brain, and the module-scoped
+    # database is shared with the tests above, so reuse whoever holds it.
+    owner = await store.get_owner()
+    if owner is None:
+        owner = await store.enroll("linked_owner", display="Leo", role="owner")
+    admin = await store.enroll("linked_admin", display="Ada", role="admin")
+
+    await link_member_channel(
+        store,
+        owner,
+        user_id=owner.user_id,
+        platform="telegram",
+        channel_user_id="8756039695",
+    )
+    await link_member_channel(
+        store,
+        owner,
+        user_id=admin.user_id,
+        platform="telegram",
+        channel_user_id="tg_ada",
+    )
+
+    never_paired = lambda platform, cuid: False  # noqa: E731 - test stub
+
+    src = _channel_source(Platform.TELEGRAM, "chatOwner", "8756039695")
+    principal = await bind_channel_principal(
+        store=store, source=src, is_paired=never_paired
+    )
+    assert principal is not None
+    assert principal.user_id == owner.user_id
+    # The role comes from the principals table, not from an assumption.
+    assert principal.role == "owner"
+    assert src.internal_user_id == owner.user_id
+    assert src.internal_user_role == "owner"
+
+    src_admin = _channel_source(Platform.TELEGRAM, "chatAda", "tg_ada")
+    resolved_admin = await bind_channel_principal(
+        store=store, source=src_admin, is_paired=never_paired
+    )
+    assert resolved_admin is not None
+    assert src_admin.internal_user_role == "admin"
+
+    # A sender that is neither linked nor paired still resolves to nothing —
+    # linking one identity must not open the door for everyone else.
+    src_stranger = _channel_source(Platform.TELEGRAM, "chatX", "tg_stranger")
+    assert (
+        await bind_channel_principal(
+            store=store, source=src_stranger, is_paired=never_paired
+        )
+        is None
+    )
+    assert src_stranger.internal_user_role is None
+
+    # Two channels for one person converge on one principal — and therefore on
+    # one memory pool — which is the whole point of resolving identity.
+    await link_member_channel(
+        store,
+        owner,
+        user_id=owner.user_id,
+        platform="whatsapp",
+        channel_user_id="wa_leo",
+    )
+    src_wa = _channel_source(Platform.WHATSAPP, "waChat", "wa_leo")
+    wa_principal = await bind_channel_principal(
+        store=store, source=src_wa, is_paired=never_paired
+    )
+    assert wa_principal is not None and wa_principal.user_id == owner.user_id
+    assert src_wa.internal_user_role == "owner"

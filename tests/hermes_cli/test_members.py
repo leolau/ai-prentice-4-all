@@ -29,6 +29,7 @@ from hermes_cli.members import (
     MemberError,
     MemberService,
     MemberView,
+    link_member_channel,
     require_member_admin,
 )
 
@@ -427,3 +428,116 @@ def test_member_view_as_dict_flags_owner() -> None:
     d = view.as_dict()
     assert d["is_owner"] is True
     assert d["channels"] == ["telegram:1"]
+
+
+# ---------------------------------------------------------------------------
+# link_member_channel — the allow-list identity gap
+# ---------------------------------------------------------------------------
+
+
+class _LinkStore(_FakeStore):
+    """Fake store that also records channel links."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.links: list[tuple[str, str, str]] = []
+
+    async def get(self, user_id: str) -> Principal | None:
+        return self.principals.get(user_id)
+
+    async def link_channel(
+        self, user_id: str, platform: str, channel_user_id: str
+    ) -> None:
+        self.links.append((user_id, platform, channel_user_id))
+        existing = self.principals[user_id]
+        self.principals[user_id] = Principal(
+            user_id=existing.user_id,
+            display=existing.display,
+            role=existing.role,
+            channels=existing.channels + (f"{platform}:{channel_user_id}",),
+        )
+
+
+def _link_store_with(role: Role = "owner", user_id: str = "leo_owner") -> _LinkStore:
+    store = _LinkStore()
+    store.principals[user_id] = Principal(user_id=user_id, display="", role=role)
+    return store
+
+
+@pytest.mark.asyncio
+async def test_link_member_channel_links_and_returns_refreshed_principal() -> None:
+    store = _link_store_with()
+    principal = await link_member_channel(
+        store,  # type: ignore[arg-type]
+        _principal("owner"),
+        user_id="leo_owner",
+        platform="telegram",
+        channel_user_id="8756039695",
+    )
+    assert store.links == [("leo_owner", "telegram", "8756039695")]
+    # The returned principal carries the new channel, so a caller can show the
+    # mapping it just made rather than the pre-link state.
+    assert principal.channels == ("telegram:8756039695",)
+
+
+@pytest.mark.asyncio
+async def test_link_member_channel_requires_owner_or_admin() -> None:
+    store = _link_store_with()
+    for role in ("member", "viewer"):
+        with pytest.raises(MemberAuthorizationError):
+            await link_member_channel(
+                store,  # type: ignore[arg-type]
+                _principal(role),  # type: ignore[arg-type]
+                user_id="leo_owner",
+                platform="telegram",
+                channel_user_id="8756039695",
+            )
+    assert store.links == []
+
+
+@pytest.mark.asyncio
+async def test_link_member_channel_refuses_unenrolled_principal() -> None:
+    store = _link_store_with()
+    with pytest.raises(MemberError):
+        await link_member_channel(
+            store,  # type: ignore[arg-type]
+            _principal("owner"),
+            user_id="leo_ownr",  # typo
+            platform="telegram",
+            channel_user_id="8756039695",
+        )
+    # A typo must not create a principal that inbound traffic then feeds.
+    assert store.links == []
+    assert "leo_ownr" not in store.principals
+
+
+@pytest.mark.asyncio
+async def test_link_member_channel_rejects_unknown_platform() -> None:
+    store = _link_store_with()
+    with pytest.raises(MemberError):
+        await link_member_channel(
+            store,  # type: ignore[arg-type]
+            _principal("owner"),
+            user_id="leo_owner",
+            platform="telegramm",
+            channel_user_id="8756039695",
+        )
+    assert store.links == []
+
+
+@pytest.mark.asyncio
+async def test_link_member_channel_normalizes_platform_case() -> None:
+    """The stored platform must match ``source.platform.value`` at intake.
+
+    A row stored as ``Telegram`` would never be found by a lookup for
+    ``telegram``, so the link would silently do nothing.
+    """
+    store = _link_store_with()
+    await link_member_channel(
+        store,  # type: ignore[arg-type]
+        _principal("owner"),
+        user_id="leo_owner",
+        platform="  TELEGRAM ",
+        channel_user_id=" 8756039695 ",
+    )
+    assert store.links == [("leo_owner", "telegram", "8756039695")]

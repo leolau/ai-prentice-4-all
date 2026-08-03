@@ -36,7 +36,7 @@ import threading
 from typing import Any, Dict, List, Optional
 
 from agent.memory_provider import MemoryProvider
-from hermes_cli.access import Principal
+from hermes_cli.access import Principal, normalize_role
 from hermes_cli.changes import ChangeLog, initialize_changes
 from hermes_cli.config import load_config
 from hermes_cli.datastore import SupabaseAppStore, get_store
@@ -198,19 +198,21 @@ class SupabasePgvectorMemoryProvider(MemoryProvider):
     def _resolve_principal(self, kwargs: Dict[str, Any]) -> Principal:
         """Derive the C2 principal for this session from init kwargs.
 
-        Prefers an explicit ``principal_user_id`` / ``principal_role`` (the seam
-        FG-01's ``resolve_principal`` can populate). Falls back to the gateway
-        ``user_id`` as a ``member`` (its own private tier + shared). A local
-        session with no user identity maps to the single ``owner`` — the
-        one-brain personal-deployment default where the owner sees everything.
+        Prefers an explicit ``principal_user_id`` / ``principal_role``, which the
+        gateway populates from the ``principals`` table via FG-01's
+        ``resolve_principal`` — so a session reads with the role its user
+        actually holds. Falls back to the gateway ``user_id`` as a ``member``
+        (its own private tier + shared): an identity nothing could resolve gets
+        base privilege, never elevated. A local session with no user identity
+        maps to the single ``owner`` — the one-brain personal-deployment default
+        where the owner sees everything.
         """
         explicit_id = kwargs.get("principal_user_id")
-        explicit_role = kwargs.get("principal_role")
         if explicit_id:
             return Principal(
                 user_id=str(explicit_id),
                 display=str(kwargs.get("user_name") or explicit_id),
-                role=explicit_role if explicit_role in ("owner", "admin", "member", "viewer") else "member",
+                role=normalize_role(kwargs.get("principal_role")),
             )
 
         gateway_user = kwargs.get("user_id")
@@ -218,7 +220,7 @@ class SupabasePgvectorMemoryProvider(MemoryProvider):
             return Principal(
                 user_id=str(gateway_user),
                 display=str(kwargs.get("user_name") or gateway_user),
-                role="member",
+                role=normalize_role(None),
             )
         return Principal(user_id="owner", display="owner", role="owner")
 

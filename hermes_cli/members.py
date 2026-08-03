@@ -434,6 +434,66 @@ class MemberService:
         self._admin.set_banned(user_id=user_id, banned=not active)
 
 
+async def link_member_channel(
+    store: PrincipalStore,
+    actor: Principal,
+    *,
+    user_id: str,
+    platform: str,
+    channel_user_id: str,
+) -> Principal:
+    """Map an inbound ``(platform, channel_user_id)`` onto an enrolled principal.
+
+    The C1 seam auto-enrols a *paired* channel sender, but a person who reaches
+    the gateway through a configured allow-list (``telegram.allow_from`` and
+    friends) is authorised without ever pairing — so nothing links their channel
+    handle to the principal that owns their data, and their session runs on the
+    raw handle with no role. This is the owner/admin surface that states the
+    mapping explicitly, and it is deliberately GoTrue-free: linking a channel is
+    a principal operation, so it must work on a deployment that has no
+    dashboard-auth configured at all.
+
+    Refuses an unenrolled ``user_id`` rather than creating one, so a typo cannot
+    silently mint a principal that inbound traffic then accumulates data under.
+    """
+    require_member_admin(actor)
+    platform = _normalize_platform(platform)
+    channel_user_id = str(channel_user_id or "").strip()
+    if not channel_user_id:
+        raise MemberError("channel_user_id is required")
+    principal = await store.get(user_id)
+    if principal is None:
+        raise MemberError(
+            f"No principal enrolled for {user_id!r}. Enrol the member first "
+            "('hermes member add', or 'hermes owner init' for the owner)."
+        )
+    await store.link_channel(principal.user_id, platform, channel_user_id)
+    refreshed = await store.get(principal.user_id)
+    return refreshed if refreshed is not None else principal
+
+
+def _normalize_platform(platform: str) -> str:
+    """Validate a platform name against the gateway's own enum.
+
+    The stored value has to be byte-identical to what ``resolve_principal``
+    looks up at intake (``source.platform.value``), so an unknown or
+    differently-cased name is rejected here rather than producing a row that
+    silently never matches.
+    """
+    from gateway.config import Platform
+
+    candidate = str(platform or "").strip().lower()
+    if not candidate:
+        raise MemberError("platform is required")
+    valid = {p.value for p in Platform}
+    if candidate not in valid:
+        raise MemberError(
+            f"Unknown platform {platform!r}. Expected one of: "
+            f"{', '.join(sorted(valid))}."
+        )
+    return candidate
+
+
 def _is_banned(account: dict[str, Any]) -> bool:
     """Whether a GoTrue user object is currently banned.
 

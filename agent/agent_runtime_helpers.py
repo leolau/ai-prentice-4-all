@@ -2056,7 +2056,9 @@ def invoke_tool(agent, function_name: str, function_args: dict, effective_task_i
                 todo_principal as _todo_principal,
                 todo_tool as _todo_tool,
             )
-            principal = _todo_principal(agent._internal_user_id)
+            principal = _todo_principal(
+                agent._internal_user_id, agent._internal_user_role
+            )
             if principal is None:
                 return _finish_agent_tool(
                     _todo_tool(

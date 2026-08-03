@@ -234,20 +234,47 @@ the hermetic test suite behave exactly as they do today.
 This is the part Leo called out as most important, and it is mostly *access
 work*, not vector work.
 
-### 6.1 P0 — make identity real (G3)
+### 6.1 P0 — make identity real (G3) — **delivered**
 
-- Wire `_resolve_principal()` to FG-01's `resolve_principal(origin)`: look up
-  `channel_identities(platform, channel_user_id)` → `principals.user_id` and use
-  the **stored role**, falling back to today's behaviour only when no mapping
-  exists.
-- Enrol Leo's Telegram identity onto the existing `leo_owner` principal, so one
-  human is one principal across Telegram, dashboard, WhatsApp and email — and so
-  `owner`-level reads actually apply on the channel he uses.
-- Migrate the 28 existing rows from `owner_user_id=8756039695` to the canonical
-  principal id, or leave them and let the alias table resolve both; decide in
-  P0 with a test either way.
-- `hermes principals` CLI: list / enrol / set-role / transfer-owner, all
-  approval-gated (C6), all audited (C5/C8).
+The root cause turned out to be narrower than "resolution is unwired", and
+worth recording because it will recur for every user Leo adds:
+
+- `resolve_principal()` **does** consult `channel_identities`; it auto-enrols
+  only senders the *pairing* store approved. Leo reaches the gateway through
+  `telegram.allow_from`, which authorises without pairing — so he was
+  authorised, never enrolled, and `channel_identities` stayed empty. Authz and
+  identity are two different gates and only one of them was passed.
+- The role never travelled even when a principal *was* resolved: the seam
+  stamped `internal_user_id` only, and `agent_init` then hardcoded
+  `principal_role="member"`. So enrolment alone could not have produced an
+  owner-level session.
+
+What landed:
+
+- `hermes member link-channel <user_id> <platform> <channel_user_id>` — the
+  owner/admin surface that states "this handle is this principal", covering
+  allow-listed users that pairing never touches. Deliberately GoTrue-free
+  (linking is a principal operation, so it must work with no dashboard auth
+  configured), refuses an unenrolled `user_id` rather than minting one, and
+  validates the platform against the gateway's own enum so a link can't be
+  stored in a form intake would never match. `hermes member list` now prints
+  each member's linked channels, so an unlinked member is visible.
+- `bind_channel_principal` stamps `internal_user_role` from the `principals`
+  row alongside `internal_user_id`, and it is threaded
+  `InboundEvent → SessionSource → init_agent → memory provider`. Unresolved
+  degrades to `member` via `normalize_role()`; nothing is elevated by failure.
+- The role is **excluded from session persistence** (`to_dict`/`from_dict`),
+  like `delivered_via_upstream_relay`: it decides what a session may read of
+  other users' data, so it is re-read from the database every turn rather than
+  replayed from a file that could be stale or edited.
+- Role management itself needed nothing new: `hermes member add/set-role/...`
+  and the owner/admin-gated `/api/comms/members` API already existed.
+
+Still open in P0's scope: the 28 existing rows still carry
+`owner_user_id=8756039695`. Linking the channel makes *new* rows land on
+`leo_owner`, which splits the history rather than joining it, so the migration
+is a deliberate, separately-verified data change — not a side effect of a code
+deploy.
 
 ### 6.2 Access model for memory (G4, G5)
 
@@ -259,9 +286,9 @@ extended:
 | my own memory | `visibility = private:<uid>` | no |
 | instance-wide knowledge | `visibility = shared` | no |
 | owner reads anyone | `principal.is_owner` bypass | no |
-| **admin reads a member's memory** | **role-scoped elevation**: `scope_filter` gains an explicit, config-declared elevation (`access.elevated_read_roles: [admin]`), mirrored in RLS | **yes** |
+| **admin reads a member's memory** | **role-scoped elevation, downward only**: `scope_filter` gains a rung comparison over `owner > admin > member > viewer`, mirrored in RLS | **yes** |
 | **one named person reads one memory** | `item_grants(item_kind='memory')` + `grant_item_kind='memory'` on the memory read paths | **yes** (reuses FG-19) |
-| **a team shares a tier** | `visibility = team:<team_id>` + `team_members` | **yes, deferred** to P5 unless needed sooner |
+| **a team shares a tier** | `visibility = team:<team_id>` + `team_members` | **not wanted** — the role ladder covers it (§10.5) |
 
 Non-negotiables:
 
@@ -270,6 +297,15 @@ Non-negotiables:
   surfaced them. Unaudited owner-bypass is the current behaviour and is not
   acceptable in a multi-user instance — if the owner can read a member's private
   memory, the member must be able to see that it happened.
+- **Reads go down the ladder only, never sideways.** An admin reads members and
+  viewers; an admin does **not** read another admin. Peer-level reads are the
+  difference between a hierarchy and a free-for-all, and are not granted by
+  role (an explicit `item_grants` row remains the way to share with a peer).
+- **One person belongs to one role, and memory is one pool per person** keyed on
+  `owner_user_id`. A Hermes profile is the *role's* shared configuration
+  (layers 1–2: `MEMORY.md` / `USER.md`); layer 4 is the person. Several people
+  on one profile therefore share behaviour and keep separate private memory —
+  and no one's private memory sits in a profile file the whole role reads.
 - **Elevation is opt-in per instance** and defaults off, so a single-user
   deployment behaves exactly as today.
 - **RLS mirrors every widening** in the same commit, with a negative test per
@@ -364,12 +400,13 @@ Report `recall@3` before and after. "It feels better" is not a result.
 
 | # | Phase | Contents | Gate |
 |---|---|---|---|
-| **P0** | Identity is real | `_resolve_principal` → FG-01 lookup; enrol Telegram → `leo_owner`; `hermes principals` CLI; migrate/alias existing rows | one human = one principal across channels, proven on the box; negative-access tests unchanged |
+| **P0** | Identity is real — **done** | `hermes member link-channel`; role stamped by `bind_channel_principal` and threaded to the memory provider; role never persisted | one human = one principal across channels; unresolved → `member`; negative-access tests unchanged |
+| **P0b** | Existing rows | migrate the 28 `8756039695` rows onto `leo_owner` (or alias), verified against a copy first | no row loses its owner; recall before/after identical for Leo |
 | **P1** | Embedding service | benchmark `bge-m3` vs `e5-base` on the box; `hermes-embed.service`; `local_http` embedder behind `memory.embedding.*`; hashing stays default | numbers recorded here; service survives restart; fail-closed fallback logged |
 | **P2** | Semantic layer 4 | model/dim columns + migration + `hermes memory reembed`; recall in `prefetch()` with budget; `uses`/`last_used`; dedup | `recall@3` on the probe set ≥ agreed floor; prompt-prefix byte-stability test green |
 | **P3** | Shared recall | role-scoped elevation (config, default off) + RLS; `item_grants` for memories; provenance labels; `memory_read_elevated` audit | full negative-access matrix (member/member, admin off/on, grantee) at the **RLS** level, not just app level |
 | **P4** | RAG | `rag_documents` / `rag_chunks` + RLS; Drive + session ingestion; nightly timer; `rag_search` with citations | answer-with-citation on 3 real Drive docs; no private→shared laundering (test) |
-| **P5** | Consolidation | layer-1 promotion/demotion; teams (`team:<id>`) if wanted; email/WhatsApp ingestion | layer 1 back under budget without losing facts |
+| **P5** | Consolidation | layer-1 promotion/demotion; email/WhatsApp ingestion (teams dropped — §10.5) | layer 1 back under budget without losing facts |
 
 Nothing here needs a new core tool, a new `HERMES_*` env var for behaviour, or a
 change to the frozen-snapshot semantics.
@@ -395,18 +432,23 @@ change to the frozen-snapshot semantics.
 
 ## 10. Open decisions for the owner
 
-1. **Model**: proceed with `bge-m3` if the P1 benchmark clears the latency bar,
-   else `multilingual-e5-base`? (Recommend: yes, decide on the numbers.)
-2. **Elevation policy**: may `admin` read a member's private memory by role, or
-   only by explicit per-item grant? (Recommend: grant by default; role elevation
-   opt-in per instance, audited.)
-3. **Audit visibility**: should a member be able to *see* that the owner read
-   their private memory? (Recommend: yes — it is the difference between an
-   access model and a surveillance one.)
-4. **Ingestion scope for P4**: all of Drive per account, or an allowlist of
-   folders? (Recommend: allowlist first — cheaper, and avoids embedding
-   material nobody wants recalled.)
-5. **Teams**: needed now, or is owner + grants enough for the first users?
+All five are **decided** (Leo, 2026-08-04):
+
+1. **Model** — `bge-m3` if the P1 benchmark clears the latency bar on 4 shared
+   vCPUs, else `multilingual-e5-base`. Decided on the measured numbers, which
+   P1 records here.
+2. **Elevation policy** — **by role**, not grant-only. Downward only: a role
+   reads every rung below it and never its peers. `item_grants` stays for
+   sharing sideways or with one named person.
+3. **Audit visibility** — **yes**. A member can see that a higher-privilege
+   principal read their private memory, which makes the `memory_read_elevated`
+   audit load-bearing rather than decorative.
+4. **Ingestion scope for P4** — **all of Drive**, both accounts, including
+   "Shared with me". Staged newest-first so current tenders are searchable
+   before the backfill completes, and every chunk keeps its Drive file id so a
+   folder can be un-indexed with one delete.
+5. **Teams** — **not needed**. The role ladder covers the hierarchy; `team:<id>`
+   is dropped from P5 rather than deferred.
 
 ## 11. Testing requirements
 
@@ -439,4 +481,5 @@ change to the frozen-snapshot semantics.
 
 | Date | Edition | Author | Change | Rationale |
 |------|---------|--------|--------|-----------|
+| 2026-08-04 | 2 | devin | Folded in Leo's five decisions (local model on measured numbers; elevation **by role, downward only**; audit visible to the member; **all of Drive** incl. Shared-with-me; **no teams** — one person, one role, one memory pool, profile = role config) and recorded the delivered P0: the identity split was `telegram.allow_from` authorising without pairing (so enrolment never happened) *plus* a hardcoded `principal_role="member"` that discarded the role even when it did | Leo answered §10 and asked for the role model to be the basis of cross-user memory; P0 shipped as `hermes member link-channel` + role propagation |
 | 2026-08-04 | 1 | devin | Created FG-21 from a live survey of `hermes-systest`: measured the pgvector tier (28 rows, hashing embeddings, 0 reads), the identity split (Telegram `8756039695` as `member` vs `leo_owner`, `channel_identities` empty), and the absent RAG corpus; planned local semantic embeddings, layer-4 recall, cross-user shared recall with audited elevation, and RAG | Leo: local embeddings, must be semantic, use as the 4th memory layer, support RAG, and share memory across users of one instance with higher-privilege access by right |
