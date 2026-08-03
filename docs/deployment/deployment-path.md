@@ -375,6 +375,8 @@ $PY scripts/backup_secrets.py restore --bundle <file>.tar.gz.age \
 
 ## Related
 
+- `docs/deployment/README.md` — the live inventory of `hermes-systest`: what
+  exists, what is verified, what is missing. Start there when picking this up.
 - `docs/deployment/runtime-drift.md` — the interpreter/package layer and the
   weekly timer this check shares.
 - `docs/deployment/deploy-credential.md` — the root-owned deploy keys: the
