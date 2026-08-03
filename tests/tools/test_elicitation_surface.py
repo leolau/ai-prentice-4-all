@@ -134,6 +134,101 @@ class TestOurFailures:
         assert _ask() == ("accept", "approved")
 
 
+class TestSurfaceDetection:
+    """Why the live prompts went to the terminal instead of Telegram.
+
+    ``HERMES_SESSION_PLATFORM`` and the approval session key are bound by
+    different mechanisms, so a call can hold the session key (its notify
+    callback live and answering other prompts in the same turn) while the
+    platform flag reads empty. The gate then concluded "not a gateway
+    session", prompted the server's stdin, and denied itself — observed on
+    hermes-systest, where a Telegram button resolved a terminal-command
+    approval at 01:25:08 and 18s later a gated MCP call in that same session
+    printed its prompt into the gateway's log file and auto-denied.
+    """
+
+    def test_registered_surface_beats_a_missing_platform_flag(self, monkeypatch):
+        monkeypatch.delenv("HERMES_GATEWAY_SESSION", raising=False)
+        monkeypatch.delenv("HERMES_CRON_SESSION", raising=False)
+        monkeypatch.setattr(approval_mod, "_get_session_platform", lambda: "")
+        token = set_current_session_key(SESSION)
+        try:
+            assert approval_mod._is_gateway_approval_context() is False
+            register_gateway_notify(SESSION, lambda _data: None)
+            assert approval_mod._is_gateway_approval_context() is True
+        finally:
+            unregister_gateway_notify(SESSION)
+            reset_current_session_key(token)
+
+    def test_another_sessions_surface_does_not_count(self, monkeypatch):
+        monkeypatch.delenv("HERMES_GATEWAY_SESSION", raising=False)
+        monkeypatch.delenv("HERMES_CRON_SESSION", raising=False)
+        monkeypatch.setattr(approval_mod, "_get_session_platform", lambda: "")
+        register_gateway_notify("agent:main:telegram:dm:12345:9999", lambda _d: None)
+        token = set_current_session_key(SESSION)
+        try:
+            assert approval_mod._is_gateway_approval_context() is False
+        finally:
+            unregister_gateway_notify("agent:main:telegram:dm:12345:9999")
+            reset_current_session_key(token)
+
+    def test_cron_is_still_never_a_gateway_context(self, monkeypatch):
+        """Cron must keep failing to the config-governed path.
+
+        A cron job has a delivery route but nobody watching it; treating its
+        callback as an approval surface would block the job for the full
+        timeout on every gated call.
+        """
+        monkeypatch.setenv("HERMES_CRON_SESSION", "1")
+        monkeypatch.setattr(approval_mod, "_get_session_platform", lambda: "telegram")
+        token = set_current_session_key(SESSION)
+        register_gateway_notify(SESSION, lambda _data: None)
+        try:
+            assert approval_mod._is_gateway_approval_context() is False
+        finally:
+            unregister_gateway_notify(SESSION)
+            reset_current_session_key(token)
+
+    def test_no_session_no_surface(self, monkeypatch):
+        monkeypatch.delenv("HERMES_GATEWAY_SESSION", raising=False)
+        monkeypatch.delenv("HERMES_CRON_SESSION", raising=False)
+        monkeypatch.setattr(approval_mod, "_get_session_platform", lambda: "")
+        token = set_current_session_key("")
+        try:
+            assert approval_mod._is_gateway_approval_context() is False
+        finally:
+            reset_current_session_key(token)
+
+    def test_the_prompt_reaches_the_user_without_the_platform_flag(
+        self, monkeypatch,
+    ):
+        """End to end: the live failure, with the platform flag missing."""
+        monkeypatch.delenv("HERMES_GATEWAY_SESSION", raising=False)
+        monkeypatch.delenv("HERMES_CRON_SESSION", raising=False)
+        monkeypatch.setattr(approval_mod, "_get_session_platform", lambda: "")
+        monkeypatch.setattr(
+            approval_mod,
+            "prompt_dangerous_approval",
+            lambda *a, **k: pytest.fail("prompted the server's terminal"),
+        )
+        prompted: list[str] = []
+
+        def notify(data):
+            prompted.append(data["command"])
+            threading.Timer(
+                0.05, resolve_gateway_approval, args=(SESSION, "once")
+            ).start()
+
+        token = set_current_session_key(SESSION)
+        register_gateway_notify(SESSION, notify)
+        try:
+            assert _ask() == ("accept", "approved")
+        finally:
+            unregister_gateway_notify(SESSION)
+            reset_current_session_key(token)
+        assert prompted and "list_calendars" in prompted[0]
+
+
 class TestBackCompat:
     def test_plain_entry_point_still_returns_a_bare_decision(self, gateway_session):
         """MCP elicitation callers keep the 3-value contract."""
