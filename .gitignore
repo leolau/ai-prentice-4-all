@@ -153,3 +153,8 @@ deploy/*/config.snapshot.yaml
 deploy/*/state.manifest.yaml
 deploy/*/systemd/
 state-secrets.env
+
+# Encrypted credential bundles (scripts/backup_secrets.py). Ciphertext, but it
+# belongs in the private backup repo, not here.
+*.tar.gz.age
+backup-recipient.env
