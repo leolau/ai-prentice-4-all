@@ -143,3 +143,13 @@ apps/desktop/demo/
 # PR body is the archive. See the hermes-agent-dev skill's
 # pr-infographic-workflow reference (storage rule + lapse #8 / #COMMIT-1).
 infographic/
+
+# Captured deployment state (scripts/deploy_state.py). It holds no
+# credentials, but it does describe one box in detail — account names, service
+# layout, which identities are enrolled — and this repo is public. Keep it in a
+# private store and point `--state-root` at that. See
+# docs/deployment/deployment-path.md.
+deploy/*/config.snapshot.yaml
+deploy/*/state.manifest.yaml
+deploy/*/systemd/
+state-secrets.env

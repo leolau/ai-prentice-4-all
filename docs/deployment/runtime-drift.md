@@ -182,3 +182,6 @@ notices a box that has not caught up.
 
 - `docs/rca-ssl-cacert-post-git-pull.md` — CA bundle breakage after a partial
   venv refresh. Different failure, same layer.
+- `docs/deployment/deployment-path.md` — the layer above this one: config,
+  units and credentials. Its check shares this unit and timer, so one weekly
+  report covers the interpreter and the deployment state together.
