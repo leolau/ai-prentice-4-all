@@ -301,6 +301,63 @@ def backup(
     return result
 
 
+def offsite(repo: Path, deployment: str) -> list[dict[str, str]]:
+    """Has the latest bundle actually left the box?
+
+    A bundle written but not pushed is on the same disk as the secrets it
+    protects, which is the situation this tool exists to end — so `verify` must
+    not count a local file as an offsite backup.
+    """
+    try:
+        git(repo, "rev-parse", "--git-dir")
+    except StateError:
+        return [
+            {
+                "severity": SEVERITY_DRIFT,
+                "component": "backup:offsite",
+                "expected": f"{repo} is a clone of the private backup repo",
+                "actual": "not a git repository",
+                "detail": "bundles are being written to the box's own disk and "
+                "going nowhere — clone the backup repo over its deploy key",
+            }
+        ]
+    try:
+        uncommitted = git(repo, "status", "--porcelain", "--", deployment)
+        # Remote-tracking refs move on push, and unlike @{upstream} they do not
+        # depend on tracking configuration that `git push origin HEAD` never sets.
+        remotes = git(repo, "branch", "--remotes", "--contains", "HEAD")
+    except StateError as error:
+        return [
+            {
+                "severity": SEVERITY_NOTE,
+                "component": "backup:offsite",
+                "expected": "a readable git clone",
+                "actual": "git refused",
+                "detail": f"cannot confirm the bundles reached the remote: {error}",
+            }
+        ]
+    findings: list[dict[str, str]] = []
+    if uncommitted:
+        findings.append({
+            "severity": SEVERITY_DRIFT,
+            "component": "backup:offsite",
+            "expected": "the latest bundle committed",
+            "actual": f"{len(uncommitted.splitlines())} uncommitted path(s)",
+            "detail": "a bundle was written but never committed — run `backup "
+            "--push`, and check the push credential if it keeps happening",
+        })
+    if not remotes:
+        findings.append({
+            "severity": SEVERITY_DRIFT,
+            "component": "backup:offsite",
+            "expected": "HEAD present on a remote branch",
+            "actual": "local only",
+            "detail": "the commits exist only on the box — the push is failing, "
+            "so nothing is actually offsite",
+        })
+    return findings
+
+
 def verify(
     deployment: str,
     state_root: Path,
@@ -313,18 +370,17 @@ def verify(
     Reads only the index and the ciphertext header, so the weekly check can run
     this as the unprivileged user without any access to the secrets themselves.
     """
-    findings: list[dict[str, str]] = []
+    findings: list[dict[str, str]] = offsite(repo, deployment)
     index = read_index(repo, deployment)
     if not index:
-        return [
-            {
-                "severity": SEVERITY_DRIFT,
-                "component": "backup",
-                "expected": f"an index at {repo / deployment / INDEX_NAME}",
-                "actual": "absent",
-                "detail": "no offsite backup has ever been written for this deployment",
-            }
-        ]
+        findings.append({
+            "severity": SEVERITY_DRIFT,
+            "component": "backup",
+            "expected": f"an index at {repo / deployment / INDEX_NAME}",
+            "actual": "absent",
+            "detail": "no offsite backup has ever been written for this deployment",
+        })
+        return findings
 
     bundle = repo / deployment / str(index.get("latest", ""))
     if not bundle.is_file():

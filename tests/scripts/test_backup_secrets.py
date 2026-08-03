@@ -96,14 +96,50 @@ def deployment(tmp_path):
         secrets_out=secrets_file,
         state_root=state_root,
     )
+    # A clone with a remote, because "offsite" is a property of the push, not of
+    # a file existing in a directory.
+    remote = tmp_path / "remote.git"
+    subprocess.run(["git", "init", "-q", "--bare", str(remote)], check=True)
     repo = tmp_path / "backups"
-    repo.mkdir()
+    subprocess.run(
+        ["git", "clone", "-q", str(remote), str(repo)], capture_output=True, check=True
+    )
+    _git(repo, "commit", "-q", "--allow-empty", "-m", "init")
+    _git(repo, "push", "-q", "origin", "HEAD")
     return home, state_root, repo, secrets_file
 
 
-def _backup(deployment, recipient, **kwargs):
+def _git(repo, *args):
+    return subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repo),
+            "-c",
+            "user.name=test",
+            "-c",
+            "user.email=test@localhost",
+            *args,
+        ],
+        capture_output=True,
+        check=True,
+        text=True,
+    ).stdout
+
+
+def _publish(repo):
+    """Commit and push whatever a test just did to the repo, so the offsite
+    findings stay quiet and the test's own subject is what is asserted."""
+    _git(repo, "add", "--all")
+    _git(repo, "commit", "-q", "-m", "test edit")
+    _git(repo, "push", "-q", "origin", "HEAD")
+
+
+def _backup(deployment, recipient, push=True, **kwargs):
     home, state_root, repo, _ = deployment
-    return bs.backup("systest-fixture", state_root, repo, recipient, **kwargs)
+    return bs.backup(
+        "systest-fixture", state_root, repo, recipient, push=push, **kwargs
+    )
 
 
 def test_the_bundle_is_real_age_ciphertext_and_leaks_nothing(deployment, identity):
@@ -240,6 +276,7 @@ def test_a_stale_backup_is_reported(deployment, identity):
         bs.datetime.now(bs.timezone.utc) - bs.timedelta(days=30)
     ).isoformat(timespec="seconds")
     bs.write_index(repo, "systest-fixture", index)
+    _publish(repo)
 
     findings = bs.verify("systest-fixture", state_root, repo, max_age_days=8)
     assert [f["component"] for f in findings] == ["backup:age"]
@@ -260,6 +297,7 @@ def test_a_plaintext_bundle_is_refused_rather_than_trusted(deployment, identity)
     _, recipient = identity
     result = _backup(deployment, recipient)
     bs.Path(result["bundle"]).write_bytes(b"TELEGRAM_BOT_TOKEN=8123:AAF-secret\n")
+    _publish(repo)
 
     findings = bs.verify("systest-fixture", state_root, repo)
     assert [f["component"] for f in findings] == ["backup:bundle"]
@@ -285,6 +323,49 @@ def test_a_credential_dropped_from_the_manifest_is_a_note(deployment, identity):
     findings = bs.verify("systest-fixture", state_root, repo)
     assert [f["severity"] for f in findings] == [NOTE]
     assert "user@example.com" in findings[0]["component"]
+
+
+def test_a_bundle_that_never_left_the_box_is_not_a_backup(deployment, identity):
+    """Found on the box: the push failed, and `verify` still reported "current"
+    because a file existed. A bundle on the same disk as the secrets it protects
+    is the situation this tool exists to end."""
+    _, state_root, repo, _ = deployment
+    _, recipient = identity
+    _backup(deployment, recipient, push=False)
+
+    findings = bs.verify("systest-fixture", state_root, repo)
+
+    offsite = [f for f in findings if f["component"] == "backup:offsite"]
+    assert [f["severity"] for f in offsite] == [DRIFT]
+    assert "never committed" in offsite[0]["detail"]
+
+
+def test_commits_that_were_never_pushed_are_drift(deployment, identity):
+    _, state_root, repo, _ = deployment
+    _, recipient = identity
+    _backup(deployment, recipient, push=False)
+    _git(repo, "add", "--all", "systest-fixture")
+    _git(repo, "commit", "-q", "-m", "local only")
+
+    findings = bs.verify("systest-fixture", state_root, repo)
+
+    offsite = [f for f in findings if f["component"] == "backup:offsite"]
+    assert [f["actual"] for f in offsite] == ["local only"]
+
+
+def test_a_backup_directory_that_is_not_a_clone_is_drift(
+    deployment, identity, tmp_path
+):
+    _, state_root, _, _ = deployment
+    _, recipient = identity
+    plain = tmp_path / "plain"
+    bs.backup("systest-fixture", state_root, plain, recipient)
+
+    findings = bs.verify("systest-fixture", state_root, plain)
+
+    assert [(f["component"], f["actual"]) for f in findings] == [
+        ("backup:offsite", "not a git repository")
+    ]
 
 
 def test_a_secrets_file_the_checker_cannot_see_is_a_note_not_a_crash(
@@ -409,5 +490,5 @@ def test_plaintext_never_reaches_the_disk(deployment, identity, monkeypatch):
     with pytest.raises(ds.StateError, match="age failed"):
         bs.backup("systest-fixture", state_root, repo, recipient)
 
-    leftovers = [p for p in repo.rglob("*") if p.is_file()]
+    leftovers = [p for p in repo.rglob("*") if p.is_file() and ".git" not in p.parts]
     assert leftovers == []
