@@ -68,6 +68,12 @@ Run it with the deployment's interpreter — it reports on the Python executing
 it, not on any Python it can find. Exit codes: `0` clean, `1` drift, `2` the
 baseline could not be read.
 
+Exit 2 also covers a baseline that is *present but incomplete* — a missing
+table, an empty one, or one that has lost `python` or `openssl` to a merge or
+a rename. Skipping the absent floor would leave that layer unwatched while
+the weekly run still printed "No runtime drift" and exited 0, which is
+indistinguishable from a healthy box. The check refuses to run instead.
+
 Flags: `--json` for machine-readable findings, `--notify` to send a Telegram
 message **only when drift is found** (silent otherwise, so the absence of a
 message is meaningful).
@@ -94,6 +100,7 @@ Type=oneshot
 User=hermes
 WorkingDirectory=/opt/data/hermes-agent
 EnvironmentFile=/opt/data/hermes-home-staging/.env
+Environment=PYTHONDONTWRITEBYTECODE=1
 ExecStart=/opt/data/hermes-agent/.venv/bin/python \
     /opt/data/hermes-agent/scripts/check_runtime_drift.py --notify
 # Drift is reported via --notify; a non-zero exit is the signal, not a fault.
@@ -119,7 +126,10 @@ systemctl start hermes-drift-check.service   # run once now
 ```
 
 `Persistent=true` matters: if the box is down at the scheduled time, the run
-happens at next boot instead of being skipped.
+happens at next boot instead of being skipped. `PYTHONDONTWRITEBYTECODE=1`
+keeps the check strictly read-only — without it the run leaves `__pycache__`
+entries in the checkout and venv, which is harmless here but would fail on a
+read-only rootfs.
 
 ## Upgrade path when the check fires
 

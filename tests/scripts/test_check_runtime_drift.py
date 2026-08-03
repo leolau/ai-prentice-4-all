@@ -166,16 +166,21 @@ def test_baseline_python_is_within_requires_python():
 # --- CLI contract ----------------------------------------------------------
 
 
-def test_exit_code_and_json_shape(monkeypatch, capsys, tmp_path):
+def _write_baseline(tmp_path, *, python="3.11.15", openssl="99.0.0", deps=""):
     pyproject = tmp_path / "pyproject.toml"
     pyproject.write_text(
         "[project]\n"
-        'dependencies = ["ghost==1.0.0"]\n'
+        f"dependencies = [{deps}]\n"
         "[tool.hermes.runtime-baseline]\n"
-        'python = "3.11.15"\n'
-        'openssl = "99.0.0"\n',
+        f'python = "{python}"\n'
+        f'openssl = "{openssl}"\n',
         encoding="utf-8",
     )
+    return pyproject
+
+
+def test_exit_code_and_json_shape(monkeypatch, capsys, tmp_path):
+    pyproject = _write_baseline(tmp_path, deps='"ghost==1.0.0"')
     code = drift.main(["--json", "--pyproject", str(pyproject)])
     assert code == 1
     findings = json.loads(capsys.readouterr().out)
@@ -184,15 +189,12 @@ def test_exit_code_and_json_shape(monkeypatch, capsys, tmp_path):
 
 
 def test_clean_runtime_exits_zero_and_does_not_notify(monkeypatch, tmp_path):
-    running = ".".join(str(p) for p in sys.version_info[:3])
-    pyproject = tmp_path / "pyproject.toml"
-    pyproject.write_text(
-        "[project]\n"
-        "dependencies = []\n"
-        "[tool.hermes.runtime-baseline]\n"
-        f'python = "{running}"\n'
-        f'openssl = "{".".join(str(p) for p in drift._parse_version(drift.ssl.OPENSSL_VERSION))}"\n',
-        encoding="utf-8",
+    pyproject = _write_baseline(
+        tmp_path,
+        python=".".join(str(p) for p in sys.version_info[:3]),
+        openssl=".".join(
+            str(p) for p in drift._parse_version(drift.ssl.OPENSSL_VERSION)
+        ),
     )
     sent = []
     monkeypatch.setattr(drift, "notify", lambda text: sent.append(text))
@@ -201,14 +203,7 @@ def test_clean_runtime_exits_zero_and_does_not_notify(monkeypatch, tmp_path):
 
 
 def test_drift_notifies_once_with_the_report(monkeypatch, tmp_path):
-    pyproject = tmp_path / "pyproject.toml"
-    pyproject.write_text(
-        "[project]\n"
-        "dependencies = []\n"
-        "[tool.hermes.runtime-baseline]\n"
-        'openssl = "99.0.0"\n',
-        encoding="utf-8",
-    )
+    pyproject = _write_baseline(tmp_path)
     sent = []
     monkeypatch.setattr(drift, "notify", lambda text: sent.append(text))
     assert drift.main(["--notify", "--pyproject", str(pyproject)]) == 1
@@ -267,3 +262,34 @@ def test_unreadable_baseline_exits_two_not_zero(tmp_path):
     # Exiting 0 on a broken baseline would report "no drift" from a check
     # that never ran.
     assert drift.main(["--pyproject", str(tmp_path / "missing.toml")]) == 2
+
+
+@pytest.mark.parametrize(
+    "table",
+    [
+        "",  # no [tool.hermes.runtime-baseline] at all
+        "[tool.hermes.runtime-baseline]\n",  # present but empty
+        '[tool.hermes.runtime-baseline]\npython = "3.11.15"\n',  # openssl dropped
+        '[tool.hermes.runtime-baseline]\nopenssl = "3.5.7"\n',  # python dropped
+    ],
+)
+def test_incomplete_baseline_is_loud_not_a_vacuous_pass(table, tmp_path, capsys):
+    # A merge that drops or renames one floor would otherwise leave that layer
+    # unwatched while the weekly run still printed "No runtime drift" and
+    # exited 0 — output identical to a healthy box, which is exactly the false
+    # confidence this script exists to remove.
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text("[project]\ndependencies = []\n" + table, encoding="utf-8")
+    assert drift.main(["--pyproject", str(pyproject)]) == 2
+    out = capsys.readouterr().out
+    assert "No runtime drift" not in out
+    assert "missing" in out
+
+
+def test_incomplete_baseline_does_not_notify(monkeypatch, tmp_path):
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text("[project]\ndependencies = []\n", encoding="utf-8")
+    sent = []
+    monkeypatch.setattr(drift, "notify", lambda text: sent.append(text))
+    assert drift.main(["--notify", "--pyproject", str(pyproject)]) == 2
+    assert sent == []

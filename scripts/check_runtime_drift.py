@@ -103,12 +103,33 @@ def _exact_pins(dependencies: list[str]) -> dict[str, str]:
     return pins
 
 
+class IncompleteBaseline(Exception):
+    """The baseline table is missing a floor the check is supposed to enforce."""
+
+
+REQUIRED_FLOORS = ("python", "openssl")
+
+
 def load_baseline(pyproject: Path) -> tuple[dict[str, str], dict[str, Any]]:
-    """Return (package pins, runtime baseline) declared in *pyproject*."""
+    """Return (package pins, runtime baseline) declared in *pyproject*.
+
+    Every floor in ``REQUIRED_FLOORS`` must be present. A missing table — or
+    a table that has lost a key to a merge or a rename — would otherwise make
+    that layer unwatched while the run still printed "no drift" and exited 0:
+    indistinguishable from a healthy deployment, which is precisely the false
+    confidence this script exists to remove. Refuse to run instead.
+    """
     with pyproject.open("rb") as handle:
         data = tomllib.load(handle)
     pins = _exact_pins(data.get("project", {}).get("dependencies", []))
     baseline = data.get("tool", {}).get("hermes", {}).get("runtime-baseline", {})
+    missing = [floor for floor in REQUIRED_FLOORS if not baseline.get(floor)]
+    if missing:
+        raise IncompleteBaseline(
+            f"[tool.hermes.runtime-baseline] in {pyproject} is missing: "
+            f"{', '.join(missing)}. Every floor must be declared, otherwise "
+            "that layer goes unchecked and the run still reports clean."
+        )
     return pins, baseline
 
 
@@ -315,7 +336,7 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         findings = collect(args.pyproject)
-    except (OSError, tomllib.TOMLDecodeError) as exc:
+    except (OSError, tomllib.TOMLDecodeError, IncompleteBaseline) as exc:
         print(f"error: could not read baseline from {args.pyproject}: {exc}")
         return 2
 
