@@ -72,6 +72,13 @@ Flags: `--json` for machine-readable findings, `--notify` to send a Telegram
 message **only when drift is found** (silent otherwise, so the absence of a
 message is meaningful).
 
+`--notify` delivers to `TELEGRAM_HOME_CHANNEL` (falling back to the first
+entry of `TELEGRAM_ALLOWED_USERS`), in the thread named by
+`TELEGRAM_CRON_THREAD_ID` or `TELEGRAM_HOME_CHANNEL_THREAD_ID`. With no
+credentials in the environment it prints a line and exits normally — the
+report is already in the journal by then, so a broken notifier never hides a
+finding.
+
 ### Weekly timer
 
 Installed on the box, not in the repo, because it is deployment-specific:

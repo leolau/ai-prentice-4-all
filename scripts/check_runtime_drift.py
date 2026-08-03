@@ -249,16 +249,42 @@ def format_report(findings: list[dict[str, str]]) -> str:
     return "\n".join(lines)
 
 
+def _telegram_target() -> tuple[str, str, str]:
+    """Resolve (token, chat_id, thread_id) from the environment.
+
+    ``TELEGRAM_HOME_CHANNEL`` is the destination Hermes' own setup writes;
+    ``TELEGRAM_ALLOWED_USERS`` is the fallback for deployments that never
+    bound a home channel. Thread selection follows the same precedence the
+    rest of the project uses for scheduled delivery: a cron-specific thread
+    overrides the home channel's default topic.
+    """
+    token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+    chat_id = os.environ.get("TELEGRAM_HOME_CHANNEL", "").strip()
+    if not chat_id:
+        chat_id = os.environ.get("TELEGRAM_ALLOWED_USERS", "").split(",")[0].strip()
+    thread_id = (
+        os.environ.get("TELEGRAM_CRON_THREAD_ID", "").strip()
+        or os.environ.get("TELEGRAM_HOME_CHANNEL_THREAD_ID", "").strip()
+    )
+    return token, chat_id, thread_id
+
+
 def notify(text: str) -> bool:
-    """Send *text* to the configured Telegram user. Returns True on success."""
-    token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-    chat_id = os.environ.get("TELEGRAM_ALLOWED_USERS", "").split(",")[0].strip()
+    """Send *text* to the configured Telegram destination.
+
+    Returns True on success. A failure here is reported but never fatal —
+    the report has already been printed to the journal by then.
+    """
+    token, chat_id, thread_id = _telegram_target()
     if not token or not chat_id:
         print("[drift] no Telegram credentials — skipping notification")
         return False
+    payload: dict[str, Any] = {"chat_id": chat_id, "text": text}
+    if thread_id:
+        payload["message_thread_id"] = thread_id
     request = Request(
         f"https://api.telegram.org/bot{token}/sendMessage",
-        data=json.dumps({"chat_id": chat_id, "text": text}).encode(),
+        data=json.dumps(payload).encode(),
         headers={"Content-Type": "application/json"},
     )
     try:

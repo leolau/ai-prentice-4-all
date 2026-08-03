@@ -216,6 +216,53 @@ def test_drift_notifies_once_with_the_report(monkeypatch, tmp_path):
     assert "openssl" in sent[0]
 
 
+# --- notification target ---------------------------------------------------
+
+TELEGRAM_VARS = (
+    "TELEGRAM_BOT_TOKEN",
+    "TELEGRAM_HOME_CHANNEL",
+    "TELEGRAM_HOME_CHANNEL_THREAD_ID",
+    "TELEGRAM_CRON_THREAD_ID",
+    "TELEGRAM_ALLOWED_USERS",
+)
+
+
+@pytest.fixture
+def clean_telegram_env(monkeypatch):
+    for var in TELEGRAM_VARS:
+        monkeypatch.delenv(var, raising=False)
+    return monkeypatch
+
+
+def test_notify_targets_the_home_channel_and_its_thread(clean_telegram_env):
+    # The systest deployment has TELEGRAM_HOME_CHANNEL + a thread id and no
+    # TELEGRAM_ALLOWED_USERS at all; reading only the latter made the first
+    # live run print "no Telegram credentials" and send nothing.
+    clean_telegram_env.setenv("TELEGRAM_BOT_TOKEN", "t")
+    clean_telegram_env.setenv("TELEGRAM_HOME_CHANNEL", "-1001234567890")
+    clean_telegram_env.setenv("TELEGRAM_HOME_CHANNEL_THREAD_ID", "42")
+    assert drift._telegram_target() == ("t", "-1001234567890", "42")
+
+
+def test_notify_falls_back_to_allowed_users(clean_telegram_env):
+    clean_telegram_env.setenv("TELEGRAM_BOT_TOKEN", "t")
+    clean_telegram_env.setenv("TELEGRAM_ALLOWED_USERS", "111,222")
+    assert drift._telegram_target() == ("t", "111", "")
+
+
+def test_cron_thread_overrides_the_home_channel_thread(clean_telegram_env):
+    clean_telegram_env.setenv("TELEGRAM_BOT_TOKEN", "t")
+    clean_telegram_env.setenv("TELEGRAM_HOME_CHANNEL", "-100")
+    clean_telegram_env.setenv("TELEGRAM_HOME_CHANNEL_THREAD_ID", "42")
+    clean_telegram_env.setenv("TELEGRAM_CRON_THREAD_ID", "99")
+    assert drift._telegram_target()[2] == "99"
+
+
+def test_notify_without_credentials_is_not_fatal(clean_telegram_env, capsys):
+    assert drift.notify("anything") is False
+    assert "no Telegram credentials" in capsys.readouterr().out
+
+
 def test_unreadable_baseline_exits_two_not_zero(tmp_path):
     # Exiting 0 on a broken baseline would report "no drift" from a check
     # that never ran.
