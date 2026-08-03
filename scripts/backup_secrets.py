@@ -73,6 +73,7 @@ from scripts.check_runtime_drift import (  # noqa: E402  (needs REPO_ROOT on the
 from scripts.deploy_state import (  # noqa: E402
     MANIFEST_NAME,
     StateError,
+    _user,
     deployment_dir,
     load_yaml,
 )
@@ -367,7 +368,22 @@ def verify(
 
     covered = set(index.get("files") or [])
     for path in members(deployment, state_root, hermes_home):
-        if not path.is_file():
+        try:
+            present = path.is_file()
+        except PermissionError:
+            # By design: `verify` runs as the unprivileged checker, and the
+            # secrets file is root-only. Say the layer is unverified rather than
+            # taking the whole report down over a file it may not reach.
+            findings.append({
+                "severity": SEVERITY_NOTE,
+                "component": f"backup:coverage:{path.name}",
+                "expected": "visible to this user",
+                "actual": "permission denied",
+                "detail": f"cannot tell whether {path} is backed up as "
+                f"{_user(os.geteuid())} — run this check as root to include it",
+            })
+            continue
+        if not present:
             continue
         if str(path) not in covered:
             findings.append({
