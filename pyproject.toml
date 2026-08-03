@@ -370,6 +370,25 @@ markers = [
 # integration tests take way too long to run in the normal CI environments
 addopts = "-m 'not integration'"
 
+[tool.hermes.runtime-baseline]
+# The interpreter a deployment is expected to run on, and the OpenSSL floor
+# that interpreter must satisfy. Checked by scripts/check_runtime_drift.py.
+#
+# `requires-python` above says which interpreters the project *supports*;
+# this says which one a given deployment is actually running, which is a
+# different question and the one nothing else in the repo answers. The venv
+# is built on a uv-managed CPython that statically bundles its own OpenSSL,
+# so `apt upgrade` patches the system libssl and leaves Hermes' copy alone —
+# the box then reports itself fully patched while every TLS connection the
+# agent makes still goes through the old crypto. Recording the floor here
+# makes an interpreter upgrade a reviewable commit instead of an
+# undocumented act on one machine.
+#
+# Raise `openssl` whenever an OpenSSL CVE lands; the weekly drift check then
+# fails until the deployment's venv is rebuilt on a patched interpreter.
+python = "3.11.15"
+openssl = "3.5.7"
+
 [tool.ty.environment]
 python-version = "3.13"
 
