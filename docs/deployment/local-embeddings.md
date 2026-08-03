@@ -36,6 +36,14 @@ rebuild re-creates them with the documented commands below.
 
 ## The unit
 
+The unit is a tracked file — `deploy/hermes-embed.service` — installed from git
+rather than typed into `/etc/systemd/system/` by hand:
+
+```bash
+install -m 644 deploy/hermes-embed.service /etc/systemd/system/
+systemctl daemon-reload && systemctl enable --now hermes-embed
+```
+
 ```ini
 [Unit]
 Description=Hermes local embedding service (loopback only)
@@ -122,10 +130,61 @@ width — because the failure that must never happen quietly is two embedding
 spaces in one column, which makes cosine distance meaningless for every row and
 looks like nothing at all in the data.
 
-**Existing rows are not re-embedded by flipping this switch.** The 28 rows
-currently in `app_dev.memories` are 256-dim hashing vectors; the re-embed
-command and the per-row model/dim metadata are FG-21 P2. Until then, treat
-`local_http` as configured-but-not-cut-over.
+**Flipping this switch does not migrate the existing rows** — and it will not
+pretend to. Every row records the model that embedded it, so:
+
+- rows from another model are **excluded from recall**, never ranked against the
+  current model's vectors;
+- a *dimension* change is **refused at startup** (`EmbeddingSpaceMismatch`, with
+  the remedy in the message) rather than failing later as an opaque Postgres
+  type error on every write.
+
+So the cutover is two steps, in this order:
+
+```bash
+hermes memory vectors status          # what's in the column right now
+# ... edit config.yaml as above ...
+hermes memory vectors reembed --mode dev
+hermes memory vectors status          # every row in the new space
+```
+
+`reembed` rewrites every row in **one transaction**, replacing the `vector(N)`
+column (pgvector cannot widen one in place) and rebuilding the HNSW index. If it
+fails part-way — the embedding service dies, the box reboots — nothing moved:
+the old column, vectors and provenance are intact, the previous config still
+works, and the migration can simply be re-run. Embedding happens *before* the
+transaction opens, so a 300 ms-per-row model does not hold a write lock across
+minutes of CPU while live sessions block behind it.
+
+Take a dump first anyway (`pg_dump -t app_dev.memories`). The transaction
+protects against a failed migration; it does not protect against a *successful*
+migration you did not want.
+
+## Automatic recall
+
+Until P2 the tier was write-only: rows accumulated and the only reader was a
+deliberate `memory_query` tool call, which in production happened **zero** times.
+Recall now runs on every turn, budgeted:
+
+```yaml
+memory:
+  recall:
+    auto: true
+    top_k: 5
+    min_score: 0.35
+    max_chars: 1200
+    min_query_chars: 8
+    dedup_threshold: 0.97
+```
+
+The recalled rows are appended to that turn's user message **at API-call time**,
+from a copy — the system prompt is untouched and the stored conversation is
+unchanged, so the cached prefix survives and nothing leaks into session history.
+
+`min_score` is not a tuning nicety: an HNSW search always returns `top_k` rows,
+so without a floor every turn recalls its least-unrelated memories. On the box's
+current hashing vectors an unrelated question still scores ~0.2 on an incidental
+shared token, which is the noise the floor removes.
 
 ## Health
 

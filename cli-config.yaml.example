@@ -541,6 +541,25 @@ memory:
   #   model: BAAI/bge-m3
   #   dim: 1024
   #   timeout_seconds: 20
+  #
+  # Changing the embedder is a DATA migration, not a config change: vectors are
+  # only comparable within one model, so existing rows must be rewritten with
+  # 'hermes memory vectors reembed'. Rows from another model are excluded from
+  # recall (never ranked against the current model), and a dimension change is
+  # refused at startup until the re-embed has run. 'hermes memory vectors
+  # status' reports the column width and the rows per model.
+
+  # Automatic recall from the pgvector tier. Every turn, the most relevant rows
+  # the user may see are appended to that turn's message at API-call time only —
+  # the system prompt and the stored conversation are never touched, so prompt
+  # caching survives. Without this the tier is write-only.
+  # recall:
+  #   auto: true               # false = recall only via the memory_query tool
+  #   top_k: 5                 # rows considered per turn
+  #   min_score: 0.35          # cosine floor; without one, recall is never empty
+  #   max_chars: 1200          # hard budget so recall can't crowd out the turn
+  #   min_query_chars: 8       # skip "ok" / "thanks" — no retrievable intent
+  #   dedup_threshold: 0.97    # a re-stated fact updates nothing, adds no row
 
   # Memory flush: give the agent one turn to save memories before context is
   # lost (compression, /new, /reset, exit). Set to 0 to disable.
