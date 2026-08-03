@@ -24,19 +24,20 @@ source: https://github.com/taylorwilsdon/google_workspace_mcp
 # covers twelve services and 120+ tools, and every tool ships in the schema on
 # every API call. This launch line registers 15. Gmail is excluded on purpose —
 # adding it here would give the agent a second, conflicting view of an inbox.
+#
+# The `cd` in front of `uvx` is load-bearing. The server's settings come from
+# pydantic-settings, which stats `.env` relative to the process working
+# directory — inherited from whatever launched Hermes. In a directory it cannot
+# read, startup dies with `PermissionError: '.env'` and the server never
+# registers; in a directory that holds Hermes' own `.env`, it would read those
+# secrets as its settings. Pinning the working directory to the credentials
+# parent avoids both.
 transport:
   type: stdio
-  command: uvx
+  command: /bin/sh
   args:
-    - "--from"
-    - "workspace-mcp==1.22.2"
-    - "workspace-mcp"
-    - "--tools"
-    - "calendar"
-    - "docs"
-    - "drive"
-    - "--tool-tier"
-    - "core"
+    - "-c"
+    - "cd \"$(dirname \"$WORKSPACE_MCP_CREDENTIALS_DIR\")\" && exec uvx --from workspace-mcp==1.22.2 workspace-mcp --tools calendar docs drive --tool-tier core"
   version: 1.22.2
 
 auth:
@@ -48,6 +49,9 @@ auth:
   #   python3 custom/calendar/calendar_auth.py --email you@example.com \
   #       --scopes calendar documents drive.file \
   #       --credentials-out /path/to/credentials-dir
+  #
+  # Add `drive.readonly` to that scope list if you want the Drive and
+  # document-reading tools — see the tool notes below.
   #
   # Each file is mode 0600 and holds a refresh token and the client secret.
   env:
@@ -65,9 +69,26 @@ auth:
       secret: false
 
 # Tool selection at install time:
-# The core tier registers 15 tools. The default below is the eight that carry
-# the intent — calendar read/write, Docs read/create/edit, and enough Drive to
-# find and read a document. The seven left off are Drive/import plumbing:
+# The core tier registers 15 tools. The default below is the five that work
+# with `calendar` + `documents` + `drive.file`: calendar read/write and Docs
+# create/edit.
+#
+# Three otherwise-obvious tools are deliberately absent, because the server
+# resolves each tool against a scope group (auth/scopes.py) and Google's scope
+# hierarchy does not let `drive.file` stand in for `drive.readonly`:
+#
+#   get_doc_content         drive_read + docs_read   needs drive.readonly
+#   search_drive_files      drive_read               needs drive.readonly
+#   get_drive_file_content  drive_read               needs drive.readonly
+#
+# So `drive.file` alone makes Docs effectively write-only — the agent can
+# create and edit a document but cannot read one back, not even one it just
+# created. Granting `drive.readonly` at consent enables all three and is
+# read-only, but it is read-only over *everything the account owns*, which is
+# the blast radius of a successful prompt injection. Decide, then re-consent
+# each account; adding a scope later is a re-run of the auth script.
+#
+# The seven remaining core-tier tools are Drive/import plumbing:
 # create_drive_file (which will also fetch an arbitrary fileUrl into your
 # Drive), create_drive_folder, get_drive_file_download_url,
 # get_drive_shareable_link, and the import_to_google_{doc,sheets,slides}
@@ -78,11 +99,8 @@ tools:
     - list_calendars
     - get_events
     - manage_event
-    - get_doc_content
     - create_doc
     - modify_doc_text
-    - search_drive_files
-    - get_drive_file_content
 
 post_install: |
   Scope is the real boundary here, not the approval prompt. Two choices matter:
@@ -91,7 +109,10 @@ post_install: |
      it created or that you explicitly opened with it; `drive` is read/write
      across everything the account owns. The credential files live where the
      Hermes user can read them, so treat their scope as the blast radius of a
-     successful prompt injection.
+     successful prompt injection. The cost is real and worth measuring before
+     you choose: with `drive.file` the three Drive/document *read* tools stay
+     unavailable (see the tool notes above), so Docs is write-only until you
+     add `drive.readonly`.
 
   2. Deletion cannot be removed by dropping a tool. There is no `delete_event`
      tool in this version — `manage_event` takes `action="create" | "update" |
