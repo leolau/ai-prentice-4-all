@@ -176,10 +176,10 @@ def normalize_visibility(visibility: str) -> str:
 ITEM_GRANTS_TABLE = "item_grants"
 
 #: Kinds of item a grant may target: the C9 GTS nodes, plus a single live
-#: ``memory`` row (FG-21 P3) so one person can share one memory with a peer the
-#: role hierarchy deliberately does not reach — the sideways case, granted by an
-#: explicit act rather than by rank.
-GRANT_ITEM_KINDS: tuple[str, ...] = ("goal", "task", "memory")
+#: ``memory`` row (FG-21 P3) and a single ingested ``document`` (P4) so one
+#: person can share one row with a peer the role hierarchy deliberately does not
+#: reach — the sideways case, granted by an explicit act rather than by rank.
+GRANT_ITEM_KINDS: tuple[str, ...] = ("goal", "task", "memory", "document")
 #: Grant roles: a single ``assignee`` (may advance progress) + read-only
 #: ``watcher``s.
 GRANT_TYPES: tuple[str, ...] = ("assignee", "watcher")
@@ -658,6 +658,74 @@ async def apply_item_grants_rls(connection: asyncpg.Connection) -> None:
     )
 
 
+async def grant_item(
+    connection: asyncpg.Connection,
+    *,
+    item_kind: str,
+    item_id: str,
+    user_id: str,
+    granted_by: str,
+) -> None:
+    """Give ``user_id`` read access to exactly one row of ``item_kind``.
+
+    The row-specific counterpart to a role read: it shares the item it names and
+    nothing else the granter owns. Reactivates an existing grant rather than
+    inserting a second one, so re-sharing after a revoke is one row with a
+    history instead of a duplicate.
+
+    Callers are responsible for checking that ``granted_by`` may share the item
+    (ownership is table-specific and lives with the table).
+    """
+    if item_kind not in GRANT_ITEM_KINDS:
+        raise ValueError(f"Unknown grant item_kind: {item_kind!r}")
+    await connection.execute(
+        f"""
+        INSERT INTO {ITEM_GRANTS_TABLE}
+            (item_kind, item_id, user_id, grant_type, granted_by, status)
+        VALUES ($1, $2::uuid, $3, 'watcher', $4, 'accepted')
+        ON CONFLICT (item_kind, item_id, user_id) DO UPDATE
+            SET status = 'accepted', granted_by = EXCLUDED.granted_by,
+                updated_at = NOW()
+        """,
+        item_kind,
+        item_id,
+        user_id,
+        granted_by,
+    )
+
+
+async def revoke_item_grant(
+    connection: asyncpg.Connection,
+    *,
+    item_kind: str,
+    item_id: str,
+    user_id: str,
+    granted_by: str,
+) -> bool:
+    """Withdraw one grant made by ``granted_by``; True if one was active.
+
+    Revoked, never deleted: that the row *was* shared for a period is part of the
+    audit trail, and only :data:`GRANT_ACTIVE_STATUSES` confer access, so
+    keeping the history costs nothing at read time.
+    """
+    if item_kind not in GRANT_ITEM_KINDS:
+        raise ValueError(f"Unknown grant item_kind: {item_kind!r}")
+    revoked = await connection.fetchval(
+        f"""
+        UPDATE {ITEM_GRANTS_TABLE} SET status = 'revoked', updated_at = NOW()
+        WHERE item_kind = $1 AND item_id = $2::uuid AND user_id = $3
+          AND granted_by = $4 AND status = ANY($5::text[])
+        RETURNING id
+        """,
+        item_kind,
+        item_id,
+        user_id,
+        granted_by,
+        list(GRANT_ACTIVE_STATUSES),
+    )
+    return revoked is not None
+
+
 async def bind_principal(
     connection: asyncpg.Connection,
     principal: Principal,
@@ -887,8 +955,9 @@ def _row_to_principal(
 
 
 def _coerce_role(value: object) -> Role:
-    if value in ROLES:
-        return value  # type: ignore[return-value]
+    for role in ROLES:
+        if value == role:
+            return role
     raise ValueError(f"Unknown role loaded from store: {value!r}")
 
 

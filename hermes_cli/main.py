@@ -12260,6 +12260,11 @@ def cmd_memory(args):
 
         cmd_memory_sharing(args)
         return
+    if sub == "rag":
+        from hermes_cli.rag_cmd import cmd_memory_rag
+
+        cmd_memory_rag(args)
+        return
     if sub == "off":
         from hermes_cli.config import load_config, save_config
 

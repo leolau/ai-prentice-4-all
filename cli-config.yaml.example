@@ -582,6 +582,31 @@ memory:
   # sharing:
   #   role_reads: false
 
+  # Document retrieval (RAG) over the same pgvector tier. Ingested documents —
+  # Google Drive files today — are chunked around headings, embedded with the
+  # SAME model as memory (two models in one instance would each be internally
+  # consistent and mutually meaningless), and searched with two arms fused by
+  # reciprocal rank: cosine similarity for meaning and paraphrase across
+  # languages, and a tsquery for exact strings a vector cannot represent (a
+  # tender number). Every passage carries the document and section it came from,
+  # so the agent can cite what it used.
+  #
+  # Off by default: enabling it adds the 'rag_search' tool to EVERY API call for
+  # the life of a conversation, which is not worth paying for on an instance with
+  # nothing ingested. Ingest first ('hermes memory rag --as <user> ingest-drive'),
+  # then turn this on.
+  #
+  # Access is identical to memory's, deliberately: a document is owned by the
+  # person who ingested it and is private to them, reachable by others only
+  # through a downward role read (above) or an explicit per-document grant
+  # ('hermes memory rag --as <owner> share <document-id> <user>'). A file merely
+  # shared WITH an account is not a file the whole instance may read.
+  # rag:
+  #   enabled: false
+  #   top_k: 5                 # passages per search (the model may lower this)
+  #   min_score: 0.35          # cosine floor on the vector arm; the lexical arm
+  #                            # needs none — a tsquery either matches or doesn't
+
   # Memory flush: give the agent one turn to save memories before context is
   # lost (compression, /new, /reset, exit). Set to 0 to disable.
   # For exit/reset, only fires if the session had at least this many user turns.
