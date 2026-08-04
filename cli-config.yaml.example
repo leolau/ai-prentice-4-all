@@ -540,7 +540,12 @@ memory:
   #   endpoint: http://127.0.0.1:8791
   #   model: BAAI/bge-m3
   #   dim: 1024
-  #   timeout_seconds: 20
+  #   timeout_seconds: 120
+  #
+  # `timeout_seconds` covers one whole request, and a request is a BATCH: a
+  # re-embed sends 16 texts at once, which on a 4-vCPU CPU-only box takes ~16 s
+  # with bge-m3 against ~0.2 s for the single text a live write embeds. Size it
+  # for the batch or the migration times out while ordinary writes look fine.
   #
   # Changing the embedder is a DATA migration, not a config change: vectors are
   # only comparable within one model, so existing rows must be rewritten with
@@ -557,9 +562,16 @@ memory:
   #   auto: true               # false = recall only via the memory_query tool
   #   top_k: 5                 # rows considered per turn
   #   min_score: 0.35          # cosine floor; without one, recall is never empty
+  #                            # CALIBRATE PER MODEL — see below
   #   max_chars: 1200          # hard budget so recall can't crowd out the turn
   #   min_query_chars: 8       # skip "ok" / "thanks" — no retrievable intent
   #   dedup_threshold: 0.97    # a re-stated fact updates nothing, adds no row
+  #
+  # min_score is not portable between embedders. Semantic models pack unrelated
+  # text far higher than the hashing embedder this default was set for: measured
+  # on one deployment's corpus, bge-m3 scored genuine matches 0.60-0.78 and
+  # unrelated questions up to 0.61, so 0.35 admits everything. Measure your own
+  # highest-unrelated score and set the floor above it (that box uses 0.65).
 
   # Cross-user memory reads (multi-user instances only). Layer-4 memory is owned
   # per person; with role_reads on, a principal also recalls the private memory
