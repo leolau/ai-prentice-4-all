@@ -42,6 +42,14 @@ async def fit_projection(
     Async so a caller already inside an event loop (a test, or a future
     scheduled job) can await it; ``cmd_projection_fit`` is the sync CLI wrapper.
     """
+    from tools.lazy_deps import ensure
+
+    # numpy is not a base dependency (it ships only in the voice extra), so a
+    # plain install reaches the fit and dies on the import. Installing here,
+    # in an operator CLI job, is the one place it is affordable — the
+    # dashboard's own query placement stays numpy-free.
+    ensure("memory.projection.pca", prompt=False)
+
     import numpy as np
 
     from plugins.memory.supabase_pgvector.rag import RAG_CHUNKS_TABLE
@@ -132,7 +140,6 @@ async def fit_projection(
         umap_ok = False
         if algorithm == "umap":
             try:
-                from tools.lazy_deps import ensure
                 ensure("memory.projection", prompt=False)
                 import umap
 
@@ -145,7 +152,7 @@ async def fit_projection(
                 print(f"  \u26a0 UMAP failed ({exc}), falling back to PCA")
 
         if not umap_ok:
-            # PCA via SVD (numpy only, no extra dependency)
+            # PCA via SVD (numpy only, no non-numeric dependency)
             if sampled:
                 indices = np.random.choice(total, sample_size, replace=False)
                 sample_emb = embeddings[indices]
