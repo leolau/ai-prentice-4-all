@@ -5,7 +5,7 @@ It states what exists, what is verified, what is *not*, and where the detail
 lives. The per-topic documents are authoritative for procedure; this file is
 authoritative for **what is currently true of the live box**.
 
-Last verified: 2026-08-04, application at `1d401da12`.
+Last verified: 2026-08-04, application at `657f1190b`.
 
 ## Read these in this order
 
@@ -57,20 +57,29 @@ cannot be scoped to a subdirectory.
 
 ## What runs
 
-11 services, all as `hermes`:
+12 services, all as `hermes`:
 
 ```
 hermes-gateway        hermes-dashboard      hermes-digest        hermes-escalation
 hermes-wa-bridge-personal    hermes-wa-bridge-connectar   hermes-wa-batcher    hermes-wa-triage
-hermes-email-poller   hermes-email-batcher  hermes-email-triage
+hermes-email-poller   hermes-email-batcher  hermes-email-triage  hermes-embed
 ```
 
-Two timers:
+`hermes-embed` is the loopback embedding service the layer-4 memory tier calls;
+see `local-embeddings.md`.
+
+Three timers:
 
 ```
-hermes-drift-check.timer     Mondays 09:00   three checks, reports only on drift
-hermes-secret-backup.timer   daily 04:30     encrypted credential backup, pushes
+hermes-drift-check.timer         Mondays 09:00   three checks, reports only on drift
+hermes-secret-backup.timer       daily 04:30     encrypted credential backup, pushes
+hermes-memory-projection.timer   daily 03:00     refits the memory explorer's 2-D map
 ```
+
+The projection fit is a whole-corpus SVD, so it can never run in a page
+request; without the timer the map would keep showing the corpus as it was the
+day someone last ran the command by hand, and every memory written since would
+be counted as "N new" and drawn nowhere.
 
 The weekly unit runs three `ExecStart` lines in order, added as drop-ins so the
 captured base unit stays byte-identical:
@@ -130,6 +139,23 @@ Verified on the live box, not in a fixture:
 - `verify` reports drift — not success — when a bundle exists locally but the
   push failed. This was a real bug (#91); a local file next to the secrets it
   protects is not a backup.
+- The memory explorer answers as the owner over a real dashboard session:
+  `/summary`, `/rows`, `/projection` and `/documents` all 200, scoped to
+  `leo_owner`, with the fitted PCA map returning its points.
+
+**The dashboard login subject must be aliased to a principal.** The basic-auth
+provider mints sessions whose subject is the configured *username* (`admin`),
+which is not a principal — so every principal-scoped page answered
+`409 Authenticated, but no principal is enrolled for this user.` until:
+
+```bash
+hermes owner alias admin      # links the login subject to the owner principal
+```
+
+Identity lives in `app_prod` (`principals`, `principal_aliases`) regardless of
+the datastore mode, because channels and the web surface share one identity
+space; memories live in the *configured* mode's schema (`app_dev` here). Both
+facts are easy to trip over and neither is obvious from an error message.
 
 **Not verified: nobody has decrypted a bundle.** The box holds only the public
 recipient by design, so a restore can only be proved by the key holder. Until
@@ -139,7 +165,8 @@ compares, "we have backups" is a belief. Do this periodically, not once.
 ## Known gaps, stated plainly
 
 - **Data is not backed up.** The bundle holds credentials only. `state.db`,
-  session history and WhatsApp message archives are excluded — large, constantly
+  the layer-4 memory rows, the interaction ledger, session history and WhatsApp
+  message archives are excluded — large, constantly
   changing, and not what makes a rebuild impossible. Full-disk ECS snapshots are
   the right tool and are **not** set up.
 - **`/opt/data/backups` is not a backup system.** Manual snapshots, on the same
