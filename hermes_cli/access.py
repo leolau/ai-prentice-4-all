@@ -487,6 +487,11 @@ def reads_by_elevation(
 
 
 _VALID_COLUMN = re.compile(r"^[A-Za-z_][A-Za-z0-9_.]*$")
+#: A column name a policy builder will qualify itself, so it must NOT already
+#: carry a table prefix: passing ``"memory_projection.id"`` where ``"id"`` is
+#: expected yields ``memory_projection.memory_projection.id``, which Postgres
+#: rejects only when the policy is created — long after the typo.
+_VALID_BARE_COLUMN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _VALID_SCHEMA = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
@@ -594,8 +599,11 @@ async def apply_scope_rls(
         raise ValueError(f"Invalid table name: {table!r}")
     grant_clause = ""
     if grant_item_kind is not None:
-        if not _VALID_COLUMN.fullmatch(id_column):
-            raise ValueError(f"Invalid id_column: {id_column!r}")
+        if not _VALID_BARE_COLUMN.fullmatch(id_column):
+            raise ValueError(
+                f"Invalid id_column: {id_column!r} — pass the bare column "
+                f"name; the policy qualifies it with {table!r} itself"
+            )
         grant_clause = "\n                OR " + _grant_exists_sql(
             grant_item_kind,
             f"{table}.{id_column}",
@@ -603,8 +611,11 @@ async def apply_scope_rls(
         )
     elevation_clause = ""
     if role_elevation:
-        if not _VALID_COLUMN.fullmatch(owner_column):
-            raise ValueError(f"Invalid owner_column: {owner_column!r}")
+        if not _VALID_BARE_COLUMN.fullmatch(owner_column):
+            raise ValueError(
+                f"Invalid owner_column: {owner_column!r} — pass the bare "
+                f"column name; the policy qualifies it with {table!r} itself"
+            )
         elevated = _elevated_read_sql(
             f"{table}.{owner_column}",
             reader_id_expr=f"current_setting('{_GUC_ID}', true)",
