@@ -7,7 +7,7 @@ vi.mock("@/components/memory/MemoryMap", () => ({
   MemoryMap: () => null,
 }));
 
-import { MemoryView } from "@/components/memory/MemoryView";
+import { MemoryView, describeFailure } from "@/components/memory/MemoryView";
 import type { MemoryRowsResponse, MemorySummary } from "@/types";
 
 /** Decode HTML entities so `toContain` can match apostrophes etc. */
@@ -141,5 +141,17 @@ describe("MemoryView", () => {
       <MemoryView summary={SUMMARY} initialRows={ROWS} />,
     );
     expect(html).toContain("Search memories");
+  });
+});
+
+describe("describeFailure", () => {
+  it("says something actionable for each status a phone user can hit", () => {
+    // A failed refetch used to `return` silently: the button stopped working
+    // and the list stayed put, which reads as "no results" rather than
+    // "your session expired".
+    expect(describeFailure(401)).toMatch(/sign in/i);
+    expect(describeFailure(403)).toMatch(/access/i);
+    expect(describeFailure(409)).toMatch(/principal/i);
+    expect(describeFailure(502)).toMatch(/load/i);
   });
 });

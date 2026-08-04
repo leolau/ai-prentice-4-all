@@ -6,7 +6,6 @@ import type {
   MemoryProjection,
   MemoryProjectionPoint,
   MemoryQueryPlacement,
-  MemoryRow,
 } from "@/types";
 
 /**
@@ -70,23 +69,34 @@ export function computeViewBox(
   };
 }
 
+/**
+ * The SVG user-space the points are drawn in. `toViewBox` normalises data
+ * coordinates into it, so the `viewBox` attribute is this square and not the
+ * data extent — PCA coordinates live in roughly [-0.5, 0.5], and a viewBox in
+ * those units would leave every dot outside the frame.
+ */
+const VIEW_SIDE = 100;
+
 /** Map a data coordinate to viewBox-space [0, 100]. */
 function toViewBox(
   val: number,
   min: number,
   range: number,
 ): number {
-  return ((val - min) / range) * 100;
+  return ((val - min) / range) * VIEW_SIDE;
 }
 
+/**
+ * Draws the corpus and, when a query has been placed, dims everything but its
+ * nearest neighbours. The nearest *list* belongs to `MemoryView`, which owns
+ * the query box — rendering it here too showed it twice.
+ */
 export function MemoryMap({
   projection,
   queryResult,
-  rowMap,
 }: {
   projection: MemoryProjection;
   queryResult: MemoryQueryPlacement | null;
-  rowMap: Map<string, MemoryRow>;
 }) {
   const [selected, setSelected] = useState<MemoryProjectionPoint | null>(null);
 
@@ -103,7 +113,13 @@ export function MemoryMap({
   }
 
   const points = projection.points;
-  const vb = computeViewBox(points);
+  // The typed query is included in the extent so a placement that lands
+  // outside the corpus's spread is drawn rather than clipped off the frame.
+  const placed =
+    queryResult && queryResult.x != null && queryResult.y != null
+      ? [{ x: queryResult.x, y: queryResult.y }]
+      : [];
+  const vb = computeViewBox([...points, ...placed]);
 
   // --- Staleness banners (two different sentences) -----------------------
   let stalenessBanner: string | null = null;
@@ -150,7 +166,7 @@ export function MemoryMap({
       </p>
 
       <svg
-        viewBox={`${vb.minX} ${vb.minY} ${vb.w} ${vb.h}`}
+        viewBox={`0 0 ${VIEW_SIDE} ${VIEW_SIDE}`}
         className="w-full touch-none rounded-2xl border border-[var(--color-border)] bg-[var(--color-bg)]"
         style={{ aspectRatio: "1" }}
         preserveAspectRatio="xMidYMid meet"
@@ -238,32 +254,6 @@ export function MemoryMap({
         </div>
       )}
 
-      {/* Query nearest list (resolved against loaded rows) */}
-      {queryResult && queryResult.nearest.length > 0 && (
-        <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-2">
-          <p className="mb-1 text-xs font-medium text-[var(--color-muted)]">
-            Nearest memories
-          </p>
-          <ul className="space-y-0.5">
-            {queryResult.nearest.slice(0, 5).map((n) => {
-              const row = rowMap.get(n.id);
-              return (
-                <li
-                  key={n.id}
-                  className="flex items-baseline gap-2 text-xs"
-                >
-                  <span className="font-mono text-[var(--color-muted)]">
-                    {n.score.toFixed(3)}
-                  </span>
-                  <span className="truncate">
-                    {row ? row.text.slice(0, 60) : n.id}
-                  </span>
-                </li>
-              );
-            })}
-          </ul>
-        </div>
-      )}
     </div>
   );
 }

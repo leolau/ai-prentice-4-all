@@ -256,7 +256,7 @@ def deployment(tmp_path, monkeypatch):
         "systest-fixture",
         home,
         units,
-        "hermes-*",
+        ["hermes-*"],
         None,
         ["creds/*.json"],
     )
@@ -335,6 +335,50 @@ def test_an_edited_systemd_unit_is_drift(deployment):
     assert "differs from the repo copy" in findings[0]["actual"]
 
 
+def test_the_default_globs_capture_the_unit_that_is_not_named_hermes(
+    tmp_path, monkeypatch
+):
+    """`agent-home.service` serves the phone and is not named `hermes-*`.
+
+    FG-23 A0: with a single `hermes-*` glob the drift check was structurally
+    blind to it — a clean report said nothing about the one service on the box
+    running from a different checkout.
+    """
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / "config.yaml").write_text(yaml.safe_dump(LIVE_CONFIG), encoding="utf-8")
+    (home / ".env").write_text(ENV_TEXT, encoding="utf-8")
+    units = tmp_path / "systemd"
+    units.mkdir()
+    (units / "hermes-gateway.service").write_text(
+        "[Service]\nUser=hermes\n", encoding="utf-8"
+    )
+    (units / "agent-home.service").write_text(
+        "[Service]\nUser=hermes\n", encoding="utf-8"
+    )
+    (units / "unrelated.service").write_text(
+        "[Service]\nUser=root\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(ds, "DEPLOY_ROOT", tmp_path / "deploy")
+
+    ds.capture("globs", home, units, list(ds.DEFAULT_UNIT_GLOBS), None, [])
+
+    manifest = yaml.safe_load(
+        (tmp_path / "deploy" / "globs" / ds.MANIFEST_NAME).read_text(encoding="utf-8")
+    )
+    assert set(manifest["units"]) == {
+        "hermes-gateway.service",
+        "agent-home.service",
+    }
+
+    # And an edit to it is now reported, which is the property that matters.
+    (units / "agent-home.service").write_text(
+        "[Service]\nUser=root\n", encoding="utf-8"
+    )
+    findings = ds.check("globs")
+    assert [f["component"] for f in findings] == ["unit:agent-home.service"]
+
+
 def test_a_new_secret_on_the_box_is_a_note_not_drift(deployment):
     """Adding a secret is normal; the report should say "capture this" rather
     than fail the weekly run."""
@@ -395,7 +439,7 @@ def test_secrets_out_is_owner_only_and_renders_the_live_config(tmp_path, monkeyp
     monkeypatch.setattr(ds, "DEPLOY_ROOT", tmp_path / "deploy")
 
     secrets_file = tmp_path / "state-secrets.env"
-    ds.capture("roundtrip", home, units, "hermes-*", None, [], secrets_file)
+    ds.capture("roundtrip", home, units, ["hermes-*"], None, [], secrets_file)
 
     assert stat.S_IMODE(os.stat(secrets_file).st_mode) == 0o600
     snapshot = yaml.safe_load(
@@ -423,7 +467,7 @@ def test_state_can_live_outside_this_repo(tmp_path, monkeypatch):
     elsewhere = tmp_path / "private-store"
     monkeypatch.setattr(ds, "DEPLOY_ROOT", tmp_path / "repo-deploy")
 
-    ds.capture("offsite", home, units, "hermes-*", None, [], None, elsewhere)
+    ds.capture("offsite", home, units, ["hermes-*"], None, [], None, elsewhere)
 
     assert (elsewhere / "offsite" / ds.SNAPSHOT_NAME).is_file()
     assert not (tmp_path / "repo-deploy").exists()

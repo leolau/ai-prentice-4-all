@@ -766,7 +766,44 @@ class TestV5Sampling:
 
     @pytest.mark.asyncio
     async def test_limit_cap_enforced(self, postgres_dsn, monkeypatch):
-        """A limit above the hard cap (20 000) is clamped down."""
+        """A limit above the hard cap samples at the cap, not at the ask.
+
+        Asserted where it is observable: with more points than the cap the
+        response must be sampled *to the cap*. A corpus smaller than the cap
+        cannot distinguish a clamped limit from an unclamped one.
+        """
+        await _reset(postgres_dsn)
+        store = _make_store(postgres_dsn)
+        await store.initialize()
+        await _enroll_principals(store)
+
+        for i in range(5):
+            await store.write(ALICE, f"memory number {i}")
+
+        _patch_projection_store(monkeypatch, store)
+        from hermes_cli.memory_projection import fit_projection
+        await fit_projection(store, algorithm="pca", sample_size=20000)
+
+        _patch_store(monkeypatch, store)
+        client = _make_client(monkeypatch, ALICE)
+
+        from hermes_cli import memory_explorer
+        monkeypatch.setattr(memory_explorer, "_PROJECTION_MAX_LIMIT", 2)
+        proj = client.get("/api/memory/explorer/projection?limit=99999").json()
+        assert proj.get("sampled") is True
+        assert proj.get("total_points") == 5
+        assert len(proj["points"]) == 2, "the ask must be clamped to the cap"
+
+    @pytest.mark.asyncio
+    async def test_degenerate_limits_do_not_empty_the_map(
+        self, postgres_dsn, monkeypatch
+    ):
+        """``limit=0`` and a negative limit must not blank the map or 500.
+
+        ``LIMIT 0`` would return an empty point set flagged ``sampled``, which
+        the phone renders as "no memories" — a lie. A negative limit is a
+        Postgres error, i.e. a 500 from a query string.
+        """
         await _reset(postgres_dsn)
         store = _make_store(postgres_dsn)
         await store.initialize()
@@ -782,7 +819,81 @@ class TestV5Sampling:
         _patch_store(monkeypatch, store)
         client = _make_client(monkeypatch, ALICE)
 
-        # 99999 is above the hard cap — should be clamped to 20000.
-        proj = client.get("/api/memory/explorer/projection?limit=99999").json()
-        # Only 3 points exist, so no sampling needed; the cap just bounds it.
-        assert len(proj["points"]) == 3
+        for bad in ("0", "-1"):
+            resp = client.get(f"/api/memory/explorer/projection?limit={bad}")
+            assert resp.status_code == 200, f"limit={bad} must not 500"
+            assert resp.json()["points"], f"limit={bad} must not blank the map"
+
+    @pytest.mark.asyncio
+    async def test_sample_is_taken_after_the_scope_filter(
+        self, postgres_dsn, monkeypatch
+    ):
+        """Sampling must not let invisible rows crowd out a principal's own.
+
+        The sample runs *after* the scope predicate, so a member asking for N
+        points gets N of the points they may see — not N drawn from everyone's
+        rows and then filtered down to whatever survives.
+        """
+        await _reset(postgres_dsn)
+        store = _make_store(postgres_dsn)
+        await store.initialize()
+        await _enroll_principals(store)
+
+        for i in range(3):
+            await store.write(ALICE, f"alice private {i}", visibility="private")
+        for i in range(40):
+            await store.write(OWNER, f"owner private {i}", visibility="private")
+
+        _patch_projection_store(monkeypatch, store)
+        from hermes_cli.memory_projection import fit_projection
+        await fit_projection(store, algorithm="pca", sample_size=20000)
+
+        _patch_store(monkeypatch, store)
+        client = _make_client(monkeypatch, ALICE)
+
+        proj = client.get("/api/memory/explorer/projection?limit=2").json()
+        assert proj.get("total_points") == 3, "the count is scoped, not global"
+        assert len(proj["points"]) == 2
+        owners = {p["owner_user_id"] for p in proj["points"]}
+        assert owners == {ALICE.user_id}, f"leaked other owners: {owners}"
+
+    @pytest.mark.asyncio
+    async def test_query_is_exact_over_the_unsampled_corpus(
+        self, postgres_dsn, monkeypatch
+    ):
+        """A visually sampled map must not narrow the nearest-neighbour search.
+
+        Sampling is a drawing budget. ``/projection/query`` still runs over
+        every row the principal may see, so the nearest hit can be a memory
+        that was not drawn.
+        """
+        await _reset(postgres_dsn)
+        store = _make_store(postgres_dsn)
+        await store.initialize()
+        await _enroll_principals(store)
+
+        for i in range(5):
+            await store.write(ALICE, f"memory number {i}")
+
+        _patch_projection_store(monkeypatch, store)
+        from hermes_cli.memory_projection import fit_projection
+        await fit_projection(store, algorithm="pca", sample_size=20000)
+
+        _patch_store(monkeypatch, store)
+        client = _make_client(monkeypatch, ALICE)
+
+        drawn = {
+            p["id"]
+            for p in client.get(
+                "/api/memory/explorer/projection?limit=2"
+            ).json()["points"]
+        }
+        placed = client.post(
+            "/api/memory/explorer/projection/query",
+            json={"text": "memory number 4"},
+        )
+        assert placed.status_code == 200
+        nearest = placed.json()["nearest"]
+        assert len(nearest) > len(drawn), (
+            "the query searched the sample, not the corpus"
+        )

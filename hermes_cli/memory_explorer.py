@@ -20,6 +20,11 @@ router = APIRouter(prefix="/api/memory/explorer")
 _MAX_TEXT_CHARS = 2000
 _MAX_LIMIT = 200
 
+# Drawing budget for the projection map (FG-23 §6), not a page size: the
+# default is what a phone can render, the cap is what the wire can carry.
+_PROJECTION_LIMIT = 5000
+_PROJECTION_MAX_LIMIT = 20000
+
 # Simple in-memory token bucket for query-placement rate limiting (V3).
 _query_rate_limit: dict[str, float] = {}
 _RATE_LIMIT_SECONDS = 3.0
@@ -699,8 +704,17 @@ async def get_projection(
         )
 
         # Sampling (FG-23 §6): count total scope-visible rows, then if they
-        # exceed the limit, fetch a deterministic subset via hashtext.
-        limit_val = min(int(limit) if limit is not None else 5000, 20000)
+        # exceed the limit, fetch a deterministic subset via hashtext. Clamped
+        # low as well as high, like ``/rows``: ``LIMIT 0`` draws an empty map
+        # and flags it ``sampled``, which reads as "no memories", and a
+        # negative limit is a Postgres error reachable from a query string.
+        limit_val = max(
+            1,
+            min(
+                int(limit) if limit is not None else _PROJECTION_LIMIT,
+                _PROJECTION_MAX_LIMIT,
+            ),
+        )
 
         # A dot's position plus its hover label *is* the memory, so the map is
         # read under the same two gates as a row: policy bound in-transaction,
