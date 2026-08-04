@@ -25,7 +25,7 @@ User=hermes
 Group=hermes
 WorkingDirectory=/opt/data/hermes-agent
 Environment=HERMES_HOME=/opt/data/hermes-home-staging
-ExecStart=/opt/data/hermes-agent/venv/bin/hermes memory rag \
+ExecStart=/opt/data/hermes-agent/.venv/bin/hermes memory rag \
     --as leo_owner ingest-drive --limit 100
 
 # Embedding is the expensive step and the gateway shares these 4 vCPUs. Losing

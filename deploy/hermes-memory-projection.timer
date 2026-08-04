@@ -1,0 +1,15 @@
+; Nightly, before the Drive ingestion pass at 03:20, so the map already
+; reflects yesterday's memories when a backfill starts adding chunks to it.
+
+[Unit]
+Description=Nightly Hermes memory projection fit
+
+[Timer]
+OnCalendar=*-*-* 03:00:00
+RandomizedDelaySec=10m
+; A box that was off at 03:00 still catches up, once, rather than skipping a day.
+Persistent=true
+Unit=hermes-memory-projection.service
+
+[Install]
+WantedBy=timers.target
