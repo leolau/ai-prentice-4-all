@@ -192,6 +192,54 @@ async def test_rows_written_before_provenance_existed_are_labelled_hashing(
     assert space.rows_by_model == {"hashing": 1}
 
 
+@pytest.mark.asyncio
+async def test_status_and_reembed_work_before_any_session_has_initialized(
+    postgres_dsn: str,
+) -> None:
+    """The operator runs these *first*, on a table that predates provenance.
+
+    On a live deployment the column is added when the agent next initializes,
+    which is after the cutover, not before it — so both commands have to add it
+    themselves or they fail on a raw "column does not exist" while reporting
+    the very state they exist to fix.
+    """
+    await _reset(postgres_dsn)
+    store = _store(postgres_dsn, HashingEmbedder(dim=256))
+    await store.initialize()
+    await store.write(ALICE, "the tender closes on 14 March")
+
+    conn = await store._connect()
+    try:
+        await conn.execute(
+            f"ALTER TABLE {MEMORY_TABLE} DROP COLUMN embedding_model"
+        )
+    finally:
+        await conn.close()
+
+    # No initialize() in between: this is a freshly deployed operator command.
+    pre = _store(postgres_dsn, HashingEmbedder(dim=256))
+    assert (await pre.describe_space()).rows_by_model == {"hashing": 1}
+
+    semantic = _store(postgres_dsn, _StubSemanticEmbedder(dim=8))
+    assert await semantic.reembed() == 1
+    assert (await semantic.describe_space()).rows_by_model == {
+        "stub/semantic-8": 1
+    }
+
+
+@pytest.mark.asyncio
+async def test_status_reports_an_uncreated_table_instead_of_raising(
+    postgres_dsn: str,
+) -> None:
+    await _reset(postgres_dsn)
+    store = _store(postgres_dsn, HashingEmbedder(dim=256))
+
+    space = await store.describe_space()
+    assert space.column_dim is None
+    assert space.rows_by_model == {}
+    assert await store.reembed() == 0
+
+
 # ---------------------------------------------------------------------------
 # Mismatch fails loudly
 # ---------------------------------------------------------------------------

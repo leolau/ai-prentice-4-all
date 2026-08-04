@@ -87,6 +87,17 @@ CREATE INDEX IF NOT EXISTS {MEMORY_AUDIT_TABLE}_reader_idx
 #: reader cannot delete from.
 _AUDIT_QUERY_CHARS = 500
 
+#: Rows written before provenance existed were produced by the hashing
+#: embedder, which is exactly what the column default states. Backfilling them
+#: as 'hashing' is a statement of fact, not a guess. Separate from the table
+#: DDL because the migration commands need it on its own, before any session
+#: has created the rest of the schema.
+_PROVENANCE_COLUMN_SQL = f"""
+ALTER TABLE {MEMORY_TABLE}
+    ADD COLUMN IF NOT EXISTS embedding_model TEXT NOT NULL
+    DEFAULT '{HASHING_MODEL_ID}';
+"""
+
 
 def _schema_sql(dim: int) -> str:
     return f"""
@@ -107,12 +118,7 @@ CREATE TABLE IF NOT EXISTS {MEMORY_TABLE} (
     uses INTEGER NOT NULL DEFAULT 0
 );
 
--- Rows written before provenance existed were produced by the hashing
--- embedder, which is exactly what the column default states. Backfilling them
--- as 'hashing' is a statement of fact, not a guess.
-ALTER TABLE {MEMORY_TABLE}
-    ADD COLUMN IF NOT EXISTS embedding_model TEXT NOT NULL
-    DEFAULT '{HASHING_MODEL_ID}';
+{_PROVENANCE_COLUMN_SQL}
 
 CREATE INDEX IF NOT EXISTS {MEMORY_TABLE}_embedding_idx
     ON {MEMORY_TABLE} USING hnsw (embedding vector_cosine_ops);
@@ -441,6 +447,32 @@ class PgvectorMemoryStore:
             if own:
                 await conn.close()
 
+    async def _add_provenance_column(self, conn: "asyncpg.Connection") -> None:
+        """Make sure ``embedding_model`` exists before anything reads it.
+
+        A deployment whose table predates provenance gains the column when the
+        agent next initializes. The migration commands are what an operator
+        runs *first*, before any session has opened, so they cannot assume
+        that has happened: without this they fail on a raw "column does not
+        exist" rather than reporting the very state they exist to fix.
+
+        Deliberately not ``initialize()``: that asserts the column width is
+        usable, which is false by construction mid-cutover — exactly when
+        ``reembed`` must run.
+        """
+        if not await self._table_exists(conn):
+            return
+        await conn.execute(_PROVENANCE_COLUMN_SQL)
+
+    async def _table_exists(self, conn: "asyncpg.Connection") -> bool:
+        return (
+            await conn.fetchval(
+                "SELECT to_regclass(current_schema() || '.' || $1)",
+                MEMORY_TABLE,
+            )
+            is not None
+        )
+
     async def _column_dim(self, conn: "asyncpg.Connection") -> Optional[int]:
         """Width the ``embedding`` column is actually declared with.
 
@@ -479,6 +511,9 @@ class PgvectorMemoryStore:
         try:
             if not own:
                 await self._prepare_connection(conn)
+            if not await self._table_exists(conn):
+                return EmbeddingSpace(column_dim=None, rows_by_model={})
+            await self._add_provenance_column(conn)
             rows = await conn.fetch(
                 f"SELECT embedding_model, COUNT(*) AS n "
                 f"FROM {MEMORY_TABLE} GROUP BY embedding_model"
@@ -536,6 +571,9 @@ class PgvectorMemoryStore:
         try:
             if not own:
                 await self._prepare_connection(conn)
+            if not await self._table_exists(conn):
+                return 0
+            await self._add_provenance_column(conn)
             rows = await conn.fetch(
                 f"SELECT id, text FROM {MEMORY_TABLE} ORDER BY created_at"
             )
