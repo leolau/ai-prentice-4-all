@@ -22,10 +22,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
-from typing import TYPE_CHECKING, List, Optional
+from typing import TYPE_CHECKING, Callable, List, Optional
 
 from hermes_cli.access import (
-    GRANT_ACTIVE_STATUSES,
     GUC_PRINCIPAL_ID,
     GUC_PRINCIPAL_ROLE,
     ITEM_GRANTS_SCHEMA_SQL,
@@ -36,9 +35,11 @@ from hermes_cli.access import (
     apply_scope_rls,
     bind_elevated_reads,
     bind_principal,
+    grant_item,
     initialize_access,
     normalize_visibility,
     reads_by_elevation,
+    revoke_item_grant,
     scope_filter,
 )
 
@@ -334,6 +335,17 @@ class PgvectorMemoryStore:
         """The vector space this store reads and writes."""
         return self._embedder.model_id
 
+    @property
+    def embedder(self) -> Embedder:
+        """The resolved embedder, so sibling tiers share one vector space.
+
+        The RAG tier (FG-21 P4) embeds with *this* embedder rather than
+        resolving its own: two tiers on two models would each be internally
+        consistent and mutually meaningless, and one re-embed would fix only
+        half the instance.
+        """
+        return self._embedder
+
     async def _prepare_connection(
         self, connection: "asyncpg.Connection"
     ) -> "asyncpg.Connection":
@@ -380,6 +392,16 @@ class PgvectorMemoryStore:
 
     async def _connect(self) -> "asyncpg.Connection":
         connection = await self._store.connect()
+        return await self._prepare_connection(connection)
+
+    async def connect(self) -> "asyncpg.Connection":
+        """A vector-ready connection on this store's schema (caller closes it)."""
+        return await self._connect()
+
+    async def prepare_connection(
+        self, connection: "asyncpg.Connection"
+    ) -> "asyncpg.Connection":
+        """Make a caller-owned connection vector-ready. Idempotent."""
         return await self._prepare_connection(connection)
 
     async def initialize(
@@ -493,7 +515,7 @@ class PgvectorMemoryStore:
         self,
         *,
         batch_size: int = 16,
-        progress: Optional[object] = None,
+        progress: Optional[Callable[[int, int], None]] = None,
         connection: Optional["asyncpg.Connection"] = None,
     ) -> int:
         """Re-embed every row with the configured embedder. Returns row count.
@@ -530,7 +552,7 @@ class PgvectorMemoryStore:
                 )
                 ids.extend(row["id"] for row in chunk)
                 vectors.extend(embedded)
-                if callable(progress):
+                if progress is not None:
                     progress(len(ids), len(rows))
 
             async with conn.transaction():
@@ -929,19 +951,12 @@ class PgvectorMemoryStore:
             )
             if owner is None or str(owner) != principal.user_id:
                 return False
-            await conn.execute(
-                f"""
-                INSERT INTO {ITEM_GRANTS_TABLE}
-                    (item_kind, item_id, user_id, grant_type, granted_by,
-                     status)
-                VALUES ($1, $2::uuid, $3, 'watcher', $4, 'accepted')
-                ON CONFLICT (item_kind, item_id, user_id) DO UPDATE
-                    SET status = 'accepted', updated_at = NOW()
-                """,
-                GRANT_ITEM_KIND,
-                memory_id,
-                grantee_user_id,
-                principal.user_id,
+            await grant_item(
+                conn,
+                item_kind=GRANT_ITEM_KIND,
+                item_id=memory_id,
+                user_id=grantee_user_id,
+                granted_by=principal.user_id,
             )
             return True
         finally:
@@ -967,22 +982,13 @@ class PgvectorMemoryStore:
         try:
             if not own:
                 await self._prepare_connection(conn)
-            statuses = list(GRANT_ACTIVE_STATUSES)
-            revoked = await conn.fetchval(
-                f"""
-                UPDATE {ITEM_GRANTS_TABLE} SET status = 'revoked',
-                       updated_at = NOW()
-                WHERE item_kind = $1 AND item_id = $2::uuid AND user_id = $3
-                  AND granted_by = $4 AND status = ANY($5::text[])
-                RETURNING id
-                """,
-                GRANT_ITEM_KIND,
-                memory_id,
-                grantee_user_id,
-                principal.user_id,
-                statuses,
+            return await revoke_item_grant(
+                conn,
+                item_kind=GRANT_ITEM_KIND,
+                item_id=memory_id,
+                user_id=grantee_user_id,
+                granted_by=principal.user_id,
             )
-            return revoked is not None
         finally:
             if own:
                 await conn.close()

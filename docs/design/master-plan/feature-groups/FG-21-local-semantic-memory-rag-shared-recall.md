@@ -458,7 +458,7 @@ only.
 | **P1** | Embedding service — **done, numbers in §7.5** | `scripts/embedding_server.py` + tracked `deploy/hermes-embed.service` (loopback, unprivileged, revision-pinned); `local_http` embedder behind `memory.embedding.*`; hashing stays default | benchmark recorded; wrong-model and wrong-width requests refused, not stored |
 | **P2** | Semantic layer 4 — **done, §8.1** | `embedding_model` per row; mismatch refused at startup; `hermes memory vectors status/reembed` (one transaction, index rebuilt); automatic recall in `prefetch()` with budget; `uses`/`last_used`; opt-in dedup | cross-model rows excluded from recall, not ranked; failed re-embed leaves the old space intact; prompt-prefix byte-stability test green |
 | **P3** | Shared recall — **done, §8.2** | role-scoped downward elevation (`memory.sharing.role_reads`, default off) + matching RLS; `item_grants` extended with a `memory` kind; provenance labels; audit ledger readable by reader *and* subject; `hermes memory sharing audit/share` | full negative-access matrix (member/member, admin/admin, admin→member off and on, grantee, unbound elevation) asserted at the **RLS** level as well as the app level |
-| **P4** | RAG | `rag_documents` / `rag_chunks` + RLS; Drive + session ingestion; nightly timer; `rag_search` with citations | answer-with-citation on 3 real Drive docs; no private→shared laundering (test) |
+| **P4** | RAG — **storage, retrieval and Drive ingestion done, §8.3** | `rag_documents` / `rag_chunks` + RLS; heading-aware chunking; hybrid vector+lexical retrieval with citations; all-of-Drive ingestion (staged, nightly timer); `rag_search` tool; `hermes memory rag` | answer-with-citation; no private→shared laundering (test); session/interaction ingestion still open |
 | **P5** | Consolidation | layer-1 promotion/demotion; email/WhatsApp ingestion (teams dropped — §10.5) | layer 1 back under budget without losing facts |
 
 Nothing here needs a new core tool, a new `HERMES_*` env var for behaviour, or a
@@ -560,6 +560,78 @@ Still off by default. Enabling it on the box is a config change plus a review,
 and it is worth noting the ladder is currently a hierarchy of one: `leo_owner`
 is the only enrolled principal, so nothing changes behaviourally until a second
 person is enrolled.
+
+### 8.3 P4 as built
+
+Storage, retrieval and Drive ingestion. Session-transcript and interaction-ledger
+ingestion are deliberately *not* in this phase — the Drive corpus is what makes
+retrieval useful today, and each new source is its own extraction and retention
+question.
+
+1. **Documents inherit nothing from the account that could see them.** A file
+   merely shared *with* a Google account is not a file the instance may read, so
+   ingestion writes `private:<ingesting principal>` and there is no
+   “ingest as shared” switch. Access afterwards is memory's access, exactly:
+   downward role read, or an explicit per-document grant. `item_grants` gained a
+   `document` kind for the sideways case, and the CHECK constraint is replaced on
+   every `initialize()` so a deployment created before the kind existed widens
+   rather than rejecting.
+
+2. **A grant on a document reaches its chunks, and only its chunks.** The chunk
+   policy correlates the grant sub-select on `document_id` rather than on the
+   chunk's own id — without that, sharing a document would confer access to
+   nothing (its chunks are not the granted row) and the failure would be silent.
+   Asserted at the RLS level under a `NOBYPASSRLS` role, not just through the app
+   filter.
+
+3. **The lexical arm indexes title + heading path + body, not body alone.** A
+   tender number lives in the *title*; a lexical arm over body text therefore
+   could not find a document by its own identifier — precisely the case the arm
+   exists for. The `tsvector` is computed at insert time and stored, so the GIN
+   index serves the query instead of every row being re-tokenised per search.
+   `'simple'`, not `'english'`: the corpus is bilingual and a stemmer mangles
+   identifiers.
+
+4. **The vector arm has a similarity floor; the lexical arm needs none.** An HNSW
+   search always returns its `LIMIT`, so without a floor every question retrieves
+   its least-unrelated passages and the model is handed irrelevant text as
+   evidence — the same lesson as automatic recall in P2. A `tsquery` either
+   matches or does not. The floor comes from config, never from the model: a floor
+   the model can set is a floor it will set to zero when it wants more results.
+
+5. **Chunking is heading-aware and multilingual.** ~512-token chunks with ~64
+   tokens of sentence-boundary overlap, never spanning a heading, with the heading
+   path kept as the citation (`Tender 2026-0418 › 2. Submission`). Token
+   estimation counts CJK characters as ~1 token and Latin text as ~1 per 4
+   characters, because a character-count budget silently produces 3× oversized
+   chunks for Chinese.
+
+6. **Ingestion is bounded, resumable, and honest about what it cannot read.**
+   `--limit` counts documents ingested or confirmed unchanged — not files listed,
+   so a folder of photographs cannot consume a run's budget. Unchanged content is
+   detected by hash and costs nothing, so a nightly pass that has caught up is
+   nearly free and an interrupted run resumes. A model change counts as a content
+   change, because vectors are only comparable within one model. PDFs and images
+   are skipped and counted, rather than stored as decoded bytes: a chunk of
+   mojibake still retrieves, and a citation to garbage is worse than none.
+
+7. **“All of Drive” is three flags, and two of them are the ones people miss.**
+   `includeItemsFromAllDrives`, `supportsAllDrives` and `corpora=allDrives`;
+   without them Drive returns only files the account *owns*, which looks like a
+   working ingestion. Accounts are discovered from the Workspace MCP credential
+   directory rather than config, so connecting an account is completing consent,
+   and naming an account with no credential file is an error rather than a silent
+   no-op. The Drive client is stdlib-only: `hermes-agent[google]` is an optional
+   extra, and a nightly timer should not fail on a box where it was never
+   installed.
+
+8. **`rag_search` is off by default.** Enabling it adds a tool schema to every API
+   call for the life of a conversation; on an empty corpus it can only answer
+   “nothing found”. Ingest first, then set `memory.rag.enabled`.
+
+Operational detail is in `docs/deployment/rag-ingestion.md`; the units are tracked
+at `deploy/hermes-rag-ingest.{service,timer}` so drift shows up in the weekly
+check.
 
 ## 9. Operational plan
 

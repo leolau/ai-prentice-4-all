@@ -145,9 +145,10 @@ def test_scope_filter_rejects_unsafe_column() -> None:
 
 
 def test_grant_vocabulary_is_the_locked_set() -> None:
-    # 'memory' joined the set in FG-21 P3: one shared memory row is the
-    # sideways case the role ladder deliberately does not cover.
-    assert GRANT_ITEM_KINDS == ("goal", "task", "memory")
+    # 'memory' joined the set in FG-21 P3 and 'document' in P4: one shared row,
+    # or one shared ingested document, is the sideways case the role ladder
+    # deliberately does not cover.
+    assert GRANT_ITEM_KINDS == ("goal", "task", "memory", "document")
     assert GRANT_TYPES == ("assignee", "watcher")
     assert GRANT_STATUSES == ("pending", "accepted", "declined", "revoked")
     # Only pending/accepted grants confer visibility.
