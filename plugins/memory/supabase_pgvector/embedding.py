@@ -44,6 +44,12 @@ DEFAULT_DIM = 256
 _TOKEN_RE = re.compile(r"[a-z0-9]+")
 
 
+#: Recorded on every row this embedder writes. Vectors are only comparable
+#: within one model, so the identifier is what makes a later model change
+#: detectable instead of silently ruining every distance in the column.
+HASHING_MODEL_ID = "hashing"
+
+
 @runtime_checkable
 class Embedder(Protocol):
     """Turns text into a fixed-length embedding vector."""
@@ -53,8 +59,23 @@ class Embedder(Protocol):
         """Dimension of every vector this embedder produces."""
         ...
 
+    @property
+    def model_id(self) -> str:
+        """Identifies the vector space these embeddings live in.
+
+        Stored per row. Two vectors are comparable only when their
+        ``model_id`` matches: cosine distance between different models'
+        vectors is a number with no meaning, and nothing about the data looks
+        wrong afterwards.
+        """
+        ...
+
     def embed(self, text: str) -> List[float]:
         """Return the embedding for ``text`` (length == :attr:`dim`)."""
+        ...
+
+    def embed_batch(self, texts: List[str]) -> List[List[float]]:
+        """Embed several texts at once (one round trip / forward pass)."""
         ...
 
 
@@ -78,6 +99,13 @@ class HashingEmbedder:
     @property
     def dim(self) -> int:
         return self._dim
+
+    @property
+    def model_id(self) -> str:
+        return HASHING_MODEL_ID
+
+    def embed_batch(self, texts: List[str]) -> List[List[float]]:
+        return [self.embed(text) for text in texts]
 
     def embed(self, text: str) -> List[float]:
         vec = [0.0] * self._dim
@@ -140,6 +168,10 @@ class LocalHttpEmbedder:
     @property
     def model(self) -> str:
         return self._model
+
+    @property
+    def model_id(self) -> str:
+        return self._model or "local_http"
 
     def embed(self, text: str) -> List[float]:
         return self.embed_batch([text])[0]

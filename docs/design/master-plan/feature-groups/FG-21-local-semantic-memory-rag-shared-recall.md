@@ -455,14 +455,183 @@ only.
 |---|---|---|---|
 | **P0** | Identity is real — **done** | `hermes member link-channel`; role stamped by `bind_channel_principal` and threaded to the memory provider; role never persisted | one human = one principal across channels; unresolved → `member`; negative-access tests unchanged |
 | **P0b** | Existing rows — **done** | 28 rows migrated `8756039695` → `leo_owner`; `telegram:8756039695` linked; pre-migration `pg_dump` kept and restore-verified into a scratch schema first | embeddings byte-identical to the pre-migration copy; 0 rows left behind; unlinked sender still resolves to nothing |
-| **P1** | Embedding service — **done, numbers in §7.5** | `scripts/embedding_server.py` + `hermes-embed.service` (loopback, unprivileged, revision-pinned); `local_http` embedder behind `memory.embedding.*`; hashing stays default; **not cut over** (needs P2's re-embed) | benchmark recorded; wrong-model and wrong-width requests refused, not stored |
-| **P2** | Semantic layer 4 | model/dim columns + migration + `hermes memory reembed`; recall in `prefetch()` with budget; `uses`/`last_used`; dedup | `recall@3` on the probe set ≥ agreed floor; prompt-prefix byte-stability test green |
-| **P3** | Shared recall | role-scoped elevation (config, default off) + RLS; `item_grants` for memories; provenance labels; `memory_read_elevated` audit | full negative-access matrix (member/member, admin off/on, grantee) at the **RLS** level, not just app level |
-| **P4** | RAG | `rag_documents` / `rag_chunks` + RLS; Drive + session ingestion; nightly timer; `rag_search` with citations | answer-with-citation on 3 real Drive docs; no private→shared laundering (test) |
+| **P1** | Embedding service — **done, numbers in §7.5** | `scripts/embedding_server.py` + tracked `deploy/hermes-embed.service` (loopback, unprivileged, revision-pinned); `local_http` embedder behind `memory.embedding.*`; hashing stays default | benchmark recorded; wrong-model and wrong-width requests refused, not stored |
+| **P2** | Semantic layer 4 — **done, §8.1** | `embedding_model` per row; mismatch refused at startup; `hermes memory vectors status/reembed` (one transaction, index rebuilt); automatic recall in `prefetch()` with budget; `uses`/`last_used`; opt-in dedup | cross-model rows excluded from recall, not ranked; failed re-embed leaves the old space intact; prompt-prefix byte-stability test green |
+| **P3** | Shared recall — **done, §8.2** | role-scoped downward elevation (`memory.sharing.role_reads`, default off) + matching RLS; `item_grants` extended with a `memory` kind; provenance labels; audit ledger readable by reader *and* subject; `hermes memory sharing audit/share` | full negative-access matrix (member/member, admin/admin, admin→member off and on, grantee, unbound elevation) asserted at the **RLS** level as well as the app level |
+| **P4** | RAG — **storage, retrieval and Drive ingestion done, §8.3** | `rag_documents` / `rag_chunks` + RLS; heading-aware chunking; hybrid vector+lexical retrieval with citations; all-of-Drive ingestion (staged, nightly timer); `rag_search` tool; `hermes memory rag` | answer-with-citation; no private→shared laundering (test); session/interaction ingestion still open |
 | **P5** | Consolidation | layer-1 promotion/demotion; email/WhatsApp ingestion (teams dropped — §10.5) | layer 1 back under budget without losing facts |
 
 Nothing here needs a new core tool, a new `HERMES_*` env var for behaviour, or a
 change to the frozen-snapshot semantics.
+
+### 8.1 P2 as built
+
+Three decisions here were not obvious from the plan and are worth recording,
+because each one exists to prevent an *invisible* failure:
+
+1. **Provenance is per row, and mismatches are refused rather than ranked.**
+   Cosine distance between two models' vectors is a well-formed number with no
+   meaning, so a mixed column returns plausible rows in a meaningless order and
+   looks entirely healthy. Recall therefore filters on `embedding_model`, and a
+   *dimension* change refuses at `initialize()` with the remedy in the message —
+   the alternative was an asyncpg type error on every write, which names the
+   symptom and not the cause. Rows written before the column existed are
+   backfilled as `hashing`, which is a statement of fact: that is what embedded
+   them.
+
+2. **The re-embed is one transaction, and embedding happens outside it.**
+   All-or-nothing, because a half-migrated column is the exact state this phase
+   exists to prevent; and embedded up-front, because holding a write transaction
+   open across minutes of CPU at ~300 ms per row would block live sessions
+   behind the migration. pgvector cannot widen `vector(N)` in place, so the
+   column is replaced and the HNSW index rebuilt — without that rebuild, recall
+   silently degrades to a sequential scan.
+
+3. **Dedup is opt-in per write, not global.** This was found by a failing test,
+   not by design: task discovery decides a standing request is a task by
+   *counting how often the same intent recurs*, so collapsing identical rows
+   made a request the user repeated three times never cross its threshold. An
+   improvement to one writer had quietly disabled a different feature. Only
+   callers that pass a threshold (the `memory_write` tool, at 0.97) get dedup,
+   and dedup is per owner — two people knowing the same fact is two memories.
+
+Automatic recall is budgeted (`top_k`, `min_score`, `max_chars`, plus a minimum
+query length so "ok" does not spend a search) and reaches the model through the
+existing `prefetch()` seam, which `conversation_loop.py` appends to the current
+user message at API-call time from a copy. The cached prefix and the stored
+conversation are untouched.
+
+`min_score` is load-bearing rather than cosmetic: an HNSW search always returns
+`top_k` rows, so without a floor every turn recalls its least-unrelated
+memories. On the current hashing vectors an unrelated question still scores
+~0.2 on an incidental shared token.
+
+Still true after P2: the live column is **256-dim hashing**. Cutover is a
+deliberate two-step act on the box — edit `memory.embedding`, then
+`hermes memory vectors reembed` — and until it is run, `local_http` is
+configured-but-not-cut-over.
+
+### 8.2 P3 as built
+
+The decision was **read down only** (§10.2) and **one person = one role** (§10.5),
+so the whole access rule is a rank comparison: `owner > admin > member > viewer`,
+readable strictly downward. What that left to design was everything around it.
+
+1. **The subject's role is looked up, never carried on the row.** The elevated
+   clause is a correlated `EXISTS` against `principals`, in both the app filter
+   and the policy. Copying a role onto each memory would be faster and wrong: a
+   demotion has to take effect on the next read, not on rows written afterwards.
+   An owner nobody enrolled ranks *last*, so an unknown role can be read and
+   cannot read — the same `ELSE` branch in SQL as in Python, asserted against a
+   real Postgres so the two cannot drift.
+
+2. **Two independent gates, and the second is per transaction.** Installing the
+   policy grants nobody anything: the elevated branch is dead unless
+   `hermes.elevated_reads` is bound `on` for that transaction, by the one code
+   path that also writes the audit row. A path that forgets the binding
+   *under*-reads. A GUC bound on an instance where `role_reads` is off does
+   nothing at all, because the branch was never compiled into the policy.
+
+3. **The audit is visible to the person who was read.** `memory_access_audit`
+   records reader, role, subject, row ids, the (truncated) query and the session,
+   is written in the *same transaction* as the read, and its own policy admits
+   the owner, the reader, or the subject. `hermes memory sharing --as <user>
+   audit` shows both directions. This also closes a pre-P3 gap: the owner-role
+   bypass previously read every private row and left no trace, which is
+   tolerable with one user and not with several.
+
+4. **Provenance, so a fact is never mis-attributed.** An elevated row recalls as
+   `(topic, from mia's memory) …`. Without the label the model reads another
+   person's private fact as if the user in front of it had said so.
+
+5. **Sideways sharing is an act, not a rank.** `item_grants` gained a `memory`
+   kind, so one person can share exactly one row with a peer the ladder does not
+   reach — revocably, and without touching the row's `private:` tag. Only the
+   *owner of the row* may share it: an elevated reader who could re-share would
+   turn a scoped read into redistribution the subject cannot take back.
+
+One latent bug surfaced while wiring the grant clause and is fixed for the GTS
+callers too: `item_grants` has its own `id` column, so an unqualified
+`id_column` bound to *that* one, making the sub-select always false — a grant
+that silently conferred nothing, with no error anywhere. `scope_filter` now
+refuses an unqualified `id_column`.
+
+Still off by default. Enabling it on the box is a config change plus a review,
+and it is worth noting the ladder is currently a hierarchy of one: `leo_owner`
+is the only enrolled principal, so nothing changes behaviourally until a second
+person is enrolled.
+
+### 8.3 P4 as built
+
+Storage, retrieval and Drive ingestion. Session-transcript and interaction-ledger
+ingestion are deliberately *not* in this phase — the Drive corpus is what makes
+retrieval useful today, and each new source is its own extraction and retention
+question.
+
+1. **Documents inherit nothing from the account that could see them.** A file
+   merely shared *with* a Google account is not a file the instance may read, so
+   ingestion writes `private:<ingesting principal>` and there is no
+   “ingest as shared” switch. Access afterwards is memory's access, exactly:
+   downward role read, or an explicit per-document grant. `item_grants` gained a
+   `document` kind for the sideways case, and the CHECK constraint is replaced on
+   every `initialize()` so a deployment created before the kind existed widens
+   rather than rejecting.
+
+2. **A grant on a document reaches its chunks, and only its chunks.** The chunk
+   policy correlates the grant sub-select on `document_id` rather than on the
+   chunk's own id — without that, sharing a document would confer access to
+   nothing (its chunks are not the granted row) and the failure would be silent.
+   Asserted at the RLS level under a `NOBYPASSRLS` role, not just through the app
+   filter.
+
+3. **The lexical arm indexes title + heading path + body, not body alone.** A
+   tender number lives in the *title*; a lexical arm over body text therefore
+   could not find a document by its own identifier — precisely the case the arm
+   exists for. The `tsvector` is computed at insert time and stored, so the GIN
+   index serves the query instead of every row being re-tokenised per search.
+   `'simple'`, not `'english'`: the corpus is bilingual and a stemmer mangles
+   identifiers.
+
+4. **The vector arm has a similarity floor; the lexical arm needs none.** An HNSW
+   search always returns its `LIMIT`, so without a floor every question retrieves
+   its least-unrelated passages and the model is handed irrelevant text as
+   evidence — the same lesson as automatic recall in P2. A `tsquery` either
+   matches or does not. The floor comes from config, never from the model: a floor
+   the model can set is a floor it will set to zero when it wants more results.
+
+5. **Chunking is heading-aware and multilingual.** ~512-token chunks with ~64
+   tokens of sentence-boundary overlap, never spanning a heading, with the heading
+   path kept as the citation (`Tender 2026-0418 › 2. Submission`). Token
+   estimation counts CJK characters as ~1 token and Latin text as ~1 per 4
+   characters, because a character-count budget silently produces 3× oversized
+   chunks for Chinese.
+
+6. **Ingestion is bounded, resumable, and honest about what it cannot read.**
+   `--limit` counts documents ingested or confirmed unchanged — not files listed,
+   so a folder of photographs cannot consume a run's budget. Unchanged content is
+   detected by hash and costs nothing, so a nightly pass that has caught up is
+   nearly free and an interrupted run resumes. A model change counts as a content
+   change, because vectors are only comparable within one model. PDFs and images
+   are skipped and counted, rather than stored as decoded bytes: a chunk of
+   mojibake still retrieves, and a citation to garbage is worse than none.
+
+7. **“All of Drive” is three flags, and two of them are the ones people miss.**
+   `includeItemsFromAllDrives`, `supportsAllDrives` and `corpora=allDrives`;
+   without them Drive returns only files the account *owns*, which looks like a
+   working ingestion. Accounts are discovered from the Workspace MCP credential
+   directory rather than config, so connecting an account is completing consent,
+   and naming an account with no credential file is an error rather than a silent
+   no-op. The Drive client is stdlib-only: `hermes-agent[google]` is an optional
+   extra, and a nightly timer should not fail on a box where it was never
+   installed.
+
+8. **`rag_search` is off by default.** Enabling it adds a tool schema to every API
+   call for the life of a conversation; on an empty corpus it can only answer
+   “nothing found”. Ingest first, then set `memory.rag.enabled`.
+
+Operational detail is in `docs/deployment/rag-ingestion.md`; the units are tracked
+at `deploy/hermes-rag-ingest.{service,timer}` so drift shows up in the weekly
+check.
 
 ## 9. Operational plan
 

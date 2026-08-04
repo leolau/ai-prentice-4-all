@@ -175,8 +175,11 @@ def normalize_visibility(visibility: str) -> str:
 #: hidden from the grantee.
 ITEM_GRANTS_TABLE = "item_grants"
 
-#: Kinds of GTS node a grant may target (matches the C9 graph).
-GRANT_ITEM_KINDS: tuple[str, ...] = ("goal", "task")
+#: Kinds of item a grant may target: the C9 GTS nodes, plus a single live
+#: ``memory`` row (FG-21 P3) and a single ingested ``document`` (P4) so one
+#: person can share one row with a peer the role hierarchy deliberately does not
+#: reach — the sideways case, granted by an explicit act rather than by rank.
+GRANT_ITEM_KINDS: tuple[str, ...] = ("goal", "task", "memory", "document")
 #: Grant roles: a single ``assignee`` (may advance progress) + read-only
 #: ``watcher``s.
 GRANT_TYPES: tuple[str, ...] = ("assignee", "watcher")
@@ -186,10 +189,12 @@ GRANT_STATUSES: tuple[str, ...] = ("pending", "accepted", "declined", "revoked")
 #: confers nothing).
 GRANT_ACTIVE_STATUSES: tuple[str, ...] = ("pending", "accepted")
 
+_GRANT_KINDS_SQL = ", ".join(f"'{kind}'" for kind in GRANT_ITEM_KINDS)
+
 ITEM_GRANTS_SCHEMA_SQL = f"""
 CREATE TABLE IF NOT EXISTS {ITEM_GRANTS_TABLE} (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    item_kind TEXT NOT NULL CHECK (item_kind IN ('goal', 'task')),
+    item_kind TEXT NOT NULL CHECK (item_kind IN ({_GRANT_KINDS_SQL})),
     item_id UUID NOT NULL,
     user_id TEXT NOT NULL,
     grant_type TEXT NOT NULL CHECK (grant_type IN ('assignee', 'watcher')),
@@ -208,6 +213,16 @@ CREATE INDEX IF NOT EXISTS {ITEM_GRANTS_TABLE}_item_idx
 CREATE UNIQUE INDEX IF NOT EXISTS {ITEM_GRANTS_TABLE}_single_assignee
     ON {ITEM_GRANTS_TABLE} (item_kind, item_id)
     WHERE grant_type = 'assignee' AND status IN ('pending', 'accepted');
+
+-- A table created before ``memory`` joined GRANT_ITEM_KINDS still carries the
+-- old two-value CHECK, and CREATE TABLE IF NOT EXISTS cannot widen it. Replace
+-- the constraint so the enum has exactly one source of truth (the tuple above)
+-- on a new install and on an existing deployment alike.
+ALTER TABLE {ITEM_GRANTS_TABLE}
+    DROP CONSTRAINT IF EXISTS {ITEM_GRANTS_TABLE}_item_kind_check;
+ALTER TABLE {ITEM_GRANTS_TABLE}
+    ADD CONSTRAINT {ITEM_GRANTS_TABLE}_item_kind_check
+    CHECK (item_kind IN ({_GRANT_KINDS_SQL}));
 """
 
 
@@ -226,6 +241,93 @@ def _grant_exists_sql(item_kind: str, id_expr: str, user_expr: str) -> str:
         f"EXISTS (SELECT 1 FROM {ITEM_GRANTS_TABLE} ig "
         f"WHERE ig.item_kind = '{item_kind}' AND ig.item_id = {id_expr} "
         f"AND ig.user_id = {user_expr} AND ig.status IN ({statuses}))"
+    )
+
+
+# ---------------------------------------------------------------------------
+# C2 — role hierarchy (FG-21 P3): downward-only elevated reads
+# ---------------------------------------------------------------------------
+
+#: The role ladder as ranks, lower number = more privilege. A reader may read a
+#: subject's private rows only when its rank is **strictly** lower — reads go
+#: *down* the hierarchy, never sideways. Two admins therefore cannot read each
+#: other, which is the difference between a hierarchy and a free-for-all among
+#: peers; and ``member``/``member`` stays mutually invisible, which is the
+#: property C2 already guaranteed and this must not weaken.
+ROLE_RANK: dict[Role, int] = {"owner": 0, "admin": 1, "member": 2, "viewer": 3}
+
+#: Roles that can be *above* somebody, i.e. that a downward read can start from.
+#: Kept explicit so a future role added to :data:`ROLES` cannot silently acquire
+#: elevated reads by sorting above another role.
+ELEVATED_READER_ROLES: tuple[Role, ...] = ("owner", "admin", "member")
+
+#: GUC that turns database-level elevated reads on. Absent or anything other
+#: than ``'on'`` means off, so a connection that forgets to bind it gets the
+#: plain C2 policy — the fail-closed direction.
+_GUC_ELEVATION = "hermes.elevated_reads"
+_ELEVATION_ON = "on"
+
+
+def role_rank(role: object) -> int:
+    """Rank of ``role`` on the ladder; an unrecognised role gets the last rung.
+
+    Deliberately *not* :func:`normalize_role`, whose unknown-value default is
+    ``member`` (the right base privilege for an unresolvable session identity,
+    and one rung above the bottom). Here the value is being used to decide
+    whether one person reads another's private rows, so an unrecognised role
+    must rank least-privileged: it can be read, it cannot read. This also
+    matches the ``ELSE`` branch of :func:`_role_rank_sql`, so the app filter and
+    the RLS policy agree about a malformed role instead of disagreeing silently.
+    """
+    if isinstance(role, str) and role in ROLE_RANK:
+        return ROLE_RANK[role]  # type: ignore[index]
+    return max(ROLE_RANK.values())
+
+
+def reads_role_below(reader: object, subject: object) -> bool:
+    """Whether ``reader``'s role may read ``subject``'s role by hierarchy.
+
+    Strictly downward: ``owner`` reads everyone, ``admin`` reads members and
+    viewers but **not** other admins, and nobody reads their own peers. This is
+    the role part of the decision only — the caller still has to be a different
+    person, and the instance still has to have elevation enabled.
+    """
+    return role_rank(reader) < role_rank(subject)
+
+
+def _role_rank_sql(role_expr: str) -> str:
+    """SQL expression mapping a role expression onto :data:`ROLE_RANK`.
+
+    Written as a ``CASE`` rather than a helper function so no migration or
+    ``CREATE FUNCTION`` privilege is needed for the RLS policy to use it, and so
+    the ladder lives in exactly one place in Python. An unrecognised role falls
+    through to the least-privileged rank, matching :func:`role_rank`.
+    """
+    branches = " ".join(
+        f"WHEN '{role}' THEN {rank}" for role, rank in ROLE_RANK.items()
+    )
+    lowest = max(ROLE_RANK.values())
+    return f"(CASE {role_expr} {branches} ELSE {lowest} END)"
+
+
+def _elevated_read_sql(
+    owner_expr: str,
+    *,
+    reader_id_expr: str,
+    reader_rank_sql: str,
+    principals_table: str = "principals",
+) -> str:
+    """SQL clause: ``owner_expr`` belongs to somebody the reader ranks above.
+
+    Correlated against the ``principals`` table because the row itself does not
+    carry its owner's role — and must not: a role change has to take effect on
+    the next read, not be frozen into every row the user ever wrote.
+    """
+    return (
+        f"({owner_expr} <> {reader_id_expr} AND EXISTS ("
+        f"SELECT 1 FROM {principals_table} p "
+        f"WHERE p.user_id = {owner_expr} "
+        f"AND {_role_rank_sql('p.role')} > {reader_rank_sql}))"
     )
 
 
@@ -298,6 +400,8 @@ def scope_filter(
     start_index: int = 1,
     grant_item_kind: str | None = None,
     id_column: str = "id",
+    role_elevation: bool = False,
+    owner_column: str = "owner_user_id",
 ) -> ScopePredicate:
     """Return the read-visibility predicate for ``principal`` (contract C2).
 
@@ -312,6 +416,14 @@ def scope_filter(
     grant clause binds one extra positional param (the principal's user id) at
     ``start_index + 1``, so a caller composing further placeholders must offset
     by 2 rather than 1.
+
+    With ``role_elevation`` (FG-21 P3) the predicate additionally matches rows
+    owned by someone the principal ranks **strictly above** on the role ladder —
+    the downward-only hierarchy read. It is off by default and must stay that
+    way: it is the one clause here that lets one person read another's private
+    rows by role rather than by their own act, so it is enabled deliberately,
+    per table, by a caller that also audits the read. Like the grant clause it
+    binds the principal's user id as one extra param.
     """
     if not _VALID_COLUMN.fullmatch(column):
         raise ValueError(f"Invalid column name for scope_filter: {column!r}")
@@ -323,13 +435,55 @@ def scope_filter(
     if grant_item_kind is not None:
         if not _VALID_COLUMN.fullmatch(id_column):
             raise ValueError(f"Invalid id_column for scope_filter: {id_column!r}")
+        if "." not in id_column:
+            # The grant clause is a sub-select over item_grants, which has its
+            # own `id` column, so an unqualified name binds to *that* one and the
+            # clause silently matches nothing. A caller would see grants that
+            # never confer access and no error anywhere.
+            raise ValueError(
+                f"id_column must be table-qualified for the grant clause "
+                f"(got {id_column!r}; use '<table>.{id_column}')"
+            )
         grant_placeholder = f"${start_index + 1}"
         clauses.append(
             _grant_exists_sql(grant_item_kind, id_column, grant_placeholder)
         )
         params = (principal.private_visibility, principal.user_id)
+    if role_elevation and principal.role in ELEVATED_READER_ROLES:
+        if not _VALID_COLUMN.fullmatch(owner_column):
+            raise ValueError(f"Invalid owner_column for scope_filter: {owner_column!r}")
+        id_placeholder = f"${start_index + len(params)}"
+        clauses.append(
+            _elevated_read_sql(
+                owner_column,
+                reader_id_expr=id_placeholder,
+                reader_rank_sql=str(role_rank(principal.role)),
+            )
+        )
+        params = (*params, principal.user_id)
     sql = "(" + " OR ".join(clauses) + ")"
     return ScopePredicate(sql, params)
+
+
+def reads_by_elevation(
+    principal: Principal,
+    row: Mapping[str, object],
+    *,
+    owner_role: object,
+) -> bool:
+    """Whether ``principal`` sees this row **only** because it ranks above.
+
+    Used to label and audit a read rather than to permit it: a row the reader
+    could already see (its own, or ``shared``) is not an elevated read even when
+    the reader outranks its owner, and auditing it as one would bury the reads
+    that matter in noise.
+    """
+    owner_user_id = row.get("owner_user_id")
+    if not isinstance(owner_user_id, str) or owner_user_id == principal.user_id:
+        return False
+    if row.get("visibility") == SHARED:
+        return False
+    return reads_role_below(principal.role, owner_role)
 
 
 _VALID_COLUMN = re.compile(r"^[A-Za-z_][A-Za-z0-9_.]*$")
@@ -346,6 +500,14 @@ _VALID_SCHEMA = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 # access token; in direct-asyncpg tests they are set via :func:`bind_principal`.
 _GUC_ID = "hermes.principal_id"
 _GUC_ROLE = "hermes.principal_role"
+
+#: Public names of the two GUCs, for modules writing their own RLS policy over a
+#: table this module doesn't know about (e.g. the memory audit ledger, whose
+#: read rule is reader-or-subject rather than C2 visibility). Exported so such a
+#: policy references the same GUCs as :func:`bind_principal` instead of
+#: re-typing the strings and silently drifting.
+GUC_PRINCIPAL_ID = _GUC_ID
+GUC_PRINCIPAL_ROLE = _GUC_ROLE
 
 ACCESS_SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS principals (
@@ -401,6 +563,8 @@ async def apply_scope_rls(
     *,
     grant_item_kind: str | None = None,
     id_column: str = "id",
+    role_elevation: bool = False,
+    owner_column: str = "owner_user_id",
 ) -> None:
     """Enforce contract-C2 visibility on ``table`` via Postgres RLS.
 
@@ -417,6 +581,14 @@ async def apply_scope_rls(
     ``id_column`` — the Postgres mirror of :func:`scope_filter`'s grant clause.
     Re-invoking this (the grant-aware call replaces the plain policy) is safe
     because the policy is dropped and recreated.
+
+    ``role_elevation`` (FG-21 P3) adds the database mirror of
+    :func:`scope_filter`'s downward-only hierarchy clause: a row owned by
+    somebody the bound principal ranks strictly above is also visible — but
+    **only while** the :data:`_GUC_ELEVATION` GUC is bound ``on`` by
+    :func:`bind_elevated_reads`. Installing the policy therefore does not by
+    itself grant anyone anything; a connection that never binds the GUC reads
+    exactly what plain C2 allows. Two gates, both of which must be deliberate.
     """
     if not _VALID_COLUMN.fullmatch(table):
         raise ValueError(f"Invalid table name: {table!r}")
@@ -429,6 +601,21 @@ async def apply_scope_rls(
             f"{table}.{id_column}",
             f"current_setting('{_GUC_ID}', true)",
         )
+    elevation_clause = ""
+    if role_elevation:
+        if not _VALID_COLUMN.fullmatch(owner_column):
+            raise ValueError(f"Invalid owner_column: {owner_column!r}")
+        elevated = _elevated_read_sql(
+            f"{table}.{owner_column}",
+            reader_id_expr=f"current_setting('{_GUC_ID}', true)",
+            reader_rank_sql=_role_rank_sql(
+                f"current_setting('{_GUC_ROLE}', true)"
+            ),
+        )
+        elevation_clause = (
+            "\n                OR (current_setting"
+            f"('{_GUC_ELEVATION}', true) = '{_ELEVATION_ON}' AND {elevated})"
+        )
     await connection.execute(
         f"""
         ALTER TABLE {table} ENABLE ROW LEVEL SECURITY;
@@ -439,7 +626,7 @@ async def apply_scope_rls(
             USING (
                 current_setting('{_GUC_ROLE}', true) = 'owner'
                 OR visibility = 'shared'
-                OR visibility = 'private:' || current_setting('{_GUC_ID}', true){grant_clause}
+                OR visibility = 'private:' || current_setting('{_GUC_ID}', true){grant_clause}{elevation_clause}
             );
         """
     )
@@ -471,6 +658,74 @@ async def apply_item_grants_rls(connection: asyncpg.Connection) -> None:
     )
 
 
+async def grant_item(
+    connection: asyncpg.Connection,
+    *,
+    item_kind: str,
+    item_id: str,
+    user_id: str,
+    granted_by: str,
+) -> None:
+    """Give ``user_id`` read access to exactly one row of ``item_kind``.
+
+    The row-specific counterpart to a role read: it shares the item it names and
+    nothing else the granter owns. Reactivates an existing grant rather than
+    inserting a second one, so re-sharing after a revoke is one row with a
+    history instead of a duplicate.
+
+    Callers are responsible for checking that ``granted_by`` may share the item
+    (ownership is table-specific and lives with the table).
+    """
+    if item_kind not in GRANT_ITEM_KINDS:
+        raise ValueError(f"Unknown grant item_kind: {item_kind!r}")
+    await connection.execute(
+        f"""
+        INSERT INTO {ITEM_GRANTS_TABLE}
+            (item_kind, item_id, user_id, grant_type, granted_by, status)
+        VALUES ($1, $2::uuid, $3, 'watcher', $4, 'accepted')
+        ON CONFLICT (item_kind, item_id, user_id) DO UPDATE
+            SET status = 'accepted', granted_by = EXCLUDED.granted_by,
+                updated_at = NOW()
+        """,
+        item_kind,
+        item_id,
+        user_id,
+        granted_by,
+    )
+
+
+async def revoke_item_grant(
+    connection: asyncpg.Connection,
+    *,
+    item_kind: str,
+    item_id: str,
+    user_id: str,
+    granted_by: str,
+) -> bool:
+    """Withdraw one grant made by ``granted_by``; True if one was active.
+
+    Revoked, never deleted: that the row *was* shared for a period is part of the
+    audit trail, and only :data:`GRANT_ACTIVE_STATUSES` confer access, so
+    keeping the history costs nothing at read time.
+    """
+    if item_kind not in GRANT_ITEM_KINDS:
+        raise ValueError(f"Unknown grant item_kind: {item_kind!r}")
+    revoked = await connection.fetchval(
+        f"""
+        UPDATE {ITEM_GRANTS_TABLE} SET status = 'revoked', updated_at = NOW()
+        WHERE item_kind = $1 AND item_id = $2::uuid AND user_id = $3
+          AND granted_by = $4 AND status = ANY($5::text[])
+        RETURNING id
+        """,
+        item_kind,
+        item_id,
+        user_id,
+        granted_by,
+        list(GRANT_ACTIVE_STATUSES),
+    )
+    return revoked is not None
+
+
 async def bind_principal(
     connection: asyncpg.Connection,
     principal: Principal,
@@ -488,6 +743,26 @@ async def bind_principal(
         principal.user_id,
         _GUC_ROLE,
         principal.role,
+    )
+
+
+async def bind_elevated_reads(
+    connection: asyncpg.Connection,
+    enabled: bool,
+) -> None:
+    """Turn database-level downward reads on for this transaction (FG-21 P3).
+
+    Separate from :func:`bind_principal` on purpose. Binding a principal is what
+    every request does; asking to read *other people's* private rows is a
+    distinct decision made by one code path that also writes the audit trail,
+    and keeping it a separate call means no request acquires elevation just by
+    identifying itself. Transaction-local, like the principal binding, so it
+    cannot leak onto a pooled connection's next user.
+    """
+    await connection.execute(
+        "SELECT set_config($1, $2, true)",
+        _GUC_ELEVATION,
+        _ELEVATION_ON if enabled else "off",
     )
 
 
@@ -680,8 +955,9 @@ def _row_to_principal(
 
 
 def _coerce_role(value: object) -> Role:
-    if value in ROLES:
-        return value  # type: ignore[return-value]
+    for role in ROLES:
+        if value == role:
+            return role
     raise ValueError(f"Unknown role loaded from store: {value!r}")
 
 

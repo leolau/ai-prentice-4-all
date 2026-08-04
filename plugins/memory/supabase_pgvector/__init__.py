@@ -47,9 +47,79 @@ from hermes_cli.task_registry import (
 )
 
 from .embedding import DEFAULT_DIM
-from .store import PgvectorMemoryStore
+from .rag import DEFAULT_MIN_SCORE as RAG_MIN_SCORE
+from .rag import RagStore
+from .store import MemoryRecord, PgvectorMemoryStore
 
 logger = logging.getLogger(__name__)
+
+#: Automatic-recall budget. Defaults chosen to be affordable on every turn:
+#: one vector search, a handful of rows, and a hard character cap so recall can
+#: never crowd out the user's actual message.
+RECALL_DEFAULTS = {
+    "auto": True,
+    "top_k": 5,
+    "min_score": 0.35,
+    "max_chars": 1200,
+    "min_query_chars": 8,
+    # Near-identical memories collapse into the existing row. High on purpose:
+    # 0.97 catches a re-statement, not two related facts.
+    "dedup_threshold": 0.97,
+}
+
+
+#: Document retrieval (FG-21 P4). Off until an instance has ingested something:
+#: a ``rag_search`` tool on an empty corpus costs a tool slot on every API call
+#: and can only answer "nothing found".
+RAG_DEFAULTS = {
+    "enabled": False,
+    "top_k": 5,
+    "min_score": RAG_MIN_SCORE,
+}
+
+
+def _rag_settings(config: Optional[dict]) -> Dict[str, Any]:
+    memory = (config or {}).get("memory")
+    section = memory.get("rag") if isinstance(memory, dict) else None
+    settings = dict(RAG_DEFAULTS)
+    if isinstance(section, dict):
+        settings.update(section)
+    return settings
+
+
+def _recall_settings(config: Optional[dict]) -> Dict[str, Any]:
+    memory = (config or {}).get("memory")
+    section = memory.get("recall") if isinstance(memory, dict) else None
+    settings = dict(RECALL_DEFAULTS)
+    if isinstance(section, dict):
+        settings.update(section)
+    return settings
+
+
+def _format_recall(records: List[MemoryRecord], max_chars: int) -> str:
+    """Render recalled rows compactly, newest-relevance first.
+
+    Truncation drops whole memories rather than cutting one mid-sentence: half a
+    fact is worse than no fact, because the model cannot tell it is reading a
+    fragment.
+    """
+    lines: List[str] = []
+    used = 0
+    for record in records:
+        label = record.topic or record.kind
+        # A memory read out of somebody else's private tier arrives labelled, so
+        # the model attributes the fact to them rather than to the user it is
+        # talking to.
+        if record.provenance:
+            label = f"{label}, {record.provenance}"
+        line = f"- ({label}) {record.text}"
+        if used + len(line) > max_chars:
+            break
+        lines.append(line)
+        used += len(line) + 1
+    if not lines:
+        return ""
+    return "<live-memory-recall>\n" + "\n".join(lines) + "\n</live-memory-recall>"
 
 
 async def _initialize_stores(
@@ -145,6 +215,44 @@ WRITE_SCHEMA = {
 }
 
 
+RAG_SEARCH_SCHEMA = {
+    "name": "rag_search",
+    "description": (
+        "Search the user's ingested documents (Google Drive files, notes, "
+        "transcripts) by meaning AND by exact text, and get back the passages "
+        "that answer the question, each with the document and section it came "
+        "from. Use this whenever a question may be answered by a document — "
+        "including when the user has not named a file. ALWAYS cite the "
+        "'citation' field of any passage you rely on, verbatim, so the user can "
+        "check it. Results are scoped to what this user is allowed to read."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "query": {
+                "type": "string",
+                "description": (
+                    "What to look for. Natural language works; so do exact "
+                    "identifiers such as 'Tender 2026-0418'."
+                ),
+            },
+            "top_k": {
+                "type": "integer",
+                "description": "Max passages to return (default 5, max 50).",
+            },
+            "source_kind": {
+                "type": "string",
+                "description": (
+                    "Optional filter, e.g. 'gdrive' to search only Drive "
+                    "documents."
+                ),
+            },
+        },
+        "required": ["query"],
+    },
+}
+
+
 class SupabasePgvectorMemoryProvider(MemoryProvider):
     """Live pgvector memory tier registered through the MemoryProvider ABC."""
 
@@ -157,6 +265,9 @@ class SupabasePgvectorMemoryProvider(MemoryProvider):
         self._task_discovery: Optional[TaskDiscoveryEngine] = None
         self._task_proposal = ""
         self._task_session = False
+        self._recall = dict(RECALL_DEFAULTS)
+        self._rag_settings = dict(RAG_DEFAULTS)
+        self._rag: Optional[RagStore] = None
 
     @property
     def name(self) -> str:
@@ -238,6 +349,7 @@ class SupabasePgvectorMemoryProvider(MemoryProvider):
             pass
         try:
             config = load_config()
+            self._recall = _recall_settings(config)
             store = get_store("supabase-app")
             self._store = PgvectorMemoryStore(store, config=config)
             self._dim = self._store.dim
@@ -251,6 +363,11 @@ class SupabasePgvectorMemoryProvider(MemoryProvider):
                 proposal_sink=self._capture_task_proposal,
                 change_recorder=change_log,
             )
+            self._rag_settings = _rag_settings(config)
+            if self._rag_settings.get("enabled"):
+                rag = RagStore(self._store)
+                self._run_async(rag.initialize())
+                self._rag = rag
         except Exception as exc:  # pragma: no cover - env/config dependent
             self._init_error = str(exc)
             self._store = None
@@ -297,15 +414,61 @@ class SupabasePgvectorMemoryProvider(MemoryProvider):
             logger.debug("task discovery observation failed", exc_info=True)
 
     def prefetch(self, query: str, **kwargs) -> str:
-        del query, kwargs
+        """Automatic recall + any pending task-discovery note for this turn.
+
+        Returned text is injected into the *current* user message at API-call
+        time only (``agent/conversation_loop.py``): the stored message is not
+        mutated and the cached prefix is untouched, so recall cannot invalidate
+        the conversation's prompt cache or leak into session persistence. That
+        is why recall belongs here rather than in ``system_prompt_block()``.
+
+        Until this existed the tier was write-only: rows accumulated and only a
+        deliberate ``memory_query`` tool call ever read them, which in practice
+        never happened.
+        """
+        del kwargs
+        blocks: List[str] = []
+        recall = self._recall_block(query)
+        if recall:
+            blocks.append(recall)
         proposal = self._task_proposal
         self._task_proposal = ""
-        if not proposal:
+        if proposal:
+            blocks.append(
+                "<task-discovery>\n"
+                f"{proposal}\n"
+                "</task-discovery>"
+            )
+        return "\n\n".join(blocks)
+
+    def _recall_block(self, query: str) -> str:
+        if self._store is None or self._principal is None:
             return ""
-        return (
-            "<task-discovery>\n"
-            f"{proposal}\n"
-            "</task-discovery>"
+        if not self._recall.get("auto", True):
+            return ""
+        text = (query or "").strip()
+        if len(text) < int(self._recall.get("min_query_chars", 8)):
+            # "ok", "thanks", "yes" carry no retrievable intent; a vector search
+            # on them spends a model forward pass to recall noise.
+            return ""
+        try:
+            records = self._run_async(
+                self._store.query(
+                    self._principal,
+                    text,
+                    top_k=int(self._recall.get("top_k", 5)),
+                    min_score=float(self._recall.get("min_score", 0.35)),
+                    record_use=True,
+                    session_id=self._session_id or None,
+                )
+            )
+        except Exception:
+            # Recall is an enhancement; a failed one must not take the turn
+            # down or discard a pending task-discovery note.
+            logger.debug("automatic memory recall failed", exc_info=True)
+            return ""
+        return _format_recall(
+            records, int(self._recall.get("max_chars", 1200))
         )
 
     def system_prompt_block(self) -> str:
@@ -327,7 +490,10 @@ class SupabasePgvectorMemoryProvider(MemoryProvider):
         )
 
     def get_tool_schemas(self) -> List[Dict[str, Any]]:
-        return [QUERY_SCHEMA, WRITE_SCHEMA]
+        schemas = [QUERY_SCHEMA, WRITE_SCHEMA]
+        if self._rag is not None:
+            schemas.append(RAG_SEARCH_SCHEMA)
+        return schemas
 
     def handle_tool_call(self, tool_name: str, args: Dict[str, Any], **kwargs) -> str:
         if self._store is None or self._principal is None:
@@ -344,6 +510,8 @@ class SupabasePgvectorMemoryProvider(MemoryProvider):
                 return self._handle_query(args)
             if tool_name == "memory_write":
                 return self._handle_write(args)
+            if tool_name == "rag_search":
+                return self._handle_rag_search(args)
         except Exception as exc:
             logger.debug("supabase_pgvector tool %s failed: %s", tool_name, exc)
             return json.dumps({"error": f"{tool_name} failed: {exc}"})
@@ -361,6 +529,7 @@ class SupabasePgvectorMemoryProvider(MemoryProvider):
                 top_k=int(args.get("top_k", 10) or 10),
                 kind=args.get("kind") or None,
                 topic=args.get("topic") or None,
+                session_id=self._session_id or None,
             )
         )
         return json.dumps(
@@ -381,10 +550,38 @@ class SupabasePgvectorMemoryProvider(MemoryProvider):
                 topic=args.get("topic") or None,
                 visibility=args.get("visibility") or None,
                 source_session=self._session_id or None,
+                dedup_threshold=float(
+                    self._recall.get("dedup_threshold", 0.97)
+                ),
             )
         )
         return json.dumps(
             {"stored": record.as_dict()},
+            ensure_ascii=False,
+        )
+
+    def _handle_rag_search(self, args: Dict[str, Any]) -> str:
+        assert self._principal is not None
+        if self._rag is None:
+            return json.dumps(
+                {"error": "Document search is not enabled (memory.rag.enabled)"}
+            )
+        query = str(args.get("query", "")).strip()
+        if not query:
+            return json.dumps({"error": "rag_search requires a 'query'"})
+        hits = self._run_async(
+            self._rag.search(
+                self._principal,
+                query,
+                top_k=int(
+                    args.get("top_k") or self._rag_settings.get("top_k", 5)
+                ),
+                min_score=float(self._rag_settings.get("min_score", 0.35)),
+                source_kind=args.get("source_kind") or None,
+            )
+        )
+        return json.dumps(
+            {"passages": [hit.as_dict() for hit in hits]},
             ensure_ascii=False,
         )
 
