@@ -65,6 +65,42 @@ MEMORY_AUDIT_TABLE = "memory_access_audit"
 #: never the owner's other private memories.
 GRANT_ITEM_KIND = "memory"
 
+#: 2-D projection of each memory/chunk for the memory explorer map (FG-22).
+#: Denormalises ``owner_user_id``/``visibility`` so the same C2 scope predicate
+#: that governs ``memories`` governs the projection — a derived table that leaked
+#: a private row's coordinates would be a way to read a memory's existence and
+#: rough topic without the read the scope policy was designed to gate.
+PROJECTION_TABLE = "memory_projection"
+
+#: Singleton row holding the fitted PCA/UMAP basis so the query-placement
+#: endpoint (V3) can project new text without re-fitting.
+PROJECTION_BASIS_TABLE = "memory_projection_basis"
+
+_PROJECTION_SCHEMA_SQL = f"""
+CREATE TABLE IF NOT EXISTS {PROJECTION_TABLE} (
+    id            UUID PRIMARY KEY,
+    kind          TEXT NOT NULL,
+    owner_user_id TEXT NOT NULL,
+    visibility    TEXT NOT NULL,
+    topic         TEXT,
+    x             REAL NOT NULL,
+    y             REAL NOT NULL,
+    model         TEXT NOT NULL,
+    algorithm     TEXT NOT NULL,
+    fitted_at     TIMESTAMPTZ NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS {PROJECTION_BASIS_TABLE} (
+    id          INTEGER PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+    algorithm   TEXT NOT NULL,
+    model       TEXT NOT NULL,
+    mean        JSONB NOT NULL,
+    components  JSONB NOT NULL,
+    sample_size INTEGER,
+    fitted_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+"""
+
 _AUDIT_SCHEMA_SQL = f"""
 CREATE TABLE IF NOT EXISTS {MEMORY_AUDIT_TABLE} (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -442,6 +478,16 @@ class PgvectorMemoryStore:
             )
             await conn.execute(_AUDIT_SCHEMA_SQL)
             await _apply_audit_rls(conn)
+            # Projection table (FG-22) — derived, but carries the same C2
+            # scope predicate so the map cannot leak a private row's location.
+            await conn.execute(_PROJECTION_SCHEMA_SQL)
+            await apply_scope_rls(
+                conn,
+                PROJECTION_TABLE,
+                grant_item_kind=GRANT_ITEM_KIND,
+                id_column=f"{PROJECTION_TABLE}.id",
+                role_elevation=self._role_reads,
+            )
             await self._assert_space_usable(conn)
         finally:
             if own:
@@ -1124,6 +1170,8 @@ def _row_to_record(
 __all__ = [
     "MEMORY_AUDIT_TABLE",
     "MEMORY_TABLE",
+    "PROJECTION_BASIS_TABLE",
+    "PROJECTION_TABLE",
     "EmbeddingSpace",
     "EmbeddingSpaceMismatch",
     "MemoryReadAudit",

@@ -152,6 +152,12 @@ LAZY_DEPS: dict[str, tuple[str, ...]] = {
     # instance and the provider silently reports itself unavailable.
     "memory.supermemory": ("supermemory==3.50.0",),
     "memory.mem0": ("mem0ai==2.0.10",),
+    
+        # ─── Memory projection (FG-22) ─────────────────────────────────────────
+        # UMAP is an opt-in alternative to the default PCA projection for the
+        # memory explorer's scatter map. PCA is numpy-only and always available;
+        # UMAP produces a better non-linear map but needs a lazily-installed dep.
+        "memory.projection": ("umap-learn==0.5.7",),
 
     # ─── Messaging platforms (lazy-installable on demand) ──────────────────
     "platform.telegram": ("python-telegram-bot[webhooks]==22.6",),
