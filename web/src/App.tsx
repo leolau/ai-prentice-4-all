@@ -195,12 +195,6 @@ const BUILTIN_NAV_REST: NavItem[] = [
     icon: BarChart3,
   },
   {
-    path: "/memory",
-    labelKey: "memory",
-    label: "Memory",
-    icon: Brain,
-  },
-  {
     path: "/models",
     labelKey: "models",
     label: "Models",

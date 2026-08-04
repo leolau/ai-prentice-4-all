@@ -7,6 +7,14 @@
 # AGENT_HOME_API_URL (127.0.0.1:9119) — the Python API is never exposed on the
 # public agent-home origin.
 #
+# FG-23 A0.1: runs from the main checkout (/opt/data/hermes-agent), not a
+# second clone. One `git pull` moves the whole system; the deploy script
+# (deploy/hermes-deploy.sh) builds and restarts it when agent-home/ changes.
+#
+# FG-23 A0.5: runs as `hermes` (not root) with the same hardening the
+# hermes-* units carry. `.next` must be writable because `next start` writes
+# its cache there.
+#
 # Install (adjust paths/User to the box; see deploy/DEPLOY.md):
 #   sudo cp agent-home/deploy/agent-home.service /etc/systemd/system/
 #   sudo systemctl daemon-reload
@@ -24,17 +32,26 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=root
-WorkingDirectory=/opt/data/agent-home-app/agent-home
-EnvironmentFile=/opt/data/agent-home-app/agent-home/agent-home.env
+User=hermes
+Group=hermes
+WorkingDirectory=/opt/data/hermes-agent/agent-home
+EnvironmentFile=/opt/data/hermes-agent/agent-home/agent-home.env
 # PATH must resolve node/npm for the service user. Verify with `command -v npm`
 # on the box during deploy and edit this line if node lives elsewhere (e.g. nvm).
 Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-ExecStart=/opt/data/agent-home-app/agent-home/deploy/start.sh
+ExecStart=/opt/data/hermes-agent/agent-home/deploy/start.sh
 Restart=on-failure
 RestartSec=5
 StandardOutput=journal
 StandardError=journal
+
+# Hardening (A0.5) — mirror the hermes-* units' unprivileged stance.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=yes
+# next start writes its cache into .next/, so that subtree must be writable.
+ReadWritePaths=/opt/data/hermes-agent/agent-home/.next
 
 [Install]
 WantedBy=multi-user.target

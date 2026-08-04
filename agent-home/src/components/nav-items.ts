@@ -10,13 +10,17 @@ export interface NavItem {
   hint?: string;
 }
 
-/** Primary destinations — the phone bottom-tab bar and the top of the sidebar. */
+/**
+ * Primary destinations — the phone bottom-tab bar and the top of the sidebar.
+ * FG-23: Memory replaces Activity in the primary bar (memory is the user's
+ * concern; traces are the operator's). Five is the bottom-bar budget on a phone.
+ */
 export const PRIMARY_NAV: NavItem[] = [
   { href: "/", label: "Home", glyph: "◉" },
   { href: "/graph", label: "Graph", glyph: "◈", hint: "GTS Centre" },
   { href: "/chat", label: "Chat", glyph: "✦", hint: "One-brain chat" },
   { href: "/inbox", label: "Inbox", glyph: "✉", hint: "Approvals + changes" },
-  { href: "/activity", label: "Activity", glyph: "≋", hint: "Interaction traces" },
+  { href: "/memory", label: "Memory", glyph: "◇", hint: "What it remembers" },
 ];
 
 /**
@@ -24,6 +28,7 @@ export const PRIMARY_NAV: NavItem[] = [
  * "More" section in the desktop sidebar where there is room for them.
  */
 export const SECONDARY_NAV: NavItem[] = [
+  { href: "/activity", label: "Activity", glyph: "≋", hint: "Interaction traces" },
   { href: "/onboarding", label: "Getting started", glyph: "◐", hint: "FG-15 readiness" },
   { href: "/tools", label: "Tools", glyph: "⚙", hint: "FG-07 registry" },
   { href: "/core", label: "Core area", glyph: "▣", hint: "C7 boundary" },
