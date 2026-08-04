@@ -1,5 +1,6 @@
 import { MobileShell } from "@/components/MobileShell";
 import { MemoryView } from "@/components/memory/MemoryView";
+import { HermesApiError } from "@/lib/api/client";
 import { apiClientForRequest, requirePrincipal } from "@/lib/auth/principal";
 import type { MemoryRowsResponse, MemorySummary } from "@/types";
 
@@ -31,11 +32,12 @@ export default async function Page() {
       client.memoryRows({ limit: 25 }),
     ]);
   } catch (err) {
-    const msg = err instanceof Error ? err.message : "Failed to load memory";
-    if (msg.includes("409") || msg.includes("no_principal")) {
+    // The status, not the message: `HermesApiError.message` embeds the request
+    // path, so matching the string "409" in it can fire on a path.
+    if (err instanceof HermesApiError && err.status === 409) {
       noPrincipal = true;
     } else {
-      error = msg;
+      error = err instanceof Error ? err.message : "Failed to load memory";
     }
   }
 

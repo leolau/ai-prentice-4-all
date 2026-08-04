@@ -11,6 +11,12 @@ next-env.d.ts
 .env
 .env.local
 .env*.local
+# FG-23 A0 runs the app from the main checkout, so its deployed env file — the
+# session-signing key and the agent_home_app DATABASE_URL — sits inside this
+# git tree. None of the patterns above match this name, which left the
+# deployment's checkout permanently dirty and the secret one `git add .` away
+# from being committed.
+/agent-home.env
 
 # test / os
 /coverage

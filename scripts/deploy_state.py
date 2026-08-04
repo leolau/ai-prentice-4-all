@@ -79,6 +79,11 @@ SNAPSHOT_NAME = "config.snapshot.yaml"
 MANIFEST_NAME = "state.manifest.yaml"
 SYSTEMD_DIRNAME = "systemd"
 
+# Units to capture. `agent-home*` is here because it is the one service on the
+# box not named `hermes-*` (FG-23 A0): with only the first pattern, the drift
+# check cannot see the unit that serves the phone.
+DEFAULT_UNIT_GLOBS = ("hermes-*", "agent-home*")
+
 # Keys whose value is a credential regardless of what it looks like. Matched
 # against the leaf key only, so `mcp_servers.github.headers.Authorization`
 # hits and `tools.include` does not.
@@ -682,12 +687,14 @@ def format_report(deployment: str, findings: list[dict[str, str]]) -> str:
 def _add_capture_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--hermes-home", type=Path, required=True)
     parser.add_argument("--systemd-dir", type=Path, default=Path("/etc/systemd/system"))
+    # ``append`` with a non-empty default appends *to* the default, so an
+    # explicit --unit-glob could only widen the capture, never narrow it.
     parser.add_argument(
         "--unit-glob",
         action="append",
-        default=["hermes-*", "agent-home*"],
+        default=None,
         help="glob pattern for systemd units to capture (repeatable); "
-        "defaults to hermes-* and agent-home*",
+        f"defaults to {' and '.join(DEFAULT_UNIT_GLOBS)}",
     )
     parser.add_argument("--deploy-script", type=Path, default=None)
     parser.add_argument(
@@ -750,7 +757,7 @@ def main(argv: list[str] | None = None) -> int:
                 args.deployment,
                 args.hermes_home,
                 args.systemd_dir,
-                args.unit_glob,
+                args.unit_glob or list(DEFAULT_UNIT_GLOBS),
                 args.deploy_script,
                 args.credential_glob or [],
                 args.secrets_out,

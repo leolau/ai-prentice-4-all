@@ -111,6 +111,53 @@ describe("MemoryMap rendered states", () => {
     expect(html).toContain("aren't on the map yet");
   });
 
+  it("plots every point inside the viewBox at real PCA coordinates", () => {
+    // The live box's spread is x −0.390…0.406, y −0.403…0.327. Point
+    // coordinates are normalised to a 0–100 space, so the viewBox has to be
+    // that same space — a viewBox in *data* units puts every dot off-canvas
+    // and blows the radii up past the frame.
+    const spread = [
+      { x: -0.39, y: -0.403 },
+      { x: 0.406, y: 0.327 },
+      { x: 0.01, y: -0.02 },
+    ];
+    const proj: MemoryProjection = {
+      algorithm: "pca",
+      computed_at: "2026-08-05T03:00:00Z",
+      stale: false,
+      unprojected_count: 0,
+      points: spread.map((p, i) => ({
+        id: `p${i}`,
+        x: p.x,
+        y: p.y,
+        owner_user_id: "u",
+        topic: "t",
+        kind: "memory",
+        elevated: false,
+        provenance: "",
+        label: `point ${i}`,
+      })),
+    };
+    const html = renderToStaticMarkup(
+      <MemoryMap projection={proj} queryResult={null} rowMap={new Map()} />,
+    );
+
+    const viewBox = /viewBox="([^"]+)"/.exec(html)?.[1];
+    expect(viewBox).toBeDefined();
+    const [vx, vy, vw, vh] = viewBox!.split(/\s+/).map(Number);
+
+    const coords = [...html.matchAll(/<circle[^>]*?cx="([^"]+)"[^>]*?cy="([^"]+)"/g)];
+    expect(coords.length).toBe(spread.length);
+    for (const m of coords) {
+      const cx = Number(m[1]);
+      const cy = Number(m[2]);
+      expect(cx).toBeGreaterThanOrEqual(vx);
+      expect(cx).toBeLessThanOrEqual(vx + vw);
+      expect(cy).toBeGreaterThanOrEqual(vy);
+      expect(cy).toBeLessThanOrEqual(vy + vh);
+    }
+  });
+
   it("renders the model-mismatch banner when stale with zero unprojected", () => {
     const proj: MemoryProjection = {
       algorithm: "pca",

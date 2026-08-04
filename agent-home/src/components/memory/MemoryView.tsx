@@ -32,6 +32,7 @@ export function MemoryView({
   const [q, setQ] = useState("");
   const [loading, setLoading] = useState(false);
   const [searching, setSearching] = useState(false);
+  const [rowsError, setRowsError] = useState<string | null>(null);
 
   // --- Search (debounced 300 ms, offset reset to 0) -----------------------
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -39,17 +40,23 @@ export function MemoryView({
     async (query: string) => {
       setLoading(true);
       setSearching(!!query.trim());
+      setRowsError(null);
       try {
         const sp = new URLSearchParams();
         if (query.trim()) sp.set("q", query.trim());
         sp.set("limit", String(limit));
         sp.set("offset", "0");
         const res = await fetch(`/api/memory/rows?${sp.toString()}`);
-        if (!res.ok) return;
+        if (!res.ok) {
+          setRowsError(describeFailure(res.status));
+          return;
+        }
         const data: MemoryRowsResponse = await res.json();
         setRows(data.rows);
         setTotal(data.total);
         setOffset(0);
+      } catch {
+        setRowsError("Couldn't reach the AI layer.");
       } finally {
         setLoading(false);
       }
@@ -57,7 +64,15 @@ export function MemoryView({
     [limit],
   );
 
+  // The server already rendered the first page, so the debounce must not fire
+  // on mount: it would refetch identical rows over mobile data and flash the
+  // list. It arms on the first keystroke.
+  const searchArmed = useRef(false);
   useEffect(() => {
+    if (!searchArmed.current) {
+      searchArmed.current = true;
+      return;
+    }
     if (debounceRef.current) clearTimeout(debounceRef.current);
     debounceRef.current = setTimeout(() => doSearch(q), 300);
     return () => {
@@ -70,16 +85,22 @@ export function MemoryView({
     const nextOffset = offset + limit;
     if (nextOffset >= total) return;
     setLoading(true);
+    setRowsError(null);
     try {
       const sp = new URLSearchParams();
       if (q.trim()) sp.set("q", q.trim());
       sp.set("limit", String(limit));
       sp.set("offset", String(nextOffset));
       const res = await fetch(`/api/memory/rows?${sp.toString()}`);
-      if (!res.ok) return;
+      if (!res.ok) {
+        setRowsError(describeFailure(res.status));
+        return;
+      }
       const data: MemoryRowsResponse = await res.json();
       setRows((prev) => [...prev, ...data.rows]);
       setOffset(nextOffset);
+    } catch {
+      setRowsError("Couldn't reach the AI layer.");
     } finally {
       setLoading(false);
     }
@@ -115,19 +136,31 @@ export function MemoryView({
     null,
   );
   const [queryLoading, setQueryLoading] = useState(false);
+  const [queryError, setQueryError] = useState<string | null>(null);
 
   const placeQuery = useCallback(async () => {
     if (!queryText.trim()) return;
     setQueryLoading(true);
+    setQueryError(null);
     try {
       const res = await fetch("/api/memory/query", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ text: queryText.trim() }),
       });
-      if (!res.ok) return;
+      if (!res.ok) {
+        // 429 is the upstream's own rate limit (one placement every 3 s).
+        setQueryError(
+          res.status === 429
+            ? "One placement every few seconds \u2014 try again shortly."
+            : describeFailure(res.status),
+        );
+        return;
+      }
       const data: MemoryQueryPlacement = await res.json();
       setQueryResult(data);
+    } catch {
+      setQueryError("Couldn't reach the AI layer.");
     } finally {
       setQueryLoading(false);
     }
@@ -152,11 +185,7 @@ export function MemoryView({
 
       {/* Map */}
       {projection ? (
-        <MemoryMap
-          projection={projection}
-          queryResult={queryResult}
-          rowMap={rowMap}
-        />
+        <MemoryMap projection={projection} queryResult={queryResult} />
       ) : projectionError ? null : (
         <div className="h-40 animate-pulse rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface)]" />
       )}
@@ -188,6 +217,11 @@ export function MemoryView({
             Your query is never stored — it&apos;s embedded and discarded.
           </p>
         )}
+        {queryError && (
+          <p data-component="MemoryQueryError" className="text-xs text-[var(--color-accent)]">
+            {queryError}
+          </p>
+        )}
         {queryResult && (
           <QueryResultView
             result={queryResult}
@@ -206,6 +240,11 @@ export function MemoryView({
       />
 
       {/* Rows */}
+      {rowsError && (
+        <p data-component="MemoryRowsError" className="text-xs text-[var(--color-accent)]">
+          {rowsError}
+        </p>
+      )}
       <div className="space-y-2">
         {rows.length === 0 && !loading ? (
           <div className="py-8 text-center text-sm text-[var(--color-muted)]">
@@ -231,6 +270,14 @@ export function MemoryView({
       )}
     </div>
   );
+}
+
+/** A failed BFF call in words a phone user can act on. */
+export function describeFailure(status: number): string {
+  if (status === 401) return "Your session expired \u2014 sign in again.";
+  if (status === 403) return "You don't have access to this memory.";
+  if (status === 409) return "Your login isn't linked to a memory principal.";
+  return "Couldn't load memories right now.";
 }
 
 function Pill({ label, value }: { label: string; value: number }) {
@@ -320,7 +367,7 @@ function NearestList({
               {n.score.toFixed(3)}
             </span>
             <span className="truncate">
-              {row ? row.text.slice(0, 80) : n.id}
+              {row ? row.text.slice(0, 80) : "(a memory outside the loaded list)"}
             </span>
           </li>
         );
