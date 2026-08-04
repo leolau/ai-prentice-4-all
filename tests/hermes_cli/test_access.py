@@ -11,6 +11,7 @@ from hermes_cli.access import (
     GRANT_TYPES,
     ITEM_GRANTS_TABLE,
     Principal,
+    ROLE_RANK,
     ROLES,
     SHARED,
     can_read,
@@ -19,6 +20,9 @@ from hermes_cli.access import (
     normalize_visibility,
     parse_private_owner,
     private,
+    reads_by_elevation,
+    reads_role_below,
+    role_rank,
     scope_filter,
 )
 
@@ -141,7 +145,9 @@ def test_scope_filter_rejects_unsafe_column() -> None:
 
 
 def test_grant_vocabulary_is_the_locked_set() -> None:
-    assert GRANT_ITEM_KINDS == ("goal", "task")
+    # 'memory' joined the set in FG-21 P3: one shared memory row is the
+    # sideways case the role ladder deliberately does not cover.
+    assert GRANT_ITEM_KINDS == ("goal", "task", "memory")
     assert GRANT_TYPES == ("assignee", "watcher")
     assert GRANT_STATUSES == ("pending", "accepted", "declined", "revoked")
     # Only pending/accepted grants confer visibility.
@@ -162,13 +168,15 @@ def test_can_read_grant_admits_only_the_granted_item() -> None:
 
 
 def test_scope_filter_grant_clause_binds_principal_and_correlates_item() -> None:
-    pred = scope_filter(_p("bob", "member"), grant_item_kind="task")
+    pred = scope_filter(
+        _p("bob", "member"), grant_item_kind="task", id_column="tasks.id"
+    )
     # shared OR own-private OR an active grant on THIS row's id to the principal.
     assert "visibility = 'shared'" in pred.sql
     assert "visibility = $1" in pred.sql
     assert f"FROM {ITEM_GRANTS_TABLE} ig" in pred.sql
     assert "ig.item_kind = 'task'" in pred.sql
-    assert "ig.item_id = id" in pred.sql
+    assert "ig.item_id = tasks.id" in pred.sql
     assert "ig.user_id = $2" in pred.sql
     assert "ig.status IN ('pending', 'accepted')" in pred.sql
     # Two bound params: the private tag ($1) and the principal id ($2).
@@ -189,8 +197,20 @@ def test_scope_filter_grant_clause_honours_indices_and_id_column() -> None:
     assert pred.params == ("private:bob", "bob")
 
 
+def test_grant_clause_refuses_an_unqualified_id_column() -> None:
+    """``item_grants`` has its own ``id``, so a bare name binds to the wrong one.
+
+    The clause would then match nothing and grant nothing, with no error — a
+    grant that silently confers no access. Cheaper to refuse than to debug.
+    """
+    with pytest.raises(ValueError, match="table-qualified"):
+        scope_filter(_p("bob", "member"), grant_item_kind="task")
+
+
 def test_scope_filter_owner_bypass_ignores_grant_kind() -> None:
-    pred = scope_filter(_p("root", "owner"), grant_item_kind="task")
+    pred = scope_filter(
+        _p("root", "owner"), grant_item_kind="task", id_column="tasks.id"
+    )
     assert pred.sql == "TRUE"
     assert pred.params == ()
 
@@ -202,5 +222,133 @@ def test_scope_filter_rejects_unknown_grant_kind_and_unsafe_id_column() -> None:
         scope_filter(
             _p("bob", "member"),
             grant_item_kind="task",
-            id_column="id; DROP TABLE x",
+            id_column="tasks.id; DROP TABLE x",
         )
+
+
+# --- FG-21 P3: the role ladder, downward only ------------------------------
+
+
+def test_the_ladder_reads_down_and_never_sideways_or_up() -> None:
+    """The whole access decision, as a matrix.
+
+    Written exhaustively because every False here is a boundary somebody could
+    remove with a one-character change to a comparison operator.
+    """
+    assert [role_rank(role) for role in ROLES] == [0, 1, 2, 3]
+
+    assert reads_role_below("owner", "admin") is True
+    assert reads_role_below("owner", "viewer") is True
+    assert reads_role_below("admin", "member") is True
+    assert reads_role_below("member", "viewer") is True
+
+    # Sideways: never.
+    for role in ROLES:
+        assert reads_role_below(role, role) is False
+    # Upward: never.
+    assert reads_role_below("admin", "owner") is False
+    assert reads_role_below("member", "admin") is False
+    assert reads_role_below("viewer", "member") is False
+
+
+def test_an_unknown_role_can_be_read_but_cannot_read() -> None:
+    """Fail closed in the direction that matters: garbage gains nothing."""
+    assert role_rank("wizard") == max(ROLE_RANK.values())
+    assert reads_role_below("wizard", "viewer") is False
+    assert reads_role_below("owner", "wizard") is True
+
+
+def test_role_elevation_is_off_unless_asked_for() -> None:
+    plain = scope_filter(_p("ada", "admin"))
+    assert "principals" not in plain.sql
+    assert plain.params == ("private:ada",)
+
+
+def test_scope_filter_elevation_clause_ranks_the_owner_from_the_table() -> None:
+    pred = scope_filter(_p("ada", "admin"), role_elevation=True)
+    # The subject's role is looked up, never taken from the row: a demotion has
+    # to take effect on the next read.
+    assert "FROM principals p" in pred.sql
+    assert "p.user_id = owner_user_id" in pred.sql
+    assert "owner_user_id <> $2" in pred.sql
+    # The reader's own rank is inlined from the ladder (admin == 1), and only
+    # strictly-higher ranks (numerically greater) are readable.
+    assert "> 1))" in pred.sql
+    assert pred.params == ("private:ada", "ada")
+
+
+def test_scope_filter_composes_grant_and_elevation_placeholders() -> None:
+    """Both optional clauses at once still number their params correctly."""
+    pred = scope_filter(
+        _p("ada", "admin"),
+        start_index=4,
+        grant_item_kind="memory",
+        id_column="memories.id",
+        role_elevation=True,
+    )
+    assert "visibility = $4" in pred.sql
+    assert "ig.user_id = $5" in pred.sql
+    assert "owner_user_id <> $6" in pred.sql
+    assert pred.params == ("private:ada", "ada", "ada")
+
+
+def test_a_viewer_gains_no_elevation_clause() -> None:
+    """Nothing is below the bottom rung, so the clause would be dead SQL."""
+    pred = scope_filter(_p("vic", "viewer"), role_elevation=True)
+    assert "principals" not in pred.sql
+    assert pred.params == ("private:vic",)
+
+
+def test_elevation_never_widens_the_owner_bypass() -> None:
+    pred = scope_filter(_p("root", "owner"), role_elevation=True)
+    assert pred.sql == "TRUE"
+    assert pred.params == ()
+
+
+def test_scope_filter_rejects_an_unsafe_owner_column() -> None:
+    with pytest.raises(ValueError):
+        scope_filter(
+            _p("ada", "admin"),
+            role_elevation=True,
+            owner_column="owner_user_id; DROP TABLE x",
+        )
+
+
+def test_reads_by_elevation_labels_only_the_rows_that_needed_rank() -> None:
+    ada = _p("ada", "admin")
+
+    # A member's private row: readable only because ada outranks mia.
+    assert (
+        reads_by_elevation(
+            ada,
+            {"owner_user_id": "mia", "visibility": private("mia")},
+            owner_role="member",
+        )
+        is True
+    )
+    # Ada's own row, and a shared row: readable anyway, so not an elevated read.
+    assert (
+        reads_by_elevation(
+            ada,
+            {"owner_user_id": "ada", "visibility": private("ada")},
+            owner_role="admin",
+        )
+        is False
+    )
+    assert (
+        reads_by_elevation(
+            ada,
+            {"owner_user_id": "mia", "visibility": SHARED},
+            owner_role="member",
+        )
+        is False
+    )
+    # A peer admin's private row is not readable at all, so never labelled.
+    assert (
+        reads_by_elevation(
+            ada,
+            {"owner_user_id": "abe", "visibility": private("abe")},
+            owner_role="admin",
+        )
+        is False
+    )

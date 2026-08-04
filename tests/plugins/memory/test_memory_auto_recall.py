@@ -54,7 +54,7 @@ class _RecallStore:
 
     async def query(self, principal, query_text, *, top_k=10, kind=None,
                     topic=None, min_score=0.0, record_use=False,
-                    connection=None):
+                    session_id=None, connection=None):
         self.calls.append(
             {
                 "query": query_text,
@@ -62,6 +62,7 @@ class _RecallStore:
                 "min_score": min_score,
                 "record_use": record_use,
                 "principal": principal.user_id,
+                "session_id": session_id,
             }
         )
         if self.fail:

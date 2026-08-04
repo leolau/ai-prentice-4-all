@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from typing import Callable
 
+from hermes_cli.memory_sharing import register_sharing_subparser
 from hermes_cli.memory_vectors import register_vectors_subparser
 
 
@@ -53,4 +54,5 @@ def build_memory_parser(subparsers, *, cmd_memory: Callable) -> None:
         help="Which store to reset: 'all' (default), 'memory', or 'user'",
     )
     register_vectors_subparser(memory_sub)
+    register_sharing_subparser(memory_sub)
     memory_parser.set_defaults(func=cmd_memory)
