@@ -416,7 +416,7 @@ def capture(
     deployment: str,
     hermes_home: Path,
     systemd_dir: Path,
-    unit_glob: str,
+    unit_globs: list[str],
     deploy_script: Path | None,
     credential_globs: list[str],
     secrets_out: Path | None = None,
@@ -444,19 +444,20 @@ def capture(
 
     units: dict[str, dict[str, str]] = {}
     unit_out = out / SYSTEMD_DIRNAME
-    for unit in sorted(systemd_dir.glob(unit_glob)):
-        if unit.is_file():
-            target = unit_out / unit.name
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(unit.read_bytes())
-            units[unit.name] = {"sha256": file_facts(unit)["sha256"]}
-    for dropin_dir in sorted(systemd_dir.glob(unit_glob + ".d")):
-        for dropin in sorted(dropin_dir.glob("*.conf")):
-            name = f"{dropin_dir.name}/{dropin.name}"
-            target = unit_out / dropin_dir.name / dropin.name
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(dropin.read_bytes())
-            units[name] = {"sha256": file_facts(dropin)["sha256"]}
+    for pattern in unit_globs:
+        for unit in sorted(systemd_dir.glob(pattern)):
+            if unit.is_file():
+                target = unit_out / unit.name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(unit.read_bytes())
+                units[unit.name] = {"sha256": file_facts(unit)["sha256"]}
+        for dropin_dir in sorted(systemd_dir.glob(pattern + ".d")):
+            for dropin in sorted(dropin_dir.glob("*.conf")):
+                name = f"{dropin_dir.name}/{dropin.name}"
+                target = unit_out / dropin_dir.name / dropin.name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(dropin.read_bytes())
+                units[name] = {"sha256": file_facts(dropin)["sha256"]}
 
     credentials: list[dict[str, str]] = []
     for pattern in credential_globs:
@@ -473,7 +474,7 @@ def capture(
         "deployment": deployment,
         "hermes_home": str(hermes_home),
         "systemd_dir": str(systemd_dir),
-        "unit_glob": unit_glob,
+        "unit_globs": unit_globs,
         "env_keys": sorted(env_values),
         "config_secrets": sorted(secrets),
         "credential_globs": credential_globs,
@@ -681,7 +682,13 @@ def format_report(deployment: str, findings: list[dict[str, str]]) -> str:
 def _add_capture_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--hermes-home", type=Path, required=True)
     parser.add_argument("--systemd-dir", type=Path, default=Path("/etc/systemd/system"))
-    parser.add_argument("--unit-glob", default="hermes-*")
+    parser.add_argument(
+        "--unit-glob",
+        action="append",
+        default=["hermes-*", "agent-home*"],
+        help="glob pattern for systemd units to capture (repeatable); "
+        "defaults to hermes-* and agent-home*",
+    )
     parser.add_argument("--deploy-script", type=Path, default=None)
     parser.add_argument(
         "--secrets-out",

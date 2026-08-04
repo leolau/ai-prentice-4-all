@@ -685,3 +685,104 @@ class TestV4RagChunks:
         kinds = {p["kind"] for p in proj["points"]}
         assert "chunk" in kinds, "Chunk points must appear on the projection"
         assert "memory" in kinds, "Memory points must also be present"
+
+
+# ---------------------------------------------------------------------------
+# V5: FG-23 §6 — deterministic projection sampling
+# ---------------------------------------------------------------------------
+
+class TestV5Sampling:
+    """FG-23 §6 — ``/projection?limit=N`` deterministically samples when total > N."""
+
+    @pytest.mark.asyncio
+    async def test_sample_is_stable_across_calls(self, postgres_dsn, monkeypatch):
+        """The same ``limit`` returns the same point set across two calls."""
+        await _reset(postgres_dsn)
+        store = _make_store(postgres_dsn)
+        await store.initialize()
+        await _enroll_principals(store)
+
+        for i in range(5):
+            await store.write(ALICE, f"memory number {i}")
+
+        _patch_projection_store(monkeypatch, store)
+        from hermes_cli.memory_projection import fit_projection
+        await fit_projection(store, algorithm="pca", sample_size=20000)
+
+        _patch_store(monkeypatch, store)
+        client = _make_client(monkeypatch, ALICE)
+
+        r1 = client.get("/api/memory/explorer/projection?limit=2").json()
+        r2 = client.get("/api/memory/explorer/projection?limit=2").json()
+        ids1 = sorted(p["id"] for p in r1["points"])
+        ids2 = sorted(p["id"] for p in r2["points"])
+        assert ids1 == ids2, "hashtext sampling must be deterministic"
+        assert len(ids1) == 2
+
+    @pytest.mark.asyncio
+    async def test_total_points_is_unsampled_count(self, postgres_dsn, monkeypatch):
+        """``total_points`` is the count before sampling, not the returned count."""
+        await _reset(postgres_dsn)
+        store = _make_store(postgres_dsn)
+        await store.initialize()
+        await _enroll_principals(store)
+
+        for i in range(5):
+            await store.write(ALICE, f"memory number {i}")
+
+        _patch_projection_store(monkeypatch, store)
+        from hermes_cli.memory_projection import fit_projection
+        await fit_projection(store, algorithm="pca", sample_size=20000)
+
+        _patch_store(monkeypatch, store)
+        client = _make_client(monkeypatch, ALICE)
+
+        proj = client.get("/api/memory/explorer/projection?limit=2").json()
+        assert proj.get("sampled") is True
+        assert proj.get("total_points") == 5
+        assert len(proj["points"]) == 2
+
+    @pytest.mark.asyncio
+    async def test_no_sampling_when_within_limit(self, postgres_dsn, monkeypatch):
+        """When total <= limit, no sampling occurs and ``sampled`` is absent."""
+        await _reset(postgres_dsn)
+        store = _make_store(postgres_dsn)
+        await store.initialize()
+        await _enroll_principals(store)
+
+        for i in range(3):
+            await store.write(ALICE, f"memory number {i}")
+
+        _patch_projection_store(monkeypatch, store)
+        from hermes_cli.memory_projection import fit_projection
+        await fit_projection(store, algorithm="pca", sample_size=20000)
+
+        _patch_store(monkeypatch, store)
+        client = _make_client(monkeypatch, ALICE)
+
+        proj = client.get("/api/memory/explorer/projection?limit=10").json()
+        assert "sampled" not in proj
+        assert len(proj["points"]) == 3
+
+    @pytest.mark.asyncio
+    async def test_limit_cap_enforced(self, postgres_dsn, monkeypatch):
+        """A limit above the hard cap (20 000) is clamped down."""
+        await _reset(postgres_dsn)
+        store = _make_store(postgres_dsn)
+        await store.initialize()
+        await _enroll_principals(store)
+
+        for i in range(3):
+            await store.write(ALICE, f"memory number {i}")
+
+        _patch_projection_store(monkeypatch, store)
+        from hermes_cli.memory_projection import fit_projection
+        await fit_projection(store, algorithm="pca", sample_size=20000)
+
+        _patch_store(monkeypatch, store)
+        client = _make_client(monkeypatch, ALICE)
+
+        # 99999 is above the hard cap — should be clamped to 20000.
+        proj = client.get("/api/memory/explorer/projection?limit=99999").json()
+        # Only 3 points exist, so no sampling needed; the cap just bounds it.
+        assert len(proj["points"]) == 3

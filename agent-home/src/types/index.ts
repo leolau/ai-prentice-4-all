@@ -582,3 +582,84 @@ export interface WebviewActionResponse {
   granted?: boolean;
   approval?: WebviewPendingApproval;
 }
+
+// ---------------------------------------------------------------------------
+// FG-23 — Memory explorer (read-only). Mirrors `hermes_cli/memory_explorer.py`
+// exactly so the BFF, the Python API and the dashboard surface speak the same
+// vocabulary. These shapes are lifted from `web/src/screens/MemoryPage.tsx`
+// without field-name "improvements" — the API is the contract.
+// ---------------------------------------------------------------------------
+
+/** Embedding-space health (mirror of `PgvectorMemoryStore.describe_space()`). */
+export interface MemorySpace {
+  column_dim: number | null;
+  rows_by_model: Record<string, number>;
+  configured_model: string;
+  healthy: boolean;
+}
+
+/** The `/api/memory/explorer/summary` response (C2-scoped counts + recall use). */
+export interface MemorySummary {
+  space: MemorySpace;
+  totals: { memories: number; documents: number; chunks: number };
+  by_owner: Record<string, number>;
+  by_topic: Record<string, number>;
+  by_kind: Record<string, number>;
+  growth: { day: string; count: number }[];
+  recall_use: {
+    never_used: number;
+    used_7d: number;
+    top: { id: string; text: string; truncated: boolean; uses: number;
+           last_used: string | null }[];
+  };
+}
+
+/** A single memory row from `/api/memory/explorer/rows`. */
+export interface MemoryRow {
+  id: string; owner_user_id: string; visibility: string; kind: string;
+  topic: string | null; text: string; truncated: boolean;
+  created_at: string | null; uses: number; last_used: string | null;
+  elevated: boolean; provenance: string; score: number | null;
+}
+
+/** Paginated rows response. */
+export interface MemoryRowsResponse {
+  rows: MemoryRow[]; total: number; limit: number; offset: number;
+}
+
+/** One point on the fitted 2-D map. */
+export interface MemoryProjectionPoint {
+  id: string; x: number; y: number; owner_user_id: string;
+  topic: string | null; kind: string; elevated: boolean;
+  provenance: string; label: string;
+}
+
+/** The `/api/memory/explorer/projection` response. */
+export interface MemoryProjection {
+  algorithm: string | null;        // "pca" | "umap" | null when never fitted
+  computed_at: string | null;
+  stale: boolean;                  // model mismatch OR unprojected rows
+  unprojected_count: number;
+  points: MemoryProjectionPoint[];
+  sampled?: boolean;               // true when the point set was deterministically downsampled
+  total_points?: number;           // the unsampled count, present when sampled
+}
+
+/** The `/api/memory/explorer/projection/query` response. */
+export interface MemoryQueryPlacement {
+  x: number | null; y: number | null;                    // null ⇒ no position
+  nearest: { id: string; score: number }[];
+  degraded?: boolean;                                    // UMAP basis unloadable
+}
+
+/** A RAG document from `/api/memory/explorer/documents`. */
+export interface MemoryDocument {
+  id: string; owner_user_id: string; visibility: string; source_kind: string;
+  source_ref: string; title: string; chunk_count: number;
+  ingested_at: string | null;
+}
+
+/** Paginated documents response. */
+export interface MemoryDocumentsResponse {
+  documents: MemoryDocument[]; total: number;
+}

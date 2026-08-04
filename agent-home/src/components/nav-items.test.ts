@@ -23,4 +23,19 @@ describe("nav-items", () => {
     }
     expect(PRIMARY_NAV.map((i) => i.href)).toContain("/");
   });
+
+  // FG-23: Memory is a primary tab (replaced Activity); Activity moved to
+  // secondary. Five is the bottom-bar budget on a phone.
+  it("has Memory in primary nav and Activity in secondary", () => {
+    const primaryHrefs = PRIMARY_NAV.map((i) => i.href);
+    const secondaryHrefs = SECONDARY_NAV.map((i) => i.href);
+    expect(primaryHrefs).toContain("/memory");
+    expect(secondaryHrefs).toContain("/activity");
+    expect(primaryHrefs).not.toContain("/activity");
+    expect(secondaryHrefs).not.toContain("/memory");
+  });
+
+  it("keeps primary nav at or below five tabs", () => {
+    expect(PRIMARY_NAV.length).toBeLessThanOrEqual(5);
+  });
 });

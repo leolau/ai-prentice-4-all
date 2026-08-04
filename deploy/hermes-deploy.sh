@@ -66,6 +66,25 @@ elif [ ! -d hermes_cli/web_dist/assets ]; then
   (cd web && nice -n 15 npm run build)
 fi
 
+# FG-23 A0.2: Rebuild agent-home (the phone PWA) only when its sources
+# changed, or when no build exists. agent-home is an npm *workspace* of the
+# root package.json — install/build from the repo root, NOT from inside
+# agent-home/ (that would create a second, unhoisted dep tree). The root
+# package-lock.json is matched explicitly because a workspace dependency change
+# lands there.
+if [ "$BEFORE" != "$AFTER" ] && \
+   git diff --name-only "$BEFORE" "$AFTER" | grep -qE '^(agent-home/|package-lock\.json$)'; then
+  echo "== rebuilding agent-home bundle (agent-home/ changed) =="
+  nice -n 15 npm ci --no-audit --no-fund --silent
+  nice -n 15 npm run build --workspace agent-home
+  systemctl restart agent-home
+elif [ ! -f agent-home/.next/BUILD_ID ]; then
+  echo "== building agent-home bundle (no build present) =="
+  nice -n 15 npm ci --no-audit --no-fund --silent
+  nice -n 15 npm run build --workspace agent-home
+  systemctl restart agent-home
+fi
+
 # hermes owns the source tree, but NOT .venv: root runs pip from it, so a
 # hermes-writable venv would be a path back to root.
 find "$REPO" -path "$REPO/.venv" -prune -o -print0 | xargs -0 chown hermes:hermes
@@ -73,6 +92,8 @@ chown -R root:root "$REPO/.venv"
 
 echo "== restarting services =="
 systemctl daemon-reload
+# agent-home is restarted above when its bundle changed; it is not in the
+# hermes-* unit glob, so the loop below does not touch it.
 for u in $UNITS; do systemctl restart "$u"; done
 sleep 15
 fail=0

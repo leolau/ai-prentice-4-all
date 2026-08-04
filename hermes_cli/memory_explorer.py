@@ -622,13 +622,23 @@ async def _rows_chunks(
 # ---------------------------------------------------------------------------
 
 @router.get("/projection")
-async def get_projection(request: Request, mode: Optional[str] = None):
+async def get_projection(
+    request: Request, mode: Optional[str] = None, limit: Optional[int] = None
+):
     """2-D projection of every memory's embedding, scope-filtered.
 
     Returns ``{ algorithm: null, points: [], stale: true }`` when no
     projection has been fit yet (not 500). ``stale`` is true when rows
     exist without projection points, or the fitted model differs from the
     configured embedder.
+
+    FG-23 §6: the point set is deterministically downsampled when it exceeds
+    ``limit`` (default 5 000, hard cap 20 000) so the phone never receives
+    megabytes of JSON. Sampling uses ``ORDER BY hashtext(id::text)`` — never
+    ``random()`` — so a refetch does not reshuffle the map. The sample is
+    applied **after** the scope predicate, so a principal's own rows can
+    never be crowded out by rows they may not see. ``/projection/query``'s
+    nearest list stays exact (runs over all rows).
     """
     principal = await _resolve_principal(request)
     store = _memory_store(mode)
@@ -688,12 +698,34 @@ async def get_projection(request: Request, mode: Optional[str] = None):
             else ""
         )
 
+        # Sampling (FG-23 §6): count total scope-visible rows, then if they
+        # exceed the limit, fetch a deterministic subset via hashtext.
+        limit_val = min(int(limit) if limit is not None else 5000, 20000)
+
         # A dot's position plus its hover label *is* the memory, so the map is
         # read under the same two gates as a row: policy bound in-transaction,
         # and every elevated point audited before it is returned.
         async with conn.transaction():
             await bind_principal(conn, principal)
             await bind_elevated_reads(conn, store.role_reads)
+
+            total_points = await conn.fetchval(
+                f"SELECT COUNT(*) FROM {PROJECTION_TABLE} p "
+                f"WHERE {predicate.sql}",
+                *predicate.params,
+            ) or 0
+
+            sampled = total_points > limit_val
+            if sampled:
+                next_idx = len(predicate.params) + 1
+                order_limit = (
+                    f"ORDER BY hashtext(p.id::text) LIMIT ${next_idx}"
+                )
+                fetch_params = [*predicate.params, limit_val]
+            else:
+                order_limit = "ORDER BY p.fitted_at DESC"
+                fetch_params = list(predicate.params)
+
             rows = await conn.fetch(
                 f"""SELECT p.id, p.x, p.y, p.owner_user_id, p.topic, p.kind,
                           p.visibility,
@@ -707,8 +739,8 @@ async def get_projection(request: Request, mode: Optional[str] = None):
                     LEFT JOIN {MEMORY_TABLE} m ON m.id = p.id
                     {chunk_join}
                     WHERE {predicate.sql}
-                    ORDER BY p.fitted_at DESC""",
-                *predicate.params,
+                    {order_limit}""",
+                *fetch_params,
             )
 
             elevated_subjects: dict[str, list] = {}
@@ -767,13 +799,17 @@ async def get_projection(request: Request, mode: Optional[str] = None):
         if basis["model"] != store.model_id:
             stale = True
 
-        return {
+        result: dict = {
             "algorithm": basis["algorithm"],
             "computed_at": basis["fitted_at"].isoformat() if basis["fitted_at"] else None,
             "stale": stale,
             "unprojected_count": unprojected,
             "points": points,
         }
+        if sampled:
+            result["sampled"] = True
+            result["total_points"] = total_points
+        return result
     finally:
         await conn.close()
 

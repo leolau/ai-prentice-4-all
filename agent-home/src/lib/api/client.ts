@@ -26,6 +26,11 @@ import type {
   MemberOkResponse,
   MemberRoleResponse,
   MembersResponse,
+  MemoryDocumentsResponse,
+  MemoryProjection,
+  MemoryQueryPlacement,
+  MemoryRowsResponse,
+  MemorySummary,
   NotificationAnswerResponse,
   NotificationsResponse,
   OnboardingReadinessResponse,
@@ -371,6 +376,56 @@ export class HermesApiClient {
       `/api/comms/members/${encodeURIComponent(userId)}/activate`,
       { method: "POST" },
     );
+  }
+
+  // --- FG-23 memory explorer (read-only) -----------------------------------
+  // Unlike `tools(mode)`, these deliberately do NOT forward
+  // AGENT_HOME_DATASTORE_MODE — the Python layer resolves the memory tier's
+  // own mode (FG-23 D3). Sending `prod` on the current box would report zero
+  // memories from an empty `app_prod` schema.
+
+  /** The C2-scoped memory summary: counts, embedding-space health, recall use. */
+  async memorySummary(): Promise<MemorySummary> {
+    return this.request("/api/memory/explorer/summary");
+  }
+
+  /** Paginated + semantic-search rows. `limit: 25` on a phone (not 50). */
+  async memoryRows(
+    opts: {
+      q?: string;
+      topic?: string;
+      kind?: string;
+      limit?: number;
+      offset?: number;
+    } = {},
+  ): Promise<MemoryRowsResponse> {
+    const p = new URLSearchParams();
+    if (opts.q) p.set("q", opts.q);
+    if (opts.topic) p.set("topic", opts.topic);
+    if (opts.kind) p.set("kind", opts.kind);
+    p.set("limit", String(opts.limit ?? 25));
+    p.set("offset", String(opts.offset ?? 0));
+    return this.request(`/api/memory/explorer/rows?${p.toString()}`);
+  }
+
+  /** The fitted 2-D projection map (scope-filtered, deterministically sampled). */
+  async memoryProjection(limit?: number): Promise<MemoryProjection> {
+    const qs =
+      limit != null ? `?limit=${encodeURIComponent(limit)}` : "";
+    return this.request(`/api/memory/explorer/projection${qs}`);
+  }
+
+  /** Place a typed query on the map. The text is never persisted upstream. */
+  async memoryQuery(text: string): Promise<MemoryQueryPlacement> {
+    return this.request("/api/memory/explorer/projection/query", {
+      method: "POST",
+      json: { text },
+    });
+  }
+
+  /** The C2-scoped RAG documents list (empty until ingestion runs). */
+  async memoryDocuments(): Promise<MemoryDocumentsResponse> {
+    return this.request("/api/memory/explorer/documents");
   }
 }
 
