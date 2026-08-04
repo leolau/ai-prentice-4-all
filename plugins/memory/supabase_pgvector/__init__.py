@@ -47,9 +47,53 @@ from hermes_cli.task_registry import (
 )
 
 from .embedding import DEFAULT_DIM
-from .store import PgvectorMemoryStore
+from .store import MemoryRecord, PgvectorMemoryStore
 
 logger = logging.getLogger(__name__)
+
+#: Automatic-recall budget. Defaults chosen to be affordable on every turn:
+#: one vector search, a handful of rows, and a hard character cap so recall can
+#: never crowd out the user's actual message.
+RECALL_DEFAULTS = {
+    "auto": True,
+    "top_k": 5,
+    "min_score": 0.35,
+    "max_chars": 1200,
+    "min_query_chars": 8,
+    # Near-identical memories collapse into the existing row. High on purpose:
+    # 0.97 catches a re-statement, not two related facts.
+    "dedup_threshold": 0.97,
+}
+
+
+def _recall_settings(config: Optional[dict]) -> Dict[str, Any]:
+    memory = (config or {}).get("memory")
+    section = memory.get("recall") if isinstance(memory, dict) else None
+    settings = dict(RECALL_DEFAULTS)
+    if isinstance(section, dict):
+        settings.update(section)
+    return settings
+
+
+def _format_recall(records: List[MemoryRecord], max_chars: int) -> str:
+    """Render recalled rows compactly, newest-relevance first.
+
+    Truncation drops whole memories rather than cutting one mid-sentence: half a
+    fact is worse than no fact, because the model cannot tell it is reading a
+    fragment.
+    """
+    lines: List[str] = []
+    used = 0
+    for record in records:
+        label = record.topic or record.kind
+        line = f"- ({label}) {record.text}"
+        if used + len(line) > max_chars:
+            break
+        lines.append(line)
+        used += len(line) + 1
+    if not lines:
+        return ""
+    return "<live-memory-recall>\n" + "\n".join(lines) + "\n</live-memory-recall>"
 
 
 async def _initialize_stores(
@@ -157,6 +201,7 @@ class SupabasePgvectorMemoryProvider(MemoryProvider):
         self._task_discovery: Optional[TaskDiscoveryEngine] = None
         self._task_proposal = ""
         self._task_session = False
+        self._recall = dict(RECALL_DEFAULTS)
 
     @property
     def name(self) -> str:
@@ -238,6 +283,7 @@ class SupabasePgvectorMemoryProvider(MemoryProvider):
             pass
         try:
             config = load_config()
+            self._recall = _recall_settings(config)
             store = get_store("supabase-app")
             self._store = PgvectorMemoryStore(store, config=config)
             self._dim = self._store.dim
@@ -297,15 +343,60 @@ class SupabasePgvectorMemoryProvider(MemoryProvider):
             logger.debug("task discovery observation failed", exc_info=True)
 
     def prefetch(self, query: str, **kwargs) -> str:
-        del query, kwargs
+        """Automatic recall + any pending task-discovery note for this turn.
+
+        Returned text is injected into the *current* user message at API-call
+        time only (``agent/conversation_loop.py``): the stored message is not
+        mutated and the cached prefix is untouched, so recall cannot invalidate
+        the conversation's prompt cache or leak into session persistence. That
+        is why recall belongs here rather than in ``system_prompt_block()``.
+
+        Until this existed the tier was write-only: rows accumulated and only a
+        deliberate ``memory_query`` tool call ever read them, which in practice
+        never happened.
+        """
+        del kwargs
+        blocks: List[str] = []
+        recall = self._recall_block(query)
+        if recall:
+            blocks.append(recall)
         proposal = self._task_proposal
         self._task_proposal = ""
-        if not proposal:
+        if proposal:
+            blocks.append(
+                "<task-discovery>\n"
+                f"{proposal}\n"
+                "</task-discovery>"
+            )
+        return "\n\n".join(blocks)
+
+    def _recall_block(self, query: str) -> str:
+        if self._store is None or self._principal is None:
             return ""
-        return (
-            "<task-discovery>\n"
-            f"{proposal}\n"
-            "</task-discovery>"
+        if not self._recall.get("auto", True):
+            return ""
+        text = (query or "").strip()
+        if len(text) < int(self._recall.get("min_query_chars", 8)):
+            # "ok", "thanks", "yes" carry no retrievable intent; a vector search
+            # on them spends a model forward pass to recall noise.
+            return ""
+        try:
+            records = self._run_async(
+                self._store.query(
+                    self._principal,
+                    text,
+                    top_k=int(self._recall.get("top_k", 5)),
+                    min_score=float(self._recall.get("min_score", 0.35)),
+                    record_use=True,
+                )
+            )
+        except Exception:
+            # Recall is an enhancement; a failed one must not take the turn
+            # down or discard a pending task-discovery note.
+            logger.debug("automatic memory recall failed", exc_info=True)
+            return ""
+        return _format_recall(
+            records, int(self._recall.get("max_chars", 1200))
         )
 
     def system_prompt_block(self) -> str:
@@ -381,6 +472,9 @@ class SupabasePgvectorMemoryProvider(MemoryProvider):
                 topic=args.get("topic") or None,
                 visibility=args.get("visibility") or None,
                 source_session=self._session_id or None,
+                dedup_threshold=float(
+                    self._recall.get("dedup_threshold", 0.97)
+                ),
             )
         )
         return json.dumps(

@@ -455,14 +455,61 @@ only.
 |---|---|---|---|
 | **P0** | Identity is real — **done** | `hermes member link-channel`; role stamped by `bind_channel_principal` and threaded to the memory provider; role never persisted | one human = one principal across channels; unresolved → `member`; negative-access tests unchanged |
 | **P0b** | Existing rows — **done** | 28 rows migrated `8756039695` → `leo_owner`; `telegram:8756039695` linked; pre-migration `pg_dump` kept and restore-verified into a scratch schema first | embeddings byte-identical to the pre-migration copy; 0 rows left behind; unlinked sender still resolves to nothing |
-| **P1** | Embedding service — **done, numbers in §7.5** | `scripts/embedding_server.py` + `hermes-embed.service` (loopback, unprivileged, revision-pinned); `local_http` embedder behind `memory.embedding.*`; hashing stays default; **not cut over** (needs P2's re-embed) | benchmark recorded; wrong-model and wrong-width requests refused, not stored |
-| **P2** | Semantic layer 4 | model/dim columns + migration + `hermes memory reembed`; recall in `prefetch()` with budget; `uses`/`last_used`; dedup | `recall@3` on the probe set ≥ agreed floor; prompt-prefix byte-stability test green |
+| **P1** | Embedding service — **done, numbers in §7.5** | `scripts/embedding_server.py` + tracked `deploy/hermes-embed.service` (loopback, unprivileged, revision-pinned); `local_http` embedder behind `memory.embedding.*`; hashing stays default | benchmark recorded; wrong-model and wrong-width requests refused, not stored |
+| **P2** | Semantic layer 4 — **done, §8.1** | `embedding_model` per row; mismatch refused at startup; `hermes memory vectors status/reembed` (one transaction, index rebuilt); automatic recall in `prefetch()` with budget; `uses`/`last_used`; opt-in dedup | cross-model rows excluded from recall, not ranked; failed re-embed leaves the old space intact; prompt-prefix byte-stability test green |
 | **P3** | Shared recall | role-scoped elevation (config, default off) + RLS; `item_grants` for memories; provenance labels; `memory_read_elevated` audit | full negative-access matrix (member/member, admin off/on, grantee) at the **RLS** level, not just app level |
 | **P4** | RAG | `rag_documents` / `rag_chunks` + RLS; Drive + session ingestion; nightly timer; `rag_search` with citations | answer-with-citation on 3 real Drive docs; no private→shared laundering (test) |
 | **P5** | Consolidation | layer-1 promotion/demotion; email/WhatsApp ingestion (teams dropped — §10.5) | layer 1 back under budget without losing facts |
 
 Nothing here needs a new core tool, a new `HERMES_*` env var for behaviour, or a
 change to the frozen-snapshot semantics.
+
+### 8.1 P2 as built
+
+Three decisions here were not obvious from the plan and are worth recording,
+because each one exists to prevent an *invisible* failure:
+
+1. **Provenance is per row, and mismatches are refused rather than ranked.**
+   Cosine distance between two models' vectors is a well-formed number with no
+   meaning, so a mixed column returns plausible rows in a meaningless order and
+   looks entirely healthy. Recall therefore filters on `embedding_model`, and a
+   *dimension* change refuses at `initialize()` with the remedy in the message —
+   the alternative was an asyncpg type error on every write, which names the
+   symptom and not the cause. Rows written before the column existed are
+   backfilled as `hashing`, which is a statement of fact: that is what embedded
+   them.
+
+2. **The re-embed is one transaction, and embedding happens outside it.**
+   All-or-nothing, because a half-migrated column is the exact state this phase
+   exists to prevent; and embedded up-front, because holding a write transaction
+   open across minutes of CPU at ~300 ms per row would block live sessions
+   behind the migration. pgvector cannot widen `vector(N)` in place, so the
+   column is replaced and the HNSW index rebuilt — without that rebuild, recall
+   silently degrades to a sequential scan.
+
+3. **Dedup is opt-in per write, not global.** This was found by a failing test,
+   not by design: task discovery decides a standing request is a task by
+   *counting how often the same intent recurs*, so collapsing identical rows
+   made a request the user repeated three times never cross its threshold. An
+   improvement to one writer had quietly disabled a different feature. Only
+   callers that pass a threshold (the `memory_write` tool, at 0.97) get dedup,
+   and dedup is per owner — two people knowing the same fact is two memories.
+
+Automatic recall is budgeted (`top_k`, `min_score`, `max_chars`, plus a minimum
+query length so "ok" does not spend a search) and reaches the model through the
+existing `prefetch()` seam, which `conversation_loop.py` appends to the current
+user message at API-call time from a copy. The cached prefix and the stored
+conversation are untouched.
+
+`min_score` is load-bearing rather than cosmetic: an HNSW search always returns
+`top_k` rows, so without a floor every turn recalls its least-unrelated
+memories. On the current hashing vectors an unrelated question still scores
+~0.2 on an incidental shared token.
+
+Still true after P2: the live column is **256-dim hashing**. Cutover is a
+deliberate two-step act on the box — edit `memory.embedding`, then
+`hermes memory vectors reembed` — and until it is run, `local_http` is
+configured-but-not-cut-over.
 
 ## 9. Operational plan
 

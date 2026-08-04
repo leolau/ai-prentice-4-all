@@ -12250,6 +12250,11 @@ def _try_termux_fast_tui_launch() -> bool:
 
 def cmd_memory(args):
     sub = getattr(args, "memory_command", None)
+    if sub == "vectors":
+        from hermes_cli.memory_vectors import cmd_memory_vectors
+
+        cmd_memory_vectors(args)
+        return
     if sub == "off":
         from hermes_cli.config import load_config, save_config
 

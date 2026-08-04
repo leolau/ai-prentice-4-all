@@ -87,12 +87,14 @@ class _FakeStore:
     rows: List[MemoryRecord]
     dim: int = 256
     mode: str = "prod"
+    model_id: str = "hashing"
 
     async def initialize(self, *, connection=None) -> None:  # noqa: D401
         return None
 
     async def write(self, principal, text, *, kind="fact", topic=None,
-                    visibility=None, source_session=None, connection=None):
+                    visibility=None, source_session=None,
+                    dedup_threshold=0.0, connection=None):
         vis = _resolve_visibility(principal, visibility)
         record = MemoryRecord(
             id=f"id-{len(self.rows)}",
@@ -108,7 +110,9 @@ class _FakeStore:
         return record
 
     async def query(self, principal, query_text, *, top_k=10, kind=None,
-                    topic=None, connection=None):
+                    topic=None, min_score=0.0, record_use=False,
+                    connection=None):
+        self.recorded_use = record_use
         return list(self.rows)[:top_k]
 
 
