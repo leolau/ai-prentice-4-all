@@ -120,7 +120,7 @@ memory:
     endpoint: http://127.0.0.1:8791
     model: BAAI/bge-m3
     dim: 1024
-    timeout_seconds: 20
+    timeout_seconds: 120
 ```
 
 `dim` must match both the service and the `vector(N)` column. The client sends
@@ -160,6 +160,42 @@ Take a dump first anyway (`pg_dump -t app_dev.memories`). The transaction
 protects against a failed migration; it does not protect against a *successful*
 migration you did not want.
 
+### Size the timeout for a batch, not a write
+
+The first attempt on this deployment failed on the first batch:
+
+```
+✗ embedding service at http://127.0.0.1:8791 is unreachable or returned a
+  non-JSON body: timed out
+```
+
+The service was healthy. `timeout_seconds` covers one whole request, and
+`reembed` sends `--batch-size` texts per request: **16 texts took 16.3 s** on
+these 4 shared vCPUs, against **0.2 s** for the single text a live memory write
+embeds. So the 20 s that is generous for every runtime path is marginal for the
+one path that batches — the migration fails while nothing else shows a symptom.
+Hence `timeout_seconds: 120`, and `--batch-size 8` if the box is busy. Nothing
+moved on the failed attempt, exactly as the transaction promises.
+
+### Performed on hermes-systest, 2026-08-04
+
+```
+before   vector(256)   28 rows   hashing
+after    vector(1024)  28 rows   BAAI/bge-m3   HNSW index rebuilt
+```
+
+Cross-lingual recall, which the hashing embedder could not do at all (a Chinese
+query embedded to the zero vector):
+
+```
+招標截止日期是幾時        0.722  "find out when the next tender is due"
+when is the bid submission deadline
+                          0.698  "find out when the next tender is due"
+```
+
+The query and the row share no character. That is the whole point of the
+migration.
+
 ## Automatic recall
 
 Until P2 the tier was write-only: rows accumulated and the only reader was a
@@ -171,7 +207,7 @@ memory:
   recall:
     auto: true
     top_k: 5
-    min_score: 0.35
+    min_score: 0.65      # calibrated for bge-m3 on this corpus — see below
     max_chars: 1200
     min_query_chars: 8
     dedup_threshold: 0.97
@@ -182,9 +218,28 @@ from a copy — the system prompt is untouched and the stored conversation is
 unchanged, so the cached prefix survives and nothing leaks into session history.
 
 `min_score` is not a tuning nicety: an HNSW search always returns `top_k` rows,
-so without a floor every turn recalls its least-unrelated memories. On the box's
-current hashing vectors an unrelated question still scores ~0.2 on an incidental
-shared token, which is the noise the floor removes.
+so without a floor every turn recalls its least-unrelated memories.
+
+**And the floor does not survive a model change.** The 0.35 default was measured
+against hashing vectors, where an unrelated question scores ~0.2 on an
+incidental shared token. bge-m3 packs everything much higher — measured on this
+deployment's 28 rows, six deliberately unrelated questions and six on-topic
+ones:
+
+```
+unrelated  0.358 - 0.614      ("recommend a film for tonight" -> 0.614)
+related    0.600 - 0.722      ("which amazon cloud account are we using" -> 0.600)
+```
+
+At 0.35 every turn recalls something; the two bands even **overlap**, so no
+floor separates them perfectly on a corpus this small. 0.65 is set above the
+highest unrelated score, which costs the weakest true match and keeps the model
+from being handed a memory about films while answering about tenders. Recall
+that misfires is worse than recall that stays quiet: a wrong memory is asserted
+as fact every turn, a missing one is one question away.
+
+Re-measure after any model change — the probe is a handful of on- and off-topic
+queries through `store.query(..., min_score=0.0)` and reading the top score.
 
 ## Health
 
