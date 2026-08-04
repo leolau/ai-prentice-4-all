@@ -176,6 +176,14 @@ mapping.
 
 Own PR. No memory code. Each step is verifiable on the box.
 
+**Read `.agents/skills/testing-hermes-systest-box/SKILL.md` first.** There is
+**no SSH** to this box: the only access path is the `alibaba-cloud` MCP server's
+`OOS_RunCommand`, which runs as root, fails the whole call on a nonzero exit
+(end scripts with `; true`), times out at ~60 s while the remote script keeps
+running, and executes under `dash` rather than bash. That skill also carries the
+`agent-home` section summarising §2 and the `sudo -u hermes -H` form needed to
+test the service account's real behaviour.
+
 ### A0.1 — one checkout
 
 **Decided (§9.1):** retire `/opt/data/agent-home-app` and run from the main
