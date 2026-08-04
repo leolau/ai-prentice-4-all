@@ -1,0 +1,7 @@
+name: dashscope
+version: 1.0.0
+description: "DashScope (Alibaba Wan) image generation backend (wan2.7-image-pro, wan2.7-image). Uses DASHSCOPE_API_KEY."
+author: NousResearch
+kind: backend
+requires_env:
+  - DASHSCOPE_API_KEY

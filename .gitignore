@@ -158,3 +158,4 @@ state-secrets.env
 # belongs in the private backup repo, not here.
 *.tar.gz.age
 backup-recipient.env
+.qoder/
