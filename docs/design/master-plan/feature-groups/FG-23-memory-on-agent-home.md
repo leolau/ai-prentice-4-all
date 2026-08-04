@@ -1,7 +1,9 @@
 # FG-23 — the memory visualizer on `agent-home` (the phone), not the dashboard
 
-**Status:** plan, implementable as written. Another agent should be able to pick
-this up cold, in order, without re-surveying the box.
+**Status:** plan, implementable as written, **all decisions resolved**
+(owner-confirmed, Leo 2026-08-05 — see §9). Another agent should be able to pick
+this up cold and execute §4 → §5 in order without re-surveying the box or
+asking anything.
 **Depends on:** FG-20 (`agent-home` BFF), FG-21 (layer-4 semantic memory),
 FG-22 (the visualizer + `/api/memory/explorer/*`, shipped, deployed, and
 confirmed working by the owner at `https://leolau.ai-and-i.io/memory` on
@@ -105,10 +107,10 @@ the data layer. The audiences differ:
 | cross-person owner counts | only what the principal may see | same, but it is the operator's job |
 
 So: build the phone view (§5), and **remove `/memory` from `web/`'s nav while
-keeping the route and the page** (A5). Deleting
-`web/src/screens/MemoryPage.tsx` is the alternative: 795 tested lines, and the
-only surface showing embedding-space health. Not recommended; trivially
-reversible either way, and it is the owner's call (§9.3).
+keeping the route and the page** (A5). The page is **not** deleted — 795 tested
+lines, and the only surface showing embedding-space health (owner-confirmed,
+§9.3). Do not delete `web/src/screens/MemoryPage.tsx`, its locale keys, or its
+route registration.
 
 ### D2 — Memory reads go through the Python API. Never `pg`.
 
@@ -174,10 +176,12 @@ mapping.
 
 Own PR. No memory code. Each step is verifiable on the box.
 
-### A0.1 — one checkout (recommended)
+### A0.1 — one checkout
 
-Retire `/opt/data/agent-home-app` and run from the main checkout, so one
-`git pull` moves the whole system and the existing drift check covers the source.
+**Decided (§9.1):** retire `/opt/data/agent-home-app` and run from the main
+checkout, so one `git pull` moves the whole system, the existing drift check
+covers the source, and ~2.2 GB is reclaimed. The two-checkout variant is *not*
+the plan — do not teach the deploy script to pull a second clone.
 
 ```bash
 # on the box, as root via OOS RunCommand
@@ -203,8 +207,10 @@ permanently dirty. The retired directory stays on disk until the owner confirms
 the phone works, then is removed in a follow-up (it reclaims ~2.2 GB, and
 nothing but the old unit ever pointed at it).
 
-The alternative (keep two checkouts, teach the deploy script to pull both) is
-strictly more machinery for a worse invariant; §9.1 is the owner's call.
+Nothing but `agent-home.service` ever referenced that clone (verified), so the
+only irreplaceable thing inside it is `agent-home.env` — copy it first, and
+confirm `curl 127.0.0.1:3100/login` returns 200 from the new location **before**
+moving the old directory aside.
 
 ### A0.2 — the deploy script builds and restarts it
 
@@ -244,9 +250,11 @@ manifest gains `agent-home.service`, its enabled/active state and its unit hash.
 Install the reviewed `agent-home/deploy/agent-home.service` (with A0.1's paths),
 then re-run the drift check. It must go **clean**, not quiet.
 
-### A0.5 — off `root` (separate PR, immediately after)
+### A0.5 — off `root` (own PR, immediately after A0)
 
-`User=hermes`, plus the hardening stanza the `hermes-*` units carry
+**Decided (§9.2):** do it, as its own change landing straight after A0 — not
+bundled with A0 and not deferred indefinitely. `User=hermes`, plus the hardening
+stanza the `hermes-*` units carry
 (`NoNewPrivileges`, `PrivateTmp`, `ProtectSystem=strict`, `ProtectHome=yes`,
 `ReadWritePaths=` the build dir). Requires `chown -R hermes:hermes` on the
 build dir and `agent-home.env`, and `.next` must be writable because `next
@@ -427,12 +435,25 @@ to bottom:
    every surface, including this one.
 4. **"Load more"** on `offset` while `rows.length < total`.
 
-**Nav** — `src/components/nav-items.ts`: add
-`{ href: "/memory", label: "Memory", glyph: "◇" }` to `PRIMARY_NAV`. Five
-primary tabs is the bottom-bar budget on a phone, so **move `Activity` to
-`SECONDARY_NAV`** (traces are an operator's tool; memory is the user's).
-`nav-items.test.ts` asserts the split — update it deliberately, not by deleting
-the assertion.
+**Nav** — `src/components/nav-items.ts`. **Decided (§9.4):** Memory becomes a
+primary tab and takes `Activity`'s slot; `Activity` moves to `SECONDARY_NAV`
+(traces are an operator's tool, memory is the user's). No sixth primary tab —
+five is the bottom-bar budget on a phone.
+
+```ts
+export const PRIMARY_NAV: NavItem[] = [
+  { href: "/",       label: "Home",   glyph: "◉" },
+  { href: "/graph",  label: "Graph",  glyph: "◈", hint: "GTS Centre" },
+  { href: "/chat",   label: "Chat",   glyph: "✦", hint: "One-brain chat" },
+  { href: "/inbox",  label: "Inbox",  glyph: "✉", hint: "Approvals + changes" },
+  { href: "/memory", label: "Memory", glyph: "◇", hint: "What it remembers" },
+];
+// SECONDARY_NAV gains, at the top (it is the most-used of the secondary set):
+//   { href: "/activity", label: "Activity", glyph: "≋", hint: "Interaction traces" },
+```
+
+`nav-items.test.ts` asserts the split — update the assertion deliberately, do
+not delete it.
 
 **Service worker** — `public/sw.js:56` already refuses to cache `/api/*` and
 `/auth/*`. Confirm `/memory` itself is not precached: it is per-principal HTML.
@@ -494,7 +515,8 @@ people:
 Remove the `/memory` item from the nav array in `web/src/App.tsx`; keep
 `"/memory": MemoryPage` in `BUILTIN_ROUTES_CORE` so deep links and the operator
 diagnostics survive. Keep the `nav.memory` locale keys (the page header uses
-them). One line; §9.3 may turn it into a deletion instead.
+them). One line. **Deletion is explicitly rejected** (§9.3): do not remove
+`MemoryPage.tsx`, its route, its tests or its locale keys.
 
 ## 6. The scaling problem, and the one API change this needs
 
@@ -567,13 +589,37 @@ bypass RLS.
   first ingestion pass has run. `/documents` returns `{documents: [], total: 0}`
   today; render nothing rather than an empty section promising a feature.
 
-## 9. Open decisions for the owner
+## 9. Decisions — RESOLVED (owner-confirmed, Leo 2026-08-05)
 
-1. **A0 checkout:** retire `/opt/data/agent-home-app` and run from
-   `/opt/data/hermes-agent/agent-home` (recommended, A0.1), or keep two
-   checkouts and have the deploy script update both?
-2. **`root` → `hermes`** for `agent-home.service`: part of this work, or its own
-   change immediately after? (Recommended: immediately after, A0.5.)
-3. **`web/`'s Memory page:** demote from nav (recommended, A5) or delete?
-4. **Bottom-bar budget:** Memory promoted in place of Activity (recommended), or
-   a sixth primary tab?
+All four are settled. **Nothing in this plan is waiting on the owner**; the next
+agent executes §4 → §5 in order and does not re-open these.
+
+1. **A0 checkout → ONE checkout.** Retire `/opt/data/agent-home-app`; run
+   `agent-home` from `/opt/data/hermes-agent/agent-home` (A0.1). The
+   two-checkout variant is rejected: strictly more machinery for a worse
+   invariant. Move the old clone aside, do not `rm` it, until the owner
+   confirms the phone works.
+2. **`root` → `hermes` → YES, its own PR immediately after A0** (A0.5). Not
+   bundled with A0, not deferred: if the hardening breaks the phone, the cause
+   must be unambiguous.
+3. **`web/`'s Memory page → DEMOTE, do not delete** (A5). Nav entry removed;
+   route, component and locale keys kept. It is the only surface showing
+   embedding-space health (`column_dim`, `rows_by_model`, mixed-model
+   staleness), which is an operator's concern and does not belong on a phone.
+4. **Bottom bar → Memory replaces Activity in `PRIMARY_NAV`;** Activity moves to
+   `SECONDARY_NAV`. No sixth primary tab (A2).
+
+### Execution order
+
+| # | PR | Contents | Gate |
+|---|----|----------|------|
+| 1 | A0 | deploy path, one checkout, state-capture glob, installed unit == git | A0 acceptance (§4): an `agent-home/src`-only commit reaches the phone after one deploy run, drift check clean |
+| 2 | A0.5 | `agent-home.service` → `User=hermes` + hardening | `/login` 200 as `hermes`; drift clean |
+| 3 | A1+A2 | types, client methods, BFF handlers, `/memory` page (counts + rows), nav change | ships useful alone: "37 memories, 20 never recalled" is answerable nowhere else on the phone |
+| 4 | A3 | `MemoryMap` + §6 deterministic projection sampling (Python) | map renders at 37 points and at a sampled cap |
+| 5 | A4 | query placement | a typed query draws a marker, or degrades to nearest with no marker |
+| 6 | A5 | `web/` nav demotion | dashboard `/memory` still reachable by URL |
+
+Each row is a separate PR against `develop`, each lands and deploys before the
+next begins — because on this box, until PR 1 is deployed, none of PRs 3–5 are
+visible on the phone at all.
