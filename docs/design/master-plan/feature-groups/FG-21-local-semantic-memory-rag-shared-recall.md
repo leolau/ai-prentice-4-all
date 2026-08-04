@@ -396,13 +396,66 @@ or chunk that *must* be in the top-3:
 
 Report `recall@3` before and after. "It feels better" is not a result.
 
+### 7.5 P1 benchmark result (measured on the box, 2026-08-04)
+
+`ecs.e-c1m4.xlarge`, 4 vCPU shared with the gateway and Supabase, CPU only. One
+process per model so RSS is that model's own footprint.
+
+```
+model                          dim  load_s  RSS_MB  1x_p50  1x_p95  16x_ms  R@1   R@3
+hashing (incumbent)            256     0.0       0    0.04    0.26     0.5  .167  .667
+BAAI/bge-m3                   1024     9.8    1577  296.71  408.61  1421.3  1.0   1.0
+intfloat/multilingual-e5-base   768     9.7     742   78.22   83.48   466.6  1.0   1.0
+```
+
+Two results matter more than the ranking:
+
+**1. The incumbent is worse than "not semantic" — for Chinese it does not rank at
+all.** Both Chinese probes embed to the **zero vector** (the tokenizer is
+`[a-z0-9]+`), so every cosine distance is 0.0 and the "nearest neighbours" are
+whatever order the rows came back in. The original plan's recall@3 of 0.667 was
+flattering an artifact; scoring recall@1 and flagging degenerate queries is what
+exposed it. `R@1 = 0.167` is the honest number.
+
+**2. Recall did not decide the model — input window did.** Both candidates scored
+1.0 on the bilingual set (10 documents is too easy to separate them), so a second
+probe put the answer at the end of an ~11,900-character document, against a decoy
+document and a padding-only document:
+
+```
+query: "when is the tender submission deadline"
+
+BAAI/bge-m3         (window 8192)        e5-base          (window 512)
+  0.7186  fact at the START                0.9150  fact at the START
+  0.5645  fact at the END    <-- found     0.7824  padding only
+  0.4817  decoy fact at the END            0.7824  fact at the END
+  0.4765  padding only                     0.7824  decoy fact at the END
+```
+
+e5-base's last three scores are **identical to four decimals**: it never read past
+512 tokens, so a document containing the answer and one containing only
+boilerplate are the same vector to it. For all-of-Drive RAG that is a correctness
+limit, not a slowdown — the answer becomes unretrievable.
+
+**Selected: `bge-m3`**, pinned at revision `5617a9f61b028005a4858fdac845db406aefb181`.
+The cost is stated rather than buried: ~300 ms per single embed against ~78 ms,
+and 2.0 GB resident against 0.9 GB. Sub-512-token chunking would let e5-base
+compete, but it would make chunk-boundary placement load-bearing for
+correctness, and boundaries are what ingestion pipelines get wrong.
+
+Operational verification on the box, running as `hermes` against the committed
+server code: `/health` reports the pinned revision; two bilingual texts return
+1,024-dim L2-normalised vectors in 0.42 s; a request naming a *different* model
+is refused with 409 and nothing is embedded; the listener is `127.0.0.1:8791`
+only.
+
 ## 8. Work breakdown (each phase is a PR)
 
 | # | Phase | Contents | Gate |
 |---|---|---|---|
 | **P0** | Identity is real — **done** | `hermes member link-channel`; role stamped by `bind_channel_principal` and threaded to the memory provider; role never persisted | one human = one principal across channels; unresolved → `member`; negative-access tests unchanged |
-| **P0b** | Existing rows | migrate the 28 `8756039695` rows onto `leo_owner` (or alias), verified against a copy first | no row loses its owner; recall before/after identical for Leo |
-| **P1** | Embedding service | benchmark `bge-m3` vs `e5-base` on the box; `hermes-embed.service`; `local_http` embedder behind `memory.embedding.*`; hashing stays default | numbers recorded here; service survives restart; fail-closed fallback logged |
+| **P0b** | Existing rows — **done** | 28 rows migrated `8756039695` → `leo_owner`; `telegram:8756039695` linked; pre-migration `pg_dump` kept and restore-verified into a scratch schema first | embeddings byte-identical to the pre-migration copy; 0 rows left behind; unlinked sender still resolves to nothing |
+| **P1** | Embedding service — **done, numbers in §7.5** | `scripts/embedding_server.py` + `hermes-embed.service` (loopback, unprivileged, revision-pinned); `local_http` embedder behind `memory.embedding.*`; hashing stays default; **not cut over** (needs P2's re-embed) | benchmark recorded; wrong-model and wrong-width requests refused, not stored |
 | **P2** | Semantic layer 4 | model/dim columns + migration + `hermes memory reembed`; recall in `prefetch()` with budget; `uses`/`last_used`; dedup | `recall@3` on the probe set ≥ agreed floor; prompt-prefix byte-stability test green |
 | **P3** | Shared recall | role-scoped elevation (config, default off) + RLS; `item_grants` for memories; provenance labels; `memory_read_elevated` audit | full negative-access matrix (member/member, admin off/on, grantee) at the **RLS** level, not just app level |
 | **P4** | RAG | `rag_documents` / `rag_chunks` + RLS; Drive + session ingestion; nightly timer; `rag_search` with citations | answer-with-citation on 3 real Drive docs; no private→shared laundering (test) |
@@ -414,7 +467,7 @@ change to the frozen-snapshot semantics.
 ## 9. Operational plan
 
 - **Resources**: 4 vCPU / ~10 GB free today, of which the embedding service
-  takes ~2.5 GB resident for `bge-m3`. `MemoryMax` on the unit; ingestion runs
+  takes **2.0 GB** resident for `bge-m3` (measured, not estimated). `MemoryMax` on the unit; ingestion runs
   `nice`d off-peak so a backfill can never starve the gateway.
 - **Storage**: 1,024 dims ≈ 4 KB/vector. 100k chunks ≈ 400 MB + index — trivial
   against 83 GB free.
@@ -434,9 +487,10 @@ change to the frozen-snapshot semantics.
 
 All five are **decided** (Leo, 2026-08-04):
 
-1. **Model** — `bge-m3` if the P1 benchmark clears the latency bar on 4 shared
-   vCPUs, else `multilingual-e5-base`. Decided on the measured numbers, which
-   P1 records here.
+1. **Model** — **resolved: `bge-m3`** (§7.5). It cleared the latency bar at
+   ~300 ms per single embed, and the long-document probe showed
+   `multilingual-e5-base` cannot see past 512 tokens — for RAG that is a
+   correctness limit, not a slower answer.
 2. **Elevation policy** — **by role**, not grant-only. Downward only: a role
    reads every rung below it and never its peers. `item_grants` stays for
    sharing sideways or with one named person.

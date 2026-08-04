@@ -237,8 +237,9 @@ class SupabasePgvectorMemoryProvider(MemoryProvider):
         except Exception:
             pass
         try:
+            config = load_config()
             store = get_store("supabase-app")
-            self._store = PgvectorMemoryStore(store)
+            self._store = PgvectorMemoryStore(store, config=config)
             self._dim = self._store.dim
             registry, change_log = self._run_async(
                 _initialize_stores(store, self._store)
@@ -246,7 +247,7 @@ class SupabasePgvectorMemoryProvider(MemoryProvider):
             self._task_discovery = TaskDiscoveryEngine.from_config(
                 registry,
                 LiveMemoryIntentSignals(self._store),
-                config=load_config(),
+                config=config,
                 proposal_sink=self._capture_task_proposal,
                 change_recorder=change_log,
             )

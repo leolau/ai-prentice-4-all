@@ -524,6 +524,24 @@ memory:
   # every N user turns. Set to 0 to disable. Only active when memory is enabled.
   nudge_interval: 10        # Nudge every 10 user turns (0 = disabled)
 
+  # Embeddings for the pgvector live-memory tier (memory.provider:
+  # supabase_pgvector). The default 'hashing' embedder needs no model, no
+  # service and no credentials, but it matches VOCABULARY, not meaning — and it
+  # produces a zero vector for text with no [a-z0-9] tokens (e.g. Chinese), for
+  # which there is no ranking at all.
+  #
+  # 'local_http' embeds with a real model over loopback (see
+  # docs/deployment/local-embeddings.md for the service). Nothing leaves the
+  # machine. `dim` must match both the service's model and the vector(N)
+  # column — a mismatch is refused rather than stored, because two embedding
+  # spaces in one column silently ruin ranking for every row.
+  # embedding:
+  #   provider: local_http          # 'hashing' (default) | 'local_http'
+  #   endpoint: http://127.0.0.1:8791
+  #   model: BAAI/bge-m3
+  #   dim: 1024
+  #   timeout_seconds: 20
+
   # Memory flush: give the agent one turn to save memories before context is
   # lost (compression, /new, /reset, exit). Set to 0 to disable.
   # For exit/reset, only fires if the session had at least this many user turns.
