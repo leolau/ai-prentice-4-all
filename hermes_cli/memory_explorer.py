@@ -27,14 +27,20 @@ _RATE_LIMIT_SECONDS = 3.0
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _memory_store(mode: str = "prod"):
-    """Create a ``PgvectorMemoryStore`` for the requested schema mode."""
+def _memory_store(mode: Optional[str] = None):
+    """Create a ``PgvectorMemoryStore`` for the requested schema mode.
+
+    ``mode=None`` defers to ``get_store``, which resolves the instance's
+    configured mode. Hard-coding ``prod`` would point the dashboard at a
+    schema the agent never writes to on a dev-mode deployment: an empty map
+    and an empty table, indistinguishable from having no memories at all.
+    """
     from hermes_cli.config import load_config
     from hermes_cli.datastore import get_store
     from plugins.memory.supabase_pgvector.store import PgvectorMemoryStore
 
     config = load_config() or {}
-    resolved_mode = mode if mode in ("dev", "prod") else "prod"
+    resolved_mode = mode if mode in ("dev", "prod") else None
     app_store = get_store("supabase-app", resolved_mode, config=config)
     return PgvectorMemoryStore(app_store, config=config)
 
@@ -76,7 +82,7 @@ def _empty_summary(store) -> dict:
 # ---------------------------------------------------------------------------
 
 @router.get("/summary")
-async def get_summary(request: Request, mode: str = "prod"):
+async def get_summary(request: Request, mode: Optional[str] = None):
     """Summary of the memory tier: space, totals, breakdowns, growth, recall.
 
     Returns zeros (not 500) when the schema is uninitialized.
@@ -275,7 +281,7 @@ async def get_rows(
     kind: str = "",
     limit: int = 200,
     offset: int = 0,
-    mode: str = "prod",
+    mode: Optional[str] = None,
 ):
     """Paginated memory rows, optionally filtered by semantic search.
 
@@ -614,7 +620,7 @@ async def _rows_chunks(
 # ---------------------------------------------------------------------------
 
 @router.get("/projection")
-async def get_projection(request: Request, mode: str = "prod"):
+async def get_projection(request: Request, mode: Optional[str] = None):
     """2-D projection of every memory's embedding, scope-filtered.
 
     Returns ``{ algorithm: null, points: [], stale: true }`` when no
@@ -775,7 +781,7 @@ async def get_projection(request: Request, mode: str = "prod"):
 # ---------------------------------------------------------------------------
 
 @router.post("/projection/query")
-async def post_projection_query(request: Request, mode: str = "prod"):
+async def post_projection_query(request: Request, mode: Optional[str] = None):
     """Place a query text on the projection map and find nearest memories.
 
     Embeds the text, projects it into the existing PCA/UMAP basis, and returns
@@ -930,7 +936,7 @@ async def post_projection_query(request: Request, mode: str = "prod"):
 # ---------------------------------------------------------------------------
 
 @router.get("/documents")
-async def get_documents(request: Request, mode: str = "prod"):
+async def get_documents(request: Request, mode: Optional[str] = None):
     """List RAG documents, scope-filtered to the caller's visible set.
 
     Returns ``{ documents: [], total: 0 }`` when the RAG schema is not

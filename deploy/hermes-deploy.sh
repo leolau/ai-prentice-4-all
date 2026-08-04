@@ -50,6 +50,22 @@ echo "$BEFORE -> $AFTER"
 echo "== reinstalling package =="
 ./.venv/bin/pip install -q -e .
 
+# The dashboard runs with --skip-build and serves the prebuilt bundle in
+# hermes_cli/web_dist, which is git-ignored: without this step a deploy ships
+# new API endpoints with the old SPA, and every frontend change is invisible
+# on the box. Only rebuild when web/ actually moved — it is minutes of CPU on
+# a box that is also serving conversations.
+if [ "$BEFORE" != "$AFTER" ] && \
+   ! git diff --quiet "$BEFORE" "$AFTER" -- web/; then
+  echo "== rebuilding dashboard bundle (web/ changed) =="
+  nice -n 15 npm ci --no-audit --no-fund --silent
+  (cd web && nice -n 15 npm run build)
+elif [ ! -d hermes_cli/web_dist/assets ]; then
+  echo "== building dashboard bundle (no bundle present) =="
+  nice -n 15 npm ci --no-audit --no-fund --silent
+  (cd web && nice -n 15 npm run build)
+fi
+
 # hermes owns the source tree, but NOT .venv: root runs pip from it, so a
 # hermes-writable venv would be a path back to root.
 find "$REPO" -path "$REPO/.venv" -prune -o -print0 | xargs -0 chown hermes:hermes
