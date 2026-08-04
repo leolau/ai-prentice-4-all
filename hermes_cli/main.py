@@ -12260,6 +12260,11 @@ def cmd_memory(args):
 
         cmd_memory_sharing(args)
         return
+    if sub == "projection":
+        from hermes_cli.memory_projection import cmd_memory_projection
+
+        cmd_memory_projection(args)
+        return
     if sub == "rag":
         from hermes_cli.rag_cmd import cmd_memory_rag
 

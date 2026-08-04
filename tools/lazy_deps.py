@@ -152,12 +152,15 @@ LAZY_DEPS: dict[str, tuple[str, ...]] = {
     # instance and the provider silently reports itself unavailable.
     "memory.supermemory": ("supermemory==3.50.0",),
     "memory.mem0": ("mem0ai==2.0.10",),
-    
-        # ─── Memory projection (FG-22) ─────────────────────────────────────────
-        # UMAP is an opt-in alternative to the default PCA projection for the
-        # memory explorer's scatter map. PCA is numpy-only and always available;
-        # UMAP produces a better non-linear map but needs a lazily-installed dep.
-        "memory.projection": ("umap-learn==0.5.7",),
+
+    # ─── Memory projection (FG-22) ─────────────────────────────────────────
+    # Fitting the memory explorer's scatter map is an operator CLI job. PCA is
+    # the default and needs only numpy — which is *not* a base dependency (it
+    # ships in the voice extra), so the fit installs it here rather than dying
+    # on the import. UMAP produces a better non-linear map and pulls in
+    # numba/llvmlite, so it stays opt-in.
+    "memory.projection.pca": ("numpy==2.4.3",),
+    "memory.projection": ("umap-learn==0.5.7",),
 
     # ─── Messaging platforms (lazy-installable on demand) ──────────────────
     "platform.telegram": ("python-telegram-bot[webhooks]==22.6",),

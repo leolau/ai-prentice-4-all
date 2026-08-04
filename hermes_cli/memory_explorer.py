@@ -9,6 +9,8 @@ Mounted by ``web_server.py`` beside the memory OAuth router.
 
 from __future__ import annotations
 
+import json
+import math
 from typing import Any, List, Optional
 
 from fastapi import APIRouter, HTTPException, Request
@@ -27,14 +29,20 @@ _RATE_LIMIT_SECONDS = 3.0
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _memory_store(mode: str = "prod"):
-    """Create a ``PgvectorMemoryStore`` for the requested schema mode."""
+def _memory_store(mode: Optional[str] = None):
+    """Create a ``PgvectorMemoryStore`` for the requested schema mode.
+
+    ``mode=None`` defers to ``get_store``, which resolves the instance's
+    configured mode. Hard-coding ``prod`` would point the dashboard at a
+    schema the agent never writes to on a dev-mode deployment: an empty map
+    and an empty table, indistinguishable from having no memories at all.
+    """
     from hermes_cli.config import load_config
     from hermes_cli.datastore import get_store
     from plugins.memory.supabase_pgvector.store import PgvectorMemoryStore
 
     config = load_config() or {}
-    resolved_mode = mode if mode in ("dev", "prod") else "prod"
+    resolved_mode = mode if mode in ("dev", "prod") else None
     app_store = get_store("supabase-app", resolved_mode, config=config)
     return PgvectorMemoryStore(app_store, config=config)
 
@@ -76,7 +84,7 @@ def _empty_summary(store) -> dict:
 # ---------------------------------------------------------------------------
 
 @router.get("/summary")
-async def get_summary(request: Request, mode: str = "prod"):
+async def get_summary(request: Request, mode: Optional[str] = None):
     """Summary of the memory tier: space, totals, breakdowns, growth, recall.
 
     Returns zeros (not 500) when the schema is uninitialized.
@@ -275,7 +283,7 @@ async def get_rows(
     kind: str = "",
     limit: int = 200,
     offset: int = 0,
-    mode: str = "prod",
+    mode: Optional[str] = None,
 ):
     """Paginated memory rows, optionally filtered by semantic search.
 
@@ -614,7 +622,7 @@ async def _rows_chunks(
 # ---------------------------------------------------------------------------
 
 @router.get("/projection")
-async def get_projection(request: Request, mode: str = "prod"):
+async def get_projection(request: Request, mode: Optional[str] = None):
     """2-D projection of every memory's embedding, scope-filtered.
 
     Returns ``{ algorithm: null, points: [], stale: true }`` when no
@@ -775,7 +783,7 @@ async def get_projection(request: Request, mode: str = "prod"):
 # ---------------------------------------------------------------------------
 
 @router.post("/projection/query")
-async def post_projection_query(request: Request, mode: str = "prod"):
+async def post_projection_query(request: Request, mode: Optional[str] = None):
     """Place a query text on the projection map and find nearest memories.
 
     Embeds the text, projects it into the existing PCA/UMAP basis, and returns
@@ -871,33 +879,29 @@ async def post_projection_query(request: Request, mode: str = "prod"):
         else:
             # PCA: project using the stored mean and components. ``jsonb``
             # comes back as JSON text, so it is decoded rather than wrapped.
-            import json
-
-            import numpy as np
-
-            mean = np.array(json.loads(basis["mean"]))
-            components = np.array(json.loads(basis["components"]))
+            # Two dot products and a 2-D sort below are plain Python on
+            # purpose: numpy is not a base dependency, and a page request is
+            # the wrong place to discover that (or to install it).
+            mean = json.loads(basis["mean"])
+            components = json.loads(basis["components"])
             if len(mean) > 0 and len(components) >= 2:
-                emb_arr = np.array(list(embedding))
-                x = float((emb_arr - mean) @ components[0])
-                y = float((emb_arr - mean) @ components[1])
+                centered = [v - m for v, m in zip(embedding, mean)]
+                x = float(sum(c * w for c, w in zip(centered, components[0])))
+                y = float(sum(c * w for c, w in zip(centered, components[1])))
 
         # Find nearest neighbors.
         nearest = []
         if rows and x is not None and y is not None:
-            import numpy as np
-
-            points_arr = np.array([(r["x"], r["y"]) for r in rows])
-            query_arr = np.array([x, y])
-            distances = np.linalg.norm(points_arr - query_arr, axis=1)
-            top_k = min(5, len(rows))
-            indices = np.argsort(distances)[:top_k]
+            scored = sorted(
+                (
+                    (math.dist((row["x"], row["y"]), (x, y)), str(row["id"]))
+                    for row in rows
+                ),
+                key=lambda pair: pair[0],
+            )
             nearest = [
-                {
-                    "id": str(rows[i]["id"]),
-                    "score": float(1.0 / (1.0 + distances[i])),
-                }
-                for i in indices
+                {"id": row_id, "score": float(1.0 / (1.0 + distance))}
+                for distance, row_id in scored[:5]
             ]
         elif degraded:
             # UMAP can't load — fall back to semantic search for nearest.
@@ -930,7 +934,7 @@ async def post_projection_query(request: Request, mode: str = "prod"):
 # ---------------------------------------------------------------------------
 
 @router.get("/documents")
-async def get_documents(request: Request, mode: str = "prod"):
+async def get_documents(request: Request, mode: Optional[str] = None):
     """List RAG documents, scope-filtered to the caller's visible set.
 
     Returns ``{ documents: [], total: 0 }`` when the RAG schema is not
