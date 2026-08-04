@@ -69,6 +69,7 @@ export const ja: Translations = {
     nav: {
       analytics: "分析",
       chat: "チャット",
+      memory: "メモリ",
       config: "設定",
       cron: "Cron",
       documentation: "ドキュメント",

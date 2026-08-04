@@ -84,7 +84,12 @@ async def get_summary(request: Request, mode: str = "prod"):
     principal = await _resolve_principal(request)
     store = _memory_store(mode)
 
-    from hermes_cli.access import scope_filter
+    from hermes_cli.access import (
+        bind_elevated_reads,
+        bind_principal,
+        reads_by_elevation,
+        scope_filter,
+    )
 
     conn = await store.connect()
     try:
@@ -164,12 +169,32 @@ async def get_summary(request: Request, mode: str = "prod"):
             f"FROM memories WHERE {psql}",
             *pparams,
         )
-        top_rows = await conn.fetch(
-            f"SELECT id, text, uses, last_used "
-            f"FROM memories WHERE {psql} "
-            f"ORDER BY uses DESC, last_used DESC NULLS LAST LIMIT 5",
-            *pparams,
-        )
+        # The most-recalled rows carry their *text*, so this one is a content
+        # read: bound to the policy and audited when it surfaces someone else's
+        # memory, exactly like ``/rows``.
+        async with conn.transaction():
+            await bind_principal(conn, principal)
+            await bind_elevated_reads(conn, store.role_reads)
+            top_rows = await conn.fetch(
+                f"SELECT memories.id, text, uses, last_used, owner_user_id, "
+                f"(SELECT pr.role FROM principals pr "
+                f"  WHERE pr.user_id = memories.owner_user_id) AS owner_role "
+                f"FROM memories WHERE {psql} "
+                f"ORDER BY uses DESC, last_used DESC NULLS LAST LIMIT 5",
+                *pparams,
+            )
+            elevated_subjects: dict[str, list] = {}
+            for r in top_rows:
+                if reads_by_elevation(principal, r, owner_role=r["owner_role"]):
+                    elevated_subjects.setdefault(
+                        str(r["owner_user_id"]), []
+                    ).append(str(r["id"]))
+            await store.audit_elevated_reads(
+                conn,
+                principal=principal,
+                subjects=elevated_subjects,
+                query_text="(memory explorer: summary top-recalled)",
+            )
         top = []
         for r in top_rows:
             text, truncated = _truncate(str(r["text"]))
@@ -281,6 +306,16 @@ async def get_rows(
             return {"rows": [], "total": 0, "limit": limit_val, "offset": offset_val}
 
         if kind == "chunk":
+            chunks_exist = await conn.fetchval(
+                "SELECT to_regclass(current_schema() || '.rag_chunks')"
+            )
+            if not chunks_exist:
+                return {
+                    "rows": [],
+                    "total": 0,
+                    "limit": limit_val,
+                    "offset": offset_val,
+                }
             return await _rows_chunks(
                 store, principal, conn, owner, topic, limit_val, offset_val
             )
@@ -361,7 +396,12 @@ async def _rows_without_query(
     store, principal, conn, owner, topic, kind, limit_val, offset_val
 ):
     """Paginated SELECT with scope filter, ordered by created_at DESC."""
-    from hermes_cli.access import reads_by_elevation, scope_filter
+    from hermes_cli.access import (
+        bind_elevated_reads,
+        bind_principal,
+        reads_by_elevation,
+        scope_filter,
+    )
 
     clauses: List[str] = []
     params: List[object] = []
@@ -392,21 +432,40 @@ async def _rows_without_query(
 
     where = " AND ".join(clauses) if clauses else "TRUE"
 
-    rows = await conn.fetch(
-        f"""SELECT memories.id, owner_user_id, visibility, kind, text,
-                  topic, created_at, uses, last_used,
-                  (SELECT pr.role FROM principals pr
-                    WHERE pr.user_id = memories.owner_user_id) AS owner_role
-            FROM memories
-            WHERE {where}
-            ORDER BY created_at DESC
-            LIMIT {limit_val} OFFSET {offset_val}""",
-        *params,
-    )
+    # Inside one transaction with the GUCs bound, so the database policy is a
+    # second gate on the app predicate above — and so any elevated row this
+    # browse surfaces is audited in the same transaction as the read.
+    async with conn.transaction():
+        await bind_principal(conn, principal)
+        await bind_elevated_reads(conn, store.role_reads)
+        rows = await conn.fetch(
+            f"""SELECT memories.id, owner_user_id, visibility, kind, text,
+                      topic, created_at, uses, last_used,
+                      (SELECT pr.role FROM principals pr
+                        WHERE pr.user_id = memories.owner_user_id) AS owner_role
+                FROM memories
+                WHERE {where}
+                ORDER BY created_at DESC
+                LIMIT {limit_val} OFFSET {offset_val}""",
+            *params,
+        )
 
-    total = await conn.fetchval(
-        f"SELECT COUNT(*) FROM memories WHERE {where}", *params
-    ) or 0
+        total = await conn.fetchval(
+            f"SELECT COUNT(*) FROM memories WHERE {where}", *params
+        ) or 0
+
+        elevated_subjects: dict[str, list] = {}
+        for row in rows:
+            if reads_by_elevation(principal, row, owner_role=row["owner_role"]):
+                elevated_subjects.setdefault(
+                    str(row["owner_user_id"]), []
+                ).append(str(row["id"]))
+        await store.audit_elevated_reads(
+            conn,
+            principal=principal,
+            subjects=elevated_subjects,
+            query_text="(memory explorer: browsed rows)",
+        )
 
     rows_out = []
     for row in rows:
@@ -450,7 +509,12 @@ async def _rows_chunks(
     fields (``document_id``, ``document_title``, ``section``, ``ordinal``)
     in addition to the standard row shape.
     """
-    from hermes_cli.access import reads_by_elevation, scope_filter
+    from hermes_cli.access import (
+        bind_elevated_reads,
+        bind_principal,
+        reads_by_elevation,
+        scope_filter,
+    )
 
     clauses: List[str] = []
     params: List[object] = []
@@ -466,37 +530,47 @@ async def _rows_chunks(
         params.append(topic)
         next_idx += 1
 
+    # Qualified columns: the join with ``rag_documents`` puts a second
+    # ``visibility`` and ``owner_user_id`` in scope, and an unqualified
+    # predicate is an ambiguous-column error at query time.
     predicate = scope_filter(
         principal,
+        column="rag_chunks.visibility",
         start_index=next_idx,
         grant_item_kind="document",
         id_column="rag_chunks.document_id",
         role_elevation=store.role_reads,
+        owner_column="rag_chunks.owner_user_id",
     )
     clauses.append(predicate.sql)
     params.extend(predicate.params)
 
     where = " AND ".join(clauses) if clauses else "TRUE"
 
-    rows = await conn.fetch(
-        f"""SELECT rag_chunks.id, rag_chunks.document_id,
-                   rag_chunks.owner_user_id, rag_chunks.visibility,
-                   rag_chunks.ordinal, rag_chunks.text, rag_chunks.section,
-                   rag_chunks.created_at,
-                   rag_documents.title AS document_title,
-                   (SELECT pr.role FROM principals pr
-                     WHERE pr.user_id = rag_chunks.owner_user_id) AS owner_role
-            FROM rag_chunks
-            LEFT JOIN rag_documents ON rag_documents.id = rag_chunks.document_id
-            WHERE {where}
-            ORDER BY rag_chunks.created_at DESC
-            LIMIT {limit_val} OFFSET {offset_val}""",
-        *params,
-    )
+    async with conn.transaction():
+        await bind_principal(conn, principal)
+        await bind_elevated_reads(conn, store.role_reads)
+        rows = await conn.fetch(
+            f"""SELECT rag_chunks.id, rag_chunks.document_id,
+                       rag_chunks.owner_user_id, rag_chunks.visibility,
+                       rag_chunks.ordinal, rag_chunks.text, rag_chunks.section,
+                       rag_chunks.created_at,
+                       rag_documents.title AS document_title,
+                       (SELECT pr.role FROM principals pr
+                         WHERE pr.user_id = rag_chunks.owner_user_id)
+                           AS owner_role
+                FROM rag_chunks
+                LEFT JOIN rag_documents
+                       ON rag_documents.id = rag_chunks.document_id
+                WHERE {where}
+                ORDER BY rag_chunks.created_at DESC
+                LIMIT {limit_val} OFFSET {offset_val}""",
+            *params,
+        )
 
-    total = await conn.fetchval(
-        f"SELECT COUNT(*) FROM rag_chunks WHERE {where}", *params
-    ) or 0
+        total = await conn.fetchval(
+            f"SELECT COUNT(*) FROM rag_chunks WHERE {where}", *params
+        ) or 0
 
     rows_out = []
     for row in rows:
@@ -551,7 +625,12 @@ async def get_projection(request: Request, mode: str = "prod"):
     principal = await _resolve_principal(request)
     store = _memory_store(mode)
 
-    from hermes_cli.access import reads_by_elevation, scope_filter
+    from hermes_cli.access import (
+        bind_elevated_reads,
+        bind_principal,
+        reads_by_elevation,
+        scope_filter,
+    )
     from plugins.memory.supabase_pgvector.rag import RAG_CHUNKS_TABLE
     from plugins.memory.supabase_pgvector.store import (
         MEMORY_TABLE,
@@ -575,31 +654,72 @@ async def get_projection(request: Request, mode: str = "prod"):
         if not basis:
             return {"algorithm": None, "computed_at": None, "stale": True, "points": []}
 
-        # Scope predicate on the projection table (C2).
+        # Scope predicate on the projection table (C2). Qualified to the ``p``
+        # alias because the label join brings two more ``visibility`` columns
+        # (memories, rag_chunks) into scope.
         predicate = scope_filter(
             principal,
+            column="p.visibility",
             start_index=1,
             grant_item_kind="memory",
-            id_column=f"{PROJECTION_TABLE}.id",
+            id_column="p.id",
             role_elevation=store.role_reads,
+            owner_column="p.owner_user_id",
         )
 
-        rows = await conn.fetch(
-            f"""SELECT p.id, p.x, p.y, p.owner_user_id, p.topic, p.kind,
-                      p.visibility,
-                      COALESCE(
-                        LEFT(m.text, 120),
-                        LEFT(c.text, 120)
-                      ) AS label,
-                      (SELECT pr.role FROM principals pr
-                        WHERE pr.user_id = p.owner_user_id) AS owner_role
-                FROM {PROJECTION_TABLE} p
-                LEFT JOIN {MEMORY_TABLE} m ON m.id = p.id
-                LEFT JOIN {RAG_CHUNKS_TABLE} c ON c.id = p.id
-                WHERE {predicate.sql}
-                ORDER BY p.fitted_at DESC""",
-            *predicate.params,
+        # The chunk label join only exists once RAG has been initialized: with
+        # ``memory.rag`` off there is no ``rag_chunks`` table, and joining it
+        # unconditionally fails the whole map.
+        chunks_exist = await conn.fetchval(
+            "SELECT to_regclass(current_schema() || '.rag_chunks')"
         )
+        chunk_label = "LEFT(c.text, 120)" if chunks_exist else "NULL"
+        chunk_join = (
+            f"LEFT JOIN {RAG_CHUNKS_TABLE} c ON c.id = p.id"
+            if chunks_exist
+            else ""
+        )
+
+        # A dot's position plus its hover label *is* the memory, so the map is
+        # read under the same two gates as a row: policy bound in-transaction,
+        # and every elevated point audited before it is returned.
+        async with conn.transaction():
+            await bind_principal(conn, principal)
+            await bind_elevated_reads(conn, store.role_reads)
+            rows = await conn.fetch(
+                f"""SELECT p.id, p.x, p.y, p.owner_user_id, p.topic, p.kind,
+                          p.visibility,
+                          COALESCE(
+                            LEFT(m.text, 120),
+                            {chunk_label}
+                          ) AS label,
+                          (SELECT pr.role FROM principals pr
+                            WHERE pr.user_id = p.owner_user_id) AS owner_role
+                    FROM {PROJECTION_TABLE} p
+                    LEFT JOIN {MEMORY_TABLE} m ON m.id = p.id
+                    {chunk_join}
+                    WHERE {predicate.sql}
+                    ORDER BY p.fitted_at DESC""",
+                *predicate.params,
+            )
+
+            elevated_subjects: dict[str, list] = {}
+            for row in rows:
+                if (
+                    row["kind"] == "memory"
+                    and reads_by_elevation(
+                        principal, row, owner_role=row["owner_role"]
+                    )
+                ):
+                    elevated_subjects.setdefault(
+                        str(row["owner_user_id"]), []
+                    ).append(str(row["id"]))
+            await store.audit_elevated_reads(
+                conn,
+                principal=principal,
+                subjects=elevated_subjects,
+                query_text="(memory explorer: projection map)",
+            )
 
         points = []
         for row in rows:
@@ -681,7 +801,11 @@ async def post_projection_query(request: Request, mode: str = "prod"):
 
     store = _memory_store(mode)
 
-    from hermes_cli.access import scope_filter
+    from hermes_cli.access import (
+        bind_elevated_reads,
+        bind_principal,
+        scope_filter,
+    )
     from plugins.memory.supabase_pgvector.store import (
         PROJECTION_BASIS_TABLE,
         PROJECTION_TABLE,
@@ -713,10 +837,14 @@ async def post_projection_query(request: Request, mode: str = "prod"):
         )
 
         # Load projection points for nearest-neighbor computation.
-        rows = await conn.fetch(
-            f"SELECT id, x, y FROM {PROJECTION_TABLE} WHERE {predicate.sql}",
-            *predicate.params,
-        )
+        async with conn.transaction():
+            await bind_principal(conn, principal)
+            await bind_elevated_reads(conn, store.role_reads)
+            rows = await conn.fetch(
+                f"SELECT id, x, y FROM {PROJECTION_TABLE} "
+                f"WHERE {predicate.sql}",
+                *predicate.params,
+            )
 
         # Project the query embedding into the 2-D basis.
         degraded = False
@@ -741,12 +869,15 @@ async def post_projection_query(request: Request, mode: str = "prod"):
                 x = None
                 y = None
         else:
-            # PCA: project using the stored mean and components.
+            # PCA: project using the stored mean and components. ``jsonb``
+            # comes back as JSON text, so it is decoded rather than wrapped.
+            import json
+
             import numpy as np
 
-            mean = np.array(basis["mean"])
-            components = np.array(basis["components"])
-            if len(mean) > 0 and len(components) > 0:
+            mean = np.array(json.loads(basis["mean"]))
+            components = np.array(json.loads(basis["components"]))
+            if len(mean) > 0 and len(components) >= 2:
                 emb_arr = np.array(list(embedding))
                 x = float((emb_arr - mean) @ components[0])
                 y = float((emb_arr - mean) @ components[1])
@@ -808,7 +939,11 @@ async def get_documents(request: Request, mode: str = "prod"):
     principal = await _resolve_principal(request)
     store = _memory_store(mode)
 
-    from hermes_cli.access import scope_filter
+    from hermes_cli.access import (
+        bind_elevated_reads,
+        bind_principal,
+        scope_filter,
+    )
 
     conn = await store.connect()
     try:
@@ -826,14 +961,17 @@ async def get_documents(request: Request, mode: str = "prod"):
             role_elevation=store.role_reads,
         )
 
-        rows = await conn.fetch(
-            f"""SELECT id, owner_user_id, visibility, source_kind, source_ref,
-                       title, chunk_count, ingested_at
-                FROM rag_documents
-                WHERE {predicate.sql}
-                ORDER BY ingested_at DESC""",
-            *predicate.params,
-        )
+        async with conn.transaction():
+            await bind_principal(conn, principal)
+            await bind_elevated_reads(conn, store.role_reads)
+            rows = await conn.fetch(
+                f"""SELECT id, owner_user_id, visibility, source_kind,
+                           source_ref, title, chunk_count, ingested_at
+                    FROM rag_documents
+                    WHERE {predicate.sql}
+                    ORDER BY ingested_at DESC""",
+                *predicate.params,
+            )
 
         documents = [
             {

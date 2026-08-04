@@ -140,6 +140,17 @@ async def _enroll_principals(store: PgvectorMemoryStore) -> None:
         await conn.close()
 
 
+@pytest.fixture(autouse=True)
+def _fresh_rate_limit_bucket(monkeypatch):
+    """Give each test its own query-placement rate-limit bucket.
+
+    The bucket is process-global and keyed by principal, so without this a
+    query in one test rate-limits the next test's first query.
+    """
+    from hermes_cli import memory_explorer
+    monkeypatch.setattr(memory_explorer, "_query_rate_limit", {})
+
+
 def _patch_store(monkeypatch, store: PgvectorMemoryStore) -> None:
     """Patch ``memory_explorer._memory_store`` to return the test store."""
     from hermes_cli import memory_explorer
@@ -256,6 +267,65 @@ class TestV1SummaryRows:
         assert len(alice_rows) == 1
         assert alice_rows[0]["elevated"] is True
 
+    @pytest.mark.asyncio
+    async def test_browsing_another_persons_memory_is_audited(
+        self, postgres_dsn, monkeypatch
+    ):
+        """Browsing is a read: an elevated row seen without a query is logged.
+
+        The search path audits through ``store.query``; the table and map
+        surface the same rows with no query at all, and an elevated read that
+        leaves no trace is not a read anybody can hold to account.
+        """
+        await _reset(postgres_dsn)
+        store = _make_store(postgres_dsn)
+        await store.initialize()
+        await _enroll_principals(store)
+
+        await store.write(ALICE, "alice private detail", visibility="private")
+
+        _patch_store(monkeypatch, store)
+        owner_client = _make_client(monkeypatch, OWNER)
+
+        rows = owner_client.get("/api/memory/explorer/rows").json()
+        assert any(r["elevated"] for r in rows["rows"])
+
+        conn = await store.connect()
+        try:
+            audit = await conn.fetch(
+                "SELECT reader_user_id, subject_user_id, query "
+                "FROM memory_access_audit"
+            )
+        finally:
+            await conn.close()
+        assert [
+            (r["reader_user_id"], r["subject_user_id"]) for r in audit
+        ] == [("root", "alice")]
+        assert "explorer" in audit[0]["query"]
+
+    @pytest.mark.asyncio
+    async def test_own_rows_are_not_audited(self, postgres_dsn, monkeypatch):
+        """Reading one's own memory writes no audit row."""
+        await _reset(postgres_dsn)
+        store = _make_store(postgres_dsn)
+        await store.initialize()
+        await _enroll_principals(store)
+
+        await store.write(ALICE, "alice own note", visibility="private")
+
+        _patch_store(monkeypatch, store)
+        alice_client = _make_client(monkeypatch, ALICE)
+
+        rows = alice_client.get("/api/memory/explorer/rows").json()
+        assert rows["total"] == 1
+
+        conn = await store.connect()
+        try:
+            count = await conn.fetchval("SELECT COUNT(*) FROM memory_access_audit")
+        finally:
+            await conn.close()
+        assert count == 0
+
 
 # ---------------------------------------------------------------------------
 # V2: Projection map
@@ -292,8 +362,8 @@ class TestV2Projection:
 
         # Fit the projection (operator-only, bypasses RLS).
         _patch_projection_store(monkeypatch, store)
-        from hermes_cli.memory_projection import cmd_projection_fit
-        cmd_projection_fit(SimpleNamespace(mode="dev", algorithm="pca", sample=20000))
+        from hermes_cli.memory_projection import fit_projection
+        await fit_projection(store, algorithm="pca", sample_size=20000)
 
         _patch_store(monkeypatch, store)
 
@@ -318,8 +388,8 @@ class TestV2Projection:
 
         await store.write(ALICE, "first memory")
         _patch_projection_store(monkeypatch, store)
-        from hermes_cli.memory_projection import cmd_projection_fit
-        cmd_projection_fit(SimpleNamespace(mode="dev", algorithm="pca", sample=20000))
+        from hermes_cli.memory_projection import fit_projection
+        await fit_projection(store, algorithm="pca", sample_size=20000)
 
         _patch_store(monkeypatch, store)
         client = _make_client(monkeypatch, ALICE)
@@ -343,17 +413,54 @@ class TestV2Projection:
         await store.write(ALICE, "memory two")
 
         _patch_projection_store(monkeypatch, store)
-        from hermes_cli.memory_projection import cmd_projection_fit
+        from hermes_cli.memory_projection import fit_projection
 
-        args = SimpleNamespace(mode="dev", algorithm="pca", sample=20000)
-        cmd_projection_fit(args)
-        cmd_projection_fit(args)  # second fit must not error
+        await fit_projection(store, algorithm="pca", sample_size=20000)
+        # A second fit must not error and must not duplicate points.
+        await fit_projection(store, algorithm="pca", sample_size=20000)
 
         _patch_store(monkeypatch, store)
         client = _make_client(monkeypatch, ALICE)
         proj = client.get("/api/memory/explorer/projection").json()
         assert len(proj["points"]) == 2
         assert proj["algorithm"] == "pca"
+
+    @pytest.mark.asyncio
+    async def test_fit_excludes_rows_from_another_model(
+        self, postgres_dsn, monkeypatch
+    ):
+        """A row from a different embedder is not projected.
+
+        Two embedding spaces in one PCA give a map whose distances mean
+        nothing, and the projection row would still be stamped with the
+        configured model — an unusable map indistinguishable from a good one.
+        """
+        await _reset(postgres_dsn)
+        store = _make_store(postgres_dsn)
+        await store.initialize()
+        await _enroll_principals(store)
+
+        await store.write(ALICE, "current model row")
+        await store.write(ALICE, "legacy model row")
+
+        conn = await store.connect()
+        try:
+            await conn.execute(
+                "UPDATE memories SET embedding_model = 'other/model' "
+                "WHERE text = 'legacy model row'"
+            )
+        finally:
+            await conn.close()
+
+        _patch_projection_store(monkeypatch, store)
+        from hermes_cli.memory_projection import fit_projection
+
+        await fit_projection(store, algorithm="pca", sample_size=20000)
+
+        _patch_store(monkeypatch, store)
+        client = _make_client(monkeypatch, ALICE)
+        proj = client.get("/api/memory/explorer/projection").json()
+        assert [p["label"] for p in proj["points"]] == ["current model row"]
 
 
 # ---------------------------------------------------------------------------
@@ -373,8 +480,8 @@ class TestV3QueryPlacement:
         await store.write(ALICE, "the tender closes on 14 March")
 
         _patch_projection_store(monkeypatch, store)
-        from hermes_cli.memory_projection import cmd_projection_fit
-        cmd_projection_fit(SimpleNamespace(mode="dev", algorithm="pca", sample=20000))
+        from hermes_cli.memory_projection import fit_projection
+        await fit_projection(store, algorithm="pca", sample_size=20000)
 
         _patch_store(monkeypatch, store)
         client = _make_client(monkeypatch, ALICE)
@@ -408,8 +515,8 @@ class TestV3QueryPlacement:
         await store.write(ALICE, "a memory to project")
 
         _patch_projection_store(monkeypatch, store)
-        from hermes_cli.memory_projection import cmd_projection_fit
-        cmd_projection_fit(SimpleNamespace(mode="dev", algorithm="pca", sample=20000))
+        from hermes_cli.memory_projection import fit_projection
+        await fit_projection(store, algorithm="pca", sample_size=20000)
 
         _patch_store(monkeypatch, store)
         client = _make_client(monkeypatch, ALICE)
@@ -439,8 +546,8 @@ class TestV3QueryPlacement:
         await store.write(ALICE, "memory for pca projection")
 
         _patch_projection_store(monkeypatch, store)
-        from hermes_cli.memory_projection import cmd_projection_fit
-        cmd_projection_fit(SimpleNamespace(mode="dev", algorithm="pca", sample=20000))
+        from hermes_cli.memory_projection import fit_projection
+        await fit_projection(store, algorithm="pca", sample_size=20000)
 
         _patch_store(monkeypatch, store)
         client = _make_client(monkeypatch, ALICE)
@@ -568,8 +675,8 @@ class TestV4RagChunks:
         )
 
         _patch_projection_store(monkeypatch, store)
-        from hermes_cli.memory_projection import cmd_projection_fit
-        cmd_projection_fit(SimpleNamespace(mode="dev", algorithm="pca", sample=20000))
+        from hermes_cli.memory_projection import fit_projection
+        await fit_projection(store, algorithm="pca", sample_size=20000)
 
         _patch_store(monkeypatch, store)
         client = _make_client(monkeypatch, ALICE)

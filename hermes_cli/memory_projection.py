@@ -16,10 +16,13 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
+import pickle
 import sys
 
 from hermes_cli.config import load_config
 from hermes_cli.datastore import get_store
+from hermes_constants import get_hermes_home
 
 
 def _store(mode: str | None):
@@ -31,8 +34,14 @@ def _store(mode: str | None):
     return PgvectorMemoryStore(app_store, config=config)
 
 
-def cmd_projection_fit(args: argparse.Namespace) -> None:
-    """Compute and write the 2-D projection of all memory embeddings."""
+async def fit_projection(
+    store, *, algorithm: str = "pca", sample_size: int = 20000
+) -> None:
+    """Compute and write the 2-D projection of every embedding.
+
+    Async so a caller already inside an event loop (a test, or a future
+    scheduled job) can await it; ``cmd_projection_fit`` is the sync CLI wrapper.
+    """
     import numpy as np
 
     from plugins.memory.supabase_pgvector.rag import RAG_CHUNKS_TABLE
@@ -42,196 +51,228 @@ def cmd_projection_fit(args: argparse.Namespace) -> None:
         PROJECTION_TABLE,
     )
 
-    store = _store(getattr(args, "mode", None))
-    algorithm = getattr(args, "algorithm", "pca")
-    sample_size = int(getattr(args, "sample", 20000))
+    conn = await store.connect()
+    try:
+        # Check the table exists.
+        exists = await conn.fetchval(
+            "SELECT to_regclass(current_schema() || '.memories')"
+        )
+        if not exists:
+            print("\n  The memories table does not exist yet.")
+            print("  Initialize the schema first (start a session).\n")
+            return
 
-    async def _fit() -> None:
-        conn = await store.connect()
-        try:
-            # Check the table exists.
-            exists = await conn.fetchval(
-                "SELECT to_regclass(current_schema() || '.memories')"
-            )
-            if not exists:
-                print("\n  The memories table does not exist yet.")
-                print("  Initialize the schema first (start a session).\n")
-                return
-
-            # Load all embeddings (bypassing RLS — fit is operator-only CLI).
-            rows = await conn.fetch(
-                f"SELECT id, embedding, owner_user_id, visibility, topic "
-                f"FROM {MEMORY_TABLE}"
-            )
-            if not rows:
-                print("\n  No memories to project.\n")
-                return
-
-            # Load RAG chunks if the table exists (V4).
-            chunk_rows = []
-            chunk_exists = await conn.fetchval(
-                "SELECT to_regclass(current_schema() || '.rag_chunks')"
-            )
-            if chunk_exists:
-                chunk_rows = await conn.fetch(
-                    f"SELECT id, embedding, owner_user_id, visibility, "
-                    f"document_id::text AS topic "
-                    f"FROM {RAG_CHUNKS_TABLE}"
+        # Load embeddings (bypassing RLS — fit is operator-only CLI), but only
+        # those made by the configured model. Two embedding spaces in one PCA
+        # produce a map whose distances mean nothing, and stamping the
+        # configured model on it would make that map indistinguishable from a
+        # good one. Rows from another model are left out and reported.
+        rows = await conn.fetch(
+            f"SELECT id, embedding, owner_user_id, visibility, topic "
+            f"FROM {MEMORY_TABLE} WHERE embedding_model = $1",
+            store.model_id,
+        )
+        skipped = await conn.fetchval(
+            f"SELECT COUNT(*) FROM {MEMORY_TABLE} WHERE embedding_model <> $1",
+            store.model_id,
+        ) or 0
+        if not rows:
+            print("\n  No memories to project.")
+            if skipped:
+                print(
+                    f"  {skipped} row(s) were embedded with another model — "
+                    f"run 'hermes memory vectors reembed' first."
                 )
+            print()
+            return
 
-            mem_total = len(rows)
-            chunk_total = len(chunk_rows)
-            total = mem_total + chunk_total
-            sampled = total > sample_size
-            print(f"\n  algorithm          {algorithm}")
-            print(f"  rows              {total}")
-            if chunk_total:
-                print(f"  chunks            {chunk_total}")
+        # Load RAG chunks if the table exists (V4).
+        chunk_rows = []
+        chunk_exists = await conn.fetchval(
+            "SELECT to_regclass(current_schema() || '.rag_chunks')"
+        )
+        if chunk_exists:
+            chunk_rows = await conn.fetch(
+                f"SELECT id, embedding, owner_user_id, visibility, "
+                f"document_id::text AS topic "
+                f"FROM {RAG_CHUNKS_TABLE} WHERE embedding_model = $1",
+                store.model_id,
+            )
 
-            mem_embeddings = np.array(
-                [list(row["embedding"]) for row in rows], dtype=np.float64
+        mem_total = len(rows)
+        chunk_total = len(chunk_rows)
+        total = mem_total + chunk_total
+        sampled = total > sample_size
+        print(f"\n  algorithm          {algorithm}")
+        print(f"  rows              {total}")
+        if chunk_total:
+            print(f"  chunks            {chunk_total}")
+        if skipped:
+            print(f"  skipped (model)   {skipped}")
+
+        mem_embeddings = np.array(
+            [list(row["embedding"]) for row in rows], dtype=np.float64
+        )
+        if chunk_rows:
+            chunk_embeddings = np.array(
+                [list(row["embedding"]) for row in chunk_rows],
+                dtype=np.float64,
+            )
+            embeddings = np.vstack([mem_embeddings, chunk_embeddings])
+        else:
+            chunk_embeddings = np.empty((0, mem_embeddings.shape[1]))
+            embeddings = mem_embeddings
+
+        ids = [str(row["id"]) for row in rows]
+        owners = [row["owner_user_id"] for row in rows]
+        visibilities = [row["visibility"] for row in rows]
+        topics = [row["topic"] for row in rows]
+
+        # ── Compute the projection ──
+        umap_ok = False
+        if algorithm == "umap":
+            try:
+                from tools.lazy_deps import ensure
+                ensure("memory.projection", prompt=False)
+                import umap
+
+                reducer = umap.UMAP(n_components=2, random_state=42)
+                coords = reducer.fit_transform(embeddings)
+                xs = coords[:, 0].tolist()
+                ys = coords[:, 1].tolist()
+                umap_ok = True
+            except Exception as exc:
+                print(f"  \u26a0 UMAP failed ({exc}), falling back to PCA")
+
+        if not umap_ok:
+            # PCA via SVD (numpy only, no extra dependency)
+            if sampled:
+                indices = np.random.choice(total, sample_size, replace=False)
+                sample_emb = embeddings[indices]
+            else:
+                sample_emb = embeddings
+
+            mean = sample_emb.mean(axis=0)
+            centered_sample = sample_emb - mean
+            _, _, vt = np.linalg.svd(centered_sample, full_matrices=False)
+            # SVD yields at most rank-many components, so a corpus of one or
+            # two rows has fewer than the two axes a plot needs. Pad with a
+            # zero axis: the map collapses to a line, which is the honest
+            # picture of two points, rather than failing the whole fit.
+            components = np.zeros((2, embeddings.shape[1]))
+            components[: min(2, vt.shape[0])] = vt[: min(2, vt.shape[0])]
+
+            # Project every row with the fitted basis.
+            centered = embeddings - mean
+            xs = (centered @ components[0]).tolist()
+            ys = (centered @ components[1]).tolist()
+
+        fit_algorithm = "umap" if umap_ok else "pca"
+        # jsonb params are sent as JSON text: asyncpg will not encode a bare
+        # Python list into it.
+        fit_mean = json.dumps([] if umap_ok else mean.tolist())
+        fit_components = json.dumps([] if umap_ok else components.tolist())
+
+        # Split coordinates back into memory and chunk sets.
+        mem_xs = xs[:mem_total]
+        mem_ys = ys[:mem_total]
+        chunk_xs = xs[mem_total:]
+        chunk_ys = ys[mem_total:]
+
+        # Write all points + basis in one transaction (idempotent,
+        # and a failed fit leaves the previous map intact).
+        async with conn.transaction():
+            await conn.execute(f"DELETE FROM {PROJECTION_TABLE}")
+            await conn.executemany(
+                f"INSERT INTO {PROJECTION_TABLE} "
+                f"(id, kind, owner_user_id, visibility, topic, "
+                f" x, y, model, algorithm, fitted_at) "
+                f"VALUES ($1, 'memory', $2, $3, $4, $5, $6, $7, $8, NOW())",
+                [
+                    (
+                        ids[i],
+                        owners[i],
+                        visibilities[i],
+                        topics[i],
+                        mem_xs[i],
+                        mem_ys[i],
+                        store.model_id,
+                        fit_algorithm,
+                    )
+                    for i in range(mem_total)
+                ],
             )
             if chunk_rows:
-                chunk_embeddings = np.array(
-                    [list(row["embedding"]) for row in chunk_rows],
-                    dtype=np.float64,
-                )
-                embeddings = np.vstack([mem_embeddings, chunk_embeddings])
-            else:
-                chunk_embeddings = np.empty((0, mem_embeddings.shape[1]))
-                embeddings = mem_embeddings
-
-            ids = [str(row["id"]) for row in rows]
-            owners = [row["owner_user_id"] for row in rows]
-            visibilities = [row["visibility"] for row in rows]
-            topics = [row["topic"] for row in rows]
-
-            # ── Compute the projection ──
-            umap_ok = False
-            if algorithm == "umap":
-                try:
-                    from tools.lazy_deps import ensure
-                    ensure("memory.projection", prompt=False)
-                    import pickle
-                    from hermes_constants import get_hermes_home
-                    import umap
-
-                    reducer = umap.UMAP(n_components=2, random_state=42)
-                    coords = reducer.fit_transform(embeddings)
-                    xs = coords[:, 0].tolist()
-                    ys = coords[:, 1].tolist()
-
-                    # Persist the fitted model for the query-placement endpoint.
-                    umap_path = get_hermes_home() / "memory_projection_umap.pkl"
-                    with open(umap_path, "wb") as fh:
-                        pickle.dump(reducer, fh)
-
-                    umap_ok = True
-                except Exception as exc:
-                    print(f"  \u26a0 UMAP failed ({exc}), falling back to PCA")
-
-            if not umap_ok:
-                # PCA via SVD (numpy only, no extra dependency)
-                if sampled:
-                    indices = np.random.choice(total, sample_size, replace=False)
-                    sample_emb = embeddings[indices]
-                else:
-                    sample_emb = embeddings
-
-                mean = sample_emb.mean(axis=0)
-                centered_sample = sample_emb - mean
-                _, _, vt = np.linalg.svd(centered_sample, full_matrices=False)
-                components = vt[:2]  # top-2 principal components
-
-                # Project every row with the fitted basis.
-                centered = embeddings - mean
-                xs = (centered @ components[0]).tolist()
-                ys = (centered @ components[1]).tolist()
-
-            fit_algorithm = "umap" if umap_ok else "pca"
-            fit_mean = [] if umap_ok else mean.tolist()
-            fit_components = [] if umap_ok else components.tolist()
-
-            # Split coordinates back into memory and chunk sets.
-            mem_xs = xs[:mem_total]
-            mem_ys = ys[:mem_total]
-            chunk_xs = xs[mem_total:]
-            chunk_ys = ys[mem_total:]
-
-            # Write all points + basis in one transaction (idempotent,
-            # and a failed fit leaves the previous map intact).
-            async with conn.transaction():
-                await conn.execute(f"DELETE FROM {PROJECTION_TABLE}")
                 await conn.executemany(
                     f"INSERT INTO {PROJECTION_TABLE} "
                     f"(id, kind, owner_user_id, visibility, topic, "
                     f" x, y, model, algorithm, fitted_at) "
-                    f"VALUES ($1, 'memory', $2, $3, $4, $5, $6, $7, $8, NOW())",
+                    f"VALUES ($1, 'chunk', $2, $3, $4, $5, $6, $7, $8, NOW())",
                     [
                         (
-                            ids[i],
-                            owners[i],
-                            visibilities[i],
-                            topics[i],
-                            mem_xs[i],
-                            mem_ys[i],
+                            str(chunk_rows[i]["id"]),
+                            chunk_rows[i]["owner_user_id"],
+                            chunk_rows[i]["visibility"],
+                            chunk_rows[i]["topic"],
+                            chunk_xs[i],
+                            chunk_ys[i],
                             store.model_id,
                             fit_algorithm,
                         )
-                        for i in range(mem_total)
+                        for i in range(chunk_total)
                     ],
                 )
-                if chunk_rows:
-                    await conn.executemany(
-                        f"INSERT INTO {PROJECTION_TABLE} "
-                        f"(id, kind, owner_user_id, visibility, topic, "
-                        f" x, y, model, algorithm, fitted_at) "
-                        f"VALUES ($1, 'chunk', $2, $3, $4, $5, $6, $7, $8, NOW())",
-                        [
-                            (
-                                str(chunk_rows[i]["id"]),
-                                chunk_rows[i]["owner_user_id"],
-                                chunk_rows[i]["visibility"],
-                                chunk_rows[i]["topic"],
-                                chunk_xs[i],
-                                chunk_ys[i],
-                                store.model_id,
-                                fit_algorithm,
-                            )
-                            for i in range(chunk_total)
-                        ],
-                    )
-                await conn.execute(
-                    f"INSERT INTO {PROJECTION_BASIS_TABLE} "
-                    f"(id, algorithm, model, mean, components, "
-                    f" sample_size, fitted_at) "
-                    f"VALUES (1, $1, $2, $3, $4, $5, NOW()) "
-                    f"ON CONFLICT (id) DO UPDATE SET "
-                    f"algorithm = EXCLUDED.algorithm, "
-                    f"model = EXCLUDED.model, "
-                    f"mean = EXCLUDED.mean, "
-                    f"components = EXCLUDED.components, "
-                    f"sample_size = EXCLUDED.sample_size, "
-                    f"fitted_at = EXCLUDED.fitted_at",
-                    fit_algorithm,
-                    store.model_id,
-                    fit_mean,
-                    fit_components,
-                    sample_size if sampled else None,
-                )
-
-            print(f"  projected         {total}")
-            print(
-                f"  sampled           "
-                f"{'yes (' + str(sample_size) + ')' if sampled else 'no'}"
+            await conn.execute(
+                f"INSERT INTO {PROJECTION_BASIS_TABLE} "
+                f"(id, algorithm, model, mean, components, "
+                f" sample_size, fitted_at) "
+                f"VALUES (1, $1, $2, $3, $4, $5, NOW()) "
+                f"ON CONFLICT (id) DO UPDATE SET "
+                f"algorithm = EXCLUDED.algorithm, "
+                f"model = EXCLUDED.model, "
+                f"mean = EXCLUDED.mean, "
+                f"components = EXCLUDED.components, "
+                f"sample_size = EXCLUDED.sample_size, "
+                f"fitted_at = EXCLUDED.fitted_at",
+                fit_algorithm,
+                store.model_id,
+                fit_mean,
+                fit_components,
+                sample_size if sampled else None,
             )
-            print(f"  model             {store.model_id}")
-            print(f"  \u2713 projection written\n")
-        finally:
-            await conn.close()
 
+        if umap_ok:
+            # Persisted only once the map it belongs to is committed: a pickle
+            # for coordinates that were rolled back would place a typed query
+            # into a basis the stored points were never drawn in.
+            umap_path = get_hermes_home() / "memory_projection_umap.pkl"
+            tmp_path = umap_path.with_suffix(".pkl.tmp")
+            with open(tmp_path, "wb") as fh:
+                pickle.dump(reducer, fh)
+            tmp_path.replace(umap_path)
+
+        print(f"  projected         {total}")
+        print(
+            f"  sampled           "
+            f"{'yes (' + str(sample_size) + ')' if sampled else 'no'}"
+        )
+        print(f"  model             {store.model_id}")
+        print(f"  \u2713 projection written\n")
+    finally:
+        await conn.close()
+
+
+def cmd_projection_fit(args: argparse.Namespace) -> None:
+    """``hermes memory projection fit`` — sync entry point for the fit."""
+    store = _store(getattr(args, "mode", None))
     try:
-        asyncio.run(_fit())
+        asyncio.run(
+            fit_projection(
+                store,
+                algorithm=getattr(args, "algorithm", "pca"),
+                sample_size=int(getattr(args, "sample", 20000)),
+            )
+        )
     except Exception as exc:
         print(f"\n  \u2717 {exc}\n", file=sys.stderr)
         raise SystemExit(1) from exc

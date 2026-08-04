@@ -69,6 +69,7 @@ export const hu: Translations = {
     nav: {
       analytics: "Analitika",
       chat: "Csevegés",
+      memory: "Memória",
       config: "Beállítások",
       cron: "Cron",
       documentation: "Dokumentáció",

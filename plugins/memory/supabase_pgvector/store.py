@@ -485,7 +485,6 @@ class PgvectorMemoryStore:
                 conn,
                 PROJECTION_TABLE,
                 grant_item_kind=GRANT_ITEM_KIND,
-                id_column=f"{PROJECTION_TABLE}.id",
                 role_elevation=self._role_reads,
             )
             await self._assert_space_usable(conn)
@@ -986,6 +985,31 @@ class PgvectorMemoryStore:
         for record in records:
             if record.elevated:
                 subjects.setdefault(record.owner_user_id, []).append(record.id)
+        await self.audit_elevated_reads(
+            conn,
+            principal=principal,
+            subjects=subjects,
+            query_text=query_text,
+            session_id=session_id,
+        )
+
+    async def audit_elevated_reads(
+        self,
+        conn: "asyncpg.Connection",
+        *,
+        principal: Principal,
+        subjects: dict,
+        query_text: str,
+        session_id: Optional[str] = None,
+    ) -> None:
+        """Record one audit row per subject, given ``{subject: [memory_id]}``.
+
+        Public because a cross-person read is not only a recall: the memory
+        explorer surfaces the same rows by browsing, and a read of another
+        person's memory that leaves no trace is the one thing this ledger
+        exists to prevent. Callers must invoke it in the same transaction as
+        the read.
+        """
         if not subjects:
             return
         await conn.executemany(
