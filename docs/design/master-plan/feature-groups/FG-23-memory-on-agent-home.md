@@ -42,9 +42,16 @@ unit           agent-home.service   active (running) since 2026-07-29, User=root
                WorkingDirectory=/opt/data/agent-home-app/agent-home
                EnvironmentFile=/opt/data/agent-home-app/agent-home/agent-home.env
                ExecStart=.../deploy/start.sh          (npm start → next start)
-checkout       /opt/data/agent-home-app  @ db68f7554 (PR #62)
-               ↑ a SECOND checkout; the application runs from /opt/data/hermes-agent @ ffabb3b97
-build          .next/BUILD_ID mtime 2026-07-27 01:40
+checkout       /opt/data/agent-home-app  @ db68f7554 (PR #62), branch develop
+               ↑ a SECOND, FULL clone of the same repo (origin leolau/ai-prentice-4-all),
+                 root:root, created 2026-07-22, 2.2 GB (1.6 GB of it root node_modules).
+                 The application itself runs from /opt/data/hermes-agent @ ffabb3b97.
+                 Only ONE thing on the box references it: agent-home.service.
+build          .next/BUILD_ID mtime 2026-07-27 01:40  (111 MB)
+npm layout     `agent-home` is a workspace of the ROOT package.json, so deps hoist to
+               <checkout>/node_modules — `next` lives there, not in agent-home/node_modules.
+               The main checkout ALREADY has that root tree (1.6 GB, `next` present),
+               because the `web/` bundle is built there.
 env (keys)     AGENT_HOME_SESSION_SECRET, DATABASE_URL, SUPABASE_URL,
                SUPABASE_ANON_KEY, AGENT_HOME_API_URL=http://127.0.0.1:9119,
                AGENT_HOME_DATASTORE_MODE=prod, PORT=3100,
@@ -178,7 +185,11 @@ systemctl stop agent-home
 cp -a /opt/data/agent-home-app/agent-home/agent-home.env \
       /opt/data/hermes-agent/agent-home/agent-home.env   # 0600, secrets, NOT committed
 chmod 600 /opt/data/hermes-agent/agent-home/agent-home.env
-cd /opt/data/hermes-agent/agent-home && npm ci && npm run build
+# `agent-home` is an npm WORKSPACE: install/build from the repo root, never
+# from inside agent-home/ (that would create a second, unhoisted dep tree).
+cd /opt/data/hermes-agent
+npm ci                                   # already satisfied here; a no-op if the tree is current
+npm run build --workspace agent-home
 # edit the unit's three paths → /opt/data/hermes-agent/agent-home
 systemctl daemon-reload && systemctl start agent-home
 curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:3100/login   # expect 200
@@ -189,7 +200,8 @@ mv /opt/data/agent-home-app /opt/data/agent-home-app.retired-YYYYMMDD  # keep, d
 and `.next` — **verify before the build**, because the checkout is now a git
 working tree the drift check inspects, and an untracked `.next/` would make it
 permanently dirty. The retired directory stays on disk until the owner confirms
-the phone works, then is removed in a follow-up.
+the phone works, then is removed in a follow-up (it reclaims ~2.2 GB, and
+nothing but the old unit ever pointed at it).
 
 The alternative (keep two checkouts, teach the deploy script to pull both) is
 strictly more machinery for a worse invariant; §9.1 is the owner's call.
@@ -203,17 +215,20 @@ mirror the existing `web/`-bundle rule:
 
 ```bash
 # Rebuild agent-home only when its sources changed, or when no build exists.
-if git diff --name-only "$BEFORE" "$AFTER" | grep -q '^agent-home/' \
+# Workspace install/build: from the repo root, NOT from inside agent-home/.
+if git diff --name-only "$BEFORE" "$AFTER" \
+     | grep -qE '^(agent-home/|package-lock\.json$)' \
    || [ ! -f agent-home/.next/BUILD_ID ]; then
-  ( cd agent-home && nice -n 15 npm ci --omit=dev=false && nice -n 15 npm run build )
+  nice -n 15 npm ci
+  nice -n 15 npm run build --workspace agent-home
   systemctl restart agent-home
 fi
 ```
 
-`nice -n 15`: a Next build on 4 shared vCPUs must lose to the gateway.
-`package-lock.json` changes must also trigger `npm ci` — include
-`^agent-home/package-lock.json` in the match (it is under the same prefix, so
-the grep above already covers it; do not narrow it to `agent-home/src/`).
+`nice -n 15`: a Next build on 4 shared vCPUs must lose to the gateway. The
+root `package-lock.json` is matched explicitly because it is where a workspace
+dependency change actually lands — matching only `agent-home/` would rebuild
+with a stale dep tree.
 
 ### A0.3 — state capture can see it
 
