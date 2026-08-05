@@ -55,34 +55,53 @@ Confirm the current instance with the user/lead rather than assuming.
 | Local Supabase stack (hermes must NOT read) | `/opt/data/supabase/docker/.env` |
 | Embedding service (loopback, layer-4 memory) | `/opt/data/hermes-embed` |
 | Deployment-state store (git, own read-only deploy key) | `/opt/data/hermes-deploy-state` |
-| `agent-home` — **the checkout that actually serves the phone** | `/opt/data/agent-home-app/agent-home` (see below) |
+| `agent-home` (the phone app) — same checkout since FG-23 A0 | `/opt/data/hermes-agent/agent-home` |
+| `agent-home` secrets (0600, git-ignored, **not** reproducible from git) | `/opt/data/hermes-agent/agent-home/agent-home.env` |
 | Logs | `/opt/data/hermes-home-staging/logs/*.log` (confirm per unit with `systemctl show -p StandardOutput <unit>`) |
 
-11 long-running units: `hermes-{dashboard,digest,email-batcher,email-poller,email-triage,escalation,gateway,wa-batcher,wa-bridge-connectar,wa-bridge-personal,wa-triage}.service`,
-plus timers/oneshots (`hermes-drift-check`, `hermes-memory-projection`, `hermes-rag-ingest`)
-and **`agent-home.service`**, which is *not* named `hermes-*` — see the next section.
+12 long-running units: `hermes-{dashboard,digest,email-batcher,email-poller,email-triage,escalation,gateway,wa-batcher,wa-bridge-connectar,wa-bridge-personal,wa-triage}.service`
+and `agent-home.service`, plus timers/oneshots (`hermes-drift-check`,
+`hermes-memory-projection`, `hermes-secret-backup`, `hermes-rag-ingest`).
+The long-running set is exactly the **enabled** unit files; timer-invoked
+oneshots are `static`:
 
-## `agent-home` (the phone app) is the one service outside the machinery
+```bash
+systemctl list-unit-files 'hermes-*.service' --state=enabled --no-legend | awk '{print $1}'
+```
 
-As of 2026-08-05, before FG-23 phase A0 lands. Every line here is a trap:
+Use that, not `ls /etc/systemd/system/hermes-*.service` — see "the deploy
+script's verdict" below for what a glob over both costs.
+
+## `agent-home` (the phone app), after FG-23 A0
+
+As of 2026-08-05, phases A0/A0.5 are deployed (`develop f4bc8af21`):
 
 ```
 public       https://home.leolau.ai-and-i.io → Caddy → 127.0.0.1:3100
-unit         agent-home.service     User=root   (every hermes-* unit is unprivileged; this one is not)
-WorkingDir   /opt/data/agent-home-app/agent-home     ← a SECOND, FULL clone of the repo
-EnvFile      /opt/data/agent-home-app/agent-home/agent-home.env   (0600 secrets, never committed)
+unit         agent-home.service     User=hermes   (ProtectSystem=strict, ProtectHome=yes)
+WorkingDir   /opt/data/hermes-agent/agent-home     ← the main checkout; one git pull moves everything
+EnvFile      /opt/data/hermes-agent/agent-home/agent-home.env   (0600, git-ignored)
 ExecStart    deploy/start.sh  →  next start   (serves the COMPILED .next bundle)
 ```
 
-- **`/opt/data/hermes-agent/agent-home` is not what is running.** Do not verify a
-  change by reading the main checkout; read the one in the unit's
-  `WorkingDirectory`, or `ls -l /proc/<pid>/cwd`.
-- **`/opt/data/deploy-hermes.sh` never touches it** — no pull, no `npm run
-  build`, no restart. "Merged to `develop`" does **not** mean it is on the phone.
-  A stale `.next/BUILD_ID` mtime is the tell.
-- **`deploy_state.py --unit-glob` defaults to `hermes-*`**, so the drift check is
-  blind to this unit, its build age and its checkout. A clean drift report says
-  nothing about `agent-home`.
+What changed, and what to check:
+
+- **The second clone is gone.** `/opt/data/agent-home-app` (a full second clone
+  frozen at PR #62, serving a 2026-07-27 build) is retired to
+  `/opt/data/agent-home-app.retired-20260805`. Nothing references it; it is kept
+  only as a rollback and can be deleted to reclaim 2.2 GB. Its old unit is at
+  `/opt/data/backups/agent-home.service.pre-fg23`.
+- **The deploy now builds and restarts it** when `agent-home/` or the root
+  `package-lock.json` moves, or when `.next/BUILD_ID` is absent. It still serves
+  a *compiled* bundle, so `next start` keeps serving the old build until
+  something rebuilds: `BUILD_ID` mtime remains the tell.
+- **The state capture covers it.** `deploy_state.py`'s default globs are
+  `hermes-*` **and** `agent-home*` (PR #112), and the manifest key is
+  `unit_globs` (plural, a list). `--unit-glob` *replaces* the defaults.
+- **It runs unprivileged.** `node`/`npm` are `/usr/bin` (no nvm), and `hermes`'s
+  home is `/opt/data/hermes-user`, so `ProtectHome=yes` does not hide it.
+  `.next` must be writable by `hermes` — a root build followed by a restart
+  *before* the `chown` starts the service against root-owned files.
 - **`agent-home` is an npm *workspace* of the root `package.json`.** Deps hoist to
   `<checkout>/node_modules` — `next` lives there, not in
   `agent-home/node_modules` (264 KB of link stubs). Install and build **from the
@@ -94,6 +113,29 @@ ExecStart    deploy/start.sh  →  next start   (serves the COMPILED .next bundl
   this box (`app_prod.memories` is the empty 256-dim pre-re-embed leftover).
   Forwarding that mode to a memory endpoint yields a healthy page reporting zero
   rows — the failure PR #107 fixed on the dashboard.
+
+### Verifying an authenticated phone page without the password
+
+`dashboard.basic_auth.password_hash` is scrypt, so the password cannot be read
+off the box — but the *provider's signing key* is in the same config, and
+`agent-home` bridges that same login. Two steps, no credential needed:
+
+1. Mint an upstream token as the service user:
+   `BasicAuthProvider(...)._mint_session(username).access_token`, with
+   `username`/`password_hash`/`secret` from `dashboard.basic_auth`. Confirm it
+   resolves a principal: `GET 127.0.0.1:9119/api/comms/whoami` →
+   `{"configured": true, "principal": {"user_id": "leo_owner", …}}`.
+2. Wrap it in an `agent_home_session` cookie: `base64url(JSON) + "." +
+   base64url(HMAC-SHA256(payload, AGENT_HOME_SESSION_SECRET))`, payload
+   `{hermesToken, principal, issuedAt}` (see `agent-home/src/lib/auth/session.ts`).
+
+Then drive `127.0.0.1:3100` with that cookie. Note the login *subject* is
+`admin` while the principal is `leo_owner`; they are linked by
+`hermes owner alias admin`, without which every memory call is a 409.
+
+**Server-rendered HTML cannot prove the map.** `MemoryMap` fetches the
+projection client-side, so `curl` sees the summary and rows but not a single
+`<circle>`. Geometry claims need a browser.
 
 ## Running Hermes CLI commands as the service user
 
@@ -110,7 +152,7 @@ or grep `/opt/data/hermes-home-staging/config.yaml` directly.
 
 Root `git` commands against the live checkout need
 `-c safe.directory=/opt/data/hermes-agent` (differing owner), and the same for
-`/opt/data/agent-home-app`.
+`/opt/data/hermes-deploy-state`.
 
 ### Memory / layer-4 quick checks
 
@@ -502,13 +544,53 @@ Running any repo script as `hermes` creates `__pycache__/*.pyc` in the checkout 
 `hermes`). It's gitignored and `git diff` stays empty, so it isn't damage — but don't claim a tool
 is strictly non-writing without checking `find <path> -newermt <start>`, and expect these entries.
 
+## Deploying: the script's own verdict, and pushing the state it captures
+
+`/opt/data/deploy-hermes.sh` is an installed *copy* of `deploy/hermes-deploy.sh`.
+The drift check hashes it, so after merging a change to that file you must
+reinstall the copy or the next check goes red — which is the check working:
+
+```bash
+install -o root -g root -m 0750 \
+  /opt/data/hermes-agent/deploy/hermes-deploy.sh /opt/data/deploy-hermes.sh
+```
+
+- **Read the verdict, not the exit code alone.** Until PR #113 the unit list came
+  from `ls /etc/systemd/system/hermes-*.service`, which includes the
+  timer-invoked oneshots; `systemctl is-active` on a finished oneshot exits 3, so
+  under `set -e` the loop died at the first one — reporting **2 of 13** units and
+  exiting 3 on every *successful* deploy. A green deploy now prints
+  `deploy OK (<sha>)`; if you don't see that line, the deploy did not finish,
+  whatever the exit code says.
+- **A deploy must not run the oneshots.** It restarts enabled units only. Check
+  `systemctl show -p ExecMainStartTimestamp --value hermes-{drift-check,memory-projection,secret-backup}.service`
+  before and after: unchanged is correct. A deploy that fires the secret backup
+  and a projection refit is doing three jobs at once.
+
+**The box cannot push the state it captures — this is deliberate (PR #88).**
+`/opt/data/hermes-deploy-state`'s deploy key is read-only so a compromised box
+cannot rewrite its own audit trail. `capture` commits locally and the `git push`
+fails with *"The key you are authenticating with has been marked as read only."*
+Finish the job off-box, or the manifest silently stays local (a commit sat
+unpushed for a whole deploy cycle this way):
+
+```bash
+# on the box
+git -C /opt/data/hermes-deploy-state -c safe.directory=... \
+  format-patch --stdout origin/main..main
+# then apply to an off-box clone and push from there
+```
+
+Verify with `git -C ... log --oneline origin/main..main` on the box: empty means
+the trail is actually published.
+
 ## Constraints usually imposed on this box
 
 Read-only by default: no service restarts, no running the deploy script, no edits to `.env` or
 the Supabase Docker stack, no production DB writes, no real messages to users. This means some
 findings are **not verifiable** — e.g. confirming a startup-time permission warning clears
 requires a restart. Say so explicitly instead of guessing. Clean up any `/tmp` probe files and
-re-confirm all 11 units are still `active/running` when done.
+re-confirm all 12 long-running units are still `active/running` when done.
 
 ## Devin Secrets Needed
 
