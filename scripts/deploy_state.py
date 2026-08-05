@@ -25,6 +25,12 @@ This script closes that gap without pretending the repo can own the file:
               Used when rebuilding a box, never on a schedule.
     check     diff the live state against the committed snapshot and report.
               Never writes. Wired into the weekly drift timer.
+    handover  report whether docs/deployment/README.md still describes the
+              revision this checkout is running. Prose is state too: the
+              document that claims to say what is true of the live box went
+              three deploys stale in silence. Run from the deploy and the
+              weekly timer; meaningless in a development clone, where HEAD is
+              not a deployed revision.
 
 `check` is deliberately read-only, because Hermes itself rewrites config.yaml
 (`/model` from Telegram, `hermes tools`, memory setup — ~30 call sites). A
@@ -46,6 +52,7 @@ Usage:
   python scripts/deploy_state.py render  --deployment hermes-systest \
       --secrets /opt/data/deploy/state-secrets.env --out /tmp/config.yaml
   python scripts/deploy_state.py check   --deployment hermes-systest [--json]
+  python scripts/deploy_state.py handover [--notify]
 """
 
 from __future__ import annotations
@@ -58,6 +65,7 @@ import os
 import pwd
 import re
 import stat
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any
@@ -116,6 +124,17 @@ CREDENTIAL_SHAPES = re.compile(
 )
 
 PLACEHOLDER_RE = re.compile(r"\$\{([A-Z][A-Z0-9_]*)\}")
+
+# The handover document claims, in its own first lines, which revision of the
+# application it describes. Nothing made that claim true, so it went three
+# deploys stale in silence — the same failure the rest of this script exists to
+# report, applied to the prose. Parsed here so the claim is checked.
+HANDOVER_DOC = Path("docs/deployment/README.md")
+HANDOVER_RE = re.compile(
+    r"^Last verified: (?P<date>\d{4}-\d{2}-\d{2}), "
+    r"application at `(?P<revision>[0-9a-f]{7,40})`",
+    re.MULTILINE,
+)
 
 # Credentials are often carried with a scheme prefix. Keeping the prefix in
 # the snapshot means the secrets file holds the secret and nothing else.
@@ -660,6 +679,79 @@ def check(deployment: str, state_root: Path | None = None) -> list[dict[str, str
     return findings
 
 
+def deployed_revision(repo_root: Path | None = None) -> str | None:
+    """The revision this checkout is actually running, or None if unreadable.
+
+    `safe.directory` because the checkout is owned by `hermes` while the deploy
+    runs as root, and this must not become the reason a check aborts.
+    """
+    root = repo_root or REPO_ROOT
+    safe = f"safe.directory={root}"
+    command = ["git", "-c", safe, "-C", str(root), "rev-parse", "HEAD"]
+    try:
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return result.stdout.strip() or None if result.returncode == 0 else None
+
+
+def check_handover_doc(repo_root: Path | None = None) -> list[dict[str, str]]:
+    """Report a handover document that describes a revision we are not running.
+
+    The document is authoritative for "what is currently true of the live box",
+    which makes it worthless the moment it is stale: an agent picking this up
+    cold reads it as fact. It names its own revision, so the claim is checkable.
+    """
+    root = repo_root or REPO_ROOT
+    doc = root / HANDOVER_DOC
+    if not doc.is_file():
+        return [{
+            "severity": SEVERITY_DRIFT,
+            "component": "handover-doc",
+            "expected": str(HANDOVER_DOC),
+            "actual": "absent",
+            "detail": "the document a cold pickup starts from is gone",
+        }]
+
+    match = HANDOVER_RE.search(doc.read_text(encoding="utf-8"))
+    if match is None:
+        return [{
+            "severity": SEVERITY_DRIFT,
+            "component": "handover-doc",
+            "expected": "a `Last verified: YYYY-MM-DD, application at `<sha>`.` line",
+            "actual": "no parseable claim",
+            "detail": f"{HANDOVER_DOC} states no revision, so its freshness "
+            "cannot be checked",
+        }]
+
+    documented = match.group("revision")
+    live = deployed_revision(root)
+    if live is None:
+        return [{
+            "severity": SEVERITY_NOTE,
+            "component": "handover-doc",
+            "expected": f"compare against {documented}",
+            "actual": "checkout revision unreadable",
+            "detail": "git could not report HEAD, so doc freshness is unknown",
+        }]
+    if live.startswith(documented):
+        return []
+    return [{
+        "severity": SEVERITY_DRIFT,
+        "component": "handover-doc",
+        "expected": f"{live[:9]} (deployed)",
+        "actual": f"{documented} (documented {match.group('date')})",
+        "detail": f"{HANDOVER_DOC} describes an older revision — re-verify it "
+        "against the box and move its `Last verified` line forward",
+    }]
+
+
 def format_report(deployment: str, findings: list[dict[str, str]]) -> str:
     drift = [f for f in findings if f["severity"] == SEVERITY_DRIFT]
     notes = [f for f in findings if f["severity"] == SEVERITY_NOTE]
@@ -749,6 +841,14 @@ def main(argv: list[str] | None = None) -> int:
         "--notify", action="store_true", help="Telegram on drift (silent otherwise)"
     )
 
+    handover_parser = subparsers.add_parser(
+        "handover",
+        help="report whether the handover doc describes the deployed revision",
+    )
+    handover_parser.add_argument(
+        "--notify", action="store_true", help="Telegram when stale (silent otherwise)"
+    )
+
     args = parser.parse_args(argv)
 
     try:
@@ -789,6 +889,21 @@ def main(argv: list[str] | None = None) -> int:
             write_yaml(args.out, config, int(args.mode, 8))
             print(f"rendered {args.out} ({len(flatten(config))} keys)")
             return 0
+
+        if args.command == "handover":
+            findings = check_handover_doc()
+            if not findings:
+                print(f"handover doc current ({HANDOVER_DOC})")
+                return 0
+            report = "\n".join(
+                f"handover doc STALE: {f['actual']} != {f['expected']} — {f['detail']}"
+                for f in findings
+            )
+            print(json.dumps(findings, indent=2) if args.json else report)
+            drifted = any(f["severity"] == SEVERITY_DRIFT for f in findings)
+            if args.notify and drifted:
+                notify(report)
+            return 1 if drifted else 0
 
         findings = check(args.deployment, args.state_root)
     except (StateError, OSError, yaml.YAMLError) as exc:
