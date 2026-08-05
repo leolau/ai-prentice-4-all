@@ -119,3 +119,9 @@ for u in $VERIFY_UNITS; do
 done
 [ "$fail" = 0 ] || { echo "DEPLOY WARNING: a unit is not active — see journalctl -u <unit>" >&2; exit 1; }
 echo "deploy OK ($AFTER)  backup: /opt/data/backups/deploy-$TS"
+
+# docs/deployment/README.md claims to state what is *currently* true of this box
+# and names the revision it was verified against. Nothing kept that honest, so
+# it went three deploys stale unnoticed. Advisory here — a stale document must
+# not block a deploy — but the weekly state check reports it as drift.
+./.venv/bin/python scripts/deploy_state.py handover || true
