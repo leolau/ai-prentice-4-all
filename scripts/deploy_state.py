@@ -25,12 +25,12 @@ This script closes that gap without pretending the repo can own the file:
               Used when rebuilding a box, never on a schedule.
     check     diff the live state against the committed snapshot and report.
               Never writes. Wired into the weekly drift timer.
-    handover  report whether docs/deployment/README.md still describes the
-              revision this checkout is running. Prose is state too: the
-              document that claims to say what is true of the live box went
-              three deploys stale in silence. Run from the deploy and the
-              weekly timer; meaningless in a development clone, where HEAD is
-              not a deployed revision.
+    handover  report whether docs/deployment/README.md still describes this
+              deployment. Prose is state too: the document that claims to say
+              what is true of the live box went three deploys stale in silence.
+              Drift means the deploy tooling it documents moved after it was
+              last written — not merely that HEAD moved, which happens on
+              every deploy and would make the check permanently red.
 
 `check` is deliberately read-only, because Hermes itself rewrites config.yaml
 (`/model` from Telegram, `hermes tools`, memory setup — ~30 call sites). A
@@ -126,14 +126,27 @@ CREDENTIAL_SHAPES = re.compile(
 PLACEHOLDER_RE = re.compile(r"\$\{([A-Z][A-Z0-9_]*)\}")
 
 # The handover document claims, in its own first lines, which revision of the
-# application it describes. Nothing made that claim true, so it went three
-# deploys stale in silence — the same failure the rest of this script exists to
-# report, applied to the prose. Parsed here so the claim is checked.
+# application it was verified against. Nothing made that claim true, so it went
+# three deploys stale in silence — the same failure the rest of this script
+# exists to report, applied to the prose. Parsed here so the claim is checked.
 HANDOVER_DOC = Path("docs/deployment/README.md")
 HANDOVER_RE = re.compile(
     r"^Last verified: (?P<date>\d{4}-\d{2}-\d{2}), "
     r"application at `(?P<revision>[0-9a-f]{7,40})`",
     re.MULTILINE,
+)
+
+# What the handover document actually describes. Staleness is "something the
+# document explains changed after it was last written", not "HEAD moved" —
+# every deploy moves HEAD, so the latter reports drift on every single deploy
+# forever, including the deploy that ships the doc update itself. A check that
+# is always red is a check nobody reads. A feature commit does not invalidate
+# the box inventory; a change to the deploy tooling does.
+HANDOVER_WATCHED = (
+    "deploy",
+    "scripts/deploy_state.py",
+    "scripts/backup_secrets.py",
+    "scripts/check_runtime_drift.py",
 )
 
 # Credentials are often carried with a scheme prefix. Keeping the prefix in
@@ -679,34 +692,59 @@ def check(deployment: str, state_root: Path | None = None) -> list[dict[str, str
     return findings
 
 
-def deployed_revision(repo_root: Path | None = None) -> str | None:
-    """The revision this checkout is actually running, or None if unreadable.
+def _git(root: Path, *args: str) -> str | None:
+    """Run git in `root` and return stdout, or None if it could not be run.
 
     `safe.directory` because the checkout is owned by `hermes` while the deploy
-    runs as root, and this must not become the reason a check aborts.
+    runs as root, and git ownership must not become the reason a check aborts.
     """
-    root = repo_root or REPO_ROOT
-    safe = f"safe.directory={root}"
-    command = ["git", "-c", safe, "-C", str(root), "rev-parse", "HEAD"]
+    command = [
+        "git",
+        "-c",
+        f"safe.directory={root}",
+        "-C",
+        str(root),
+        *args,
+    ]
     try:
         result = subprocess.run(
-            command,
-            capture_output=True,
-            text=True,
-            timeout=30,
-            check=False,
+            command, capture_output=True, text=True, timeout=30, check=False
         )
     except (OSError, subprocess.SubprocessError):
         return None
-    return result.stdout.strip() or None if result.returncode == 0 else None
+    return result.stdout.strip() if result.returncode == 0 else None
+
+
+def deployed_revision(repo_root: Path | None = None) -> str | None:
+    """The revision this checkout is actually running, or None if unreadable."""
+    return _git(repo_root or REPO_ROOT, "rev-parse", "HEAD") or None
+
+
+def _last_commit(root: Path, paths: tuple[str, ...]) -> str | None:
+    return _git(root, "log", "-1", "--format=%H", "--", *paths) or None
+
+
+def _describes_current_tooling(root: Path, doc_revision: str) -> list[str]:
+    """Deployment-relevant paths changed after the doc was last written."""
+    changed = _git(
+        root, "diff", "--name-only", f"{doc_revision}..HEAD", "--", *HANDOVER_WATCHED
+    )
+    return [line for line in (changed or "").splitlines() if line]
 
 
 def check_handover_doc(repo_root: Path | None = None) -> list[dict[str, str]]:
-    """Report a handover document that describes a revision we are not running.
+    """Report a handover document that no longer describes the deployment.
 
     The document is authoritative for "what is currently true of the live box",
     which makes it worthless the moment it is stale: an agent picking this up
-    cold reads it as fact. It names its own revision, so the claim is checkable.
+    cold reads it as fact.
+
+    Staleness is measured against the *tooling it documents*, not against HEAD.
+    Requiring its `Last verified` sha to equal HEAD sounds stricter and is worse:
+    every deploy moves HEAD, so it would report drift on every deploy forever —
+    including the one that ships the doc update — and a check that is always red
+    gets muted, which is how the doc went stale in the first place. A revision
+    behind HEAD with no deploy-tooling change since is *reported as a note*.
     """
     root = repo_root or REPO_ROOT
     doc = root / HANDOVER_DOC
@@ -742,13 +780,35 @@ def check_handover_doc(repo_root: Path | None = None) -> list[dict[str, str]]:
         }]
     if live.startswith(documented):
         return []
+
+    doc_revision = _last_commit(root, (str(HANDOVER_DOC),))
+    if doc_revision is None:
+        return [{
+            "severity": SEVERITY_NOTE,
+            "component": "handover-doc",
+            "expected": f"a commit touching {HANDOVER_DOC}",
+            "actual": "none in history",
+            "detail": "the document is not committed, so its age is unknown",
+        }]
+
+    changed = _describes_current_tooling(root, doc_revision)
+    if not changed:
+        return [{
+            "severity": SEVERITY_NOTE,
+            "component": "handover-doc",
+            "expected": f"{live[:9]} (deployed)",
+            "actual": f"{documented} (verified {match.group('date')})",
+            "detail": "verified at an earlier revision, but nothing it "
+            "documents has changed since",
+        }]
     return [{
         "severity": SEVERITY_DRIFT,
         "component": "handover-doc",
-        "expected": f"{live[:9]} (deployed)",
-        "actual": f"{documented} (documented {match.group('date')})",
-        "detail": f"{HANDOVER_DOC} describes an older revision — re-verify it "
-        "against the box and move its `Last verified` line forward",
+        "expected": f"a document written after {', '.join(sorted(changed)[:4])}",
+        "actual": f"{documented} (verified {match.group('date')})",
+        "detail": f"{len(changed)} deployment path(s) changed since "
+        f"{HANDOVER_DOC} was last written — re-verify it against the box and "
+        "move its `Last verified` line forward",
     }]
 
 
@@ -896,7 +956,9 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"handover doc current ({HANDOVER_DOC})")
                 return 0
             report = "\n".join(
-                f"handover doc STALE: {f['actual']} != {f['expected']} — {f['detail']}"
+                f"handover doc "
+                f"{'STALE' if f['severity'] == SEVERITY_DRIFT else 'note'}: "
+                f"{f['actual']} != {f['expected']} — {f['detail']}"
                 for f in findings
             )
             print(json.dumps(findings, indent=2) if args.json else report)

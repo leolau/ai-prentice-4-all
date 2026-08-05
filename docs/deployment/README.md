@@ -5,13 +5,21 @@ It states what exists, what is verified, what is *not*, and where the detail
 lives. The per-topic documents are authoritative for procedure; this file is
 authoritative for **what is currently true of the live box**.
 
-Last verified: 2026-08-05, application at `f4bc8af21`.
+Last verified: 2026-08-05, application at `9ac3ce251`.
 
-That line is **checked**, not a promise: `deploy_state.py handover` compares it
-against the revision the box is actually running, the deploy prints the result,
-and the weekly timer reports a stale document. It went three deploys stale before
-that existed. Re-verify the claims below before moving it forward — a fresh date
-on stale prose is worse than an old date.
+That line is **checked**, not a promise: `deploy_state.py handover` reports this
+document as stale once anything it describes — `deploy/`, `deploy_state.py`,
+`backup_secrets.py`, `check_runtime_drift.py` — changes after the document was
+last written. The deploy prints the result and the weekly timer reports it. It
+went three deploys stale before that existed.
+
+Staleness is deliberately *not* "this sha is not HEAD": every deploy moves HEAD,
+so that fires on every deploy forever — including the deploy shipping the doc
+update, whose merge sha cannot be known while the doc is being written — and an
+always-red check gets muted, which is how this document went stale in the first
+place. Being a few feature commits behind HEAD is reported as a note. Re-verify
+the claims below before moving the line forward: a fresh date on stale prose is
+worse than an old date.
 
 ## Read these in this order
 
