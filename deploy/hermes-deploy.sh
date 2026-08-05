@@ -9,7 +9,18 @@ REPO=/opt/data/hermes-agent
 BRANCH="${1:-develop}"
 ALLOWED_LOCAL_MODS=(
 )
-UNITS=$(ls /etc/systemd/system/hermes-*.service | xargs -n1 basename)
+# Only the long-running services. `hermes-*` also matches the oneshot jobs
+# behind timers (drift-check, memory-projection, secret-backup): restarting
+# those *runs* them mid-deploy, and `systemctl is-active` reports `inactive`
+# with exit 3 for a oneshot that has finished — under `set -e` that aborted the
+# verification loop, so this script exited 3 on every successful deploy and
+# never printed its own "deploy OK". Enabled unit files are exactly the ones
+# meant to be running; `static` (timer-invoked) units are excluded.
+UNITS=$(systemctl list-unit-files 'hermes-*.service' --state=enabled --no-legend \
+  | awk '{print $1}')
+# agent-home is restarted separately (it is not in the hermes-* glob) but a
+# deploy that leaves the phone app down must still fail loudly.
+VERIFY_UNITS="$UNITS agent-home.service"
 
 cd "$REPO"
 
@@ -77,12 +88,12 @@ if [ "$BEFORE" != "$AFTER" ] && \
   echo "== rebuilding agent-home bundle (agent-home/ changed) =="
   nice -n 15 npm ci --no-audit --no-fund --silent
   nice -n 15 npm run build --workspace agent-home
-  systemctl restart agent-home
+  restart_agent_home=1
 elif [ ! -f agent-home/.next/BUILD_ID ]; then
   echo "== building agent-home bundle (no build present) =="
   nice -n 15 npm ci --no-audit --no-fund --silent
   nice -n 15 npm run build --workspace agent-home
-  systemctl restart agent-home
+  restart_agent_home=1
 fi
 
 # hermes owns the source tree, but NOT .venv: root runs pip from it, so a
@@ -92,13 +103,17 @@ chown -R root:root "$REPO/.venv"
 
 echo "== restarting services =="
 systemctl daemon-reload
-# agent-home is restarted above when its bundle changed; it is not in the
-# hermes-* unit glob, so the loop below does not touch it.
+# agent-home runs as `hermes` and `next start` writes into .next, so it is
+# restarted *after* the chown above — a build leaves root-owned files behind.
+if [ "${restart_agent_home:-0}" = 1 ]; then
+  systemctl restart agent-home
+fi
 for u in $UNITS; do systemctl restart "$u"; done
 sleep 15
 fail=0
-for u in $UNITS; do
-  s=$(systemctl is-active "$u")
+for u in $VERIFY_UNITS; do
+  # `is-active` exits nonzero for anything not active; report it, don't abort.
+  s=$(systemctl is-active "$u" || true)
   printf "%-40s %s\n" "$u" "$s"
   [ "$s" = active ] || fail=1
 done
