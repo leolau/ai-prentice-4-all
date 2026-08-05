@@ -584,6 +584,25 @@ git -C /opt/data/hermes-deploy-state -c safe.directory=... \
 Verify with `git -C ... log --oneline origin/main..main` on the box: empty means
 the trail is actually published.
 
+### The handover document is checked state too
+
+`docs/deployment/README.md` claims to state what is *currently* true of this box.
+Nothing kept that honest and it went three deploys stale — including across the
+deploy that moved the phone app to a different checkout and a different user. It
+is now checked, from the deploy and from the weekly timer:
+
+```bash
+cd /opt/data/hermes-agent && ./.venv/bin/python scripts/deploy_state.py handover
+#  exit 0  current (or a note: behind HEAD, but nothing it documents changed)
+#  exit 1  STALE — deploy/, deploy_state.py, backup_secrets.py or
+#          check_runtime_drift.py moved after the doc was last written
+```
+
+Stale is measured against that tooling, **not** against `HEAD`: HEAD moves on
+every deploy, so a HEAD-equality check reports drift on every deploy forever and
+gets muted. When it does fire, re-verify the claims against the box before moving
+the `Last verified` line — a fresh date on stale prose is worse than an old date.
+
 ## Constraints usually imposed on this box
 
 Read-only by default: no service restarts, no running the deploy script, no edits to `.env` or

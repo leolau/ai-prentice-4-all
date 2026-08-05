@@ -9,6 +9,14 @@ as fact, so a silently stale one is worse than none.
 
 These tests pin the check on a real git repository rather than a mock, because
 the failure mode being guarded against is a claim that looks right.
+
+The second failure mode, found by running the check on the box, is the opposite
+one: staleness measured as "the documented sha is not HEAD" fires on **every**
+deploy — including the deploy that ships the doc update, whose merge sha does
+not exist when the doc is written. An always-red check gets muted, which is how
+the document went stale to begin with. So drift means *the deployment tooling
+the document describes* moved after the document was last written; being a few
+feature commits behind HEAD is a note.
 """
 
 import subprocess
@@ -46,10 +54,12 @@ def checkout(tmp_path):
     _git(repo, "config", "user.email", "test@example.com")
     _git(repo, "config", "user.name", "test")
 
-    def commit(text: str) -> str:
-        (repo / ds.HANDOVER_DOC).write_text(text, encoding="utf-8")
-        _git(repo, "add", str(ds.HANDOVER_DOC))
-        _git(repo, "commit", "-q", "-m", "doc")
+    def commit(text: str, path=ds.HANDOVER_DOC) -> str:
+        target = repo / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text, encoding="utf-8")
+        _git(repo, "add", str(path))
+        _git(repo, "commit", "-q", "-m", str(path))
         return subprocess.run(
             ["git", "-C", str(repo), "rev-parse", "HEAD"],
             check=True,
@@ -69,17 +79,47 @@ def test_a_doc_naming_the_deployed_revision_is_clean(checkout):
     assert ds.check_handover_doc(repo) == []
 
 
-def test_the_real_failure_a_doc_three_deploys_behind_is_drift(checkout):
+def test_the_real_failure_deploy_tooling_moved_after_the_doc_was_written(checkout):
+    """The original bug: the deploy script and the state tool changed, the doc
+    describing them did not, and nothing said so."""
     repo, commit = checkout
     commit(DOC.format(date="2026-08-04", revision="657f1190b"))
+    commit("echo new verdict\n", path="deploy/hermes-deploy.sh")
     findings = ds.check_handover_doc(repo)
     assert [f["severity"] for f in findings] == [DRIFT]
     finding = findings[0]
     assert finding["component"] == "handover-doc"
-    # The report must name both revisions: "stale" without them is unactionable.
+    # Actionable means naming the claim and the file that outdated it.
     assert "657f1190b" in finding["actual"]
     assert "2026-08-04" in finding["actual"]
-    assert "deployed" in finding["expected"]
+    assert "deploy/hermes-deploy.sh" in finding["expected"]
+
+
+def test_a_doc_behind_head_with_no_tooling_change_is_a_note_not_drift(checkout):
+    """Every deploy moves HEAD. If that alone were drift the check would be red
+    forever — including on the deploy that ships the doc update, whose merge sha
+    cannot be known when the doc is written."""
+    repo, commit = checkout
+    commit(DOC.format(date="2026-08-05", revision="657f1190b"))
+    commit("export const x = 1\n", path="agent-home/src/feature.ts")
+    findings = ds.check_handover_doc(repo)
+    assert [f["severity"] for f in findings] == [NOTE]
+    assert "nothing it documents has changed" in findings[0]["detail"]
+
+
+def test_a_doc_updated_in_the_same_commit_as_the_tooling_is_clean(checkout):
+    """The doc and the tool change together — the normal, correct case, and the
+    one a HEAD-equality check could never satisfy."""
+    repo, commit = checkout
+    commit(DOC.format(date="2026-08-05", revision="657f1190b"))
+    (repo / "deploy").mkdir(parents=True, exist_ok=True)
+    (repo / "deploy" / "hermes-deploy.sh").write_text("echo v2\n", encoding="utf-8")
+    (repo / ds.HANDOVER_DOC).write_text(
+        DOC.format(date="2026-08-06", revision="657f1190b"), encoding="utf-8"
+    )
+    _git(repo, "add", "deploy/hermes-deploy.sh", str(ds.HANDOVER_DOC))
+    _git(repo, "commit", "-q", "-m", "tool + doc")
+    assert [f["severity"] for f in ds.check_handover_doc(repo)] == [NOTE]
 
 
 def test_an_abbreviated_claim_matching_head_is_not_drift(checkout):
@@ -121,6 +161,7 @@ def test_the_cli_exits_nonzero_on_a_stale_doc_and_names_it(
 ):
     repo, commit = checkout
     commit(DOC.format(date="2026-08-04", revision="657f1190b"))
+    commit("echo new verdict\n", path="deploy/hermes-deploy.sh")
     monkeypatch.setattr(ds, "REPO_ROOT", repo)
     assert ds.main(["handover"]) == 1
     out = capsys.readouterr().out

@@ -122,6 +122,8 @@ echo "deploy OK ($AFTER)  backup: /opt/data/backups/deploy-$TS"
 
 # docs/deployment/README.md claims to state what is *currently* true of this box
 # and names the revision it was verified against. Nothing kept that honest, so
-# it went three deploys stale unnoticed. Advisory here — a stale document must
-# not block a deploy — but the weekly state check reports it as drift.
+# it went three deploys stale unnoticed. Stale means the deploy tooling it
+# documents moved after it was written, not merely that HEAD moved — that is
+# every deploy. Advisory here (a stale document must not block a deploy); the
+# weekly drift timer is what reports it.
 ./.venv/bin/python scripts/deploy_state.py handover || true
