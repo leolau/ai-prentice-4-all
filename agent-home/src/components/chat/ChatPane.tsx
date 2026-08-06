@@ -2,13 +2,15 @@
 
 import { useEffect, useRef, useState } from "react";
 
+import { ApprovalCard } from "@/components/chat/ApprovalCard";
 import { ConversationList } from "@/components/chat/ConversationList";
 import { MessageBubble } from "@/components/chat/MessageBubble";
 import { Composer } from "@/components/chat/Composer";
+import { streamChatTurn } from "@/lib/chat/stream";
 import type {
+  ChatApprovalRequest,
   ChatAttachment,
   ChatMessage,
-  ChatSendResponse,
   SessionSummary,
 } from "@/types";
 
@@ -22,6 +24,12 @@ export interface ChatPaneProps {
 /** Only user/assistant turns are shown in the visible thread. */
 function visible(messages: ChatMessage[]): ChatMessage[] {
   return messages.filter((m) => m.role === "user" || m.role === "assistant");
+}
+
+/** True while the latest assistant turn has streamed no text yet. */
+function assistantIsEmpty(messages: ChatMessage[]): boolean {
+  const last = messages[messages.length - 1];
+  return !last || last.role !== "assistant" || last.content === "";
 }
 
 /**
@@ -43,6 +51,8 @@ export function ChatPane({
   const [loadingThread, setLoadingThread] = useState(false);
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [approval, setApproval] = useState<ChatApprovalRequest | null>(null);
+  const [resolvingApproval, setResolvingApproval] = useState(false);
   const threadRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
@@ -85,25 +95,68 @@ export function ChatPane({
   async function send(text: string, attachments: ChatAttachment[]) {
     if (sending) return;
     setError(null);
+    setApproval(null);
     setSending(true);
     const optimistic: ChatMessage = { role: "user", content: text };
-    setMessages((prev) => [...prev, optimistic]);
+    const live: ChatMessage = { role: "assistant", content: "" };
+    setMessages((prev) => [...prev, optimistic, live]);
+
+    let assistantText = "";
+    const setLive = (content: string) =>
+      setMessages((prev) =>
+        prev.map((m) => (m === live ? { ...live, content } : m)),
+      );
+
     try {
-      const res = await fetch("/api/chat/send", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ sessionId, message: text, attachments }),
-      });
-      const body = (await res.json()) as (ChatSendResponse & { detail?: string });
-      if (!res.ok) throw new Error(body.detail ?? "The message could not be sent.");
-      setSessionId(body.session_id);
-      setMessages((prev) => [...prev, body.message]);
+      const { sessionId: landed } = await streamChatTurn(
+        { sessionId, message: text, attachments },
+        {
+          onDelta: (delta) => {
+            assistantText += delta;
+            setLive(assistantText);
+          },
+          onApproval: (req) => setApproval(req),
+          onCompleted: (content) => {
+            setApproval(null);
+            if (content) {
+              assistantText = content;
+              setLive(content);
+            }
+          },
+          onError: (message) => setError(message),
+        },
+      );
+      if (landed) setSessionId(landed);
       void refreshSessions();
     } catch (err) {
-      setMessages((prev) => prev.filter((m) => m !== optimistic));
+      setMessages((prev) => prev.filter((m) => m !== optimistic && m !== live));
       setError(err instanceof Error ? err.message : "The message could not be sent.");
     } finally {
       setSending(false);
+      setApproval(null);
+    }
+  }
+
+  async function resolveApproval(choice: string) {
+    if (!approval || resolvingApproval) return;
+    setResolvingApproval(true);
+    setError(null);
+    try {
+      const res = await fetch("/api/chat/approval", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ runId: approval.runId, choice }),
+      });
+      if (!res.ok) {
+        const body = (await res.json().catch(() => ({}))) as { detail?: string };
+        throw new Error(body.detail ?? "Your decision could not be submitted.");
+      }
+      // The turn resumes on the open stream; clear the card and let deltas flow.
+      setApproval(null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Your decision could not be submitted.");
+    } finally {
+      setResolvingApproval(false);
     }
   }
 
@@ -156,9 +209,11 @@ export function ChatPane({
               : "Start a new conversation with your agent."}
           </p>
         ) : (
-          messages.map((m, i) => <MessageBubble key={m.id ?? i} message={m} />)
+          messages
+            .filter((m) => m.role !== "assistant" || m.content !== "")
+            .map((m, i) => <MessageBubble key={m.id ?? i} message={m} />)
         )}
-        {sending ? (
+        {sending && !approval && assistantIsEmpty(messages) ? (
           <div className="flex justify-start">
             <span className="rounded-2xl bg-[var(--color-surface-2)] px-3 py-2 text-sm text-[var(--color-muted)]">
               Thinking…
@@ -166,6 +221,14 @@ export function ChatPane({
           </div>
         ) : null}
       </div>
+
+      {approval ? (
+        <ApprovalCard
+          request={approval}
+          busy={resolvingApproval}
+          onResolve={resolveApproval}
+        />
+      ) : null}
 
       {error ? (
         <p className="mt-2 rounded-lg bg-[var(--color-surface-2)] px-3 py-2 text-sm text-red-300">
