@@ -1,25 +1,33 @@
+import { ChatFile } from "@/components/chat/ChatFile";
 import { ChatMedia } from "@/components/chat/ChatMedia";
 import { RichText } from "@/components/chat/RichText";
 import { mediaRefPath } from "@/lib/chat/media-ref";
 import type { ChatMessage } from "@/types";
 
 interface Segment {
-  kind: "text" | "image";
+  kind: "text" | "image" | "file";
   value: string;
   alt?: string;
 }
 
-/** Split content into text + inline `![alt](url)` image segments for render. */
+/**
+ * Split content into text, inline `![alt](url)` image segments, and
+ * `[name](ref)` file-attachment links that point at a private-bucket media ref
+ * (other links stay literal text — user turns aren't full Markdown).
+ */
 function segment(content: string): Segment[] {
   const out: Segment[] = [];
-  const re = /!\[([^\]]*)\]\((\S+?)\)/g;
+  const re = /(!?)\[([^\]]*)\]\((\S+?)\)/g;
   let last = 0;
   let m: RegExpExecArray | null;
   while ((m = re.exec(content)) !== null) {
+    const isImage = m[1] === "!";
+    const isFileRef = !isImage && mediaRefPath(m[3]) !== null;
+    if (!isImage && !isFileRef) continue; // leave plain links as text
     if (m.index > last) {
       out.push({ kind: "text", value: content.slice(last, m.index) });
     }
-    out.push({ kind: "image", value: m[2], alt: m[1] });
+    out.push({ kind: isImage ? "image" : "file", value: m[3], alt: m[2] });
     last = re.lastIndex;
   }
   if (last < content.length) {
@@ -28,12 +36,24 @@ function segment(content: string): Segment[] {
   return out;
 }
 
-/** A user turn: literal text plus any inline `![alt](ref)` media they sent. */
+/**
+ * A user turn: literal text plus any inline media they sent — images preview
+ * via `![alt](ref)`, other files (PDF/DOC/XLS/…) render as `[name](ref)`
+ * download chips.
+ */
 function UserContent({ content }: { content: string }) {
   return (
     <>
       {segment(content).map((s, i) => {
-        if (s.kind !== "image") return <span key={i}>{s.value}</span>;
+        if (s.kind === "text") return <span key={i}>{s.value}</span>;
+        if (s.kind === "file") {
+          const filePath = mediaRefPath(s.value);
+          return filePath ? (
+            <ChatFile key={i} path={filePath} name={s.alt || "attachment"} />
+          ) : (
+            <span key={i}>{s.alt || s.value}</span>
+          );
+        }
         const path = mediaRefPath(s.value);
         return path ? (
           <ChatMedia key={i} path={path} alt={s.alt || "attachment"} />

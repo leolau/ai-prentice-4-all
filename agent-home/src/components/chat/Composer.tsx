@@ -102,7 +102,6 @@ export function Composer({
             <input
               ref={fileRef}
               type="file"
-              accept="image/*"
               className="hidden"
               onChange={(e) => {
                 const f = e.target.files?.[0];
@@ -111,7 +110,8 @@ export function Composer({
             />
             <button
               type="button"
-              aria-label="Attach image"
+              aria-label="Attach file"
+              title="Attach a file (image, PDF, DOC, XLS, …)"
               disabled={uploading}
               onClick={() => fileRef.current?.click()}
               className="rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-3 text-sm disabled:opacity-60"
