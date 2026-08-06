@@ -84,6 +84,7 @@ export function ChatPane({
   const [decisions, setDecisions] = useState<Record<string, string>>({});
   const [resolvingApproval, setResolvingApproval] = useState(false);
   const threadRef = useRef<HTMLDivElement | null>(null);
+  const approvalRef = useRef<HTMLDivElement | null>(null);
   // Mirrors the selected session for use inside async stream callbacks, and
   // buffers turns whose session is not currently on screen.
   const selectedRef = useRef<string | null>(sessionId);
@@ -93,16 +94,43 @@ export function ChatPane({
     selectedRef.current = sessionId;
   }, [sessionId]);
 
-  useEffect(() => {
-    const el = threadRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
-  }, [messages, sendingKeys]);
-
   const selKey = keyOf(sessionId);
   const selBusy = sendingKeys.includes(selKey);
   const selApproval = approvals[selKey] ?? null;
   const selDecision = decisions[selKey] ?? null;
   const otherBusy = sendingKeys.some((k) => k !== selKey);
+
+  // Keep the thread pinned to the bottom as content grows: streamed text, the
+  // status indicator, an approval card, or the decision note. A double rAF lets
+  // late-laid-out nodes (the approval card renders below the scroll box) settle
+  // before we measure, so the newest content is always in view.
+  useEffect(() => {
+    let raf1 = 0;
+    let raf2 = 0;
+    const pin = () => {
+      const el = threadRef.current;
+      if (el) el.scrollTop = el.scrollHeight;
+    };
+    raf1 = requestAnimationFrame(() => {
+      pin();
+      raf2 = requestAnimationFrame(pin);
+    });
+    return () => {
+      cancelAnimationFrame(raf1);
+      cancelAnimationFrame(raf2);
+    };
+  }, [messages, sendingKeys, selApproval, selDecision, loadingThread]);
+
+  // The approval card renders below the scroll box, so pin it into view when a
+  // new request arrives (keyed on runId so re-renders don't keep yanking).
+  const approvalRunId = selApproval?.runId ?? null;
+  useEffect(() => {
+    if (!approvalRunId) return;
+    const raf = requestAnimationFrame(() => {
+      approvalRef.current?.scrollIntoView({ block: "nearest" });
+    });
+    return () => cancelAnimationFrame(raf);
+  }, [approvalRunId]);
 
   const removeSending = (k: string) =>
     setSendingKeys((prev) => prev.filter((x) => x !== k));
@@ -350,11 +378,13 @@ export function ChatPane({
       </div>
 
       {selApproval ? (
-        <ApprovalCard
-          request={selApproval}
-          busy={resolvingApproval}
-          onResolve={resolveApproval}
-        />
+        <div ref={approvalRef}>
+          <ApprovalCard
+            request={selApproval}
+            busy={resolvingApproval}
+            onResolve={resolveApproval}
+          />
+        </div>
       ) : null}
 
       {error ? (
