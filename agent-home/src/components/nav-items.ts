@@ -33,6 +33,7 @@ export const SECONDARY_NAV: NavItem[] = [
   { href: "/tools", label: "Tools", glyph: "⚙", hint: "FG-07 registry" },
   { href: "/core", label: "Core area", glyph: "▣", hint: "C7 boundary" },
   { href: "/webview", label: "Agent webview", glyph: "◔", hint: "FG-17b CDP" },
+  { href: "/settings", label: "Settings", glyph: "⛭", hint: "Theme + preferences" },
 ];
 
 /** Whether `pathname` should mark `href` active (root only matches exactly). */
