@@ -1,4 +1,4 @@
-# Drive → RAG ingestion
+# Drive and local files → RAG ingestion
 
 How documents get into layer 4 on this deployment, what it costs, and what it
 deliberately refuses to do. Design rationale lives in
@@ -72,6 +72,41 @@ Accounts come from the credential directory
 Workspace MCP server already keeps), not from config, so connecting an account is
 completing consent rather than editing YAML. Naming an account that has no
 credential file is an error, not a silent no-op.
+
+## Files that are not in Drive
+
+`ingest-files` covers documents on disk — notes, exported specs, transcripts, a
+repo's `docs/`, and anything uploaded to the box through the dashboard's **Files**
+page (`/files`). Getting a file from a laptop into the corpus is therefore: put
+it on the box, then ingest the path.
+
+```bash
+# One file, a whole directory, or a mix. Directories are walked recursively
+# for .md/.markdown/.txt/.rst/.text/.csv/.tsv/.org documents.
+hermes memory rag --as leo_owner ingest-files ~/uploads/pricing.md ~/uploads/specs --verbose
+
+# Same corpus label as ingestion used, when removing one document again.
+hermes memory rag --as leo_owner forget /home/hermes/uploads/pricing.md --source-kind local
+```
+
+The **absolute path is the document's identity**, so re-running after editing a
+file updates that document in place instead of leaving two copies in retrieval,
+and re-running over an unchanged file costs nothing (content hash, same as
+Drive). `--source-kind` (default `local`) labels the corpus, and
+`search --source-kind` restricts retrieval to it.
+
+Refusals are reported per file with a reason rather than passed over silently:
+
+| Case | What happens |
+|---|---|
+| PDF, DOC/DOCX, RTF, ODT | skipped — "convert it first"; no OCR/extraction dependency is taken on, and mojibake chunks would retrieve and cite garbage |
+| Any other non-text suffix | skipped as unsupported (a named file is still *reported*; a directory walk simply never picks it up) |
+| Not valid UTF-8, or empty | skipped with that reason |
+| Larger than 2 MB | skipped — a multi-megabyte log is thousands of near-useless chunks and hours of embedding |
+| Ingest error (e.g. embedding service down) | recorded as a failure; the run continues to the remaining files |
+
+There is no "ingest as shared" flag here either — documents land
+`private:<principal>` and reach others only through `rag share`.
 
 ## Why it is staged, and nightly
 
