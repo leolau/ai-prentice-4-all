@@ -13,8 +13,8 @@
 import { HermesApiError } from "@/lib/api/client";
 import { apiClientForRequest, getPrincipal } from "@/lib/auth/principal";
 import { mediaRef } from "@/lib/chat/media-ref";
-import { canReadMediaPath } from "@/lib/supabase/storage";
-import type { ChatAttachment, Principal } from "@/types";
+import { canReadMediaPath, createMediaSignedUrl } from "@/lib/supabase/storage";
+import type { AgentAttachmentPayload, ChatAttachment, Principal } from "@/types";
 
 interface SendBody {
   sessionId?: unknown;
@@ -59,6 +59,32 @@ function readAttachments(principal: Principal, raw: unknown): ChatAttachment[] {
   return out;
 }
 
+/**
+ * Turn owned attachments into the per-turn payload the Python chat endpoint
+ * downloads once. The transcript keeps only the durable object `path`; here we
+ * mint a short-lived signed URL per file so the box can fetch the bytes into
+ * its document cache and make the upload readable by the brain. An attachment
+ * that fails to sign is dropped (the transcript link still renders) rather than
+ * failing the whole turn.
+ */
+async function signAttachments(
+  attachments: ChatAttachment[],
+): Promise<AgentAttachmentPayload[]> {
+  const signed = await Promise.all(
+    attachments.map(async (a) => {
+      const s = await createMediaSignedUrl(a.path).catch(() => null);
+      if (!s) return null;
+      return {
+        name: a.name,
+        content_type: a.content_type,
+        size: a.size,
+        url: s.url,
+      } satisfies AgentAttachmentPayload;
+    }),
+  );
+  return signed.filter((x): x is AgentAttachmentPayload => x !== null);
+}
+
 function jsonError(error: string, detail: string, status: number): Response {
   return new Response(JSON.stringify({ error, detail }), {
     status,
@@ -94,7 +120,12 @@ export async function POST(request: Request): Promise<Response> {
       const created = await client.createSession();
       sessionId = created.session_id;
     }
-    const upstream = await client.openChatStream(sessionId, message);
+    const agentAttachments = await signAttachments(attachments);
+    const upstream = await client.openChatStream(
+      sessionId,
+      message,
+      agentAttachments,
+    );
     return new Response(upstream.body, {
       status: 200,
       headers: {

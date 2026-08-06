@@ -16,6 +16,7 @@ import "server-only";
 
 import { hermesApiBaseUrl } from "@/lib/env";
 import type {
+  AgentAttachmentPayload,
   ChangeOpResponse,
   ChangesResponse,
   ChatMessagesResponse,
@@ -259,10 +260,17 @@ export class HermesApiClient {
   async sendChat(
     sessionId: string,
     message: string,
+    attachments?: AgentAttachmentPayload[],
   ): Promise<ChatSendResponse> {
     return this.request(
       `/api/sessions/${encodeURIComponent(sessionId)}/chat`,
-      { method: "POST", json: { message } },
+      {
+        method: "POST",
+        json:
+          attachments && attachments.length > 0
+            ? { message, attachments }
+            : { message },
+      },
     );
   }
 
@@ -275,18 +283,26 @@ export class HermesApiClient {
    * `resolveRunApproval`. This is what gives agent-home chat an approval
    * surface, so gated tools (e.g. calendar) prompt instead of failing closed.
    */
-  async openChatStream(sessionId: string, message: string): Promise<Response> {
+  async openChatStream(
+    sessionId: string,
+    message: string,
+    attachments?: AgentAttachmentPayload[],
+  ): Promise<Response> {
     const headers = new Headers({ "content-type": "application/json" });
     if (this.hermesToken) {
       headers.set("cookie", `hermes_session_at=${this.hermesToken}`);
       headers.set("authorization", `Bearer ${this.hermesToken}`);
     }
+    const body =
+      attachments && attachments.length > 0
+        ? { message, attachments }
+        : { message };
     const res = await fetch(
       `${this.baseUrl}/api/sessions/${encodeURIComponent(sessionId)}/chat/stream`,
       {
         method: "POST",
         headers,
-        body: JSON.stringify({ message }),
+        body: JSON.stringify(body),
         cache: "no-store",
       },
     );
