@@ -216,6 +216,20 @@ export class HermesApiClient {
   }
 
   /**
+   * Rename a conversation via `PATCH /api/sessions/{id}` (title only). An empty
+   * string clears the title; the backend rejects a duplicate title with 400.
+   */
+  async renameSession(
+    sessionId: string,
+    title: string,
+  ): Promise<{ ok: boolean; title: string }> {
+    return this.request(`/api/sessions/${encodeURIComponent(sessionId)}`, {
+      method: "PATCH",
+      json: { title },
+    });
+  }
+
+  /**
    * Send one one-brain turn to a conversation via
    * `POST /api/sessions/{id}/chat` and return the assistant reply. The turn is
    * driven by the shared `AIAgent` + `SessionDB` under the C1 principal — this
