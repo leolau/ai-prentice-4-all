@@ -112,6 +112,9 @@ export function ChatPane({
   // buffers turns whose session is not currently on screen.
   const selectedRef = useRef<string | null>(sessionId);
   const liveRef = useRef<Map<string, LiveTurn>>(new Map());
+  // One AbortController per in-flight turn (keyed like the buffers) so the user
+  // can stop the turn for the conversation currently on screen.
+  const abortRef = useRef<Map<string, AbortController>>(new Map());
 
   useEffect(() => {
     selectedRef.current = sessionId;
@@ -217,6 +220,8 @@ export function ChatPane({
     // Buffer this turn so it survives session switches; the buffer's assistant
     // text is the single source of truth for accumulated deltas.
     liveRef.current.set(turnKey, { user: text, assistant: "" });
+    const controller = new AbortController();
+    abortRef.current.set(turnKey, controller);
     setMessages((prev) => [
       ...prev,
       { role: "user", content: text },
@@ -237,7 +242,7 @@ export function ChatPane({
 
     try {
       const { sessionId: landed } = await streamChatTurn(
-        { sessionId: turnSessionId, message: text, attachments },
+        { sessionId: turnSessionId, message: text, attachments, signal: controller.signal },
         {
           onDelta: (delta) => {
             const buf = liveRef.current.get(turnKey);
@@ -260,15 +265,30 @@ export function ChatPane({
       }
       void refreshSessions();
     } catch (err) {
-      if (onThisSession()) {
-        setMessages((prev) => prev.slice(0, Math.max(0, prev.length - 2)));
+      const aborted = err instanceof DOMException && err.name === "AbortError";
+      if (aborted) {
+        // The user stopped the turn. Keep whatever streamed so far; only drop a
+        // trailing empty assistant bubble so we never leave a blank reply.
+        if (onThisSession()) {
+          setMessages((prev) => {
+            const last = prev[prev.length - 1];
+            return last && last.role === "assistant" && last.content === ""
+              ? prev.slice(0, -1)
+              : prev;
+          });
+        }
+      } else {
+        if (onThisSession()) {
+          setMessages((prev) => prev.slice(0, Math.max(0, prev.length - 2)));
+        }
+        setError(err instanceof Error ? err.message : "The message could not be sent.");
       }
-      setError(err instanceof Error ? err.message : "The message could not be sent.");
     } finally {
       // Turn is done and now persisted server-side; drop the live buffer so a
       // later re-open shows the canonical transcript, not a duplicate overlay.
       removeSending(turnKey);
       liveRef.current.delete(turnKey);
+      abortRef.current.delete(turnKey);
       setApprovals((prev) => dropKey(prev, turnKey));
     }
   }
@@ -298,6 +318,12 @@ export function ChatPane({
     } finally {
       setResolvingApproval(false);
     }
+  }
+
+  // Stop the in-flight turn for the conversation currently on screen. Aborting
+  // the stream closes the connection, which cancels the server-side driver.
+  function stopTurn() {
+    abortRef.current.get(selKey)?.abort();
   }
 
   function reorderSessions(orderedIds: string[]) {
@@ -448,7 +474,13 @@ export function ChatPane({
         </p>
       ) : null}
 
-      <Composer sending={selBusy} storageEnabled={storageEnabled} sessionId={sessionId} onSend={send} />
+      <Composer
+        sending={selBusy}
+        storageEnabled={storageEnabled}
+        sessionId={sessionId}
+        onSend={send}
+        onStop={stopTurn}
+      />
 
       {detailsSession ? (
         <SessionModal

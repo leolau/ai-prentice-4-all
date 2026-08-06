@@ -36,9 +36,13 @@ export function SessionTabs({
   /** Commit a new left-to-right ordering of the session ids (drag-to-reorder). */
   onReorder: (orderedIds: string[]) => void;
 }) {
-  // A brand-new conversation has no persisted row yet; show it as an active,
-  // non-editable chip so the strip reflects what's on screen.
-  const showNew = activeId === null;
+  // A brand-new conversation has no persisted row yet (it only gets one when
+  // its first turn completes). Show it as a chip whenever it is on screen OR
+  // has a live turn running — otherwise switching away mid-turn would make the
+  // new conversation vanish from the strip until the turn finishes.
+  const newActive = activeId === null;
+  const newBusy = busyKeys.includes(NEW_KEY);
+  const showNew = newActive || newBusy;
   // Index of the chip currently being dragged, and the one it is hovering over,
   // so we can show a drop indicator without mutating state until the drop.
   const [dragIndex, setDragIndex] = useState<number | null>(null);
@@ -61,12 +65,24 @@ export function SessionTabs({
     >
       <div className="flex min-w-0 flex-1 gap-2 overflow-x-auto pb-1 [-ms-overflow-style:none] [scrollbar-width:thin]">
         {showNew ? (
-          <span className="flex shrink-0 items-center gap-1.5 rounded-xl border border-[var(--color-accent)] bg-[var(--color-surface-2)] px-3 py-2 text-sm font-medium text-[var(--color-fg)]">
-            New conversation
-            {busyKeys.includes(NEW_KEY) ? (
+          newActive ? (
+            <span className="flex shrink-0 items-center gap-1.5 rounded-xl border border-[var(--color-accent)] bg-[var(--color-surface-2)] px-3 py-2 text-sm font-medium text-[var(--color-fg)]">
+              New conversation
+              {newBusy ? (
+                <span className="h-2 w-2 animate-pulse rounded-full bg-[var(--color-accent)]" />
+              ) : null}
+            </span>
+          ) : (
+            <button
+              type="button"
+              onClick={onNew}
+              aria-label="Switch to the new conversation"
+              className="flex shrink-0 items-center gap-1.5 rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm font-medium text-[var(--color-muted)]"
+            >
+              New conversation
               <span className="h-2 w-2 animate-pulse rounded-full bg-[var(--color-accent)]" />
-            ) : null}
-          </span>
+            </button>
+          )
         ) : null}
         {sessions.map((s, index) => {
           const active = s.id === activeId;
