@@ -21,6 +21,54 @@ describe("MessageBubble", () => {
     expect(html).toContain("how can I help?");
   });
 
+  it("renders assistant Markdown (headings, tables, emphasis) as HTML", () => {
+    const html = renderToStaticMarkup(
+      <MessageBubble
+        message={{
+          role: "assistant",
+          content:
+            "## Tenders\n\n**Bold** and a table:\n\n| Name | Due |\n| --- | --- |\n| CUHK | Today |",
+        }}
+      />,
+    );
+    expect(html).toContain("<h2");
+    expect(html).toContain("<strong>Bold</strong>");
+    expect(html).toContain("<table");
+    expect(html).toContain("<th");
+    expect(html).toContain("CUHK");
+  });
+
+  it("sanitizes dangerous HTML in an assistant reply (fail-closed)", () => {
+    const html = renderToStaticMarkup(
+      <MessageBubble
+        message={{
+          role: "assistant",
+          content:
+            'Safe <b>bold</b> but <script>alert(1)</script> and <a href="javascript:alert(2)">x</a> and <img src="x" onerror="alert(3)">',
+        }}
+      />,
+    );
+    // Allowed inline HTML survives; scripts, javascript: URLs and inline event
+    // handlers are stripped by rehype-sanitize.
+    expect(html).toContain("<b>bold</b>");
+    expect(html).not.toContain("<script");
+    expect(html).not.toContain("javascript:");
+    expect(html).not.toContain("onerror");
+  });
+
+  it("routes an assistant private-bucket media ref through the signing route", () => {
+    const html = renderToStaticMarkup(
+      <MessageBubble
+        message={{
+          role: "assistant",
+          content: "here ![shot](/api/chat/media?path=mia_member%2Fhome_2%2Fu1-a.png)",
+        }}
+      />,
+    );
+    expect(html).toContain('data-component="ChatMedia"');
+    expect(html).not.toContain("<img");
+  });
+
   it("routes a private-bucket media ref through the signing route", () => {
     const html = renderToStaticMarkup(
       <MessageBubble
