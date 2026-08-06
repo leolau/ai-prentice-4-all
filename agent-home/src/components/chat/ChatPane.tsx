@@ -15,6 +15,7 @@ import {
   type LiveTurn,
 } from "@/lib/chat/messages";
 import {
+  nextActiveAfterArchive,
   orderSessions,
   parseOrder,
   SESSION_ORDER_STORAGE_KEY,
@@ -355,10 +356,19 @@ export function ChatPane({
     const s = detailsSession;
     if (!s) return;
     await setArchived(s.id, true);
-    // Drop it from the strip; if it was the open conversation, leave it and let
-    // the user start/pick another (its live buffer, if any, keeps streaming).
+    // Drop it from the strip. If it was the open conversation, switch to a
+    // neighbouring conversation (in display order) rather than dropping the
+    // user into a blank "New conversation"; only fall back to the empty state
+    // when no conversations remain.
+    const nextId = nextActiveAfterArchive(
+      orderedSessions.map((x) => x.id),
+      s.id,
+    );
     setSessions((prev) => prev.filter((x) => x.id !== s.id));
-    if (sessionId === s.id) startNewConversation();
+    if (sessionId === s.id) {
+      if (nextId) void openConversation(nextId);
+      else startNewConversation();
+    }
     void refreshSessions();
   }
 
