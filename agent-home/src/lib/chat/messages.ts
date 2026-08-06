@@ -30,3 +30,33 @@ export function setLastAssistantContent(
   next[idx] = { ...last, content };
   return next;
 }
+
+/**
+ * An in-flight turn that belongs to a session other than the one currently on
+ * screen. Buffering it (rather than blocking the switch) lets the user move
+ * between conversations at any time while a turn keeps streaming in the
+ * background; when they return, the buffered turn is overlaid onto that
+ * session's persisted transcript.
+ */
+export interface LiveTurn {
+  user: string;
+  assistant: string;
+}
+
+/**
+ * Overlay a still-streaming turn onto a session's loaded transcript: the just
+ * -sent user message and the assistant text accumulated so far. The persisted
+ * transcript does not yet contain this turn (it is written on completion), so
+ * appending here is what makes a returned-to session show its live progress.
+ */
+export function withLiveTurn(
+  base: ChatMessage[],
+  live: LiveTurn | undefined,
+): ChatMessage[] {
+  if (!live) return base;
+  return [
+    ...base,
+    { role: "user", content: live.user },
+    { role: "assistant", content: live.assistant },
+  ];
+}

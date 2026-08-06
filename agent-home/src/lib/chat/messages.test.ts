@@ -8,7 +8,7 @@
  */
 import { describe, expect, it } from "vitest";
 
-import { setLastAssistantContent } from "@/lib/chat/messages";
+import { setLastAssistantContent, withLiveTurn } from "@/lib/chat/messages";
 import type { ChatMessage } from "@/types";
 
 describe("setLastAssistantContent", () => {
@@ -58,5 +58,28 @@ describe("setLastAssistantContent", () => {
       { role: "assistant", content: "same" },
     ];
     expect(setLastAssistantContent(msgs, "same")).toBe(msgs);
+  });
+});
+
+describe("withLiveTurn", () => {
+  it("returns the base transcript unchanged when no turn is buffered", () => {
+    const base: ChatMessage[] = [{ role: "user", content: "hi" }];
+    expect(withLiveTurn(base, undefined)).toBe(base);
+  });
+
+  it("overlays a buffered turn (user + partial assistant) onto the transcript", () => {
+    const base: ChatMessage[] = [
+      { role: "user", content: "earlier" },
+      { role: "assistant", content: "earlier reply" },
+    ];
+    const out = withLiveTurn(base, { user: "new question", assistant: "partial" });
+    // Base is preserved and the live turn is appended in order, with the
+    // assistant bubble last so streaming deltas keep landing on it.
+    expect(out).toEqual([
+      ...base,
+      { role: "user", content: "new question" },
+      { role: "assistant", content: "partial" },
+    ]);
+    expect(out[out.length - 1].role).toBe("assistant");
   });
 });

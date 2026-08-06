@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useLayoutEffect, useRef, useState } from "react";
 
 import type { ChatAttachment } from "@/types";
 
@@ -26,6 +26,16 @@ export function Composer({
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
   const fileRef = useRef<HTMLInputElement | null>(null);
+  const textRef = useRef<HTMLTextAreaElement | null>(null);
+
+  // Grow the input to fit its content (starting at one row) up to a max height,
+  // then let it scroll. Runs on every text change and after clearing on send.
+  useLayoutEffect(() => {
+    const el = textRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${el.scrollHeight}px`;
+  }, [text]);
 
   const canSend = !sending && !uploading && (text.trim() !== "" || attachments.length > 0);
 
@@ -111,6 +121,7 @@ export function Composer({
           </>
         ) : null}
         <textarea
+          ref={textRef}
           value={text}
           onChange={(e) => setText(e.target.value)}
           onKeyDown={(e) => {
@@ -120,8 +131,8 @@ export function Composer({
             }
           }}
           rows={1}
-          placeholder="Message your agent…"
-          className="max-h-32 min-h-[46px] flex-1 resize-none rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-3 text-sm"
+          placeholder="Message your agent… (Shift+Enter for a new line)"
+          className="max-h-48 min-h-[46px] flex-1 resize-none overflow-y-auto rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-3 text-sm"
         />
         <button
           type="button"
