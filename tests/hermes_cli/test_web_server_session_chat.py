@@ -195,6 +195,49 @@ def test_chat_stream_roundtrip_and_attaches_approval_surface(client, capture_tur
     assert capture_turn["approval_session_key"] not in _ap._gateway_notify_cbs
 
 
+def test_chat_stream_emits_every_delta_in_order(client, monkeypatch):
+    """Regression for "only shows the first couple of characters then stopped":
+    every provider delta the runner streams must appear as its own
+    `assistant.delta` frame, in order, followed by the full completed content.
+    (The truncation was a browser-side identity bug, but this pins the server
+    contract the client depends on: one frame per delta, not just the first.)
+    """
+    import hermes_state
+    import gateway.session_chat as session_chat
+
+    db = hermes_state.SessionDB()
+    try:
+        db.ensure_session("s-multi", source="agent_home")
+    finally:
+        db.close()
+
+    parts = ["I'm", " powered", " by", " GLM-5.2", "."]
+
+    def _streaming_turn(*, session_db, user_message, conversation_history,
+                        session_id=None, stream_delta_callback=None, **kwargs):
+        for p in parts:
+            stream_delta_callback(p)
+        return (
+            {"final_response": "".join(parts), "session_id": session_id},
+            {"input_tokens": 1, "output_tokens": 2, "total_tokens": 3},
+        )
+
+    monkeypatch.setattr(session_chat, "run_session_turn_sync", _streaming_turn)
+
+    resp = client.post("/api/sessions/s-multi/chat/stream", json={"message": "hi"})
+    assert resp.status_code == 200
+    body = resp.text
+
+    # One delta frame per part, and they arrive in order.
+    assert body.count("event: assistant.delta") == len(parts)
+    positions = [body.index(f'"delta": "{p}"') for p in parts]
+    assert positions == sorted(positions)
+    # The completed frame carries the full concatenation.
+    assert 'event: assistant.completed' in body
+    assert "I'm powered by GLM-5.2." in body
+    assert body.index("event: assistant.completed") > positions[-1]
+
+
 def test_chat_stream_unknown_session_404(client, capture_turn):
     resp = client.post("/api/sessions/nope/chat/stream", json={"message": "hi"})
     assert resp.status_code == 404
