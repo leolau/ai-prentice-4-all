@@ -101,7 +101,9 @@ try:
         WebSocket, WebSocketDisconnect,
     )
     from fastapi.middleware.cors import CORSMiddleware
-    from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
+    from fastapi.responses import (
+        FileResponse, HTMLResponse, JSONResponse, Response, StreamingResponse,
+    )
     from fastapi.staticfiles import StaticFiles
     from pydantic import BaseModel
 except ImportError:
@@ -116,7 +118,9 @@ except ImportError:
             WebSocket, WebSocketDisconnect,
         )
         from fastapi.middleware.cors import CORSMiddleware
-        from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
+        from fastapi.responses import (
+            FileResponse, HTMLResponse, JSONResponse, Response, StreamingResponse,
+        )
         from fastapi.staticfiles import StaticFiles
         from pydantic import BaseModel
     except Exception:
@@ -9536,6 +9540,184 @@ async def session_chat(session_id: str, request: Request):
         "session_id": effective_sid,
         "message": {"role": "assistant", "content": final_response},
         "usage": usage,
+    }
+
+
+@app.post("/api/sessions/{session_id}/chat/stream")
+async def session_chat_stream(session_id: str, request: Request):
+    """POST /api/sessions/{session_id}/chat/stream — SSE one-brain turn with an
+    approval surface.
+
+    Same one-brain turn as ``/api/sessions/{id}/chat`` (shared
+    ``gateway.session_chat`` builder, same ``SessionDB``, owner-attributed C1
+    principal), but streamed as Server-Sent Events so agent-home can render live
+    assistant deltas AND — the reason this path exists — an inline approve/deny
+    card for a tool gated by ``approvals.tools`` (e.g. calendar).
+
+    A gated tool blocks the agent thread and calls the per-run notify callback
+    registered here; we forward it as an ``approval.request`` event and the
+    client resolves it via ``POST /v1/runs/{run_id}/approval``. The approval
+    session is keyed on a unique ``run_id`` so concurrent turns cannot
+    cross-resolve. Without this surface the gate fails closed with
+    ``no_surface`` — the agent-home calendar bug (the non-streaming ``/chat``
+    endpoint above binds ``platform="api_server"`` but registers no surface).
+    Prompt caching / strict alternation are preserved exactly as in ``/chat``.
+    """
+    principal = await _comms_resolve_principal(request)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    user_message = str((body or {}).get("message", "")).strip()
+    if not user_message:
+        raise HTTPException(status_code=400, detail="message is required")
+    profile = (body or {}).get("profile") or None
+
+    db = _open_session_db_for_profile(profile)
+    try:
+        sid = db.resolve_session_id(session_id)
+        if not sid:
+            raise HTTPException(status_code=404, detail="Session not found")
+        sid = db.resolve_resume_session_id(sid)
+        history = db.get_messages_as_conversation(sid)
+    finally:
+        db.close()
+
+    run_id = f"run_{uuid.uuid4().hex}"
+    loop = asyncio.get_running_loop()
+    queue: "asyncio.Queue" = asyncio.Queue()
+
+    def _enqueue(name: str, payload: dict) -> None:
+        loop.call_soon_threadsafe(queue.put_nowait, (name, payload))
+
+    def _delta(delta: str) -> None:
+        if delta:
+            _enqueue("assistant.delta", {"delta": delta, "run_id": run_id})
+
+    def _approval_notify(approval_data: dict) -> None:
+        # A gated tool blocked the agent thread. Redact the command (it can
+        # carry secrets) and forward the prompt to the browser; the user's
+        # choice comes back via POST /v1/runs/{run_id}/approval.
+        event = dict(approval_data or {})
+        if "command" in event:
+            from gateway.run import _redact_approval_command
+
+            event["command"] = _redact_approval_command(event.get("command"))
+        event["run_id"] = run_id
+        event.setdefault("choices", ["once", "session", "always", "deny"])
+        _enqueue("approval.request", event)
+
+    def _run():
+        # Mirrors the non-streaming session_chat worker, plus the per-run
+        # approval surface. set_current_session_key + register_gateway_notify
+        # MUST run in this executor thread: the tool executor inherits this
+        # thread's contextvars, and the gate resolves the notify_cb by the
+        # approval session key.
+        from gateway.session_chat import run_session_turn_sync
+        from gateway.session_context import set_session_vars, clear_session_vars
+        from tools.approval import (
+            register_gateway_notify,
+            reset_current_session_key,
+            set_current_session_key,
+            unregister_gateway_notify,
+        )
+
+        tokens = set_session_vars(
+            platform="api_server",
+            source="agent_home",
+            user_id=principal.user_id,
+            user_name=getattr(principal, "display", "") or "",
+            session_id=sid,
+            session_key=sid,
+            async_delivery=False,
+        )
+        approval_token = set_current_session_key(run_id)
+        register_gateway_notify(run_id, _approval_notify)
+        try:
+            run_db = _open_session_db_for_profile(profile)
+            try:
+                return run_session_turn_sync(
+                    session_db=run_db,
+                    user_message=user_message,
+                    conversation_history=history,
+                    session_id=sid,
+                    stream_delta_callback=_delta,
+                )
+            finally:
+                run_db.close()
+        finally:
+            unregister_gateway_notify(run_id)
+            reset_current_session_key(approval_token)
+            clear_session_vars(tokens)
+
+    async def _driver():
+        try:
+            result, usage = await loop.run_in_executor(None, _run)
+            final_response = result.get("final_response", "") if isinstance(result, dict) else ""
+            eff_sid = result.get("session_id", sid) if isinstance(result, dict) else sid
+            _enqueue("assistant.completed", {"content": final_response, "run_id": run_id})
+            _enqueue("run.completed", {"session_id": eff_sid, "usage": usage, "run_id": run_id})
+        except Exception:
+            _log.exception("[agent-home] session chat stream failed")
+            _enqueue("error", {"message": "The turn could not be completed.", "run_id": run_id})
+        finally:
+            _enqueue("done", {"run_id": run_id})
+            loop.call_soon_threadsafe(queue.put_nowait, None)
+
+    task = asyncio.create_task(_driver())
+
+    async def _events():
+        try:
+            while True:
+                try:
+                    item = await asyncio.wait_for(queue.get(), timeout=15.0)
+                except asyncio.TimeoutError:
+                    yield b": keepalive\n\n"
+                    continue
+                if item is None:
+                    break
+                name, payload = item
+                data = json.dumps(payload, ensure_ascii=False)
+                yield f"event: {name}\ndata: {data}\n\n".encode("utf-8")
+        finally:
+            if not task.done():
+                task.cancel()
+
+    headers = {
+        "Cache-Control": "no-cache, no-transform",
+        "X-Accel-Buffering": "no",
+        "X-Hermes-Session-Id": sid,
+    }
+    return StreamingResponse(_events(), media_type="text/event-stream", headers=headers)
+
+
+@app.post("/v1/runs/{run_id}/approval")
+async def resolve_run_approval(run_id: str, request: Request):
+    """Resolve a tool-approval prompt raised during a chat/stream turn.
+
+    The streamed turn blocks the agent thread on a gated tool and emits an
+    ``approval.request`` keyed on ``run_id``; this unblocks it with the user's
+    explicit choice. Owner-attributed like the other write endpoints — the
+    endpoint forwards the user's decision, it does not itself decide consent.
+    """
+    await _comms_resolve_principal(request)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    choice = str((body or {}).get("choice", "")).strip().lower()
+    if choice == "approve":
+        choice = "once"
+    if choice not in {"once", "session", "always", "deny"}:
+        raise HTTPException(status_code=400, detail="invalid choice")
+    from tools.approval import resolve_gateway_approval
+
+    resolved = resolve_gateway_approval(run_id, choice)
+    return {
+        "object": "hermes.run.approval",
+        "run_id": run_id,
+        "choice": choice,
+        "resolved": resolved,
     }
 
 

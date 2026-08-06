@@ -70,6 +70,16 @@ def capture_turn(monkeypatch):
         captured["conversation_history"] = conversation_history
         captured["session_id"] = session_id
         captured["kwargs"] = kwargs
+        # Observe the approval surface as the agent thread would see it: the
+        # streaming path binds a per-run approval session key and registers a
+        # notify callback under it, which is exactly what the non-streaming
+        # path omitted (→ the `no_surface` calendar bug).
+        from tools import approval as _ap
+
+        key = _ap.get_current_session_key(default="")
+        captured["approval_session_key"] = key
+        captured["surface_registered"] = key in _ap._gateway_notify_cbs
+        captured["gateway_ctx"] = _ap._is_gateway_approval_context()
         return (
             {"final_response": f"echo:{user_message}", "session_id": session_id},
             {"input_tokens": 1, "output_tokens": 2, "total_tokens": 3},
@@ -139,3 +149,90 @@ def test_chat_roundtrip_forwards_history_verbatim(client, capture_turn):
     assert capture_turn["session_id"] == "s-hist"
     # No ephemeral system prompt is smuggled through kwargs.
     assert "ephemeral_system_prompt" not in capture_turn["kwargs"]
+
+
+def test_chat_stream_roundtrip_and_attaches_approval_surface(client, capture_turn):
+    """The streamed turn returns SSE and — the fix — attaches a per-run approval
+    surface so a gated tool can prompt instead of failing closed (`no_surface`).
+    """
+    import hermes_state
+
+    db = hermes_state.SessionDB()
+    try:
+        db.ensure_session("s-stream", source="agent_home")
+        db.append_message("s-stream", "user", "first")
+        expected = db.get_messages_as_conversation("s-stream")
+    finally:
+        db.close()
+
+    resp = client.post("/api/sessions/s-stream/chat/stream", json={"message": "hi"})
+    assert resp.status_code == 200
+    assert resp.headers["content-type"].startswith("text/event-stream")
+    assert resp.headers["x-hermes-session-id"] == "s-stream"
+
+    body = resp.text
+    assert "event: assistant.completed" in body
+    assert "echo:hi" in body
+    assert "event: run.completed" in body
+    assert "event: done" in body
+
+    # History forwarded verbatim (cache/alternation safety), and the message
+    # passed separately — same contract as the non-streaming endpoint.
+    assert capture_turn["conversation_history"] == expected
+    assert capture_turn["user_message"] == "hi"
+    # The surface: a per-run key was bound AND a notify_cb registered under it
+    # while the turn ran. This is the exact state whose absence returned
+    # `no_surface` for the calendar tool in agent-home.
+    assert capture_turn["approval_session_key"].startswith("run_")
+    assert capture_turn["surface_registered"] is True
+    assert capture_turn["gateway_ctx"] is True
+    # Provider deltas are wired through to the browser.
+    assert callable(capture_turn["kwargs"].get("stream_delta_callback"))
+
+    # …and it is torn down after the turn (no leaked global callback).
+    from tools import approval as _ap
+
+    assert capture_turn["approval_session_key"] not in _ap._gateway_notify_cbs
+
+
+def test_chat_stream_unknown_session_404(client, capture_turn):
+    resp = client.post("/api/sessions/nope/chat/stream", json={"message": "hi"})
+    assert resp.status_code == 404
+    assert "user_message" not in capture_turn
+
+
+def test_run_approval_normalizes_choice_and_resolves(client, monkeypatch):
+    """The resolve route forwards the user's explicit choice to the existing
+    gateway approval mechanism (mapping the UI 'approve' alias to 'once')."""
+    from tools import approval as _ap
+
+    calls: dict = {}
+
+    def _fake_resolve(session_key, choice, resolve_all=False):
+        calls["session_key"] = session_key
+        calls["choice"] = choice
+        calls["resolve_all"] = resolve_all
+        return 1
+
+    monkeypatch.setattr(_ap, "resolve_gateway_approval", _fake_resolve)
+
+    resp = client.post("/v1/runs/run_abc/approval", json={"choice": "approve"})
+    assert resp.status_code == 200
+    assert resp.json() == {
+        "object": "hermes.run.approval",
+        "run_id": "run_abc",
+        "choice": "once",
+        "resolved": 1,
+    }
+    assert calls == {"session_key": "run_abc", "choice": "once", "resolve_all": False}
+
+
+def test_run_approval_rejects_invalid_choice(client, monkeypatch):
+    from tools import approval as _ap
+
+    def _boom(*a, **k):  # must never be reached
+        raise AssertionError("resolve_gateway_approval called for invalid choice")
+
+    monkeypatch.setattr(_ap, "resolve_gateway_approval", _boom)
+    resp = client.post("/v1/runs/run_abc/approval", json={"choice": "maybe"})
+    assert resp.status_code == 400
