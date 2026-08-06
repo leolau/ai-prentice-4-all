@@ -3,9 +3,10 @@
 import { useEffect, useRef, useState } from "react";
 
 import { ApprovalCard } from "@/components/chat/ApprovalCard";
-import { ConversationList } from "@/components/chat/ConversationList";
 import { MessageBubble } from "@/components/chat/MessageBubble";
 import { Composer } from "@/components/chat/Composer";
+import { SessionModal } from "@/components/chat/SessionModal";
+import { SessionTabs } from "@/components/chat/SessionTabs";
 import { StatusIndicator } from "@/components/chat/StatusIndicator";
 import {
   setLastAssistantContent,
@@ -73,7 +74,7 @@ export function ChatPane({
   const [sessions, setSessions] = useState<SessionSummary[]>(initialSessions);
   const [sessionId, setSessionId] = useState<string | null>(initialSessionId);
   const [messages, setMessages] = useState<ChatMessage[]>(visible(initialMessages));
-  const [listOpen, setListOpen] = useState(false);
+  const [detailsSession, setDetailsSession] = useState<SessionSummary | null>(null);
   const [loadingThread, setLoadingThread] = useState(false);
   // Per-session state, keyed by session id (or NEW_KEY). Turns run per session
   // so the user can switch conversations at any time without cancelling or
@@ -98,7 +99,6 @@ export function ChatPane({
   const selBusy = sendingKeys.includes(selKey);
   const selApproval = approvals[selKey] ?? null;
   const selDecision = decisions[selKey] ?? null;
-  const otherBusy = sendingKeys.some((k) => k !== selKey);
 
   // Keep the thread pinned to the bottom as content grows: streamed text, the
   // status indicator, an approval card, or the decision note. A double rAF lets
@@ -144,7 +144,6 @@ export function ChatPane({
   async function openConversation(id: string) {
     // Switching is allowed at any time — a turn in another session keeps
     // streaming into its own buffer and is overlaid when you return to it.
-    setListOpen(false);
     if (id === sessionId) return;
     setSessionId(id);
     selectedRef.current = id;
@@ -177,7 +176,6 @@ export function ChatPane({
   }
 
   function startNewConversation() {
-    setListOpen(false);
     setSessionId(null);
     selectedRef.current = null;
     setMessages(withLiveTurn([], liveRef.current.get(NEW_KEY)));
@@ -291,49 +289,36 @@ export function ChatPane({
     }
   }
 
-  const activeTitle =
-    sessions.find((s) => s.id === sessionId)?.title || "New conversation";
-  const sessionCount = sessions.length;
+  async function renameSession(title: string) {
+    const s = detailsSession;
+    if (!s) return;
+    const res = await fetch("/api/chat/sessions/rename", {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ sessionId: s.id, title }),
+    });
+    if (!res.ok) {
+      const body = (await res.json().catch(() => ({}))) as { detail?: string };
+      throw new Error(body.detail ?? "The conversation could not be renamed.");
+    }
+    const body = (await res.json()) as { title?: string };
+    const newTitle = body.title ?? title;
+    setSessions((prev) =>
+      prev.map((x) => (x.id === s.id ? { ...x, title: newTitle || null } : x)),
+    );
+    void refreshSessions();
+  }
 
   return (
     <div data-component="ChatPane" className="flex min-h-0 flex-1 flex-col">
-      <div className="mb-3 flex items-center gap-2">
-        <button
-          type="button"
-          onClick={() => setListOpen(true)}
-          aria-label={`Switch conversation (${sessionCount} chat${sessionCount === 1 ? "" : "s"})`}
-          className="flex min-w-0 flex-1 items-center gap-3 rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] px-4 py-3 text-left"
-        >
-          <span
-            aria-hidden="true"
-            className="relative flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-[var(--color-surface-2)] text-lg leading-none"
-          >
-            ☰
-            {otherBusy ? (
-              <span className="absolute -right-0.5 -top-0.5 h-2.5 w-2.5 animate-pulse rounded-full bg-[var(--color-accent)]" />
-            ) : null}
-          </span>
-          <span className="flex min-w-0 flex-1 flex-col">
-            <span className="text-[11px] uppercase tracking-wide text-[var(--color-muted)]">
-              Conversations · {sessionCount}
-            </span>
-            <span className="truncate text-sm font-medium text-[var(--color-fg)]">
-              {activeTitle}
-            </span>
-          </span>
-          <span aria-hidden="true" className="shrink-0 text-[var(--color-muted)]">
-            ⌄
-          </span>
-        </button>
-        <button
-          type="button"
-          onClick={startNewConversation}
-          aria-label="New conversation"
-          className="shrink-0 rounded-xl bg-[var(--color-accent)] px-4 py-3 text-sm font-semibold text-[var(--color-accent-fg)]"
-        >
-          + New
-        </button>
-      </div>
+      <SessionTabs
+        sessions={sessions}
+        activeId={sessionId}
+        busyKeys={sendingKeys}
+        onSelect={openConversation}
+        onOpenDetails={setDetailsSession}
+        onNew={startNewConversation}
+      />
 
       <div
         ref={threadRef}
@@ -395,12 +380,11 @@ export function ChatPane({
 
       <Composer sending={selBusy} storageEnabled={storageEnabled} sessionId={sessionId} onSend={send} />
 
-      {listOpen ? (
-        <ConversationList
-          sessions={sessions}
-          activeId={sessionId}
-          onSelect={openConversation}
-          onClose={() => setListOpen(false)}
+      {detailsSession ? (
+        <SessionModal
+          session={detailsSession}
+          onClose={() => setDetailsSession(null)}
+          onRename={renameSession}
         />
       ) : null}
     </div>
