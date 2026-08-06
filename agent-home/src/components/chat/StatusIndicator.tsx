@@ -16,17 +16,29 @@ export type ChatActivity =
 
 const LABELS: Record<Exclude<ChatActivity, "idle">, string> = {
   thinking: "a4all agent is thinking…",
-  streaming: "a4all agent is responding…",
+  streaming: "a4all agent is working…",
   waiting_approval: "Waiting for your approval…",
 };
 
-function Dots({ className }: { className: string }) {
+/** A rotating ring — an unmistakable "still working" signal that reads even
+ * when the reply already shows a complete-looking sentence (e.g. while the
+ * agent runs tools between messages). */
+function Spinner() {
+  return (
+    <span
+      aria-hidden="true"
+      className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-current border-t-transparent"
+    />
+  );
+}
+
+function Dots() {
   return (
     <span className="inline-flex items-center gap-1" aria-hidden="true">
       {[0, 1, 2].map((i) => (
         <span
           key={i}
-          className={`h-1.5 w-1.5 animate-bounce rounded-full ${className}`}
+          className="h-1.5 w-1.5 animate-bounce rounded-full bg-current"
           style={{ animationDelay: `${i * 150}ms`, animationDuration: "1s" }}
         />
       ))}
@@ -46,15 +58,11 @@ export function StatusIndicator({ activity }: { activity: ChatActivity }) {
       className="flex justify-start"
     >
       <span
-        className={`inline-flex items-center gap-2 rounded-2xl px-3 py-2 text-sm ${
-          waiting
-            ? "animate-pulse bg-[var(--color-surface-2)] text-[var(--color-accent)]"
-            : "bg-[var(--color-surface-2)] text-[var(--color-muted)]"
+        className={`inline-flex items-center gap-2 rounded-2xl border border-[var(--color-accent)] bg-[var(--color-surface-2)] px-3 py-2 text-sm font-medium text-[var(--color-accent)] ${
+          waiting ? "animate-pulse" : ""
         }`}
       >
-        <Dots
-          className={waiting ? "bg-[var(--color-accent)]" : "bg-[var(--color-muted)]"}
-        />
+        {waiting ? <Dots /> : <Spinner />}
         {LABELS[activity]}
       </span>
     </div>

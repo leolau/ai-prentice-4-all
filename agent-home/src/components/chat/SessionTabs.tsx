@@ -1,5 +1,7 @@
 "use client";
 
+import { useState } from "react";
+
 import type { SessionSummary } from "@/types";
 
 const NEW_KEY = "__new__";
@@ -22,6 +24,7 @@ export function SessionTabs({
   onOpenDetails,
   onNew,
   onOpenArchived,
+  onReorder,
 }: {
   sessions: SessionSummary[];
   activeId: string | null;
@@ -30,10 +33,27 @@ export function SessionTabs({
   onOpenDetails: (session: SessionSummary) => void;
   onNew: () => void;
   onOpenArchived: () => void;
+  /** Commit a new left-to-right ordering of the session ids (drag-to-reorder). */
+  onReorder: (orderedIds: string[]) => void;
 }) {
   // A brand-new conversation has no persisted row yet; show it as an active,
   // non-editable chip so the strip reflects what's on screen.
   const showNew = activeId === null;
+  // Index of the chip currently being dragged, and the one it is hovering over,
+  // so we can show a drop indicator without mutating state until the drop.
+  const [dragIndex, setDragIndex] = useState<number | null>(null);
+  const [overIndex, setOverIndex] = useState<number | null>(null);
+
+  function drop(from: number, to: number) {
+    setDragIndex(null);
+    setOverIndex(null);
+    if (from === to) return;
+    const ids = sessions.map((s) => s.id);
+    const [moved] = ids.splice(from, 1);
+    ids.splice(to, 0, moved);
+    onReorder(ids);
+  }
+
   return (
     <div
       data-component="SessionTabs"
@@ -48,23 +68,42 @@ export function SessionTabs({
             ) : null}
           </span>
         ) : null}
-        {sessions.map((s) => {
+        {sessions.map((s, index) => {
           const active = s.id === activeId;
           const busy = busyKeys.includes(s.id);
+          const dragging = dragIndex === index;
+          const dropTarget = overIndex === index && dragIndex !== index;
           return (
             <button
               key={s.id}
               type="button"
+              draggable
               onClick={() => (active ? onOpenDetails(s) : onSelect(s.id))}
+              onDragStart={() => setDragIndex(index)}
+              onDragOver={(e) => {
+                e.preventDefault();
+                if (overIndex !== index) setOverIndex(index);
+              }}
+              onDrop={(e) => {
+                e.preventDefault();
+                if (dragIndex !== null) drop(dragIndex, index);
+              }}
+              onDragEnd={() => {
+                setDragIndex(null);
+                setOverIndex(null);
+              }}
               aria-label={
                 active
                   ? `Edit conversation "${titleOf(s)}"`
                   : `Switch to conversation "${titleOf(s)}"`
               }
-              className={`flex shrink-0 items-center gap-1.5 rounded-xl border px-3 py-2 text-sm font-medium ${
+              title="Drag to reorder"
+              className={`flex shrink-0 cursor-grab items-center gap-1.5 rounded-xl border px-3 py-2 text-sm font-medium active:cursor-grabbing ${
                 active
                   ? "border-[var(--color-accent)] bg-[var(--color-surface-2)] text-[var(--color-fg)]"
                   : "border-[var(--color-border)] bg-[var(--color-surface)] text-[var(--color-muted)]"
+              } ${dragging ? "opacity-40" : ""} ${
+                dropTarget ? "ring-2 ring-[var(--color-accent)]" : ""
               }`}
             >
               <span className="max-w-[9rem] truncate">{titleOf(s)}</span>

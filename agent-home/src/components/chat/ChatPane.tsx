@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import { ApprovalCard } from "@/components/chat/ApprovalCard";
 import { ArchivedModal } from "@/components/chat/ArchivedModal";
@@ -14,7 +14,13 @@ import {
   withLiveTurn,
   type LiveTurn,
 } from "@/lib/chat/messages";
+import {
+  orderSessions,
+  parseOrder,
+  SESSION_ORDER_STORAGE_KEY,
+} from "@/lib/chat/session-order";
 import { streamChatTurn } from "@/lib/chat/stream";
+import { usePersistentState } from "@/lib/use-persistent-state";
 import type {
   ChatApprovalRequest,
   ChatAttachment,
@@ -73,6 +79,19 @@ export function ChatPane({
   storageEnabled,
 }: ChatPaneProps) {
   const [sessions, setSessions] = useState<SessionSummary[]>(initialSessions);
+  // The user's manual left-to-right ordering of the tabs, persisted per-device
+  // as a JSON string (a stable snapshot for useSyncExternalStore). The array is
+  // derived and applied to whatever the server most recently returned.
+  const [orderRaw, setOrderRaw] = usePersistentState<string>(
+    SESSION_ORDER_STORAGE_KEY,
+    "",
+    (raw) => raw,
+    (value) => value,
+  );
+  const orderedSessions = useMemo(
+    () => orderSessions(sessions, parseOrder(orderRaw)),
+    [sessions, orderRaw],
+  );
   const [sessionId, setSessionId] = useState<string | null>(initialSessionId);
   const [messages, setMessages] = useState<ChatMessage[]>(visible(initialMessages));
   const [detailsSession, setDetailsSession] = useState<SessionSummary | null>(null);
@@ -280,6 +299,10 @@ export function ChatPane({
     }
   }
 
+  function reorderSessions(orderedIds: string[]) {
+    setOrderRaw(JSON.stringify(orderedIds));
+  }
+
   async function refreshSessions() {
     try {
       const res = await fetch("/api/chat/sessions", { cache: "no-store" });
@@ -347,13 +370,14 @@ export function ChatPane({
   return (
     <div data-component="ChatPane" className="flex min-h-0 flex-1 flex-col">
       <SessionTabs
-        sessions={sessions}
+        sessions={orderedSessions}
         activeId={sessionId}
         busyKeys={sendingKeys}
         onSelect={openConversation}
         onOpenDetails={setDetailsSession}
         onNew={startNewConversation}
         onOpenArchived={() => setArchivedOpen(true)}
+        onReorder={reorderSessions}
       />
 
       <div
