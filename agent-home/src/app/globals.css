@@ -23,6 +23,48 @@
   --bottom-nav-h: 4rem;
 }
 
+/*
+ * Selectable UI themes. Components reference the `--color-*` variables at
+ * runtime (`bg-[var(--color-bg)]`), so a theme is just an override of those
+ * tokens on the <html data-theme> element. `dark` (or no attribute) keeps the
+ * original palette from the @theme block above.
+ */
+[data-theme="dark"] {
+  color-scheme: dark;
+  --color-bg: #0b0d12;
+  --color-surface: #141821;
+  --color-surface-2: #1c2230;
+  --color-border: #262d3a;
+  --color-text: #e6e9ef;
+  --color-muted: #8b93a7;
+  --color-accent: #5b8cff;
+  --color-accent-fg: #ffffff;
+}
+
+[data-theme="light"] {
+  color-scheme: light;
+  --color-bg: #f6f7f9;
+  --color-surface: #ffffff;
+  --color-surface-2: #eef1f5;
+  --color-border: #d7dce3;
+  --color-text: #1a1f29;
+  --color-muted: #626b7a;
+  --color-accent: #2f6bff;
+  --color-accent-fg: #ffffff;
+}
+
+[data-theme="colourful"] {
+  color-scheme: dark;
+  --color-bg: #1a1030;
+  --color-surface: #2a1a4a;
+  --color-surface-2: #3a2566;
+  --color-border: #59409a;
+  --color-text: #f4ecff;
+  --color-muted: #b7a4e0;
+  --color-accent: #ff5db8;
+  --color-accent-fg: #ffffff;
+}
+
 html,
 body {
   height: 100%;
