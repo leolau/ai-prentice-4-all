@@ -336,6 +336,52 @@ class TestMemoryManager:
         r2 = json.loads(mgr.handle_tool_call("ext_tool", {"b": 2}))
         assert r2["handled"] == "ext_tool"
 
+    def test_tool_gained_during_initialize_is_routable(self):
+        """A provider whose toolset widens at initialize() must stay routable.
+
+        The pgvector provider only offers ``rag_search`` once it has read its
+        config and opened the store, i.e. during ``initialize()``. Indexing
+        only at registration advertised that tool to the model while leaving
+        it unroutable, so every call came back "unknown tool".
+        """
+
+        class LateToolProvider(FakeMemoryProvider):
+            def initialize(self, session_id, **kwargs):
+                super().initialize(session_id, **kwargs)
+                self._tools = self._tools + [
+                    {"name": "rag_search", "description": "Docs", "parameters": {}}
+                ]
+
+        mgr = MemoryManager()
+        provider = LateToolProvider("external", tools=[
+            {"name": "memory_query", "description": "Recall", "parameters": {}}
+        ])
+        mgr.add_provider(provider)
+        assert not mgr.has_tool("rag_search")
+
+        mgr.initialize_all(session_id="s1")
+
+        assert mgr.has_tool("rag_search")
+        assert {s["name"] for s in mgr.get_all_tool_schemas()} == {
+            "memory_query", "rag_search"
+        }
+        result = json.loads(mgr.handle_tool_call("rag_search", {"query": "x"}))
+        assert result["handled"] == "rag_search"
+
+    def test_reindexing_does_not_warn_about_self_conflict(self, caplog):
+        """Re-indexing the same provider is not a name collision."""
+        mgr = MemoryManager()
+        provider = FakeMemoryProvider("external", tools=[
+            {"name": "memory_query", "description": "Recall", "parameters": {}}
+        ])
+        mgr.add_provider(provider)
+
+        with caplog.at_level("WARNING"):
+            mgr.initialize_all(session_id="s1")
+
+        assert "conflict" not in caplog.text
+        assert mgr.has_tool("memory_query")
+
     # -- Lifecycle hooks -----------------------------------------------------
 
     def test_on_turn_start(self):
