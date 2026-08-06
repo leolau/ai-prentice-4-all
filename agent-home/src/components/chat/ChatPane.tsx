@@ -6,6 +6,8 @@ import { ApprovalCard } from "@/components/chat/ApprovalCard";
 import { ConversationList } from "@/components/chat/ConversationList";
 import { MessageBubble } from "@/components/chat/MessageBubble";
 import { Composer } from "@/components/chat/Composer";
+import { StatusIndicator } from "@/components/chat/StatusIndicator";
+import { setLastAssistantContent } from "@/lib/chat/messages";
 import { streamChatTurn } from "@/lib/chat/stream";
 import type {
   ChatApprovalRequest,
@@ -13,6 +15,12 @@ import type {
   ChatMessage,
   SessionSummary,
 } from "@/types";
+
+/** A pending approval, bound to the run AND the session that raised it. */
+interface PendingApproval {
+  request: ChatApprovalRequest;
+  sessionId: string | null;
+}
 
 export interface ChatPaneProps {
   initialSessions: SessionSummary[];
@@ -51,7 +59,7 @@ export function ChatPane({
   const [loadingThread, setLoadingThread] = useState(false);
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [approval, setApproval] = useState<ChatApprovalRequest | null>(null);
+  const [approval, setApproval] = useState<PendingApproval | null>(null);
   const [resolvingApproval, setResolvingApproval] = useState(false);
   const threadRef = useRef<HTMLDivElement | null>(null);
 
@@ -61,7 +69,11 @@ export function ChatPane({
   }, [messages, sending]);
 
   async function openConversation(id: string) {
+    // Never switch mid-turn: a live stream writes into the active thread, so
+    // switching would splice its deltas / approval into the wrong session.
+    if (sending) return;
     setListOpen(false);
+    setApproval(null);
     if (id === sessionId) return;
     setSessionId(id);
     setError(null);
@@ -86,7 +98,9 @@ export function ChatPane({
   }
 
   function startNewConversation() {
+    if (sending) return;
     setListOpen(false);
+    setApproval(null);
     setSessionId(null);
     setMessages([]);
     setError(null);
@@ -97,15 +111,22 @@ export function ChatPane({
     setError(null);
     setApproval(null);
     setSending(true);
+    // The session this turn belongs to, captured up-front so a late-arriving
+    // event is attributed to its origin, not to whatever is selected later.
+    const turnSessionId = sessionId;
     const optimistic: ChatMessage = { role: "user", content: text };
-    const live: ChatMessage = { role: "assistant", content: "" };
-    setMessages((prev) => [...prev, optimistic, live]);
+    setMessages((prev) => [
+      ...prev,
+      optimistic,
+      { role: "assistant", content: "" },
+    ]);
 
+    // Update the trailing assistant bubble by position (identity-safe): the
+    // first delta replaces the placeholder object, so an identity match would
+    // stop firing and truncate the reply to its first token.
     let assistantText = "";
     const setLive = (content: string) =>
-      setMessages((prev) =>
-        prev.map((m) => (m === live ? { ...live, content } : m)),
-      );
+      setMessages((prev) => setLastAssistantContent(prev, content));
 
     try {
       const { sessionId: landed } = await streamChatTurn(
@@ -115,21 +136,20 @@ export function ChatPane({
             assistantText += delta;
             setLive(assistantText);
           },
-          onApproval: (req) => setApproval(req),
+          onApproval: (req) =>
+            setApproval({ request: req, sessionId: turnSessionId }),
           onCompleted: (content) => {
             setApproval(null);
-            if (content) {
-              assistantText = content;
-              setLive(content);
-            }
+            if (content) setLive(content);
           },
           onError: (message) => setError(message),
         },
       );
-      if (landed) setSessionId(landed);
+      if (landed && landed !== turnSessionId) setSessionId(landed);
       void refreshSessions();
     } catch (err) {
-      setMessages((prev) => prev.filter((m) => m !== optimistic && m !== live));
+      // Drop this turn's optimistic pair (the two trailing messages we added).
+      setMessages((prev) => prev.slice(0, Math.max(0, prev.length - 2)));
       setError(err instanceof Error ? err.message : "The message could not be sent.");
     } finally {
       setSending(false);
@@ -145,7 +165,7 @@ export function ChatPane({
       const res = await fetch("/api/chat/approval", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ runId: approval.runId, choice }),
+        body: JSON.stringify({ runId: approval.request.runId, choice }),
       });
       if (!res.ok) {
         const body = (await res.json().catch(() => ({}))) as { detail?: string };
@@ -173,6 +193,7 @@ export function ChatPane({
 
   const activeTitle =
     sessions.find((s) => s.id === sessionId)?.title || "New conversation";
+  const sessionCount = sessions.length;
 
   return (
     <div data-component="ChatPane" className="flex min-h-0 flex-1 flex-col">
@@ -180,17 +201,23 @@ export function ChatPane({
         <button
           type="button"
           onClick={() => setListOpen(true)}
-          className="flex-1 truncate rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-left text-sm"
+          disabled={sending}
+          aria-label="Switch conversation"
+          className="flex min-w-0 flex-1 items-center gap-2 rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-left text-sm disabled:opacity-50"
         >
-          <span className="text-[var(--color-muted)]">Conversation · </span>
-          {activeTitle}
+          <span aria-hidden="true">☰</span>
+          <span className="min-w-0 flex-1 truncate">{activeTitle}</span>
+          <span className="shrink-0 rounded-full bg-[var(--color-surface-2)] px-2 py-0.5 text-xs text-[var(--color-muted)]">
+            {sessionCount} chat{sessionCount === 1 ? "" : "s"}
+          </span>
         </button>
         <button
           type="button"
           onClick={startNewConversation}
-          className="rounded-xl bg-[var(--color-accent)] px-3 py-2 text-sm font-semibold text-[var(--color-accent-fg)]"
+          disabled={sending}
+          className="shrink-0 rounded-xl bg-[var(--color-accent)] px-3 py-2 text-sm font-semibold text-[var(--color-accent-fg)] disabled:opacity-50"
         >
-          New
+          + New
         </button>
       </div>
 
@@ -213,18 +240,22 @@ export function ChatPane({
             .filter((m) => m.role !== "assistant" || m.content !== "")
             .map((m, i) => <MessageBubble key={m.id ?? i} message={m} />)
         )}
-        {sending && !approval && assistantIsEmpty(messages) ? (
-          <div className="flex justify-start">
-            <span className="rounded-2xl bg-[var(--color-surface-2)] px-3 py-2 text-sm text-[var(--color-muted)]">
-              Thinking…
-            </span>
-          </div>
-        ) : null}
+        <StatusIndicator
+          activity={
+            approval
+              ? "waiting_approval"
+              : sending
+                ? assistantIsEmpty(messages)
+                  ? "thinking"
+                  : "streaming"
+                : "idle"
+          }
+        />
       </div>
 
-      {approval ? (
+      {approval && approval.sessionId === sessionId ? (
         <ApprovalCard
-          request={approval}
+          request={approval.request}
           busy={resolvingApproval}
           onResolve={resolveApproval}
         />
