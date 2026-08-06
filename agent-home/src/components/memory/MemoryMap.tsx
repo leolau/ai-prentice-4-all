@@ -1,7 +1,8 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
+import { describeSource } from "@/components/memory/citation";
 import type {
   MemoryProjection,
   MemoryProjectionPoint,
@@ -196,6 +197,15 @@ export function MemoryMap({
                 r={1.2}
                 fill={color}
                 opacity={opacity}
+                pointerEvents="none"
+              />
+              {/* A 1.2-unit dot is a ~4 px target on a phone: the hit area is
+                  a wider invisible circle over it. */}
+              <circle
+                cx={cx}
+                cy={cy}
+                r={3}
+                fill="transparent"
                 onClick={() => setSelected(p)}
                 style={{ cursor: "pointer" }}
               />
@@ -228,32 +238,97 @@ export function MemoryMap({
         )}
       </svg>
 
-      {/* Bottom sheet for selected point */}
       {selected && (
-        <div
-          data-component="MemoryMapSheet"
-          className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface)] p-3"
-          onClick={() => setSelected(null)}
-        >
-          <p className="text-sm leading-relaxed">
-            {selected.label || "(no label)"}
-          </p>
-          <div className="mt-1 flex flex-wrap gap-2 text-xs text-[var(--color-muted)]">
-            {selected.topic && (
-              <span className="rounded bg-[var(--color-bg)] px-2 py-0.5">
-                {selected.topic}
-              </span>
-            )}
-            <span>owner: {selected.owner_user_id}</span>
-            {selected.elevated && selected.provenance && (
-              <span className="text-[var(--color-accent)]">
-                {selected.provenance}
-              </span>
+        <MemoryPointModal
+          point={selected}
+          onClose={() => setSelected(null)}
+        />
+      )}
+    </div>
+  );
+}
+
+/**
+ * The clicked dot's detail, as a modal over the map.
+ *
+ * It used to render underneath the plot, which on a tall square map meant
+ * clicking a dot appeared to do nothing until you scrolled — the answer was
+ * off-screen at the moment you asked for it.
+ */
+export function MemoryPointModal({
+  point,
+  onClose,
+}: {
+  point: MemoryProjectionPoint;
+  onClose: () => void;
+}) {
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  const source = describeSource(point);
+
+  return (
+    <div
+      data-component="MemoryPointModal"
+      role="dialog"
+      aria-modal="true"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+      onClick={onClose}
+    >
+      <div
+        className="w-full max-w-sm rounded-2xl border border-[var(--color-border)] bg-[var(--color-bg)] p-4"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="mb-2 flex items-center justify-between gap-3">
+          <h2 className="text-sm font-semibold">
+            {point.kind === "chunk" ? "Document chunk" : "Memory"}
+          </h2>
+          <button
+            type="button"
+            onClick={onClose}
+            className="text-sm text-[var(--color-muted)]"
+          >
+            Close
+          </button>
+        </div>
+
+        <p className="max-h-60 overflow-y-auto text-sm leading-relaxed">
+          {point.label || "(no label)"}
+        </p>
+
+        {source && (
+          <div className="mt-3 border-t border-[var(--color-border)] pt-2">
+            <p className="text-xs uppercase tracking-wide text-[var(--color-muted)]">
+              Source
+            </p>
+            <p className="text-sm">{source.label}</p>
+            {source.detail && (
+              <p className="break-all text-xs text-[var(--color-muted)]">
+                {source.detail}
+              </p>
             )}
           </div>
-        </div>
-      )}
+        )}
 
+        <div className="mt-3 flex flex-wrap gap-2 text-xs text-[var(--color-muted)]">
+          {point.topic && (
+            <span className="rounded bg-[var(--color-surface)] px-2 py-0.5">
+              {point.topic}
+            </span>
+          )}
+          <span>owner: {point.owner_user_id}</span>
+          {point.elevated && point.provenance && (
+            <span className="text-[var(--color-accent)]">
+              {point.provenance}
+            </span>
+          )}
+        </div>
+      </div>
     </div>
   );
 }

@@ -16,17 +16,22 @@ import { SideNav } from "@/components/SideNav";
  *   comfortable max) — a real responsive webapp, not a phone frame.
  *
  * Feature panels render into `children`. `showNav={false}` (e.g. the login
- * page) drops both navs and their reserved space.
+ * page) drops both navs and their reserved space. `wide` lifts the desktop
+ * max width for panels that lay out side-by-side columns (the memory map next
+ * to its list) — at `max-w-5xl` both columns are too narrow to be readable.
  */
 export function MobileShell({
   title,
   children,
   showNav = true,
+  wide = false,
 }: {
   title: string;
   children: ReactNode;
   showNav?: boolean;
+  wide?: boolean;
 }) {
+  const contentWidth = wide ? "lg:max-w-7xl" : "lg:max-w-5xl";
   return (
     <div data-component="MobileShell" className="min-h-dvh bg-[var(--color-bg)] lg:flex">
       {showNav ? <SideNav /> : null}
@@ -35,7 +40,7 @@ export function MobileShell({
           className="sticky top-0 z-20 border-b border-[var(--color-border)] bg-[var(--color-bg)]/90 px-4 py-3 backdrop-blur lg:px-8"
           style={{ paddingTop: "calc(var(--safe-top) + 0.75rem)" }}
         >
-          <div className="mx-auto w-full max-w-2xl lg:max-w-5xl">
+          <div className={`mx-auto w-full max-w-2xl ${contentWidth}`}>
             <h1 className="text-base font-semibold tracking-tight lg:text-lg">
               {title}
             </h1>
@@ -48,7 +53,9 @@ export function MobileShell({
               : "pb-[calc(var(--safe-bottom)+1rem)]"
           }`}
         >
-          <div className="mx-auto w-full max-w-2xl lg:max-w-5xl">{children}</div>
+          <div className={`mx-auto w-full max-w-2xl ${contentWidth}`}>
+            {children}
+          </div>
         </main>
         {showNav ? <BottomNav /> : null}
       </div>

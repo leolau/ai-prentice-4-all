@@ -42,7 +42,7 @@ export default async function Page() {
   }
 
   return (
-    <MobileShell title="Memory">
+    <MobileShell title="Memory" wide>
       {noPrincipal ? (
         <div
           data-component="MemoryNoPrincipal"

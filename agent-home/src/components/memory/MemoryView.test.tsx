@@ -56,6 +56,7 @@ const ROWS: MemoryRowsResponse = {
       elevated: false,
       provenance: "",
       score: null,
+      source_session: "sess-42",
     },
     {
       id: "m2",
@@ -141,6 +142,62 @@ describe("MemoryView", () => {
       <MemoryView summary={SUMMARY} initialRows={ROWS} />,
     );
     expect(html).toContain("Search memories");
+  });
+
+  it("puts the search box and the list in their own panel beside the map", () => {
+    // On a wide screen the stacked layout forced a scroll between the map and
+    // the list, which are two halves of the same question.
+    const html = renderToStaticMarkup(
+      <MemoryView summary={SUMMARY} initialRows={ROWS} />,
+    );
+    expect(html).toContain('data-component="MemoryListPanel"');
+    expect(html).toContain("xl:grid-cols-");
+  });
+
+  it("cites the chat a memory was written in", () => {
+    const html = renderToStaticMarkup(
+      <MemoryView summary={SUMMARY} initialRows={ROWS} />,
+    );
+    expect(html).toContain("From a chat");
+    expect(html).toContain("sess-42");
+  });
+
+  it("cites the document a chunk row came from", () => {
+    const chunkRows: MemoryRowsResponse = {
+      ...ROWS,
+      rows: [
+        {
+          ...ROWS.rows[0],
+          id: "c1",
+          kind: "chunk",
+          source_session: null,
+          document_title: "Joyaether 2026 Support Policy",
+          section: "Response targets",
+          source_kind: "local",
+          source_ref: "/opt/data/uploads/policy.md",
+        },
+      ],
+    };
+    const html = renderToStaticMarkup(
+      <MemoryView summary={SUMMARY} initialRows={chunkRows} />,
+    );
+    expect(html).toContain("Joyaether 2026 Support Policy");
+    expect(html).toContain("Response targets");
+  });
+
+  it("offers the documents tab only when documents exist", () => {
+    const withoutDocs = renderToStaticMarkup(
+      <MemoryView summary={SUMMARY} initialRows={ROWS} />,
+    );
+    expect(withoutDocs).not.toContain(">Documents<");
+
+    const withDocs = renderToStaticMarkup(
+      <MemoryView
+        summary={{ ...SUMMARY, totals: { memories: 37, documents: 2, chunks: 9 } }}
+        initialRows={ROWS}
+      />,
+    );
+    expect(withDocs).toContain(">Documents<");
   });
 });
 

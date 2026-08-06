@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { MemoryMap } from "@/components/memory/MemoryMap";
+import { describeSource } from "@/components/memory/citation";
 import type {
   MemoryProjection,
   MemoryQueryPlacement,
@@ -15,6 +16,11 @@ import type {
  * FG-23 A2/A4 — the phone memory view. Server-rendered with the first page of
  * rows; search, paging, the map and query placement are client-side refetches
  * through the BFF handlers under `src/app/api/memory/*`.
+ *
+ * Layout: one column on a phone, and from `xl` up the search box and the list
+ * become their own panel beside the map, scrolling independently. On a wide
+ * screen the stacked version forced a scroll between "where is this memory"
+ * and "what does it say", which are the two halves of the same question.
  *
  * Read-only: no write, delete, re-embed or forget path exists on this surface.
  */
@@ -30,20 +36,26 @@ export function MemoryView({
   const [offset, setOffset] = useState(initialRows.offset);
   const [limit] = useState(initialRows.limit);
   const [q, setQ] = useState("");
+  const [browse, setBrowse] = useState<BrowseKind>("memory");
   const [loading, setLoading] = useState(false);
   const [searching, setSearching] = useState(false);
   const [rowsError, setRowsError] = useState<string | null>(null);
 
   // --- Search (debounced 300 ms, offset reset to 0) -----------------------
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // The server already rendered the first page, so the debounce must not fire
+  // on mount: it would refetch identical rows over mobile data and flash the
+  // list. It arms on the first keystroke.
+  const searchArmed = useRef(false);
   const doSearch = useCallback(
-    async (query: string) => {
+    async (query: string, kind: BrowseKind = browse) => {
       setLoading(true);
       setSearching(!!query.trim());
       setRowsError(null);
       try {
         const sp = new URLSearchParams();
         if (query.trim()) sp.set("q", query.trim());
+        if (kind === "chunk") sp.set("kind", "chunk");
         sp.set("limit", String(limit));
         sp.set("offset", "0");
         const res = await fetch(`/api/memory/rows?${sp.toString()}`);
@@ -61,13 +73,19 @@ export function MemoryView({
         setLoading(false);
       }
     },
-    [limit],
+    [limit, browse],
   );
 
-  // The server already rendered the first page, so the debounce must not fire
-  // on mount: it would refetch identical rows over mobile data and flash the
-  // list. It arms on the first keystroke.
-  const searchArmed = useRef(false);
+  const switchBrowse = useCallback(
+    (kind: BrowseKind) => {
+      if (kind === browse) return;
+      setBrowse(kind);
+      searchArmed.current = true;
+      void doSearch(q, kind);
+    },
+    [browse, doSearch, q],
+  );
+
   useEffect(() => {
     if (!searchArmed.current) {
       searchArmed.current = true;
@@ -89,6 +107,7 @@ export function MemoryView({
     try {
       const sp = new URLSearchParams();
       if (q.trim()) sp.set("q", q.trim());
+      if (browse === "chunk") sp.set("kind", "chunk");
       sp.set("limit", String(limit));
       sp.set("offset", String(nextOffset));
       const res = await fetch(`/api/memory/rows?${sp.toString()}`);
@@ -104,7 +123,7 @@ export function MemoryView({
     } finally {
       setLoading(false);
     }
-  }, [offset, limit, total, q]);
+  }, [offset, limit, total, q, browse]);
 
   // --- Map (fetched after first paint) ------------------------------------
   const [projection, setProjection] = useState<MemoryProjection | null>(null);
@@ -170,7 +189,11 @@ export function MemoryView({
   const rowMap = new Map(rows.map((r) => [r.id, r]));
 
   return (
-    <div data-component="MemoryView" className="space-y-4">
+    <div
+      data-component="MemoryView"
+      className="space-y-4 xl:grid xl:grid-cols-[minmax(0,1fr)_24rem] xl:items-start xl:gap-6 xl:space-y-0"
+    >
+      <div className="min-w-0 space-y-4">
       {/* Pills */}
       <div className="flex flex-wrap gap-2">
         <Pill label="memories" value={summary.totals.memories} />
@@ -229,46 +252,104 @@ export function MemoryView({
           />
         )}
       </div>
-
-      {/* Search */}
-      <input
-        type="search"
-        value={q}
-        onChange={(e) => setQ(e.target.value)}
-        placeholder="Search memories…"
-        className="w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm"
-      />
-
-      {/* Rows */}
-      {rowsError && (
-        <p data-component="MemoryRowsError" className="text-xs text-[var(--color-accent)]">
-          {rowsError}
-        </p>
-      )}
-      <div className="space-y-2">
-        {rows.length === 0 && !loading ? (
-          <div className="py-8 text-center text-sm text-[var(--color-muted)]">
-            {searching
-              ? "No memories matched your search."
-              : "No memories visible in your scope yet."}
-          </div>
-        ) : (
-          rows.map((row) => <MemoryCard key={row.id} row={row} />)
-        )}
       </div>
 
-      {/* Load more */}
-      {offset + limit < total && (
-        <button
-          type="button"
-          onClick={loadMore}
-          disabled={loading}
-          className="w-full rounded-lg border border-[var(--color-border)] py-2 text-sm text-[var(--color-muted)] disabled:opacity-40"
-        >
-          {loading ? "Loading…" : "Load more"}
-        </button>
-      )}
+      {/* Panel: search + list. Its own scroll container from `xl` up, so the
+          map stays in view while the list is paged. */}
+      <aside
+        data-component="MemoryListPanel"
+        className="space-y-3 xl:sticky xl:top-20 xl:max-h-[calc(100dvh-9rem)] xl:overflow-y-auto xl:pr-1"
+      >
+        <input
+          type="search"
+          value={q}
+          onChange={(e) => setQ(e.target.value)}
+          placeholder={
+            browse === "chunk" ? "Search documents…" : "Search memories…"
+          }
+          className="w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm"
+        />
+
+        {summary.totals.documents > 0 && (
+          <div className="flex gap-1 rounded-lg border border-[var(--color-border)] p-1 text-xs">
+            <BrowseTab
+              active={browse === "memory"}
+              onClick={() => switchBrowse("memory")}
+              label="Memories"
+            />
+            <BrowseTab
+              active={browse === "chunk"}
+              onClick={() => switchBrowse("chunk")}
+              label="Documents"
+            />
+          </div>
+        )}
+        {browse === "chunk" && q.trim() && (
+          <p className="text-xs text-[var(--color-muted)]">
+            Document chunks are listed newest first — typed text doesn&apos;t
+            filter them. Use the map&apos;s query box to find them by meaning.
+          </p>
+        )}
+
+        {/* Rows */}
+        {rowsError && (
+          <p data-component="MemoryRowsError" className="text-xs text-[var(--color-accent)]">
+            {rowsError}
+          </p>
+        )}
+        <div className="space-y-2">
+          {rows.length === 0 && !loading ? (
+            <div className="py-8 text-center text-sm text-[var(--color-muted)]">
+              {searching
+                ? "No memories matched your search."
+                : "No memories visible in your scope yet."}
+            </div>
+          ) : (
+            rows.map((row) => <MemoryCard key={row.id} row={row} />)
+          )}
+        </div>
+
+        {/* Load more */}
+        {offset + limit < total && (
+          <button
+            type="button"
+            onClick={loadMore}
+            disabled={loading}
+            className="w-full rounded-lg border border-[var(--color-border)] py-2 text-sm text-[var(--color-muted)] disabled:opacity-40"
+          >
+            {loading ? "Loading…" : "Load more"}
+          </button>
+        )}
+      </aside>
     </div>
+  );
+}
+
+/** Which corpus the list panel is browsing. */
+type BrowseKind = "memory" | "chunk";
+
+function BrowseTab({
+  active,
+  onClick,
+  label,
+}: {
+  active: boolean;
+  onClick: () => void;
+  label: string;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-pressed={active}
+      className={`flex-1 rounded px-2 py-1 ${
+        active
+          ? "bg-[var(--color-surface)] font-medium"
+          : "text-[var(--color-muted)]"
+      }`}
+    >
+      {label}
+    </button>
   );
 }
 
@@ -290,6 +371,7 @@ function Pill({ label, value }: { label: string; value: number }) {
 }
 
 function MemoryCard({ row }: { row: MemoryRow }) {
+  const source = describeSource(row);
   return (
     <div
       data-component="MemoryCard"
@@ -316,6 +398,15 @@ function MemoryCard({ row }: { row: MemoryRow }) {
           </span>
         )}
       </div>
+      {source && (
+        <p
+          data-component="MemoryCardSource"
+          className="mt-1 truncate text-xs text-[var(--color-muted)]"
+          title={source.detail ?? source.label}
+        >
+          {source.label}
+        </p>
+      )}
     </div>
   );
 }
