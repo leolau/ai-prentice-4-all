@@ -10,6 +10,10 @@
   --color-surface-2: #1c2230;
   --color-border: #262d3a;
   --color-text: #e6e9ef;
+  /* `--color-fg` is the explicit body/foreground text colour used by bubbles,
+   * tabs and modals. It is kept in lockstep with `--color-text` so a theme
+   * only has to set one; components may reference either. */
+  --color-fg: #e6e9ef;
   --color-muted: #8b93a7;
   --color-accent: #5b8cff;
   --color-accent-fg: #ffffff;
@@ -36,6 +40,7 @@
   --color-surface-2: #1c2230;
   --color-border: #262d3a;
   --color-text: #e6e9ef;
+  --color-fg: #e6e9ef;
   --color-muted: #8b93a7;
   --color-accent: #5b8cff;
   --color-accent-fg: #ffffff;
@@ -43,26 +48,28 @@
 
 [data-theme="light"] {
   color-scheme: light;
-  --color-bg: #f6f7f9;
+  --color-bg: #eef1f5;
   --color-surface: #ffffff;
-  --color-surface-2: #eef1f5;
-  --color-border: #d7dce3;
-  --color-text: #1a1f29;
-  --color-muted: #626b7a;
+  --color-surface-2: #e6eaf1;
+  --color-border: #cbd2dc;
+  --color-text: #101828;
+  --color-fg: #101828;
+  --color-muted: #4a5567;
   --color-accent: #2f6bff;
   --color-accent-fg: #ffffff;
 }
 
 [data-theme="colourful"] {
   color-scheme: dark;
-  --color-bg: #1a1030;
-  --color-surface: #2a1a4a;
-  --color-surface-2: #3a2566;
-  --color-border: #59409a;
-  --color-text: #f4ecff;
-  --color-muted: #b7a4e0;
+  --color-bg: #170e2e;
+  --color-surface: #241640;
+  --color-surface-2: #33215c;
+  --color-border: #533a91;
+  --color-text: #f6f0ff;
+  --color-fg: #f6f0ff;
+  --color-muted: #c3b1e8;
   --color-accent: #ff5db8;
-  --color-accent-fg: #ffffff;
+  --color-accent-fg: #1a0f2e;
 }
 
 html,
