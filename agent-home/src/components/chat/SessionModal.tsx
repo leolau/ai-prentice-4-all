@@ -45,13 +45,16 @@ export function SessionModal({
   session,
   onClose,
   onRename,
+  onArchive,
 }: {
   session: SessionSummary;
   onClose: () => void;
   onRename: (title: string) => Promise<void>;
+  onArchive: () => Promise<void>;
 }) {
   const [name, setName] = useState(session.title ?? "");
   const [saving, setSaving] = useState(false);
+  const [archiving, setArchiving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   async function save() {
@@ -65,6 +68,20 @@ export function SessionModal({
       setError(err instanceof Error ? err.message : "Rename failed.");
     } finally {
       setSaving(false);
+    }
+  }
+
+  async function archive() {
+    if (archiving) return;
+    setArchiving(true);
+    setError(null);
+    try {
+      await onArchive();
+      onClose();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Archive failed.");
+    } finally {
+      setArchiving(false);
     }
   }
 
@@ -126,22 +143,32 @@ export function SessionModal({
           <Stat label="Session id" value={session.id} />
         </div>
 
-        <div className="mt-4 flex justify-end gap-2">
+        <div className="mt-4 flex items-center justify-between gap-2">
           <button
             type="button"
-            onClick={onClose}
-            className="rounded-xl border border-[var(--color-border)] px-4 py-2 text-sm"
+            onClick={archive}
+            disabled={archiving}
+            className="rounded-xl border border-[var(--color-border)] px-4 py-2 text-sm text-[var(--color-muted)] disabled:opacity-60"
           >
-            Cancel
+            {archiving ? "Archiving…" : "Archive"}
           </button>
-          <button
-            type="button"
-            onClick={save}
-            disabled={saving}
-            className="rounded-xl bg-[var(--color-accent)] px-4 py-2 text-sm font-semibold text-[var(--color-accent-fg)] disabled:opacity-60"
-          >
-            {saving ? "Saving…" : "Save"}
-          </button>
+          <div className="flex gap-2">
+            <button
+              type="button"
+              onClick={onClose}
+              className="rounded-xl border border-[var(--color-border)] px-4 py-2 text-sm"
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              onClick={save}
+              disabled={saving}
+              className="rounded-xl bg-[var(--color-accent)] px-4 py-2 text-sm font-semibold text-[var(--color-accent-fg)] disabled:opacity-60"
+            >
+              {saving ? "Saving…" : "Save"}
+            </button>
+          </div>
         </div>
       </div>
     </div>

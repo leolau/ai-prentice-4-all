@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 
 import { ApprovalCard } from "@/components/chat/ApprovalCard";
+import { ArchivedModal } from "@/components/chat/ArchivedModal";
 import { MessageBubble } from "@/components/chat/MessageBubble";
 import { Composer } from "@/components/chat/Composer";
 import { SessionModal } from "@/components/chat/SessionModal";
@@ -75,6 +76,7 @@ export function ChatPane({
   const [sessionId, setSessionId] = useState<string | null>(initialSessionId);
   const [messages, setMessages] = useState<ChatMessage[]>(visible(initialMessages));
   const [detailsSession, setDetailsSession] = useState<SessionSummary | null>(null);
+  const [archivedOpen, setArchivedOpen] = useState(false);
   const [loadingThread, setLoadingThread] = useState(false);
   // Per-session state, keyed by session id (or NEW_KEY). Turns run per session
   // so the user can switch conversations at any time without cancelling or
@@ -309,6 +311,39 @@ export function ChatPane({
     void refreshSessions();
   }
 
+  async function setArchived(id: string, archived: boolean) {
+    const res = await fetch("/api/chat/sessions/archive", {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ sessionId: id, archived }),
+    });
+    if (!res.ok) {
+      const body = (await res.json().catch(() => ({}))) as { detail?: string };
+      throw new Error(
+        body.detail ??
+          (archived
+            ? "The conversation could not be archived."
+            : "The conversation could not be un-archived."),
+      );
+    }
+  }
+
+  async function archiveSession() {
+    const s = detailsSession;
+    if (!s) return;
+    await setArchived(s.id, true);
+    // Drop it from the strip; if it was the open conversation, leave it and let
+    // the user start/pick another (its live buffer, if any, keeps streaming).
+    setSessions((prev) => prev.filter((x) => x.id !== s.id));
+    if (sessionId === s.id) startNewConversation();
+    void refreshSessions();
+  }
+
+  async function unarchiveSession(id: string) {
+    await setArchived(id, false);
+    void refreshSessions();
+  }
+
   return (
     <div data-component="ChatPane" className="flex min-h-0 flex-1 flex-col">
       <SessionTabs
@@ -318,6 +353,7 @@ export function ChatPane({
         onSelect={openConversation}
         onOpenDetails={setDetailsSession}
         onNew={startNewConversation}
+        onOpenArchived={() => setArchivedOpen(true)}
       />
 
       <div
@@ -385,6 +421,14 @@ export function ChatPane({
           session={detailsSession}
           onClose={() => setDetailsSession(null)}
           onRename={renameSession}
+          onArchive={archiveSession}
+        />
+      ) : null}
+
+      {archivedOpen ? (
+        <ArchivedModal
+          onClose={() => setArchivedOpen(false)}
+          onUnarchive={unarchiveSession}
         />
       ) : null}
     </div>

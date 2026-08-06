@@ -21,6 +21,7 @@ export function SessionTabs({
   onSelect,
   onOpenDetails,
   onNew,
+  onOpenArchived,
 }: {
   sessions: SessionSummary[];
   activeId: string | null;
@@ -28,6 +29,7 @@ export function SessionTabs({
   onSelect: (id: string) => void;
   onOpenDetails: (session: SessionSummary) => void;
   onNew: () => void;
+  onOpenArchived: () => void;
 }) {
   // A brand-new conversation has no persisted row yet; show it as an active,
   // non-editable chip so the strip reflects what's on screen.
@@ -78,6 +80,15 @@ export function SessionTabs({
           );
         })}
       </div>
+      <button
+        type="button"
+        onClick={onOpenArchived}
+        aria-label="Show archived conversations"
+        title="Archived conversations"
+        className="shrink-0 rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm text-[var(--color-muted)]"
+      >
+        Archived
+      </button>
       <button
         type="button"
         onClick={onNew}

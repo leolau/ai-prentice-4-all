@@ -188,12 +188,18 @@ export class HermesApiClient {
    * list surfaces the conversations started from this app first.
    */
   async sessions(
-    opts: { source?: string; limit?: number; order?: "created" | "recent" } = {},
+    opts: {
+      source?: string;
+      limit?: number;
+      order?: "created" | "recent";
+      archived?: "exclude" | "only" | "include";
+    } = {},
   ): Promise<SessionsResponse> {
     const params = new URLSearchParams();
     if (opts.source) params.set("source", opts.source);
     params.set("limit", String(opts.limit ?? 30));
     params.set("order", opts.order ?? "recent");
+    if (opts.archived) params.set("archived", opts.archived);
     return this.request(`/api/sessions?${params.toString()}`);
   }
 
@@ -226,6 +232,21 @@ export class HermesApiClient {
     return this.request(`/api/sessions/${encodeURIComponent(sessionId)}`, {
       method: "PATCH",
       json: { title },
+    });
+  }
+
+  /**
+   * Archive or unarchive a conversation via `PATCH /api/sessions/{id}`
+   * (`archived` only). Archived conversations are hidden from the default list
+   * (`archived=exclude`) and returned by `archived=only`.
+   */
+  async setSessionArchived(
+    sessionId: string,
+    archived: boolean,
+  ): Promise<{ ok: boolean; archived: boolean }> {
+    return this.request(`/api/sessions/${encodeURIComponent(sessionId)}`, {
+      method: "PATCH",
+      json: { archived },
     });
   }
 

@@ -343,6 +343,7 @@ export interface SessionSummary {
   last_active: number | null;
   ended_at: number | null;
   is_active?: boolean;
+  archived?: boolean;
 }
 
 /** The list of conversations from `GET /api/sessions`. */
