@@ -413,6 +413,20 @@ export interface ChatAttachment {
   size: number;
 }
 
+/**
+ * The per-attachment payload the BFF forwards to the Python chat endpoints so
+ * the brain can actually read an upload. The transcript keeps only the durable
+ * object `path` ({@link ChatAttachment}); this adds a short-lived signed `url`
+ * the server uses once to download the bytes into the shared document cache.
+ * It is never persisted or sent to the browser.
+ */
+export interface AgentAttachmentPayload {
+  name: string;
+  content_type: string;
+  size: number;
+  url: string;
+}
+
 /** Response of `GET /api/chat/media?path=…` — a short-lived signed read URL. */
 export interface ChatMediaUrlResponse {
   path: string;

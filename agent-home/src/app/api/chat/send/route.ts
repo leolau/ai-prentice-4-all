@@ -12,8 +12,8 @@ import { NextResponse } from "next/server";
 import { HermesApiError } from "@/lib/api/client";
 import { apiClientForRequest, getPrincipal } from "@/lib/auth/principal";
 import { mediaRef } from "@/lib/chat/media-ref";
-import { canReadMediaPath } from "@/lib/supabase/storage";
-import type { ChatAttachment, Principal } from "@/types";
+import { canReadMediaPath, createMediaSignedUrl } from "@/lib/supabase/storage";
+import type { AgentAttachmentPayload, ChatAttachment, Principal } from "@/types";
 
 interface SendBody {
   sessionId?: unknown;
@@ -62,6 +62,30 @@ function readAttachments(principal: Principal, raw: unknown): ChatAttachment[] {
   return out;
 }
 
+/**
+ * Mint a short-lived signed URL per owned attachment so the Python endpoint can
+ * download the bytes once into its document cache and make the upload readable
+ * by the brain. Attachments that fail to sign are dropped (the transcript link
+ * still renders) rather than failing the whole turn.
+ */
+async function signAttachments(
+  attachments: ChatAttachment[],
+): Promise<AgentAttachmentPayload[]> {
+  const signed = await Promise.all(
+    attachments.map(async (a) => {
+      const s = await createMediaSignedUrl(a.path).catch(() => null);
+      if (!s) return null;
+      return {
+        name: a.name,
+        content_type: a.content_type,
+        size: a.size,
+        url: s.url,
+      } satisfies AgentAttachmentPayload;
+    }),
+  );
+  return signed.filter((x): x is AgentAttachmentPayload => x !== null);
+}
+
 export async function POST(request: Request): Promise<NextResponse> {
   const principal = await getPrincipal();
   if (!principal) {
@@ -93,7 +117,8 @@ export async function POST(request: Request): Promise<NextResponse> {
       const created = await client.createSession();
       sessionId = created.session_id;
     }
-    const reply = await client.sendChat(sessionId, message);
+    const agentAttachments = await signAttachments(attachments);
+    const reply = await client.sendChat(sessionId, message, agentAttachments);
     return NextResponse.json(reply);
   } catch (err) {
     if (err instanceof HermesApiError) {

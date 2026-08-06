@@ -9491,6 +9491,15 @@ async def session_chat(session_id: str, request: Request):
         raise HTTPException(status_code=400, detail="message is required")
     profile = (body or {}).get("profile") or None
 
+    # Attachments live in a private Supabase bucket the brain can't reach;
+    # download them into the shared document cache and point the brain at the
+    # local paths so uploaded PDFs/DOCX/XLSX are actually readable (FG-20).
+    _attachments = (body or {}).get("attachments")
+    if isinstance(_attachments, list) and _attachments:
+        user_message = await _materialize_agent_home_attachments(
+            _attachments, user_message
+        )
+
     db = _open_session_db_for_profile(profile)
     try:
         sid = db.resolve_session_id(session_id)
@@ -9543,6 +9552,169 @@ async def session_chat(session_id: str, request: Request):
     }
 
 
+# Hard caps for agent-home chat attachments (config-free; these are safety
+# limits, not user-facing behaviour knobs).
+_AGENT_HOME_ATTACHMENT_MAX = 32
+_AGENT_HOME_INLINE_TEXT_MAX = 200_000
+_AGENT_HOME_TEXT_EXTS = {
+    ".txt", ".md", ".csv", ".log", ".json", ".xml",
+    ".yaml", ".yml", ".toml", ".ini", ".cfg", ".tsv",
+}
+
+
+def _agent_home_download_allowed(url: str) -> bool:
+    """SSRF guard for an agent-home attachment download URL.
+
+    agent-home stores chat uploads in a *private* Supabase Storage bucket and
+    hands the brain only a short-lived signed URL per attachment (never a local
+    path — the bucket is remote). We fetch each file server-side, so a crafted
+    ``attachments[].url`` in the request body must not be able to make the box
+    reach an internal/metadata address. Only accept ``https`` URLs whose host
+    is the configured Supabase project (``SUPABASE_URL``) or a first-party
+    ``*.supabase.co`` / ``*.supabase.in`` host.
+    """
+    from urllib.parse import urlparse
+
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return False
+    if parsed.scheme != "https" or not parsed.hostname:
+        return False
+    host = parsed.hostname.lower()
+    env_url = os.environ.get("SUPABASE_URL", "")
+    if env_url:
+        env_host = (urlparse(env_url).hostname or "").lower()
+        if env_host and host == env_host:
+            return True
+    return host.endswith(".supabase.co") or host.endswith(".supabase.in")
+
+
+async def _fetch_agent_home_attachment(url: str) -> bytes:
+    """Download one agent-home attachment. Split out so tests inject a fetcher."""
+    import httpx
+
+    async with httpx.AsyncClient(
+        timeout=httpx.Timeout(60.0), follow_redirects=False
+    ) as client:
+        resp = await client.get(url)
+        resp.raise_for_status()
+        return resp.content
+
+
+async def _materialize_agent_home_attachments(
+    attachments: list,
+    user_message: str,
+    *,
+    fetch=_fetch_agent_home_attachment,
+) -> str:
+    """Make agent-home chat attachments readable by the brain.
+
+    The agent-home upload pipeline (FG-20) writes files to a private Supabase
+    bucket and, in the transcript, references them by an ``/api/chat/media``
+    URL the brain cannot reach (SSRF-blocked + expiring). So a PDF/DOCX/XLSX
+    attached in agent-home looked "invisible" — the model searched the local
+    filesystem, found nothing, and refused to summarize it.
+
+    This fetches each attachment's bytes into the shared ``cache/documents``
+    dir — the *same* place gateway inbound documents land — and prepends the
+    gateway's document context-note (reusing
+    :func:`gateway.run._build_document_context_note` and
+    :func:`tools.credential_files.to_agent_visible_cache_path`) so a file
+    uploaded in agent-home is read exactly as one sent over Telegram: the brain
+    is pointed at a real local path and told to extract the text itself.
+    Returns the (possibly enriched) user message.
+    """
+    import mimetypes
+
+    from gateway.platforms.base import (
+        cache_document_from_bytes,
+        get_inbound_media_max_bytes,
+    )
+    from gateway.run import _build_document_context_note
+    from tools.credential_files import to_agent_visible_cache_path
+
+    notes: list[str] = []
+    max_bytes = get_inbound_media_max_bytes()
+    handled = 0
+    for item in attachments:
+        if handled >= _AGENT_HOME_ATTACHMENT_MAX:
+            break
+        if not isinstance(item, dict):
+            continue
+        url = str(item.get("url") or "").strip()
+        name = str(item.get("name") or "").strip() or "attachment"
+        ctype = str(item.get("content_type") or "").strip().lower()
+        if not url or not _agent_home_download_allowed(url):
+            _log.warning("[agent-home] attachment %r skipped: URL missing/not allowed", name)
+            notes.append(
+                f"[The user attached '{name}' but it could not be retrieved from "
+                f"storage. Tell them the upload could not be read and ask them to "
+                f"re-send it — do not invent its contents.]"
+            )
+            continue
+        try:
+            data = await fetch(url)
+        except Exception:
+            _log.exception("[agent-home] attachment download failed: %r", name)
+            notes.append(
+                f"[The user attached '{name}' but it could not be downloaded. Tell "
+                f"them the upload could not be read and ask them to re-send it — do "
+                f"not invent its contents.]"
+            )
+            continue
+        if max_bytes and len(data) > max_bytes:
+            notes.append(
+                f"[The user attached '{name}' but it is too large "
+                f"({len(data)} bytes > {max_bytes}) and was not loaded.]"
+            )
+            continue
+        try:
+            host_path = cache_document_from_bytes(data, name)
+        except Exception:
+            _log.exception("[agent-home] caching attachment failed: %r", name)
+            continue
+        agent_path = to_agent_visible_cache_path(host_path)
+        if not ctype:
+            guessed, _ = mimetypes.guess_type(name)
+            ctype = (guessed or "application/octet-stream").lower()
+        handled += 1
+
+        if ctype.startswith("image/"):
+            notes.append(
+                f"[The user sent an image: '{name}'. It is saved at: {agent_path}. "
+                f"If the request depends on what the image shows, inspect it yourself "
+                f"— e.g. with vision_analyze or the ocr-and-documents skill — instead "
+                f"of asking the user to describe it.]"
+            )
+            continue
+
+        ext = os.path.splitext(name)[1].lower()
+        if ctype.startswith("text/") or ext in _AGENT_HOME_TEXT_EXTS:
+            try:
+                text = data.decode("utf-8")
+            except UnicodeDecodeError:
+                text = None
+            if text is not None:
+                snippet = text[:_AGENT_HOME_INLINE_TEXT_MAX]
+                truncated = (
+                    "\n\n[...truncated — read the full file at the path above...]"
+                    if len(text) > _AGENT_HOME_INLINE_TEXT_MAX
+                    else ""
+                )
+                note = _build_document_context_note(name, agent_path, "text/plain")
+                notes.append(f"{note}\n\n--- {name} ---\n{snippet}{truncated}")
+            else:
+                notes.append(_build_document_context_note(name, agent_path, ctype))
+            continue
+
+        notes.append(_build_document_context_note(name, agent_path, ctype))
+
+    if not notes:
+        return user_message
+    return "\n\n".join(notes) + ("\n\n" + user_message if user_message else "")
+
+
 @app.post("/api/sessions/{session_id}/chat/stream")
 async def session_chat_stream(session_id: str, request: Request):
     """POST /api/sessions/{session_id}/chat/stream — SSE one-brain turn with an
@@ -9572,6 +9744,15 @@ async def session_chat_stream(session_id: str, request: Request):
     if not user_message:
         raise HTTPException(status_code=400, detail="message is required")
     profile = (body or {}).get("profile") or None
+
+    # Attachments live in a private Supabase bucket the brain can't reach;
+    # download them into the shared document cache and point the brain at the
+    # local paths so uploaded PDFs/DOCX/XLSX are actually readable (FG-20).
+    _attachments = (body or {}).get("attachments")
+    if isinstance(_attachments, list) and _attachments:
+        user_message = await _materialize_agent_home_attachments(
+            _attachments, user_message
+        )
 
     db = _open_session_db_for_profile(profile)
     try:

@@ -91,6 +91,47 @@ describe("HermesApiClient Wave C1 chat (BFF forwarding)", () => {
     expect(JSON.parse(String(init?.body))).toEqual({ message: "hello" });
   });
 
+  it("sendChat forwards attachments so the box can read the upload", async () => {
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(ok({ session_id: "s1", message: { role: "assistant", content: "ok" } }));
+
+    const client = new HermesApiClient({ baseUrl: "http://api.test" });
+    await client.sendChat("s1", "summarize", [
+      { name: "r.pdf", content_type: "application/pdf", size: 9, url: "https://p.supabase.co/x" },
+    ]);
+
+    expect(JSON.parse(String(fetchMock.mock.calls[0][1]?.body))).toEqual({
+      message: "summarize",
+      attachments: [
+        { name: "r.pdf", content_type: "application/pdf", size: 9, url: "https://p.supabase.co/x" },
+      ],
+    });
+  });
+
+  it("sendChat omits attachments when none are given", async () => {
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(ok({ session_id: "s1", message: { role: "assistant", content: "ok" } }));
+    const client = new HermesApiClient({ baseUrl: "http://api.test" });
+    await client.sendChat("s1", "hi", []);
+    expect(JSON.parse(String(fetchMock.mock.calls[0][1]?.body))).toEqual({ message: "hi" });
+  });
+
+  it("openChatStream forwards attachments in the streamed turn body", async () => {
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(new Response("event: done\ndata: {}\n\n", { status: 200 }));
+    const client = new HermesApiClient({ baseUrl: "http://api.test" });
+    await client.openChatStream("s1", "read this", [
+      { name: "d.docx", content_type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document", size: 3, url: "https://p.supabase.co/y" },
+    ]);
+    const body = JSON.parse(String(fetchMock.mock.calls[0][1]?.body));
+    expect(body.message).toBe("read this");
+    expect(body.attachments).toHaveLength(1);
+    expect(body.attachments[0].url).toBe("https://p.supabase.co/y");
+  });
+
   it("throws HermesApiError on a non-2xx upstream", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
       new Response(JSON.stringify({ detail: "nope" }), { status: 404 }),
