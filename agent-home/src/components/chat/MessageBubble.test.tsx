@@ -99,4 +99,30 @@ describe("MessageBubble", () => {
     expect(html).toContain('src="https://cdn.test/a.png"');
     expect(html).toContain('alt="shot"');
   });
+
+  it("renders a non-image attachment ref as a download chip, not an image", () => {
+    const html = renderToStaticMarkup(
+      <MessageBubble
+        message={{
+          role: "user",
+          content:
+            "see [report.pdf](/api/chat/media?path=mia_member%2Fhome_2%2Fu1-report.pdf)",
+        }}
+      />,
+    );
+    expect(html).toContain('data-component="ChatFile"');
+    expect(html).toContain("report.pdf");
+    // A document ref is never rendered as an <img> (would show broken).
+    expect(html).not.toContain("<img");
+  });
+
+  it("leaves a plain (non-media) link as literal text", () => {
+    const html = renderToStaticMarkup(
+      <MessageBubble
+        message={{ role: "user", content: "see [docs](https://example.com)" }}
+      />,
+    );
+    expect(html).not.toContain('data-component="ChatFile"');
+    expect(html).toContain("[docs](https://example.com)");
+  });
 });

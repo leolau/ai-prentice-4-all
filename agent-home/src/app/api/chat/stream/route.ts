@@ -25,7 +25,13 @@ interface SendBody {
 function withAttachments(message: string, attachments: ChatAttachment[]): string {
   if (attachments.length === 0) return message;
   const refs = attachments
-    .map((a) => `![${a.name}](${mediaRef(a.path)})`)
+    .map((a) => {
+      // Images embed inline (`![]`) for a preview; any other file type
+      // (PDF/DOC/XLS/…) is a download link (`[]`) so it isn't treated as a
+      // broken image.
+      const marker = a.content_type.startsWith("image/") ? "!" : "";
+      return `${marker}[${a.name}](${mediaRef(a.path)})`;
+    })
     .join("\n");
   return message ? `${message}\n\n${refs}` : refs;
 }

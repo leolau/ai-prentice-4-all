@@ -8,14 +8,21 @@ import { NextResponse } from "next/server";
 import { HermesApiError } from "@/lib/api/client";
 import { apiClientForRequest, getPrincipal } from "@/lib/auth/principal";
 
-export async function GET(): Promise<NextResponse> {
+export async function GET(request: Request): Promise<NextResponse> {
   const principal = await getPrincipal();
   if (!principal) {
     return NextResponse.json({ error: "unauthenticated" }, { status: 401 });
   }
+  const raw = new URL(request.url).searchParams.get("archived");
+  const archived =
+    raw === "only" || raw === "include" || raw === "exclude" ? raw : undefined;
   try {
     const client = await apiClientForRequest();
-    const data = await client.sessions({ source: "agent_home", order: "recent" });
+    const data = await client.sessions({
+      source: "agent_home",
+      order: "recent",
+      archived,
+    });
     return NextResponse.json(data);
   } catch (err) {
     if (err instanceof HermesApiError) {
