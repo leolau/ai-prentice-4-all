@@ -25,6 +25,7 @@ from hermes_cli.rag_drive import (
     credential_path,
     ingest_drive,
 )
+from hermes_cli.rag_files import FileIngestSummary, collect_files, ingest_files
 
 #: Where the Google Workspace MCP server keeps its per-account credentials,
 #: relative to the Hermes home. Ingestion reuses them rather than asking the
@@ -112,6 +113,41 @@ def cmd_rag_ingest_drive(args: argparse.Namespace) -> None:
 
 def _progress(file, outcome: str) -> None:
     print(f"  {outcome:34} {file.name[:60]}")
+
+
+def _report_files(summary: FileIngestSummary) -> None:
+    print(f"\n  files seen     {summary.seen}")
+    print(f"  ingested       {summary.ingested} ({summary.chunks} chunks)")
+    print(f"  unchanged      {summary.unchanged}")
+    print(f"  skipped        {summary.skipped}")
+    if summary.failures:
+        print(f"  failures       {len(summary.failures)}")
+        for failure in summary.failures[:10]:
+            print(f"    - {failure}")
+    print()
+
+
+def cmd_rag_ingest_files(args: argparse.Namespace) -> None:
+    rag, principals = _stores(args)
+    files = collect_files(args.paths, recursive=not args.no_recursive)
+    if not files:
+        raise SystemExit(
+            "No files matched. Name files directly, or a directory holding "
+            "text documents (.md, .txt, .rst, .csv)."
+        )
+
+    async def run():
+        principal = await _principal(principals, args.acting_as)
+        await rag.initialize()
+        return await ingest_files(
+            rag,
+            principal,
+            files,
+            source_kind=args.source_kind,
+            progress=_progress if args.verbose else None,
+        )
+
+    _report_files(asyncio.run(run()))
 
 
 def cmd_rag_search(args: argparse.Namespace) -> None:
@@ -219,6 +255,7 @@ def cmd_memory_rag(args: argparse.Namespace) -> None:
     action = getattr(args, "rag_command", None)
     handlers = {
         "ingest-drive": cmd_rag_ingest_drive,
+        "ingest-files": cmd_rag_ingest_files,
         "search": cmd_rag_search,
         "documents": cmd_rag_documents,
         "forget": cmd_rag_forget,
@@ -228,7 +265,7 @@ def cmd_memory_rag(args: argparse.Namespace) -> None:
     if handler is None:
         print(
             "Usage: hermes memory rag "
-            "<ingest-drive|search|documents|forget|share>",
+            "<ingest-drive|ingest-files|search|documents|forget|share>",
             file=sys.stderr,
         )
         raise SystemExit(2)
@@ -296,6 +333,37 @@ def register_rag_subparser(memory_sub: argparse._SubParsersAction) -> None:
         help="Override the Google credential directory",
     )
     ingest.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Print each file and what happened to it",
+    )
+
+    ingest_local = actions.add_parser(
+        "ingest-files",
+        help="Ingest local text files or directories of them",
+        description=(
+            "Ingests text documents from disk — including anything uploaded to "
+            "this machine through the dashboard's Files page. The file's "
+            "absolute path is its identity, so re-running updates a document "
+            "in place, and an unchanged file costs nothing."
+        ),
+    )
+    ingest_local.add_argument(
+        "paths",
+        nargs="+",
+        help="Files, or directories to walk for .md/.txt/.rst/.csv documents",
+    )
+    ingest_local.add_argument(
+        "--no-recursive",
+        action="store_true",
+        help="Do not descend into subdirectories",
+    )
+    ingest_local.add_argument(
+        "--source-kind",
+        default="local",
+        help="Corpus label these documents belong to (default: local)",
+    )
+    ingest_local.add_argument(
         "--verbose",
         action="store_true",
         help="Print each file and what happened to it",
