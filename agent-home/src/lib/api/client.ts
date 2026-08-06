@@ -232,6 +232,57 @@ export class HermesApiClient {
   }
 
   /**
+   * Open a streaming turn via `POST /api/sessions/{id}/chat/stream` and return
+   * the raw SSE `Response` for the BFF to proxy to the browser. Unlike
+   * `request()`, this does NOT consume the body — the caller pipes it through.
+   * Tool-approval prompts (approvals.tools) arrive mid-stream as
+   * `approval.request` events carrying the run_id; resolve them with
+   * `resolveRunApproval`. This is what gives agent-home chat an approval
+   * surface, so gated tools (e.g. calendar) prompt instead of failing closed.
+   */
+  async openChatStream(sessionId: string, message: string): Promise<Response> {
+    const headers = new Headers({ "content-type": "application/json" });
+    if (this.hermesToken) {
+      headers.set("cookie", `hermes_session_at=${this.hermesToken}`);
+      headers.set("authorization", `Bearer ${this.hermesToken}`);
+    }
+    const res = await fetch(
+      `${this.baseUrl}/api/sessions/${encodeURIComponent(sessionId)}/chat/stream`,
+      {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ message }),
+        cache: "no-store",
+      },
+    );
+    if (!res.ok || !res.body) {
+      const text = res.body ? await res.text().catch(() => "") : "";
+      throw new HermesApiError(
+        res.status,
+        `Hermes API chat/stream → ${res.status}`,
+        text,
+      );
+    }
+    return res;
+  }
+
+  /**
+   * Resolve a pending tool approval for a streamed run. `choice` is one of
+   * `once | session | always | deny` (or `approve`, aliased server-side).
+   * Forwards to `POST /v1/runs/{run_id}/approval` → `resolve_gateway_approval`,
+   * which unblocks the waiting agent turn. This client never decides consent.
+   */
+  async resolveRunApproval(
+    runId: string,
+    choice: string,
+  ): Promise<{ object: string; run_id: string; choice: string; resolved: number }> {
+    return this.request(`/v1/runs/${encodeURIComponent(runId)}/approval`, {
+      method: "POST",
+      json: { choice },
+    });
+  }
+
+  /**
    * The caller's open FG-17b webview session (C6 consent-gated), or the
    * default-deny empty state (`session: null`) when none is open. Read path.
    */

@@ -376,6 +376,22 @@ export interface ChatSendResponse {
   usage?: ChatUsage;
 }
 
+/**
+ * A pending tool-approval prompt surfaced mid-turn on the chat stream (the
+ * `approval.request` event from `POST /api/sessions/{id}/chat/stream`). A tool
+ * matched by `approvals.tools` blocks the agent turn until the user resolves
+ * this via `POST /api/chat/approval` with one of `choices`. `command` is
+ * already secret-redacted server-side.
+ */
+export interface ChatApprovalRequest {
+  runId: string;
+  toolName?: string;
+  command?: string;
+  description?: string;
+  patternKey?: string;
+  choices: string[];
+}
+
 /** The result of creating a conversation via `POST /api/sessions`. */
 export interface SessionCreateResponse {
   session_id: string;

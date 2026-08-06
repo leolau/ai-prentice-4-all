@@ -43,7 +43,7 @@ import sqlite3
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 try:
     from aiohttp import web
@@ -1713,6 +1713,27 @@ class APIServerAdapter(BasePlatformAdapter):
                 event_name = event_type.replace("tool.", "tool.")
                 _enqueue(event_name, {"message_id": message_id, "tool_name": tool_name, "preview": preview, "args": args})
 
+        # Approval surface for this streamed turn: a tool gated by
+        # approvals.tools blocks the agent thread and calls this back; we
+        # forward it as an `approval.request` SSE event so the client can
+        # render approve/deny and resolve it via POST /v1/runs/{run_id}/approval
+        # (see _handle_run_approval). The approval session is keyed on run_id so
+        # concurrent turns cannot cross-resolve each other. Without this surface
+        # the gate fails closed with `no_surface` (issue: agent-home calendar).
+        self._run_approval_sessions[run_id] = run_id
+        self._set_run_status(run_id, "running", session_id=session_id)
+
+        def _approval_notify(approval_data: Dict[str, Any]) -> None:
+            event = dict(approval_data or {})
+            if "command" in event:
+                from gateway.run import _redact_approval_command
+
+                event["command"] = _redact_approval_command(event.get("command"))
+            event["message_id"] = message_id
+            event.setdefault("choices", ["once", "session", "always", "deny"])
+            self._set_run_status(run_id, "waiting_for_approval", last_event="approval.request")
+            _enqueue("approval.request", event)
+
         async def _run_and_signal() -> None:
             try:
                 await queue.put(_event_payload("run.started", {"user_message": {"role": "user", "content": user_message}}))
@@ -1726,6 +1747,8 @@ class APIServerAdapter(BasePlatformAdapter):
                     stream_delta_callback=_delta,
                     tool_progress_callback=_tool_progress,
                     gateway_session_key=gateway_session_key,
+                    gateway_notify_cb=_approval_notify,
+                    approval_session_key=run_id,
                 )
                 final_response = result.get("final_response", "") if isinstance(result, dict) else ""
                 effective_session_id = result.get("session_id", session_id) if isinstance(result, dict) else session_id
@@ -1749,6 +1772,8 @@ class APIServerAdapter(BasePlatformAdapter):
                 logger.exception("[api_server] session chat stream failed")
                 await queue.put(_event_payload("error", {"message": _redact_api_error_text(exc)}))
             finally:
+                self._run_approval_sessions.pop(run_id, None)
+                self._set_run_status(run_id, "completed")
                 await queue.put(_event_payload("done", {}))
                 await queue.put(None)
 
@@ -3752,6 +3777,8 @@ class APIServerAdapter(BasePlatformAdapter):
         tool_complete_callback=None,
         agent_ref: Optional[list] = None,
         gateway_session_key: Optional[str] = None,
+        gateway_notify_cb: Optional[Callable[[Dict[str, Any]], None]] = None,
+        approval_session_key: Optional[str] = None,
     ) -> tuple:
         """
         Create an agent and run a conversation in a thread executor.
@@ -3763,6 +3790,15 @@ class APIServerAdapter(BasePlatformAdapter):
         at ``agent_ref[0]`` before ``run_conversation`` begins.  This allows
         callers (e.g. the SSE writer) to call ``agent.interrupt()`` from
         another thread to stop in-progress LLM calls.
+
+        If *gateway_notify_cb* is provided, it is registered as this run's
+        approval surface (keyed on *approval_session_key*, defaulting to a
+        per-run key) so approval-gated tools can prompt the caller instead of
+        failing closed with ``no_surface``.  Without it, non-streaming callers
+        keep the previous behavior.  The approval key is bound via
+        ``set_current_session_key`` so the tool-executor's ContextVar
+        propagation (see ``agent/tool_executor.py``) reaches the worker thread
+        where the approval hook runs.
         """
         loop = asyncio.get_running_loop()
 
@@ -3774,6 +3810,26 @@ class APIServerAdapter(BasePlatformAdapter):
                 session_key=gateway_session_key or session_id or "",
                 session_id=session_id or "",
             )
+            approval_token = None
+            approval_key = ""
+            if gateway_notify_cb is not None:
+                from tools.approval import (
+                    register_gateway_notify,
+                    set_current_session_key,
+                )
+
+                approval_key = (
+                    approval_session_key
+                    or gateway_session_key
+                    or session_id
+                    or ""
+                )
+                if approval_key:
+                    # Prefer the approval ContextVar over the bound session
+                    # env key so the approval surface is isolated per run
+                    # while memory/history stay keyed on session_id.
+                    approval_token = set_current_session_key(approval_key)
+                    register_gateway_notify(approval_key, gateway_notify_cb)
             try:
                 agent = self._create_agent(
                     ephemeral_system_prompt=ephemeral_system_prompt,
@@ -3805,6 +3861,20 @@ class APIServerAdapter(BasePlatformAdapter):
                     result["session_id"] = _eff_sid
                 return result, usage
             finally:
+                if gateway_notify_cb is not None and approval_key:
+                    from tools.approval import (
+                        reset_current_session_key,
+                        unregister_gateway_notify,
+                    )
+
+                    try:
+                        unregister_gateway_notify(approval_key)
+                    finally:
+                        if approval_token is not None:
+                            try:
+                                reset_current_session_key(approval_token)
+                            except Exception:
+                                pass
                 clear_session_vars(tokens)
 
         self._inflight_agent_runs += 1
