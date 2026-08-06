@@ -396,6 +396,7 @@ async def _rows_with_query(
             "elevated": record.elevated,
             "provenance": record.provenance,
             "score": record.score,
+            "source_session": record.source_session,
         })
     return {
         "rows": rows_out,
@@ -453,7 +454,7 @@ async def _rows_without_query(
         await bind_elevated_reads(conn, store.role_reads)
         rows = await conn.fetch(
             f"""SELECT memories.id, owner_user_id, visibility, kind, text,
-                      topic, created_at, uses, last_used,
+                      topic, created_at, uses, last_used, source_session,
                       (SELECT pr.role FROM principals pr
                         WHERE pr.user_id = memories.owner_user_id) AS owner_role
                 FROM memories
@@ -503,6 +504,7 @@ async def _rows_without_query(
             "elevated": elevated,
             "provenance": provenance,
             "score": None,
+            "source_session": row["source_session"],
         })
     return {
         "rows": rows_out,
@@ -569,6 +571,7 @@ async def _rows_chunks(
                        rag_chunks.ordinal, rag_chunks.text, rag_chunks.section,
                        rag_chunks.created_at,
                        rag_documents.title AS document_title,
+                       rag_documents.source_kind, rag_documents.source_ref,
                        (SELECT pr.role FROM principals pr
                          WHERE pr.user_id = rag_chunks.owner_user_id)
                            AS owner_role
@@ -613,6 +616,8 @@ async def _rows_chunks(
             "document_title": str(row["document_title"] or ""),
             "section": row["section"],
             "ordinal": int(row["ordinal"]),
+            "source_kind": row["source_kind"],
+            "source_ref": row["source_ref"],
         })
     return {
         "rows": rows_out,
@@ -697,10 +702,23 @@ async def get_projection(
             "SELECT to_regclass(current_schema() || '.rag_chunks')"
         )
         chunk_label = "LEFT(c.text, 120)" if chunks_exist else "NULL"
+        # A chunk's citation is its document, so the label join carries the
+        # document row too: without it a clicked chunk says only "chunk".
         chunk_join = (
-            f"LEFT JOIN {RAG_CHUNKS_TABLE} c ON c.id = p.id"
+            f"LEFT JOIN {RAG_CHUNKS_TABLE} c ON c.id = p.id "
+            "LEFT JOIN rag_documents d ON d.id = c.document_id"
             if chunks_exist
             else ""
+        )
+        chunk_columns = (
+            "c.section, c.document_id, d.title AS document_title, "
+            "d.source_kind, d.source_ref"
+            if chunks_exist
+            else (
+                "NULL AS section, NULL AS document_id, "
+                "NULL AS document_title, NULL AS source_kind, "
+                "NULL AS source_ref"
+            )
         )
 
         # Sampling (FG-23 §6): count total scope-visible rows, then if they
@@ -742,7 +760,8 @@ async def get_projection(
 
             rows = await conn.fetch(
                 f"""SELECT p.id, p.x, p.y, p.owner_user_id, p.topic, p.kind,
-                          p.visibility,
+                          p.visibility, m.source_session,
+                          {chunk_columns},
                           COALESCE(
                             LEFT(m.text, 120),
                             {chunk_label}
@@ -793,6 +812,14 @@ async def get_projection(
                 "elevated": elevated,
                 "provenance": provenance,
                 "label": str(row["label"] or ""),
+                "source_session": row["source_session"],
+                "document_id": (
+                    str(row["document_id"]) if row["document_id"] else None
+                ),
+                "document_title": row["document_title"],
+                "section": row["section"],
+                "source_kind": row["source_kind"],
+                "source_ref": row["source_ref"],
             })
 
         # Staleness: rows without projection, or model mismatch.

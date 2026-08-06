@@ -651,6 +651,16 @@ export interface MemoryRow {
   topic: string | null; text: string; truncated: boolean;
   created_at: string | null; uses: number; last_used: string | null;
   elevated: boolean; provenance: string; score: number | null;
+  // Citation fields — where this row came from. `source_session` is set on
+  // memories written during a chat; the document fields are set on
+  // `kind === "chunk"` rows, which come from an ingested file or Drive doc.
+  source_session?: string | null;
+  document_id?: string | null;
+  document_title?: string | null;
+  section?: string | null;
+  source_kind?: string | null;
+  source_ref?: string | null;
+  ordinal?: number;
 }
 
 /** Paginated rows response. */
@@ -663,6 +673,14 @@ export interface MemoryProjectionPoint {
   id: string; x: number; y: number; owner_user_id: string;
   topic: string | null; kind: string; elevated: boolean;
   provenance: string; label: string;
+  // Same citation fields as `MemoryRow`, so a clicked dot can say where it
+  // came from without a second fetch.
+  source_session?: string | null;
+  document_id?: string | null;
+  document_title?: string | null;
+  section?: string | null;
+  source_kind?: string | null;
+  source_ref?: string | null;
 }
 
 /** The `/api/memory/explorer/projection` response. */

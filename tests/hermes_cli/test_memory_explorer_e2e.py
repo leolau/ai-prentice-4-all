@@ -658,6 +658,78 @@ class TestV4RagChunks:
         assert all(r["owner_user_id"] != "bob" for r in rows["rows"])
 
     @pytest.mark.asyncio
+    async def test_rows_carry_the_source_they_came_from(
+        self, postgres_dsn, monkeypatch
+    ):
+        """A row without its origin cannot be cited (FG-23 citations).
+
+        A memory names the chat it was written in; a chunk names the document
+        and the file it was cut from.
+        """
+        await _reset(postgres_dsn)
+        store = _make_store(postgres_dsn)
+        await store.initialize()
+        await _enroll_principals(store)
+
+        rag = RagStore(store)
+        await rag.initialize()
+
+        await store.write(
+            ALICE, "the tender closes in March", source_session="sess-42"
+        )
+        await rag.ingest(
+            ALICE, source_kind="local", source_ref="/uploads/spec.md",
+            title="Tender Spec", text="The tender closes on 14 March 2026.",
+        )
+
+        _patch_store(monkeypatch, store)
+        client = _make_client(monkeypatch, ALICE)
+
+        memory_row = client.get("/api/memory/explorer/rows").json()["rows"][0]
+        assert memory_row["source_session"] == "sess-42"
+
+        chunk_row = client.get(
+            "/api/memory/explorer/rows?kind=chunk"
+        ).json()["rows"][0]
+        assert chunk_row["document_title"] == "Tender Spec"
+        assert chunk_row["source_kind"] == "local"
+        assert chunk_row["source_ref"] == "/uploads/spec.md"
+
+    @pytest.mark.asyncio
+    async def test_projection_points_carry_their_source(
+        self, postgres_dsn, monkeypatch
+    ):
+        """Clicking a dot must be able to say where it came from."""
+        await _reset(postgres_dsn)
+        store = _make_store(postgres_dsn)
+        await store.initialize()
+        await _enroll_principals(store)
+
+        rag = RagStore(store)
+        await rag.initialize()
+
+        await store.write(
+            ALICE, "a memory to anchor the projection", source_session="sess-7"
+        )
+        await rag.ingest(
+            ALICE, source_kind="local", source_ref="/uploads/doc.md",
+            title="Test Doc", text="Chunk text for the projection.",
+        )
+
+        _patch_projection_store(monkeypatch, store)
+        from hermes_cli.memory_projection import fit_projection
+        await fit_projection(store, algorithm="pca", sample_size=20000)
+
+        _patch_store(monkeypatch, store)
+        client = _make_client(monkeypatch, ALICE)
+
+        points = client.get("/api/memory/explorer/projection").json()["points"]
+        by_kind = {p["kind"]: p for p in points}
+        assert by_kind["memory"]["source_session"] == "sess-7"
+        assert by_kind["chunk"]["document_title"] == "Test Doc"
+        assert by_kind["chunk"]["source_ref"] == "/uploads/doc.md"
+
+    @pytest.mark.asyncio
     async def test_chunks_on_projection_map(self, postgres_dsn, monkeypatch):
         """After fit, chunk points appear on the projection with kind='chunk'."""
         await _reset(postgres_dsn)

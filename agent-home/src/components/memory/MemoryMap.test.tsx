@@ -1,8 +1,13 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
-import { MemoryMap, computeViewBox, topicColor } from "@/components/memory/MemoryMap";
-import type { MemoryProjection } from "@/types";
+import {
+  MemoryMap,
+  MemoryPointModal,
+  computeViewBox,
+  topicColor,
+} from "@/components/memory/MemoryMap";
+import type { MemoryProjection, MemoryProjectionPoint } from "@/types";
 
 /** Decode HTML entities so `toContain` can match apostrophes etc. */
 function decodeHtml(s: string): string {
@@ -72,7 +77,7 @@ describe("MemoryMap rendered states", () => {
       points: [],
     };
     const html = renderToStaticMarkup(
-      <MemoryMap projection={proj} queryResult={null} rowMap={new Map()} />,
+      <MemoryMap projection={proj} queryResult={null} />,
     );
     expect(html).toContain("No map yet");
     expect(html).toContain("03:00");
@@ -89,7 +94,7 @@ describe("MemoryMap rendered states", () => {
       total_points: 50000,
     };
     const html = renderToStaticMarkup(
-      <MemoryMap projection={proj} queryResult={null} rowMap={new Map()} />,
+      <MemoryMap projection={proj} queryResult={null} />,
     );
     expect(html).toContain("1 of 50,000");
   });
@@ -104,7 +109,7 @@ describe("MemoryMap rendered states", () => {
     };
     const html = decodeHtml(
       renderToStaticMarkup(
-        <MemoryMap projection={proj} queryResult={null} rowMap={new Map()} />,
+        <MemoryMap projection={proj} queryResult={null} />,
       ),
     );
     expect(html).toContain("3 new memories");
@@ -139,15 +144,17 @@ describe("MemoryMap rendered states", () => {
       })),
     };
     const html = renderToStaticMarkup(
-      <MemoryMap projection={proj} queryResult={null} rowMap={new Map()} />,
+      <MemoryMap projection={proj} queryResult={null} />,
     );
 
     const viewBox = /viewBox="([^"]+)"/.exec(html)?.[1];
     expect(viewBox).toBeDefined();
     const [vx, vy, vw, vh] = viewBox!.split(/\s+/).map(Number);
 
+    // Two circles per point: the visible dot and the wider transparent hit
+    // target sitting over it.
     const coords = [...html.matchAll(/<circle[^>]*?cx="([^"]+)"[^>]*?cy="([^"]+)"/g)];
-    expect(coords.length).toBe(spread.length);
+    expect(coords.length).toBe(spread.length * 2);
     for (const m of coords) {
       const cx = Number(m[1]);
       const cy = Number(m[2]);
@@ -168,10 +175,86 @@ describe("MemoryMap rendered states", () => {
     };
     const html = decodeHtml(
       renderToStaticMarkup(
-        <MemoryMap projection={proj} queryResult={null} rowMap={new Map()} />,
+        <MemoryMap projection={proj} queryResult={null} />,
       ),
     );
     expect(html).toContain("different embedder");
     expect(html).toContain("aren't meaningful");
+  });
+});
+
+describe("MemoryPointModal", () => {
+  const POINT: MemoryProjectionPoint = {
+    id: "p1",
+    x: 0.1,
+    y: 0.2,
+    owner_user_id: "leo_owner",
+    topic: "pricing",
+    kind: "chunk",
+    elevated: false,
+    provenance: "",
+    label: "Enterprise seats above 250 get 22% off.",
+    document_title: "Joyaether 2026 Support Policy",
+    section: "Enterprise seat discounts",
+    source_kind: "local",
+    source_ref: "/opt/data/uploads/support-policy.md",
+  };
+
+  it("is an overlay dialog, not a block appended under the map", () => {
+    // The detail used to render below a full-width square plot, so clicking a
+    // dot looked like nothing happened until the user scrolled.
+    const html = renderToStaticMarkup(
+      <MemoryPointModal point={POINT} onClose={() => {}} />,
+    );
+    expect(html).toContain('data-component="MemoryPointModal"');
+    expect(html).toContain('role="dialog"');
+    expect(html).toContain("fixed inset-0");
+  });
+
+  it("cites the document and section a chunk came from", () => {
+    const html = decodeHtml(
+      renderToStaticMarkup(
+        <MemoryPointModal point={POINT} onClose={() => {}} />,
+      ),
+    );
+    expect(html).toContain("Joyaether 2026 Support Policy");
+    expect(html).toContain("Enterprise seat discounts");
+    expect(html).toContain("/opt/data/uploads/support-policy.md");
+  });
+
+  it("cites the chat a memory was written in", () => {
+    const html = renderToStaticMarkup(
+      <MemoryPointModal
+        point={{
+          ...POINT,
+          kind: "memory",
+          document_title: null,
+          section: null,
+          source_kind: null,
+          source_ref: null,
+          source_session: "sess-42",
+        }}
+        onClose={() => {}}
+      />,
+    );
+    expect(html).toContain("From a chat");
+    expect(html).toContain("sess-42");
+  });
+
+  it("shows no source block when nothing was recorded", () => {
+    const html = renderToStaticMarkup(
+      <MemoryPointModal
+        point={{
+          ...POINT,
+          document_title: null,
+          section: null,
+          source_kind: null,
+          source_ref: null,
+        }}
+        onClose={() => {}}
+      />,
+    );
+    // "Unknown source" reads as an error; absence is silence.
+    expect(html).not.toContain("Source");
   });
 });
