@@ -21,6 +21,15 @@ def _run(coro):
     return asyncio.get_event_loop().run_until_complete(coro)
 
 
+@pytest.fixture(autouse=True)
+def _clean_supabase_env(monkeypatch):
+    """Make the SSRF guard deterministic: no ambient Supabase origin unless a
+    test sets one, and never read the box's real config.yaml."""
+    monkeypatch.delenv("HERMES_DASHBOARD_SUPABASE_URL", raising=False)
+    monkeypatch.delenv("SUPABASE_URL", raising=False)
+    monkeypatch.setattr(web_server, "load_config", lambda: {})
+
+
 # --------------------------------------------------------------------------- #
 # SSRF guard
 # --------------------------------------------------------------------------- #
@@ -50,6 +59,33 @@ def test_download_guard_honors_supabase_url_env(monkeypatch):
     )
     # A different host is still rejected even with the env set.
     assert not web_server._agent_home_download_allowed("https://other.example/x")
+
+
+def test_download_guard_allows_configured_http_loopback(monkeypatch):
+    # Self-hosted Supabase (the hermes-systest box) signs URLs on
+    # http://127.0.0.1:8000 — the guard must accept its own configured origin.
+    monkeypatch.setenv("SUPABASE_URL", "http://127.0.0.1:8000")
+    assert web_server._agent_home_download_allowed(
+        "http://127.0.0.1:8000/storage/v1/object/sign/media/x?token=y"
+    )
+    # But not some *other* localhost service on a different port (SSRF).
+    assert not web_server._agent_home_download_allowed("http://127.0.0.1:6379/x")
+    # Nor a non-loopback host on the same port.
+    assert not web_server._agent_home_download_allowed("http://10.0.0.5:8000/x")
+
+
+def test_download_guard_honors_dashboard_env_and_config(monkeypatch):
+    # HERMES_DASHBOARD_SUPABASE_URL wins over the bare name.
+    monkeypatch.setenv("HERMES_DASHBOARD_SUPABASE_URL", "http://127.0.0.1:8000")
+    assert web_server._agent_home_download_allowed("http://127.0.0.1:8000/x")
+    # And config.yaml is the last-resort source when no env is set.
+    monkeypatch.delenv("HERMES_DASHBOARD_SUPABASE_URL", raising=False)
+    monkeypatch.setattr(
+        web_server,
+        "load_config",
+        lambda: {"dashboard": {"supabase_auth": {"url": "http://127.0.0.1:8000"}}},
+    )
+    assert web_server._agent_home_download_allowed("http://127.0.0.1:8000/x")
 
 
 # --------------------------------------------------------------------------- #
