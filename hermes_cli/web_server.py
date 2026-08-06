@@ -9562,6 +9562,37 @@ _AGENT_HOME_TEXT_EXTS = {
 }
 
 
+def _agent_home_supabase_origin() -> tuple[str, str, "int | None"] | None:
+    """Resolve the ``(scheme, host, port)`` the box signs media URLs against.
+
+    Mirrors the dashboard-auth resolution order
+    (``HERMES_DASHBOARD_SUPABASE_URL`` → ``SUPABASE_URL`` →
+    ``dashboard.supabase_auth.url`` in config.yaml) so the guard recognises the
+    same Supabase endpoint the login flow already trusts — including a
+    self-hosted deployment that serves storage over ``http`` on loopback
+    (e.g. ``http://127.0.0.1:8000``). Returns ``None`` when unconfigured.
+    """
+    from urllib.parse import urlparse
+
+    url = (
+        os.environ.get("HERMES_DASHBOARD_SUPABASE_URL", "").strip()
+        or os.environ.get("SUPABASE_URL", "").strip()
+    )
+    if not url:
+        try:
+            section = cfg_get(load_config() or {}, "dashboard", "supabase_auth", default=None)
+            if isinstance(section, dict):
+                url = str(section.get("url", "") or "").strip()
+        except Exception:
+            url = ""
+    if not url:
+        return None
+    parsed = urlparse(url)
+    if not parsed.scheme or not parsed.hostname:
+        return None
+    return (parsed.scheme.lower(), parsed.hostname.lower(), parsed.port)
+
+
 def _agent_home_download_allowed(url: str) -> bool:
     """SSRF guard for an agent-home attachment download URL.
 
@@ -9569,9 +9600,14 @@ def _agent_home_download_allowed(url: str) -> bool:
     hands the brain only a short-lived signed URL per attachment (never a local
     path — the bucket is remote). We fetch each file server-side, so a crafted
     ``attachments[].url`` in the request body must not be able to make the box
-    reach an internal/metadata address. Only accept ``https`` URLs whose host
-    is the configured Supabase project (``SUPABASE_URL``) or a first-party
-    ``*.supabase.co`` / ``*.supabase.in`` host.
+    reach an internal/metadata address. Accept a URL only when it either:
+
+    1. exactly matches the configured Supabase origin (scheme + host + port) —
+       this is the endpoint the BFF minted the signed URL on, and it covers
+       self-hosted boxes that serve storage over ``http`` on loopback (the
+       match is exact, so no *other* localhost port is reachable); or
+    2. is an ``https`` URL to a first-party ``*.supabase.co`` /
+       ``*.supabase.in`` host (hosted Supabase, when the origin is unset).
     """
     from urllib.parse import urlparse
 
@@ -9579,15 +9615,18 @@ def _agent_home_download_allowed(url: str) -> bool:
         parsed = urlparse(url)
     except Exception:
         return False
-    if parsed.scheme != "https" or not parsed.hostname:
+    if not parsed.hostname:
         return False
+    scheme = parsed.scheme.lower()
     host = parsed.hostname.lower()
-    env_url = os.environ.get("SUPABASE_URL", "")
-    if env_url:
-        env_host = (urlparse(env_url).hostname or "").lower()
-        if env_host and host == env_host:
-            return True
-    return host.endswith(".supabase.co") or host.endswith(".supabase.in")
+
+    origin = _agent_home_supabase_origin()
+    if origin is not None and (scheme, host, parsed.port) == origin:
+        return True
+
+    return scheme == "https" and (
+        host.endswith(".supabase.co") or host.endswith(".supabase.in")
+    )
 
 
 async def _fetch_agent_home_attachment(url: str) -> bytes:
