@@ -15,11 +15,14 @@ export function Composer({
   storageEnabled,
   sessionId,
   onSend,
+  onStop,
 }: {
   sending: boolean;
   storageEnabled: boolean;
   sessionId: string | null;
   onSend: (text: string, attachments: ChatAttachment[]) => void | Promise<void>;
+  /** Cancel the in-flight turn for the conversation on screen. */
+  onStop?: () => void;
 }) {
   const [text, setText] = useState("");
   const [attachments, setAttachments] = useState<ChatAttachment[]>([]);
@@ -134,14 +137,27 @@ export function Composer({
           placeholder="Message your agent… (Shift+Enter for a new line)"
           className="max-h-48 min-h-[46px] flex-1 resize-none overflow-y-auto rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-3 text-sm"
         />
-        <button
-          type="button"
-          onClick={submit}
-          disabled={!canSend}
-          className="rounded-xl bg-[var(--color-accent)] px-4 py-3 text-sm font-semibold text-[var(--color-accent-fg)] disabled:opacity-60"
-        >
-          Send
-        </button>
+        {sending ? (
+          <button
+            type="button"
+            onClick={() => onStop?.()}
+            aria-label="Stop the agent"
+            title="Stop the agent"
+            className="flex items-center gap-1.5 rounded-xl bg-red-600 px-4 py-3 text-sm font-semibold text-white"
+          >
+            <span aria-hidden="true" className="h-3 w-3 rounded-[3px] bg-white" />
+            Stop
+          </button>
+        ) : (
+          <button
+            type="button"
+            onClick={submit}
+            disabled={!canSend}
+            className="rounded-xl bg-[var(--color-accent)] px-4 py-3 text-sm font-semibold text-[var(--color-accent-fg)] disabled:opacity-60"
+          >
+            Send
+          </button>
+        )}
       </div>
     </div>
   );
