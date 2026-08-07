@@ -40,6 +40,46 @@ export function describeSource(row: {
   return null;
 }
 
+/**
+ * Where to go for the full source, when somewhere exists.
+ *
+ * A chat memory links to its conversation; a Drive document links out to
+ * Drive; an ingested local file links to the rest of its chunks on this page,
+ * because agent-home deliberately serves no arbitrary path off the box.
+ */
+export interface SourceLink {
+  href: string;
+  text: string;
+  external: boolean;
+}
+
+export function sourceLink(row: {
+  source_session?: string | null;
+  document_id?: string | null;
+  source_kind?: string | null;
+  source_ref?: string | null;
+}): SourceLink | null {
+  const ref = row.source_ref || "";
+  if (/^https?:\/\//i.test(ref)) {
+    return { href: ref, text: "Open the document", external: true };
+  }
+  if (row.document_id) {
+    return {
+      href: `/memory?document=${encodeURIComponent(row.document_id)}`,
+      text: "See this document's passages",
+      external: false,
+    };
+  }
+  if (row.source_session) {
+    return {
+      href: `/chat?session=${encodeURIComponent(row.source_session)}`,
+      text: "Open the conversation",
+      external: false,
+    };
+  }
+  return null;
+}
+
 /** "file" → "File", "drive" → "Google Drive", anything else title-cased. */
 function sourceKindWord(kind: string | null | undefined): string {
   if (!kind) return "Document";

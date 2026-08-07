@@ -1,8 +1,8 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 
-import { describeSource } from "@/components/memory/citation";
+import { describeSource, sourceLink } from "@/components/memory/citation";
 import type {
   MemoryProjection,
   MemoryProjectionPoint,
@@ -100,6 +100,7 @@ export function MemoryMap({
   queryResult: MemoryQueryPlacement | null;
 }) {
   const [selected, setSelected] = useState<MemoryProjectionPoint | null>(null);
+  const [legendOpen, setLegendOpen] = useState(false);
 
   // --- Empty / degenerate states (all of which occur) --------------------
   if (projection.algorithm == null || projection.points.length === 0) {
@@ -162,13 +163,25 @@ export function MemoryMap({
       {sampledBanner && (
         <p className="text-xs text-[var(--color-muted)]">{sampledBanner}</p>
       )}
-      <p className="text-xs text-[var(--color-muted)]">
-        A 2-D projection always distorts — positions are relative, not exact.
-      </p>
+      <div className="flex items-start justify-between gap-3">
+        <p className="text-xs text-[var(--color-muted)]">
+          A 2-D projection always distorts — positions are relative, not exact.
+        </p>
+        <button
+          type="button"
+          onClick={() => setLegendOpen(true)}
+          className="shrink-0 rounded-lg border border-[var(--color-border)] px-2 py-1 text-xs text-[var(--color-muted)]"
+        >
+          Legend
+        </button>
+      </div>
 
+      {/* 85% of the column width: the plot is square, so trimming the width
+          is the only way to lose 15% of its height and still keep the
+          aspect ratio — which is what makes it fit a laptop viewport. */}
       <svg
         viewBox={`0 0 ${VIEW_SIDE} ${VIEW_SIDE}`}
-        className="w-full touch-none rounded-2xl border border-[var(--color-border)] bg-[var(--color-bg)]"
+        className="mx-auto w-[85%] touch-none rounded-2xl border border-[var(--color-border)] bg-[var(--color-bg)]"
         style={{ aspectRatio: "1" }}
         preserveAspectRatio="xMidYMid meet"
       >
@@ -191,14 +204,28 @@ export function MemoryMap({
                   opacity={opacity}
                 />
               )}
-              <circle
-                cx={cx}
-                cy={cy}
-                r={1.2}
-                fill={color}
-                opacity={opacity}
-                pointerEvents="none"
-              />
+              {/* Shape carries the kind: a memory is a dot, a document chunk
+                  a square. Colour is already spent on the topic. */}
+              {p.kind === "chunk" ? (
+                <rect
+                  x={cx - 1.1}
+                  y={cy - 1.1}
+                  width={2.2}
+                  height={2.2}
+                  fill={color}
+                  opacity={opacity}
+                  pointerEvents="none"
+                />
+              ) : (
+                <circle
+                  cx={cx}
+                  cy={cy}
+                  r={1.2}
+                  fill={color}
+                  opacity={opacity}
+                  pointerEvents="none"
+                />
+              )}
               {/* A 1.2-unit dot is a ~4 px target on a phone: the hit area is
                   a wider invisible circle over it. */}
               <circle
@@ -238,12 +265,119 @@ export function MemoryMap({
         )}
       </svg>
 
+      {legendOpen && <MemoryMapLegend onClose={() => setLegendOpen(false)} />}
+
       {selected && (
         <MemoryPointModal
           point={selected}
           onClose={() => setSelected(null)}
         />
       )}
+    </div>
+  );
+}
+
+/** What a dot's shape, ring and colour mean. */
+export function MemoryMapLegend({ onClose }: { onClose: () => void }) {
+  useEscapeToClose(onClose);
+  return (
+    <ModalFrame
+      component="MemoryMapLegend"
+      title="How to read the map"
+      onClose={onClose}
+    >
+      <dl className="space-y-3 text-sm">
+        <LegendRow
+          swatch={<circle cx={8} cy={8} r={5} fill="var(--color-accent)" />}
+          term="Dot — a memory"
+          desc="A fact the agent stored, usually written during a chat."
+        />
+        <LegendRow
+          swatch={
+            <rect x={3} y={3} width={10} height={10} fill="var(--color-accent)" />
+          }
+          term="Square — a document chunk"
+          desc="A passage of a file you ingested, retrievable with citations."
+        />
+        <LegendRow
+          swatch={
+            <>
+              <circle
+                cx={8}
+                cy={8}
+                r={7}
+                fill="none"
+                stroke="var(--color-accent)"
+                strokeWidth={1}
+              />
+              <circle cx={8} cy={8} r={3.5} fill="var(--color-accent)" />
+            </>
+          }
+          term="Outer ring — someone else's"
+          desc="Read through your elevated role; the owner is named in the popup."
+        />
+        <LegendRow
+          swatch={
+            <>
+              <circle
+                cx={8}
+                cy={8}
+                r={7}
+                fill="none"
+                stroke="var(--color-accent)"
+                strokeWidth={1}
+              />
+              <circle
+                cx={8}
+                cy={8}
+                r={2.5}
+                fill="none"
+                stroke="var(--color-accent)"
+                strokeWidth={1}
+              />
+            </>
+          }
+          term="Hollow double ring — your query"
+          desc="Where the text you placed lands; its neighbours stay lit and the rest dim."
+        />
+        <LegendRow
+          swatch={
+            <>
+              <circle cx={5} cy={8} r={3.5} fill="#4363d8" />
+              <circle cx={12} cy={8} r={3.5} fill="#f58231" />
+            </>
+          }
+          term="Colour — the topic"
+          desc="One stable colour per topic (untopiced memories share one). Colour says nothing about importance."
+        />
+      </dl>
+      <p className="mt-3 text-xs text-[var(--color-muted)]">
+        Distance is meaning: dots near each other were embedded as similar
+        text. The projection flattens 1024 dimensions to two, so read
+        neighbourhoods, not exact positions.
+      </p>
+    </ModalFrame>
+  );
+}
+
+function LegendRow({
+  swatch,
+  term,
+  desc,
+}: {
+  swatch: ReactNode;
+  term: string;
+  desc: string;
+}) {
+  return (
+    <div data-component="LegendRow" className="flex gap-3">
+      <svg viewBox="0 0 16 16" className="mt-0.5 h-4 w-4 shrink-0 text-[var(--color-accent)]">
+        {swatch}
+      </svg>
+      <div>
+        <dt className="font-medium">{term}</dt>
+        <dd className="text-xs text-[var(--color-muted)]">{desc}</dd>
+      </div>
     </div>
   );
 }
@@ -262,6 +396,64 @@ export function MemoryPointModal({
   point: MemoryProjectionPoint;
   onClose: () => void;
 }) {
+  useEscapeToClose(onClose);
+
+  const source = describeSource(point);
+  const link = sourceLink(point);
+
+  return (
+    <ModalFrame
+      component="MemoryPointModal"
+      title={point.kind === "chunk" ? "Document chunk" : "Memory"}
+      onClose={onClose}
+    >
+      <p className="max-h-60 overflow-y-auto text-sm leading-relaxed">
+        {point.label || "(no label)"}
+      </p>
+
+      {source && (
+        <div className="mt-3 border-t border-[var(--color-border)] pt-2">
+          <p className="text-xs uppercase tracking-wide text-[var(--color-muted)]">
+            Source
+          </p>
+          <p className="text-sm">{source.label}</p>
+          {source.detail && (
+            <p className="break-all text-xs text-[var(--color-muted)]">
+              {source.detail}
+            </p>
+          )}
+          {link && (
+            <a
+              href={link.href}
+              target={link.external ? "_blank" : undefined}
+              rel={link.external ? "noreferrer" : undefined}
+              className="mt-2 inline-block text-sm text-[var(--color-accent)] underline"
+            >
+              {link.text}
+            </a>
+          )}
+        </div>
+      )}
+
+      <div className="mt-3 flex flex-wrap gap-2 text-xs text-[var(--color-muted)]">
+        {point.topic && (
+          <span className="rounded bg-[var(--color-surface)] px-2 py-0.5">
+            {point.topic}
+          </span>
+        )}
+        <span>owner: {point.owner_user_id}</span>
+        {point.elevated && point.provenance && (
+          <span className="text-[var(--color-accent)]">
+            {point.provenance}
+          </span>
+        )}
+      </div>
+    </ModalFrame>
+  );
+}
+
+/** Close on Escape, so a modal over the map is dismissable from the keyboard. */
+function useEscapeToClose(onClose: () => void): void {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") onClose();
@@ -269,25 +461,34 @@ export function MemoryPointModal({
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
+}
 
-  const source = describeSource(point);
-
+/** Backdrop + dialog card + close button, shared by the map's two popups. */
+function ModalFrame({
+  component,
+  title,
+  onClose,
+  children,
+}: {
+  component: string;
+  title: string;
+  onClose: () => void;
+  children: ReactNode;
+}) {
   return (
     <div
-      data-component="MemoryPointModal"
+      data-component={component}
       role="dialog"
       aria-modal="true"
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
       onClick={onClose}
     >
       <div
-        className="w-full max-w-sm rounded-2xl border border-[var(--color-border)] bg-[var(--color-bg)] p-4"
+        className="max-h-[85dvh] w-full max-w-sm overflow-y-auto rounded-2xl border border-[var(--color-border)] bg-[var(--color-bg)] p-4"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="mb-2 flex items-center justify-between gap-3">
-          <h2 className="text-sm font-semibold">
-            {point.kind === "chunk" ? "Document chunk" : "Memory"}
-          </h2>
+          <h2 className="text-sm font-semibold">{title}</h2>
           <button
             type="button"
             onClick={onClose}
@@ -296,38 +497,7 @@ export function MemoryPointModal({
             Close
           </button>
         </div>
-
-        <p className="max-h-60 overflow-y-auto text-sm leading-relaxed">
-          {point.label || "(no label)"}
-        </p>
-
-        {source && (
-          <div className="mt-3 border-t border-[var(--color-border)] pt-2">
-            <p className="text-xs uppercase tracking-wide text-[var(--color-muted)]">
-              Source
-            </p>
-            <p className="text-sm">{source.label}</p>
-            {source.detail && (
-              <p className="break-all text-xs text-[var(--color-muted)]">
-                {source.detail}
-              </p>
-            )}
-          </div>
-        )}
-
-        <div className="mt-3 flex flex-wrap gap-2 text-xs text-[var(--color-muted)]">
-          {point.topic && (
-            <span className="rounded bg-[var(--color-surface)] px-2 py-0.5">
-              {point.topic}
-            </span>
-          )}
-          <span>owner: {point.owner_user_id}</span>
-          {point.elevated && point.provenance && (
-            <span className="text-[var(--color-accent)]">
-              {point.provenance}
-            </span>
-          )}
-        </div>
+        {children}
       </div>
     </div>
   );
