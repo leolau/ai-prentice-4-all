@@ -22,6 +22,9 @@ from urllib.request import Request, urlopen
 sys.path.insert(0, '/opt/data')
 from track_credit_helper import track_inference
 
+# Shared modules (triage_handlers, memory_bridge)
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 # Paths
 EMAIL_CONFIG_PATH = '/opt/data/email-messages/config.json'
 DB_PATH = '/opt/data/whatsapp-messages/whatsapp_data.db'
@@ -36,8 +39,14 @@ os.makedirs(EMAIL_PROCESSED_DIR, exist_ok=True)
 sys.path.insert(0, '/opt/data/whatsapp-messages')
 
 DEEPSEEK_API_KEY = os.environ.get('DEEPSEEK_API_KEY', '')
-DEEPSEEK_MODEL = 'deepseek-chat'
 DEEPSEEK_BASE_URL = 'https://api.deepseek.com/v1/chat/completions'
+
+# Load config for model name (previously hardcoded)
+try:
+    _email_config = load_email_config()
+except Exception:
+    _email_config = {}
+DEEPSEEK_MODEL = _email_config.get('triage', {}).get('model', 'deepseek-chat')
 
 
 def get_db():
@@ -52,14 +61,24 @@ def load_email_config():
         return json.load(f)
 
 
-def load_skills(channel='email'):
-    """Load skill .md files from both shared and email-specific directories."""
-    skills_content = []
-    dirs = [WA_SKILLS_DIR, EMAIL_SKILLS_DIR]
-    if channel == 'email':
-        dirs.append(os.path.join(EMAIL_SKILLS_DIR, 'custom'))
+def load_skills(channel='email', config=None):
+    """Load skill .md files from configured skill directories.
 
-    for sdir in dirs:
+    Reads skills_dirs from config.json's 'triage' section. Falls back to
+    WA_SKILLS_DIR + EMAIL_SKILLS_DIR for backward compatibility.
+    """
+    skills_content = []
+
+    triage_cfg = (config or _email_config or {}).get('triage', {})
+    base_dirs = triage_cfg.get('skills_dirs', [WA_SKILLS_DIR, EMAIL_SKILLS_DIR])
+    subdirs = triage_cfg.get('skills_subdirs', ['custom'])
+
+    search_dirs = list(base_dirs)
+    for bd in base_dirs:
+        for sd in subdirs:
+            search_dirs.append(os.path.join(bd, sd))
+
+    for sdir in search_dirs:
         if not os.path.isdir(sdir):
             continue
         for f in sorted(glob.glob(os.path.join(sdir, '*.md'))):
@@ -104,7 +123,7 @@ def call_deepseek(messages, temperature=0.3, max_tokens=2000):
 
 def triage_email_batch(batch):
     """Run triage on an email batch."""
-    skills_text = load_skills('email')
+    skills_text = load_skills('email', _email_config)
     sender = batch['sender']
     sender_name = batch.get('sender_name', '')
     account_id = batch['account_id']
@@ -150,34 +169,13 @@ def triage_email_batch(batch):
 2. Extract any tasks or action items
 3. Extract any notes worth remembering
 4. Determine if this batch should be escalated (pushed immediately to the user)
+5. Extract any facts worth persisting to long-term memory
 
 {skills_text}
 
-ESCALATION RULES:
-- ANY email from a family contact -> ESCALATE (reason: "family")
-- ANY email from a VIP contact with important content -> ESCALATE (reason: "vip_sender")
-- Business requests needing immediate attention -> ESCALATE (reason: "urgent_business")
-- Sales/RFP/proposal deadlines within 24h -> ESCALATE (reason: "sales_opportunity")
-- Invoices and payment requests -> ESCALATE (reason: "invoice")
-- Client emails needing response -> ESCALATE (reason: "client_email")
-- Newsletters, marketing, auto-generated notifications -> DO NOT escalate
-- Automated alerts and system notifications -> DO NOT escalate
 {family_info}
 
-Respond in JSON format:
-{{
-  "classification": "urgent_business|meeting|task|invoice|sales_opportunity|informational|newsletter|notification|personal|spam",
-  "summary": "brief 1-2 sentence summary of the batch",
-  "escalate": true/false,
-  "escalation_reason": "family|vip_sender|urgent_business|sales_opportunity|invoice|client_email|null",
-  "escalation_priority": "high|medium|low",
-  "tasks": [
-    {{"description": "...", "due_date": "YYYY-MM-DD or null", "priority": "high|medium|low"}}
-  ],
-  "notes": [
-    {{"content": "..."}}
-  ]
-}}
+Analyze the batch and respond according to the response schema defined in the skills above.
 """
 
     user_prompt = f"""Triage this email batch:
@@ -208,70 +206,64 @@ Emails:
 
 
 def process_email_triage_result(batch, result):
-    """Write email triage results to SQLite."""
+    """Write email triage results to SQLite via the handler registry."""
     db = get_db()
-    now = datetime.now(timezone.utc).isoformat()
-    account_id = batch['account_id']
-    first_email_id = batch['emails'][0]['id'] if batch['emails'] else None
-
-    # Write tasks to email_tasks
-    for task in result.get('tasks', []):
-        task_id = str(uuid.uuid4())
-        try:
-            db.execute(
-                """INSERT INTO email_tasks (id, account_id, source_email_id, description, due_date, status, priority, created_at)
-                   VALUES (?, ?, ?, ?, ?, 'pending', ?, ?)""",
-                (task_id, account_id, first_email_id,
-                 task['description'], task.get('due_date'), task.get('priority', 'medium'), now)
-            )
-        except Exception as e:
-            print(f"[email-triage] Error inserting task: {e}")
-
-    # Write notes to email_notes
-    for note in result.get('notes', []):
-        note_id = str(uuid.uuid4())
-        try:
-            db.execute(
-                """INSERT INTO email_notes (id, account_id, source_email_id, content, created_at)
-                   VALUES (?, ?, ?, ?, ?)""",
-                (note_id, account_id, first_email_id,
-                 note['content'], now)
-            )
-        except Exception as e:
-            print(f"[email-triage] Error inserting note: {e}")
-
-    # Write escalation if needed
-    if result.get('escalate'):
-        esc_id = str(uuid.uuid4())
-
-        # Look up contact_id
-        contact_id = None
-        handle = db.execute(
-            "SELECT contact_id FROM contact_handles WHERE handle_type = 'email' AND handle_value = ?",
-            (batch['sender'],)
-        ).fetchone()
-        if handle:
-            contact_id = handle['contact_id']
-
-        try:
-            db.execute(
-                """INSERT INTO escalations (id, source_phone, source_msg_id, sender_phone,
-                   reason, summary, priority, status, created_at,
-                   channel, sender_email, sender_name, contact_id)
-                   VALUES (?, ?, ?, NULL, ?, ?, ?, 'pending', ?, 'email', ?, ?, ?)""",
-                (esc_id, account_id, first_email_id,
-                 result.get('escalation_reason', 'unknown'),
-                 result.get('summary', ''), result.get('escalation_priority', 'medium'), now,
-                 batch['sender'], batch.get('sender_name', ''), contact_id)
-            )
-        except Exception as e:
-            print(f"[email-triage] Error inserting escalation: {e}")
-
+    batch['_channel'] = 'email'
+    try:
+        from shared.triage_handlers import process_result
+        process_result(result, batch, db)
+    except ImportError:
+        # Fallback to inline processing if shared module is not available
+        now = datetime.now(timezone.utc).isoformat()
+        account_id = batch['account_id']
+        first_email_id = batch['emails'][0]['id'] if batch['emails'] else None
+        for task in result.get('tasks', []):
+            try:
+                db.execute(
+                    """INSERT INTO email_tasks (id, account_id, source_email_id, description, due_date, status, priority, created_at)
+                       VALUES (?, ?, ?, ?, ?, 'pending', ?, ?)""",
+                    (str(uuid.uuid4()), account_id, first_email_id,
+                     task['description'], task.get('due_date'), task.get('priority', 'medium'), now)
+                )
+            except Exception as e:
+                print(f"[email-triage] Error inserting task: {e}")
+        for note in result.get('notes', []):
+            try:
+                db.execute(
+                    """INSERT INTO email_notes (id, account_id, source_email_id, content, created_at)
+                       VALUES (?, ?, ?, ?, ?)""",
+                    (str(uuid.uuid4()), account_id, first_email_id,
+                     note['content'], now)
+                )
+            except Exception as e:
+                print(f"[email-triage] Error inserting note: {e}")
+        if result.get('escalate'):
+            contact_id = None
+            handle = db.execute(
+                "SELECT contact_id FROM contact_handles WHERE handle_type = 'email' AND handle_value = ?",
+                (batch['sender'],)
+            ).fetchone()
+            if handle:
+                contact_id = handle['contact_id']
+            try:
+                db.execute(
+                    """INSERT INTO escalations (id, source_phone, source_msg_id, sender_phone,
+                       reason, summary, priority, status, created_at,
+                       channel, sender_email, sender_name, contact_id)
+                       VALUES (?, ?, ?, NULL, ?, ?, ?, 'pending', ?, 'email', ?, ?, ?)""",
+                    (str(uuid.uuid4()), account_id, first_email_id,
+                     result.get('escalation_reason', 'unknown'),
+                     result.get('summary', ''), result.get('escalation_priority', 'medium'), now,
+                     batch['sender'], batch.get('sender_name', ''), contact_id)
+                )
+            except Exception as e:
+                print(f"[email-triage] Error inserting escalation: {e}")
     db.commit()
     db.close()
 
     print(f"[email-triage] Result: class={result.get('classification')}, escalate={result.get('escalate')}, "
-          f"tasks={len(result.get('tasks', []))}, notes={len(result.get('notes', []))}")
+          f"tasks={len(result.get('tasks', []))}, notes={len(result.get('notes', []))}, "
+          f"memory_facts={len(result.get('memory_facts', []))}")
 
 
 def process_email_batch_file(batch_path):
