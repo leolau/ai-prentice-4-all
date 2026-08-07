@@ -37,6 +37,9 @@ SKILLS_DIR = '/opt/data/skills/calendar-triage'
 DEEPSEEK_API_KEY = os.environ.get('DEEPSEEK_API_KEY', '')
 DEEPSEEK_BASE_URL = 'https://api.deepseek.com/v1/chat/completions'
 
+# Module-level config fallback (set by main() at startup)
+config = {}
+
 
 def get_db():
     conn = sqlite3.connect(DB_PATH, timeout=30)

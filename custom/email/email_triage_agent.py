@@ -41,6 +41,12 @@ sys.path.insert(0, '/opt/data/whatsapp-messages')
 DEEPSEEK_API_KEY = os.environ.get('DEEPSEEK_API_KEY', '')
 DEEPSEEK_BASE_URL = 'https://api.deepseek.com/v1/chat/completions'
 
+
+def load_email_config():
+    with open(EMAIL_CONFIG_PATH) as f:
+        return json.load(f)
+
+
 # Load config for model name (previously hardcoded)
 try:
     _email_config = load_email_config()
@@ -54,11 +60,6 @@ def get_db():
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     return conn
-
-
-def load_email_config():
-    with open(EMAIL_CONFIG_PATH) as f:
-        return json.load(f)
 
 
 def load_skills(channel='email', config=None):
