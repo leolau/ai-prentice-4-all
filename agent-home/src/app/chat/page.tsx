@@ -1,3 +1,4 @@
+import { ChatHeaderActions } from "@/components/chat/ChatHeaderActions";
 import { ChatPane } from "@/components/chat/ChatPane";
 import { MobileShell } from "@/components/MobileShell";
 import { apiClientForRequest, requirePrincipal } from "@/lib/auth/principal";
@@ -54,7 +55,7 @@ export default async function Page({
   }
 
   return (
-    <MobileShell title="Chat">
+    <MobileShell title="Chat" actions={error ? null : <ChatHeaderActions />}>
       {error ? (
         <div
           data-component="ChatError"

@@ -9,6 +9,7 @@ import { Composer } from "@/components/chat/Composer";
 import { SessionModal } from "@/components/chat/SessionModal";
 import { SessionTabs } from "@/components/chat/SessionTabs";
 import { StatusIndicator } from "@/components/chat/StatusIndicator";
+import { chatHeaderActionsRef } from "@/lib/chat/header-actions";
 import {
   setLastAssistantContent,
   withLiveTurn,
@@ -119,6 +120,24 @@ export function ChatPane({
   useEffect(() => {
     selectedRef.current = sessionId;
   }, [sessionId]);
+
+  // Register the chat header action callbacks (startNew / openArchived) into the
+  // shared ref so the ChatHeaderActions component in the MobileShell header can
+  // invoke them.  Runs on every render (no deps) so the ref always holds the
+  // latest closures.  The cleanup resets to noops on unmount so a stale ref
+  // can't fire after navigating away from the chat page.
+  useEffect(() => {
+    chatHeaderActionsRef.current.startNew = startNewConversation;
+    chatHeaderActionsRef.current.openArchived = () => setArchivedOpen(true);
+  });
+  useEffect(() => {
+    return () => {
+      chatHeaderActionsRef.current = {
+        startNew: () => {},
+        openArchived: () => {},
+      };
+    };
+  }, []);
 
   const selKey = keyOf(sessionId);
   const selBusy = sendingKeys.includes(selKey);
@@ -412,7 +431,6 @@ export function ChatPane({
         onSelect={openConversation}
         onOpenDetails={setDetailsSession}
         onNew={startNewConversation}
-        onOpenArchived={() => setArchivedOpen(true)}
         onReorder={reorderSessions}
       />
 
