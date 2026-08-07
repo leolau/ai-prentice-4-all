@@ -10,16 +10,21 @@ Polls both Bridge A (port 3000) and Bridge B (port 3001) for messages.
 """
 
 import json
+import mimetypes
 import os
 import sqlite3
+import sys
 import threading
 import time
 import uuid
 from datetime import datetime, timezone
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
-from urllib.request import urlopen
-from urllib.error import URLError
+from urllib.request import urlopen, Request
+from urllib.error import URLError, HTTPError
+
+# Make custom/shared importable so the batcher can register media files.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # Paths
 CONFIG_PATH = '/opt/data/whatsapp-messages/config.json'
@@ -144,8 +149,39 @@ def get_sender_name(msg):
     return msg.get('senderName') or msg.get('pushName') or msg.get('verifiedBizName') or None
 
 
-def process_message(msg, source_phone):
-    """Process a single message: write to DB and add to batch."""
+def _media_filename(msg, msg_id, media_type, mimetype):
+    """Derive a reasonable filename for a WhatsApp media file."""
+    # Try to get the original filename for documents.
+    msg_obj = (msg.get('message', msg) if isinstance(msg, dict) else {}) or {}
+    doc = msg_obj.get('documentMessage') or {}
+    if doc.get('fileName'):
+        return doc['fileName']
+    ext = mimetypes.guess_extension(mimetype or '') or ''
+    if not ext:
+        ext_map = {'image': '.jpg', 'video': '.mp4', 'audio': '.mp3',
+                   'document': '.bin', 'sticker': '.webp'}
+        ext = ext_map.get(media_type or '', '.bin')
+    return f"{media_type or 'media'}_{msg_id}{ext}"
+
+
+def download_media(bridge_port, msg_id):
+    """Download media bytes from the bridge.
+
+    Tries ``GET http://localhost:{port}/media/{messageId}``.
+    Returns ``(data, content_type)`` or ``(None, None)`` on failure.
+    """
+    url = f"http://localhost:{bridge_port}/media/{msg_id}"
+    try:
+        resp = urlopen(url, timeout=30)
+        data = resp.read()
+        content_type = resp.headers.get('Content-Type', 'application/octet-stream')
+        return data, content_type
+    except Exception:
+        return None, None
+
+
+def process_message(msg, source_phone, bridge_port=None):
+    """Process a single message: write to DB, download media, add to batch."""
     msg_id = msg.get('messageId') or msg.get('key', {}).get('id') or str(uuid.uuid4())
     sender_phone = extract_sender_phone(msg)
     sender_name = get_sender_name(msg)
@@ -183,7 +219,51 @@ def process_message(msg, source_phone):
     except Exception as e:
         print(f"[batcher] DB insert error: {e}")
         return
-    
+
+    # Download media from the bridge and register in the file registry.
+    # Best-effort: a failed download or registration never blocks
+    # message processing.
+    if media_type and bridge_port:
+        media_data, media_ct = download_media(bridge_port, msg_id)
+        if media_data:
+            filename = _media_filename(msg, msg_id, media_type, media_mimetype or media_ct)
+            media_path = os.path.join(MEDIA_DIR, filename)
+            try:
+                with open(media_path, 'wb') as f:
+                    f.write(media_data)
+                db.execute(
+                    "UPDATE messages SET media_path = ? WHERE id = ?",
+                    (media_path, msg_id),
+                )
+                db.commit()
+            except Exception as e:
+                print(f"[batcher] Error saving media for {msg_id}: {e}")
+                media_path = None
+
+            # Register in the file registry (Supabase + file_assets table).
+            try:
+                from shared.file_registration import register_file
+                registered = register_file(
+                    media_data,
+                    surface='whatsapp',
+                    filename=filename,
+                    content_type=media_mimetype or media_ct or 'application/octet-stream',
+                    account_id=source_phone,
+                    conversation=chat_id,
+                    sender_id=sender_phone,
+                    sender_name=sender_name or '',
+                    message_id=msg_id,
+                    received_at=datetime.fromisoformat(timestamp) if timestamp else None,
+                )
+                if registered:
+                    print(f"[batcher] Registered media file: {filename}")
+            except ImportError:
+                pass  # shared.file_registration not available
+            except Exception as e:
+                print(f"[batcher] File registration failed for {msg_id}: {e}")
+        else:
+            print(f"[batcher] Could not download media for {msg_id} (bridge may not support /media endpoint)")
+
     # Update contact
     try:
         db.execute(
@@ -289,7 +369,7 @@ def poll_bridge(port, source_phone):
             
             if isinstance(data, list) and len(data) > 0:
                 for msg in data:
-                    process_message(msg, source_phone)
+                    process_message(msg, source_phone, bridge_port=port)
         except (URLError, TimeoutError, json.JSONDecodeError) as e:
             consecutive_errors += 1
             if consecutive_errors <= 3:
