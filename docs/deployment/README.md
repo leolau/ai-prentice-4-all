@@ -5,7 +5,7 @@ It states what exists, what is verified, what is *not*, and where the detail
 lives. The per-topic documents are authoritative for procedure; this file is
 authoritative for **what is currently true of the live box**.
 
-Last verified: 2026-08-05, application at `9ac3ce251`.
+Last verified: 2026-08-07, application at `cbc8f5526`.
 
 That line is **checked**, not a promise: `deploy_state.py handover` reports this
 document as stale once anything it describes — `deploy/`, `deploy_state.py`,
@@ -263,3 +263,99 @@ content digest and writes a new bundle by itself.
 Two rules worth restating because they are easy to break by accident: never
 render straight onto a running box's `config.yaml`, and never give the box write
 access to the state repo.
+
+## Deploying a code change
+
+The box has no SSH. Code deploys are driven from a local machine (or an agent
+session) through the Alibaba Cloud CLI — `aliyun`, not the MCP OOS tool. The
+MCP `OOS_RunCommand` path works too, but the CLI is simpler for a long-running
+script and is what the deploy commands below use.
+
+### Prerequisites
+
+- `aliyun` CLI installed and configured (`aliyun configure`) with credentials
+  that have ECS RunCommand permission on `cn-hongkong`.
+- Git push access to `leolau/ai-prentice-4-all` (the `develop` branch requires
+  pull requests — a direct `git push origin develop` is rejected by a repository
+  rule).
+
+### The full flow
+
+```bash
+# 1. Commit on a feature branch
+git checkout -b feat/my-feature
+git add -p
+git commit -m "feat(scope): what changed"
+git push origin feat/my-feature
+
+# 2. Open and merge a PR (develop requires it)
+#    Via GitHub CLI: gh pr create --base develop ...
+#    Or via the GitHub MCP tool: create_pull_request + merge_pull_request
+
+# 3. Pull the merged develop locally
+git checkout develop && git pull origin develop
+
+# 4. Deploy — run the deploy script on the box via aliyun CLI
+aliyun ecs RunCommand \
+  --RegionId cn-hongkong \
+  --InstanceId.1 i-j6c81aisv2dd8mg17yle \
+  --Type RunShellScript \
+  --CommandContent "/opt/data/deploy-hermes.sh develop 2>&1" \
+  --Timeout 600
+#    Returns: { "InvokeId": "t-hk..." }
+
+# 5. Poll for results (the deploy takes 2-5 minutes)
+sleep 180
+aliyun ecs DescribeInvocationResults \
+  --RegionId cn-hongkong \
+  --InvokeId t-hk... 2>&1 | python3 -c '
+import sys, json, base64
+data = json.load(sys.stdin)
+results = data.get("Invocation", {}).get("InvocationResults", {}).get("InvocationResult", [])
+for r in results:
+    output = r.get("Output", "")
+    try: decoded = base64.b64decode(output).decode("utf-8", "replace")
+    except: decoded = output
+    print(f"ExitCode: {r.get("ExitCode", "?")}")
+    print(decoded)
+'
+```
+
+### What the deploy script does
+
+`/opt/data/deploy-hermes.sh` (the reviewed copy in `deploy/hermes-deploy.sh`):
+
+1. Checks for unexpected local modifications (aborts if any exist — a hotfix
+   must never be silently clobbered).
+2. Fetches `origin/develop` and fast-forwards.
+3. `pip install -e .` (reinstalls the package).
+4. Rebuilds the dashboard bundle (`web/`) only when `web/` changed.
+5. Rebuilds the agent-home bundle only when `agent-home/` or `package-lock.json`
+   changed — this is a `next build` with full TypeScript type checking, which
+   is stricter than vitest's esbuild and will catch type errors vitest misses.
+6. Fixes ownership (`hermes:hermes` for source, `root:root` for `.venv`).
+7. Restarts all enabled `hermes-*` services + `agent-home`.
+8. Sleeps 15s, then verifies every unit is `active`.
+9. Prints `deploy OK (<sha>)` or exits 1 on any inactive unit.
+10. Runs `deploy_state.py handover` (reports doc staleness, never blocks).
+
+A successful deploy ends with `deploy OK (<sha>)` and all 13 services `active`.
+
+### Common pitfalls
+
+- **Region is `cn-hongkong`, not `cn-shenzhen`.** The instance is in Hong Kong;
+  using the wrong region gives `InvalidInstance.NotFound`.
+- **The Output field is base64-encoded.** `DescribeInvocationResults` returns
+  the script's stdout in `Output` as base64 — decode it before reading. A
+  manual copy/paste of the base64 string can corrupt bytes; pipe through
+  `python3 -c "import base64; ..."` in one step.
+- **`develop` requires pull requests.** A direct `git push origin develop` is
+  rejected by a GitHub repository rule. Always branch → PR → merge.
+- **vitest passes but `tsc` fails.** vitest uses esbuild (lenient), but the
+  deploy script runs `next build` which uses `tsc` (strict). A missing closing
+  brace on an interface, for example, passes vitest but fails the deploy build.
+  Run `npx tsc --noEmit` in `agent-home/` before pushing if you changed `.ts`/
+`.tsx` files.
+- **The deploy takes 2-5 minutes.** The `aliyun ecs RunCommand` call returns
+  immediately with an `InvokeId`; the script keeps running. Wait at least 120s
+  before polling `DescribeInvocationResults`.
