@@ -44,6 +44,11 @@ from typing import Any, cast, Dict, List, Optional, Tuple, TYPE_CHECKING
 if TYPE_CHECKING:
     from hermes_cli.gts import EvaluationMethod
     from hermes_cli.access import Principal
+    from hermes_cli.interactions import (
+        InteractionKind,
+        InteractionLedger,
+        InteractionTrace,
+    )
     from hermes_cli.webview import (
         WebviewAction,
         WebviewRegistry,
@@ -9512,8 +9517,11 @@ async def session_chat(session_id: str, request: Request):
 
     from gateway.session_chat import run_session_turn_sync
     from gateway.session_context import set_session_vars, clear_session_vars
+    from hermes_cli.interactions import bind_trace
 
     loop = asyncio.get_running_loop()
+    trace, ledger = _agent_home_trace(principal, sid)
+    _trace_emit(trace, "inbound", sid, "agent-home chat message")
 
     def _run():
         # Bind the runtime session-context for the turn (C1 identity flows to
@@ -9531,25 +9539,109 @@ async def session_chat(session_id: str, request: Request):
         try:
             run_db = _open_session_db_for_profile(profile)
             try:
-                return run_session_turn_sync(
-                    session_db=run_db,
-                    user_message=user_message,
-                    conversation_history=history,
-                    session_id=sid,
-                )
+                # The trace contextvar must be bound in *this* thread: the tool
+                # loop reads it from the thread it runs on, so binding it on the
+                # request coroutine would leave every tool span untraced.
+                with bind_trace(trace):
+                    return run_session_turn_sync(
+                        session_db=run_db,
+                        user_message=user_message,
+                        conversation_history=history,
+                        session_id=sid,
+                    )
             finally:
                 run_db.close()
         finally:
             clear_session_vars(tokens)
 
-    result, usage = await loop.run_in_executor(None, _run)
-    final_response = result.get("final_response", "") if isinstance(result, dict) else ""
-    effective_sid = result.get("session_id", sid) if isinstance(result, dict) else sid
+    try:
+        result, usage = await loop.run_in_executor(None, _run)
+        final_response = result.get("final_response", "") if isinstance(result, dict) else ""
+        effective_sid = result.get("session_id", sid) if isinstance(result, dict) else sid
+        _trace_emit(
+            trace,
+            "outbound",
+            effective_sid,
+            f"agent-home response ({len(final_response)} chars)",
+        )
+    except Exception as exc:
+        _trace_emit(
+            trace, "error", type(exc).__name__,
+            f"agent-home turn error: {type(exc).__name__}",
+        )
+        raise
+    finally:
+        await _flush_agent_home_trace(trace, ledger)
     return {
         "session_id": effective_sid,
         "message": {"role": "assistant", "content": final_response},
         "usage": usage,
     }
+
+
+def _agent_home_trace(
+    principal: "Principal",
+    session_key: str,
+) -> tuple["InteractionTrace | None", "InteractionLedger | None"]:
+    """Mint the C8 interaction trace for one agent-home turn (fail-open).
+
+    agent-home is not a gateway channel, so the ``gateway/run.py`` inbound
+    chokepoint never mints a trace for it — without this the Activity ledger
+    only ever shows channel traffic. ``mode="prod"`` matches
+    :func:`_comms_app_store`, the schema the trace read APIs serve.
+    """
+    try:
+        from hermes_cli.interactions import create_trace
+
+        return create_trace(
+            config=load_config() or {},
+            actor_user_id=principal.user_id,
+            session_key=session_key,
+            platform="agent_home",
+            mode="prod",
+        )
+    except Exception as exc:
+        _log.warning("[agent-home] interaction trace setup failed: %s", exc)
+        return None, None
+
+
+def _trace_emit(
+    trace: "InteractionTrace | None",
+    kind: "InteractionKind",
+    ref: str,
+    summary: str,
+) -> None:
+    """Append one row to ``trace`` from outside the bound worker thread.
+
+    The endpoint coroutine has no bound trace contextvar (the agent thread owns
+    it), so this emits on the object directly and re-derives the parent the way
+    ``observe()`` would — otherwise the reply would hang off the trace root
+    instead of the turn it answers.
+    """
+    if trace is None:
+        return
+    try:
+        trace.emit(
+            kind,
+            ref=ref,
+            summary=summary,
+            parent_id=None if kind == "inbound" else trace.parent_for(),
+        )
+    except Exception:
+        _log.debug("[agent-home] interaction trace emit failed", exc_info=True)
+
+
+async def _flush_agent_home_trace(
+    trace: "InteractionTrace | None",
+    ledger: "InteractionLedger | None",
+) -> None:
+    """Write the buffered trace rows. Tracing never fails a delivered turn."""
+    if trace is None or ledger is None:
+        return
+    try:
+        await ledger.flush(trace)
+    except Exception as exc:
+        _log.warning("[agent-home] interaction trace flush failed: %s", exc)
 
 
 # Hard caps for agent-home chat attachments (config-free; these are safety
@@ -9806,6 +9898,8 @@ async def session_chat_stream(session_id: str, request: Request):
     run_id = f"run_{uuid.uuid4().hex}"
     loop = asyncio.get_running_loop()
     queue: "asyncio.Queue" = asyncio.Queue()
+    trace, ledger = _agent_home_trace(principal, sid)
+    _trace_emit(trace, "inbound", sid, "agent-home chat message")
 
     def _enqueue(name: str, payload: dict) -> None:
         loop.call_soon_threadsafe(queue.put_nowait, (name, payload))
@@ -9835,6 +9929,7 @@ async def session_chat_stream(session_id: str, request: Request):
         # approval session key.
         from gateway.session_chat import run_session_turn_sync
         from gateway.session_context import set_session_vars, clear_session_vars
+        from hermes_cli.interactions import bind_trace
         from tools.approval import (
             register_gateway_notify,
             reset_current_session_key,
@@ -9856,13 +9951,16 @@ async def session_chat_stream(session_id: str, request: Request):
         try:
             run_db = _open_session_db_for_profile(profile)
             try:
-                return run_session_turn_sync(
-                    session_db=run_db,
-                    user_message=user_message,
-                    conversation_history=history,
-                    session_id=sid,
-                    stream_delta_callback=_delta,
-                )
+                # Bound here, not on the request coroutine: the tool loop reads
+                # the trace contextvar from the thread it runs on.
+                with bind_trace(trace):
+                    return run_session_turn_sync(
+                        session_db=run_db,
+                        user_message=user_message,
+                        conversation_history=history,
+                        session_id=sid,
+                        stream_delta_callback=_delta,
+                    )
             finally:
                 run_db.close()
         finally:
@@ -9877,12 +9975,23 @@ async def session_chat_stream(session_id: str, request: Request):
             eff_sid = result.get("session_id", sid) if isinstance(result, dict) else sid
             _enqueue("assistant.completed", {"content": final_response, "run_id": run_id})
             _enqueue("run.completed", {"session_id": eff_sid, "usage": usage, "run_id": run_id})
-        except Exception:
+            _trace_emit(
+                trace,
+                "outbound",
+                eff_sid,
+                f"agent-home streamed response ({len(final_response)} chars)",
+            )
+        except Exception as exc:
             _log.exception("[agent-home] session chat stream failed")
             _enqueue("error", {"message": "The turn could not be completed.", "run_id": run_id})
+            _trace_emit(
+                trace, "error", type(exc).__name__,
+                f"agent-home turn error: {type(exc).__name__}",
+            )
         finally:
             _enqueue("done", {"run_id": run_id})
             loop.call_soon_threadsafe(queue.put_nowait, None)
+            await _flush_agent_home_trace(trace, ledger)
 
     task = asyncio.create_task(_driver())
 

@@ -89,6 +89,133 @@ def capture_turn(monkeypatch):
     return captured
 
 
+@pytest.fixture
+def trace_probe(monkeypatch):
+    """Stub the C8 ledger, keeping the real ``InteractionTrace`` buffer.
+
+    Tracing needs Postgres; the trace object itself doesn't, so minting is
+    redirected here and the flushed rows are asserted directly.
+    """
+    from hermes_cli import interactions
+
+    state: dict = {"flushed": [], "mint": []}
+
+    class _Ledger:
+        async def flush(self, trace):
+            state["flushed"].append(tuple(trace.events))
+
+    def _fake_create_trace(
+        *, config, actor_user_id, session_key, platform, source=None, mode=None,
+    ):
+        state["mint"].append(
+            {
+                "actor_user_id": actor_user_id,
+                "session_key": session_key,
+                "platform": platform,
+                "mode": mode,
+            }
+        )
+        trace = interactions.InteractionTrace(
+            actor_user_id=actor_user_id,
+            session_key=session_key,
+            platform=platform,
+            mode=mode or "prod",
+        )
+        state["trace"] = trace
+        return trace, _Ledger()
+
+    monkeypatch.setattr(interactions, "create_trace", _fake_create_trace)
+    return state
+
+
+@pytest.fixture
+def turn_observes(monkeypatch):
+    """Runner stub that emits a `turn` row the way the real loop does."""
+    import gateway.session_chat as session_chat
+    from hermes_cli.interactions import current_trace, observe
+
+    seen: dict = {}
+
+    def _fake_turn(*, session_db, user_message, conversation_history,
+                   session_id=None, **kwargs):
+        seen["bound_trace"] = current_trace()
+        observe("turn", ref="turn_1", summary="turn")
+        return (
+            {"final_response": f"echo:{user_message}", "session_id": session_id},
+            {"input_tokens": 1, "output_tokens": 2, "total_tokens": 3},
+        )
+
+    monkeypatch.setattr(session_chat, "run_session_turn_sync", _fake_turn)
+    return seen
+
+
+def _rows(state):
+    assert len(state["flushed"]) == 1, "the trace is flushed exactly once"
+    return state["flushed"][0]
+
+
+@pytest.mark.parametrize("path", ["chat", "chat/stream"])
+def test_chat_writes_one_agent_home_trace(client, trace_probe, turn_observes, path):
+    """agent-home turns land in the C8 ledger as their own platform.
+
+    Before this, only the gateway minted traces, so Activity showed channel
+    traffic only and every row was labelled with a channel platform.
+    """
+    import hermes_state
+
+    db = hermes_state.SessionDB()
+    try:
+        db.ensure_session("s-trace", source="agent_home")
+    finally:
+        db.close()
+
+    resp = client.post(f"/api/sessions/s-trace/{path}", json={"message": "hi"})
+    assert resp.status_code == 200
+
+    assert trace_probe["mint"] == [
+        {
+            "actor_user_id": "root",
+            "session_key": "s-trace",
+            "platform": "agent_home",
+            "mode": "prod",
+        }
+    ]
+    # The agent thread saw the trace bound, so tool spans join this trace.
+    assert turn_observes["bound_trace"] is trace_probe["trace"]
+
+    rows = _rows(trace_probe)
+    assert [r.kind for r in rows] == ["inbound", "turn", "outbound"]
+    assert {r.trace_id for r in rows} == {trace_probe["trace"].trace_id}
+    assert {r.platform for r in rows} == {"agent_home"}
+    # inbound → turn → outbound is a single causation chain (FG-16 C8).
+    assert rows[0].parent_id is None
+    assert rows[1].parent_id == rows[0].id
+    assert rows[2].parent_id == rows[1].id
+
+
+@pytest.mark.parametrize("path", ["chat", "chat/stream"])
+def test_chat_survives_trace_failure(client, capture_turn, monkeypatch, path):
+    """Tracing is observability: a broken ledger must not fail the turn."""
+    from hermes_cli import interactions
+    import hermes_state
+
+    db = hermes_state.SessionDB()
+    try:
+        db.ensure_session("s-notrace", source="agent_home")
+    finally:
+        db.close()
+
+    def _boom(**kwargs):
+        raise RuntimeError("supabase-app store is not configured")
+
+    monkeypatch.setattr(interactions, "create_trace", _boom)
+
+    resp = client.post(f"/api/sessions/s-notrace/{path}", json={"message": "hi"})
+    assert resp.status_code == 200
+    assert "echo:hi" in resp.text
+    assert capture_turn["user_message"] == "hi"
+
+
 def test_create_session_returns_id(client):
     resp = client.post("/api/sessions", json={})
     assert resp.status_code == 200

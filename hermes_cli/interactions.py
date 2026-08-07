@@ -448,18 +448,27 @@ def observe_tool_result(
     )
 
 
-def create_gateway_trace(
+def create_trace(
     *,
     config: Mapping[str, object],
-    source: SessionOrigin,
     actor_user_id: str,
     session_key: str,
     platform: str,
+    source: SessionOrigin | None = None,
+    mode: "StoreMode | None" = None,
 ) -> tuple[InteractionTrace | None, "InteractionLedger | None"]:
+    """Mint a trace + ledger for one interaction, or ``(None, None)`` if off.
+
+    ``source`` is the gateway inbound path: the C3 router derives the schema
+    mode from the channel. Off-gateway surfaces (agent-home chat, cron) have no
+    inbound channel session, so they pass ``mode`` explicitly — ``"prod"``,
+    which is the schema the read APIs serve, so those traces are visible
+    alongside the channel ones.
+    """
     settings = ActionTrackingConfig.from_config(config)
     if not settings.enabled:
         return None, None
-    store = get_store("supabase-app", source=source, config=config)
+    store = get_store("supabase-app", mode, source=source, config=config)
     if not isinstance(store, SupabaseAppStore):
         raise TypeError("Interaction tracing requires a supabase-app store")
     trace = InteractionTrace(

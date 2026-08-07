@@ -23,6 +23,7 @@ so it fits the box.
 - cost-tracker MCP (`/opt/data/mcp_cost_tracker.py` pattern) — cost rows fold into the trace as a `cost` kind.
 - `hermes_cli/changes.py` (C5, FG-12) — change events become `change` trace rows (linked by `trace_id`).
 - `gateway/run.py` inbound chokepoint (`_handle_message_with_agent`) + `run_agent.py` tool-call loop — the natural emit points for inbound/turn/tool/outbound spans.
+- Off-gateway agent surfaces mint their own trace at their entry point, since they never reach the gateway chokepoint: `hermes_cli/web_server.py` agent-home chat (`platform=agent_home`, streaming and non-streaming) and `cron/scheduler.py` scheduled/calendar runs (`platform=cron`, attributed to the enrolled owner). All three call the shared `create_trace()`; the turn/tool spans come from the same loop regardless of surface.
 - `plugins/observability/` — existing metrics/traces/logs plugin; reuse rather than add a parallel system.
 
 ## Design / approach
@@ -94,6 +95,7 @@ Tests green (incl. cache-safety + negative access + RLS) + baseline green + `ruf
 | Date | Edition | Author | Change | Rationale |
 |------|---------|--------|--------|-----------|
 | 2026-07-12 | 1 | devin:8cec0d47 (for Leo) | Created FG doc | Phase-2 req 16.0: action tracking (2nd only to security) — every interaction traceable, joined by trace_id |
+| 2026-08-06 | 3 | devin:1539ece6 (for Leo) | Extended trace minting beyond the gateway chokepoint to agent-home chat (`agent_home`) and cron/calendar runs (`cron`) | The Activity view could only ever show channel traffic: agent-home turns and scheduled runs drive the same agent and tools but never pass `_handle_message_with_agent`, so they wrote zero ledger rows and every visible trace carried a channel platform label |
 | 2026-07-12 | 2 | devin:eaf2cdff (for Leo) | Implemented C8 ledger, gateway/turn/tool/change/cost propagation, C2/RLS query scope, retention/rollup/sampling, dashboard API, and cache/access/E2E coverage | Publish the smallest additive side-channel contract without changing prompts, conversation roles, the model tool surface, or outbound telemetry defaults; ECS validation and production promotion remain requester-owned gated steps |
 
 ## Cloud-agent prompt
