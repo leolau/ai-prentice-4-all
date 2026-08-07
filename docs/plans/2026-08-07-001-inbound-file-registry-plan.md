@@ -60,18 +60,26 @@ CREATE TABLE IF NOT EXISTS file_assets (
     byte_size      BIGINT NOT NULL,
     sha256         TEXT NOT NULL,
     storage_bucket TEXT NOT NULL,
-    storage_path   TEXT NOT NULL,          -- <owner>/<surface>/<yyyy-mm>/<sha256>-<name>
+    storage_path   TEXT NOT NULL,          -- <owner>/files/<hh>/<sha256>-<name>
     -- the memory link, when one exists
     document_id    UUID REFERENCES rag_documents(id) ON DELETE SET NULL,
     remembered_at  TIMESTAMPTZ,
-    remembered_by  TEXT,                   -- 'user' | '<skill name>'
-    UNIQUE (owner_user_id, sha256)
+    remembered_by  TEXT                    -- 'user' | '<skill name>'
 );
 ```
 
-`UNIQUE (owner_user_id, sha256)` makes re-sends free and collapses the three
-copies of the DBS grant PDF into one row with the earliest `received_at` — the
-same content-hash trick RAG ingestion already uses. RLS follows the existing
+**One row per arrival, not per distinct file** (revised after review — an
+earlier draft of this plan proposed `UNIQUE (owner_user_id, sha256)`, which was
+wrong). The same deck forwarded by two people in two chats is two events with
+two answers to "who sent me this, and when", and collapsing them on the hash
+destroys exactly the provenance this table exists to keep. Every attachment
+counts, images and voice notes and stickers included.
+
+Deduplication happens one level down, in the bucket: `storage_key()` is a pure
+function of owner + content digest, so N arrivals of identical bytes cost one
+object and N rows pointing at it. Cheap storage, intact history.
+
+RLS follows the existing
 `scope_filter` / `apply_scope_rls` helpers, so a member sees their own files and
 anything shared, and an owner-role read is elevated and labelled exactly as it
 is for memories today.
@@ -110,7 +118,9 @@ logs and the message proceeds.
 
 One command walks the existing bucket prefixes and inserts rows for the 9
 objects already there, taking `received_at` from the object's `created_at` and
-`surface = agent_home`. Duplicates collapse on the hash.
+`surface = agent_home`. Since arrivals no longer collapse on the hash, the
+backfill must be idempotent on `storage_path` instead — re-running it twice must
+not invent a second arrival that never happened.
 
 ## 2. Remembering a file (opt-in, two triggers)
 
@@ -175,7 +185,8 @@ stored — ingested from a path on the box" line instead of a link that pretends
 - `file_assets` RLS: owner reads own, member cannot read another member's,
   owner-role elevation is labelled — the pattern in `tests/hermes_cli` for
   memories and grants.
-- Registration is idempotent: the same bytes twice yield one row.
+- Every arrival is its own row: the same bytes sent three times yield three
+  rows, each keeping its own sender/conversation/timestamp, over one object.
 - Registration failure does not break the message turn.
 - The gateway hook stamps the right surface/sender for a Telegram and an email
   attachment.
@@ -213,8 +224,9 @@ agents are working this repo.
 2. **Every attachment counts** — images, voice notes and stickers each get their
    own row, in groups as well as 1:1. The registry records what arrived;
    curation is what step 4 is for.
-3. **Caps** — register up to 25 MB per file, no expiry. The content hash
-   collapses re-sends, which is where most duplicate volume comes from.
+3. **Caps** — register up to 25 MB per file, no expiry. The content-addressed
+   storage key keeps re-sends from costing a second copy of the bytes, while
+   each arrival still gets its own row.
 4. **PDF/DOCX** — `pypdf` and `python-docx` as optional dependencies behind the
    existing `tools.lazy_deps` pattern.
 5. **A skill, not a tool** — `remember-file` is a CLI command plus a skill, so

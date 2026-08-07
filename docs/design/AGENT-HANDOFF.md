@@ -106,6 +106,10 @@ plan this is D1 multi-user-not-multi-tenant + FG-03 one-brain gateway.)
   — **operational** hand-off: writable Figma, Canva, Vercel, Railway, and AWS MCP
   access on the live box (which providers allow open client registration, the
   headless OAuth procedure, Railway's token traps, two Hermes bugs found).
+- [`SESSION-HANDOFF-2026-08-file-registry.md`](./SESSION-HANDOFF-2026-08-file-registry.md)
+  — **mid-feature** hand-off: the live box's move to `app_prod`, and the inbound
+  file registry (what is written, what is left, and the duplicate-collapse
+  design error not to repeat).
 - [`architecture-design-number-one.md`](./architecture-design-number-one.md) — frozen design #1 (read-only history).
 - `AGENT-HANDOFF.md` — this note (now just a pointer to the plan).
 - `../WHATSAPP_IMPLEMENTATION.md`, `../EMAIL_IMPLEMENTATION.md`,

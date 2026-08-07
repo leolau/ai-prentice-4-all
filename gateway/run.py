@@ -2631,6 +2631,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # sites are untouched when multiplexing is off (this dict is empty).
         # Populated by _start_secondary_profile_adapters().
         self._profile_adapters: Dict[str, Dict[Platform, BasePlatformAdapter]] = {}
+        # In-flight file-registry uploads, held so the event loop cannot
+        # garbage-collect a background task before it finishes.
+        self._file_registry_tasks: set = set()
         self._warn_if_docker_media_delivery_is_risky()
         _gateway_runner_ref = _weakref.ref(self)
 
@@ -3380,6 +3383,27 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         exc_info=True,
                     )
         return source
+
+    def _spawn_inbound_file_registration(
+        self, event: Any, source: SessionSource
+    ) -> None:
+        """Record this event's attachments in the file registry, off the turn.
+
+        Fire-and-forget on purpose: uploading to Supabase Storage is network
+        I/O, and the reply must not wait on it. The task holds its own
+        reference until it finishes so the loop cannot garbage-collect it
+        mid-upload, and every failure inside is already non-fatal.
+        """
+        if not getattr(event, "media_urls", None):
+            return
+        try:
+            from gateway.inbound_files import register_event_files
+
+            task = asyncio.create_task(register_event_files(event, source))
+            self._file_registry_tasks.add(task)
+            task.add_done_callback(self._file_registry_tasks.discard)
+        except Exception:
+            logger.debug("file registry: could not schedule registration", exc_info=True)
 
     def _session_key_for_source(self, source: SessionSource) -> str:
         """Resolve the current session key for a source, honoring gateway config when available."""
@@ -10272,6 +10296,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             event.source = source
         except Exception:
             pass
+
+        # Record any attachment in the durable file registry, with the
+        # provenance this chokepoint has and nowhere downstream does. Runs in
+        # the background: the upload is network I/O and a file arriving must
+        # never make the reply slower or fail it.
+        self._spawn_inbound_file_registration(event, source)
 
         session_entry = self.session_store.get_or_create_session(source)
         session_key = session_entry.session_key
