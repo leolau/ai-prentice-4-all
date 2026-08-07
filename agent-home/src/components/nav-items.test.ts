@@ -38,4 +38,13 @@ describe("nav-items", () => {
   it("keeps primary nav at or below five tabs", () => {
     expect(PRIMARY_NAV.length).toBeLessThanOrEqual(5);
   });
+
+  // The mobile MoreSheet (opened from the 6th BottomNav tab) surfaces every
+  // SECONDARY_NAV item — so all of them must be reachable on a phone.
+  it("includes Files, Activity, and Settings in secondary nav", () => {
+    const secondaryHrefs = SECONDARY_NAV.map((i) => i.href);
+    expect(secondaryHrefs).toContain("/files");
+    expect(secondaryHrefs).toContain("/activity");
+    expect(secondaryHrefs).toContain("/settings");
+  });
 });

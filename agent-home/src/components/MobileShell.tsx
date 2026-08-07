@@ -25,11 +25,14 @@ export function MobileShell({
   children,
   showNav = true,
   wide = false,
+  actions,
 }: {
   title: string;
   children: ReactNode;
   showNav?: boolean;
   wide?: boolean;
+  /** Optional action elements rendered in the header bar, right-aligned next to the title. */
+  actions?: ReactNode;
 }) {
   const contentWidth = wide ? "lg:max-w-7xl" : "lg:max-w-5xl";
   return (
@@ -40,10 +43,13 @@ export function MobileShell({
           className="sticky top-0 z-20 border-b border-[var(--color-border)] bg-[var(--color-bg)]/90 px-4 py-3 backdrop-blur lg:px-8"
           style={{ paddingTop: "calc(var(--safe-top) + 0.75rem)" }}
         >
-          <div className={`mx-auto w-full max-w-2xl ${contentWidth}`}>
+          <div className={`mx-auto flex w-full max-w-2xl items-center justify-between gap-2 ${contentWidth}`}>
             <h1 className="text-base font-semibold tracking-tight lg:text-lg">
               {title}
             </h1>
+            {actions ? (
+              <div className="flex shrink-0 items-center gap-2">{actions}</div>
+            ) : null}
           </div>
         </header>
         <main

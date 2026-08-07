@@ -31,4 +31,16 @@ describe("MobileShell", () => {
     expect(html).toContain("lg:flex");
     expect(html).toContain("lg:max-w-5xl");
   });
+
+  it("renders optional actions in the header alongside the title", () => {
+    const html = renderToStaticMarkup(
+      <MobileShell title="Chat" showNav={false} actions={<span>test-actions</span>}>
+        <p>panel</p>
+      </MobileShell>,
+    );
+    expect(html).toContain("Chat");
+    expect(html).toContain("test-actions");
+    // The header inner div uses justify-between so actions sit on the right.
+    expect(html).toContain("justify-between");
+  });
 });
