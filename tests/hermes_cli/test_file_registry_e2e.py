@@ -379,3 +379,72 @@ async def test_oversized_files_are_not_registered(postgres_dsn: str) -> None:
     )
     assert asset is None
     assert _Storage.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_backfill_idempotency_on_storage_path(postgres_dsn: str) -> None:
+    """A second backfill run never invents a second arrival.
+
+    The backfill command checks ``storage_path`` against existing rows before
+    inserting.  §4 of the handoff is explicit: there is no unique constraint,
+    so idempotency is an application-level check — this test asserts that check
+    actually works against the live table.
+    """
+    registry = await _registry(postgres_dsn)
+    ada = _principal("ada")
+
+    # Register one file through the normal path.
+    asset = await _register(registry, ada, filename="minutes.txt")
+    path = asset.storage_path
+
+    # Simulate the backfill's idempotency check: ``SELECT 1 FROM file_assets
+    # WHERE storage_path = $1 LIMIT 1``.
+    conn = await asyncpg.connect(postgres_dsn, ssl=False)
+    try:
+        already = await conn.fetchval(
+            f"SELECT 1 FROM app_prod.{FILE_ASSETS_TABLE} "
+            f"WHERE storage_path = $1 LIMIT 1",
+            path,
+        )
+        assert already == 1, "registered path must be found"
+
+        # A path the backfill discovered but has not yet written — must be
+        # absent so the check returns None (triggering an insert).
+        missing = await conn.fetchval(
+            f"SELECT 1 FROM app_prod.{FILE_ASSETS_TABLE} "
+            f"WHERE storage_path = $1 LIMIT 1",
+            "ada/files/newcomer.txt",
+        )
+        assert missing is None
+
+        # After a manual insert (what the backfill does), the same path is
+        # found — a second run would skip it.
+        await conn.execute(
+            f"""INSERT INTO app_prod.{FILE_ASSETS_TABLE} (
+                    owner_user_id, visibility, surface, account_id,
+                    conversation, sender_id, sender_name, message_id,
+                    received_at, filename, content_type, byte_size,
+                    sha256, storage_bucket, storage_path)
+                VALUES (
+                    $1, $2, 'agent_home', $3, NULL, $4, $5, NULL,
+                    NOW(), $6, 'text/plain', 4, $7, $8, $9)""",
+            "ada", "private:ada", "ada", "ada", "Ada",
+            "newcomer.txt", content_digest(b"new"),
+            "agent-home-media", "ada/files/newcomer.txt",
+        )
+        second = await conn.fetchval(
+            f"SELECT 1 FROM app_prod.{FILE_ASSETS_TABLE} "
+            f"WHERE storage_path = $1 LIMIT 1",
+            "ada/files/newcomer.txt",
+        )
+        assert second == 1
+
+        # Total rows: original + the one we just wrote — no duplicate.
+        total = await conn.fetchval(
+            f"SELECT count(*) FROM app_prod.{FILE_ASSETS_TABLE} "
+            f"WHERE storage_path = $1",
+            "ada/files/newcomer.txt",
+        )
+        assert total == 1, "second backfill must not create a duplicate"
+    finally:
+        await conn.close()

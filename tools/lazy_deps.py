@@ -249,6 +249,17 @@ LAZY_DEPS: dict[str, tuple[str, ...]] = {
         "mcp==1.26.0",
         "starlette==1.0.1",  # CVE-2026-48710 — keep in sync with pyproject [computer-use]
     ),
+
+    # ─── RAG document extraction ───────────────────────────────────────────
+    # PDF and DOCX text extraction for ``hermes memory rag remember-file``.
+    # Most files that arrive are PDFs, so the extraction is behind lazy_deps
+    # rather than a core dependency — a user who never remembers a file never
+    # pays the import. pypdf is pure-Python (no compiled deps); python-docx
+    # likewise. The ``read_document`` path (ingest-files) still reports these
+    # as "convert first" because it reads from disk; the bytes path
+    # (remember-file) handles them directly.
+    "rag.pypdf": ("pypdf==5.1.0",),
+    "rag.python_docx": ("python-docx==1.2.0",),
 }
 
 

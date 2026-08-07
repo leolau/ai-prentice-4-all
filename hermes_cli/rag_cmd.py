@@ -25,7 +25,12 @@ from hermes_cli.rag_drive import (
     credential_path,
     ingest_drive,
 )
-from hermes_cli.rag_files import FileIngestSummary, collect_files, ingest_files
+from hermes_cli.rag_files import (
+    FileIngestSummary,
+    collect_files,
+    extract_text_from_bytes,
+    ingest_files,
+)
 
 #: Where the Google Workspace MCP server keeps its per-account credentials,
 #: relative to the Hermes home. Ingestion reuses them rather than asking the
@@ -250,6 +255,199 @@ def cmd_rag_share(args: argparse.Namespace) -> None:
     raise SystemExit(1)
 
 
+def cmd_rag_remember_file(args: argparse.Namespace) -> None:
+    """Register a file from the inbound registry into the RAG corpus.
+
+    Downloads the bytes from Supabase Storage, extracts text (PDF/DOCX
+    included via lazy-deps), ingests as ``source_kind='file'`` with
+    ``source_ref=<asset_id>``, and stamps ``document_id`` on the
+    ``file_assets`` row so the link from ``/memory`` resolves.
+    """
+    rag, principals = _stores(args)
+
+    async def run():
+        principal = await _principal(principals, args.acting_as)
+        await rag.initialize()
+
+        from hermes_cli.file_registry import default_registry
+        from hermes_cli.filestore import SupabaseStorage
+
+        storage = SupabaseStorage.from_env()
+        registry = default_registry(getattr(args, "mode", None))
+
+        asset = await registry.get(principal, args.asset_id)
+        if asset is None:
+            raise SystemExit(
+                f"No file asset {args.asset_id} visible to {args.acting_as}."
+            )
+        if asset.remembered and not args.force:
+            print(
+                f"\n  already remembered (document {asset.document_id}); "
+                "use --force to re-ingest.\n"
+            )
+            return None
+
+        data = await storage.download(asset.storage_path)
+        text, skip_reason = extract_text_from_bytes(
+            asset.filename, data, asset.content_type
+        )
+        if skip_reason:
+            raise SystemExit(
+                f"Cannot extract text from {asset.filename}: {skip_reason}"
+            )
+
+        result = await rag.ingest(
+            principal,
+            source_kind="file",
+            source_ref=str(asset.id),
+            title=asset.filename,
+            text=text,
+        )
+        if result.document_id is None and result.skipped:
+            # The content hash matched — the document is already current.
+            # Look up the existing document_id so we can stamp it.
+            existing = await rag.ingested_state(principal, "file")
+            doc_id = existing.get(str(asset.id))
+            if doc_id is None:
+                print(
+                    f"\n  = {asset.filename} unchanged (already ingested), "
+                    "but no document_id found to stamp.\n"
+                )
+                return None
+            result_doc_id = doc_id
+        else:
+            result_doc_id = result.document_id
+
+        await registry.mark_remembered(
+            principal,
+            str(asset.id),
+            document_id=str(result_doc_id),
+            remembered_by=args.remembered_by,
+        )
+        return result_doc_id, result.chunks, result.skipped
+
+    outcome = asyncio.run(run())
+    if outcome is None:
+        return
+    doc_id, chunks, skipped = outcome
+    status = "unchanged" if skipped else "ingested"
+    print(
+        f"\n  \u2713 {status}: document {doc_id} "
+        f"({chunks} chunks) — remembered by {args.remembered_by}\n"
+    )
+
+
+def cmd_rag_backfill_files(args: argparse.Namespace) -> None:
+    """Register pre-existing bucket objects that predate the registry.
+
+    Walks the ``agent-home-media`` bucket for objects under the user's
+    prefix, and inserts a ``file_assets`` row for each one not already
+    recorded. Idempotent on ``storage_path`` — re-running never invents
+    a second arrival.
+    """
+    rag, principals = _stores(args)
+
+    async def run():
+        principal = await _principal(principals, args.acting_as)
+
+        from hermes_cli.file_registry import (
+            FILE_ASSETS_TABLE,
+            MAX_REGISTER_BYTES,
+            default_registry,
+        )
+        from hermes_cli.filestore import SupabaseStorage
+
+        storage = SupabaseStorage.from_env()
+        registry = default_registry(getattr(args, "mode", None))
+        await registry.initialize()
+
+        prefix = args.prefix or f"{principal.user_id}/"
+        objects = await storage.list_objects(prefix=prefix)
+        if not objects:
+            print(f"\n  no objects found under {prefix}\n")
+            return 0, 0, []
+
+        conn = await registry._connect()
+        try:
+            seen = 0
+            written = 0
+            skipped: list[str] = []
+            for obj in objects:
+                seen += 1
+                name = str(obj.get("name") or "")
+                if not name:
+                    continue
+                # Idempotent on storage_path — not on hash (see handoff §4).
+                exists = await conn.fetchval(
+                    f"SELECT 1 FROM {FILE_ASSETS_TABLE} "
+                    f"WHERE storage_path = $1 LIMIT 1",
+                    name,
+                )
+                if exists:
+                    continue
+
+                meta = obj.get("metadata") or {}
+                byte_size = int(meta.get("size") or 0)
+                created = obj.get("created_at")
+
+                if byte_size and byte_size > MAX_REGISTER_BYTES:
+                    skipped.append(f"{name} ({byte_size} bytes over limit)")
+                    continue
+
+                if args.dry_run:
+                    print(f"  would register  {name[:70]}")
+                    written += 1
+                    continue
+
+                # Download to compute the hash; the list API doesn't give one.
+                try:
+                    data = await storage.download(name)
+                except Exception as exc:
+                    skipped.append(f"{name}: download failed ({exc})")
+                    continue
+                import hashlib
+
+                digest = hashlib.sha256(data).hexdigest()
+                filename = name.rsplit("/", 1)[-1] if "/" in name else name
+
+                await conn.execute(
+                    f"""INSERT INTO {FILE_ASSETS_TABLE} (
+                            owner_user_id, visibility, surface, account_id,
+                            conversation, sender_id, sender_name, message_id,
+                            received_at, filename, content_type, byte_size,
+                            sha256, storage_bucket, storage_path)
+                        VALUES (
+                            $1, $2, 'agent_home', $3, NULL, $4, $5, NULL,
+                            COALESCE($6, NOW()), $7, $8, $9, $10, $11, $12)""",
+                    principal.user_id,
+                    principal.private_visibility,
+                    principal.user_id,
+                    principal.user_id,
+                    principal.display or principal.user_id,
+                    created,
+                    filename,
+                    str(obj.get("mimetype") or "application/octet-stream"),
+                    byte_size or len(data),
+                    digest,
+                    storage.bucket,
+                    name,
+                )
+                written += 1
+                print(f"  registered     {name[:70]}")
+        finally:
+            await conn.close()
+        return seen, written, skipped
+
+    seen, written, skipped = asyncio.run(run())
+    print(f"\n  objects seen   {seen}")
+    print(f"  registered      {written}")
+    if skipped:
+        print(f"  skipped         {len(skipped)}")
+        for reason in skipped[:10]:
+            print(f"    - {reason}")
+    print()
+
+
 def cmd_memory_rag(args: argparse.Namespace) -> None:
     """Dispatch ``hermes memory rag <ingest-drive|search|documents|...>``."""
     action = getattr(args, "rag_command", None)
@@ -260,12 +458,15 @@ def cmd_memory_rag(args: argparse.Namespace) -> None:
         "documents": cmd_rag_documents,
         "forget": cmd_rag_forget,
         "share": cmd_rag_share,
+        "remember-file": cmd_rag_remember_file,
+        "backfill-files": cmd_rag_backfill_files,
     }
     handler = handlers.get(action or "")
     if handler is None:
         print(
             "Usage: hermes memory rag "
-            "<ingest-drive|ingest-files|search|documents|forget|share>",
+            "<ingest-drive|ingest-files|search|documents|forget|share"
+            "|remember-file|backfill-files>",
             file=sys.stderr,
         )
         raise SystemExit(2)
@@ -391,3 +592,49 @@ def register_rag_subparser(memory_sub: argparse._SubParsersAction) -> None:
     share.add_argument("document_id", help="UUID from 'hermes rag documents'")
     share.add_argument("user_id")
     share.add_argument("--revoke", action="store_true")
+
+    remember = actions.add_parser(
+        "remember-file",
+        help="Ingest a registered file into the RAG corpus",
+        description=(
+            "Downloads a file from the inbound registry, extracts text "
+            "(PDF/DOCX included), ingests it as a RAG document with "
+            "source_kind='file', and stamps the file_assets row so "
+            "the /memory link resolves to the file."
+        ),
+    )
+    remember.add_argument(
+        "asset_id",
+        help="file_assets UUID (from the /files page or 'hermes files')",
+    )
+    remember.add_argument(
+        "--remembered-by",
+        default="user",
+        help="Who decided this file matters (default: user; triage "
+             "skills pass their own name)",
+    )
+    remember.add_argument(
+        "--force",
+        action="store_true",
+        help="Re-ingest even if the file is already remembered",
+    )
+
+    backfill = actions.add_parser(
+        "backfill-files",
+        help="Register pre-existing bucket objects in the file registry",
+        description=(
+            "Walks the Supabase bucket for objects that predate the "
+            "registry and inserts a file_assets row for each one not "
+            "already recorded. Idempotent on storage_path."
+        ),
+    )
+    backfill.add_argument(
+        "--prefix",
+        default=None,
+        help="Bucket prefix to scan (default: <user_id>/)",
+    )
+    backfill.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="List what would be registered without writing",
+    )

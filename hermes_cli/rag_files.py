@@ -119,6 +119,91 @@ def read_document(path: Path) -> tuple[str, str]:
     return text, ""
 
 
+def extract_text_from_bytes(
+    filename: str,
+    data: bytes,
+    content_type: str = "",
+) -> tuple[str, str]:
+    """Return ``(text, skip_reason)`` for in-memory bytes.
+
+    Mirrors :func:`read_document` but works on bytes the registry already has
+    rather than a path on disk — the ``remember-file`` command downloads from
+    the bucket, so there is no path to ``stat`` or ``read_text``.
+
+    Text suffixes are decoded as UTF-8 (same allowlist). PDF and DOCX are
+    extracted directly via lazy-deps (:data:`TEXT_SUFFIXES` is still the
+    allowlist for the disk path, which reports PDFs as "convert first").
+    """
+    suffix = Path(filename).suffix.lower()
+    if not data:
+        return "", "empty"
+    if suffix in TEXT_SUFFIXES:
+        if len(data) > MAX_BYTES:
+            return "", f"{len(data)} bytes exceeds the {MAX_BYTES}-byte limit"
+        try:
+            text = data.decode("utf-8")
+        except UnicodeDecodeError:
+            return "", "not valid UTF-8 text"
+        if not text.strip():
+            return "", "empty"
+        return text, ""
+    if suffix == ".pdf":
+        return _extract_pdf(data)
+    if suffix == ".docx":
+        return _extract_docx(data)
+    if suffix == ".doc":
+        return "", ".doc is a legacy binary format — convert to .docx or .pdf first"
+    if suffix in CONVERTIBLE_SUFFIXES:
+        return "", f"{suffix} is not directly extractable — convert to .pdf, .docx, or .txt first"
+    return "", f"unsupported suffix {suffix or '(none)'}"
+
+
+def _extract_pdf(data: bytes) -> tuple[str, str]:
+    """Extract text from a PDF via pypdf (lazy-installed)."""
+    try:
+        from tools.lazy_deps import ensure
+        ensure("rag.pypdf", prompt=False)
+    except ImportError:
+        pass  # lazy_deps unavailable — fall through to raw import
+    except Exception as exc:
+        return "", f"pypdf not available: {exc}"
+    try:
+        import io
+        from pypdf import PdfReader
+        reader = PdfReader(io.BytesIO(data))
+        parts: list[str] = []
+        for page in reader.pages:
+            parts.append(page.extract_text() or "")
+        text = "\n".join(parts).strip()
+        if not text:
+            return "", "PDF contained no extractable text (may be scanned images)"
+        return text, ""
+    except Exception as exc:
+        return "", f"PDF extraction failed: {exc}"
+
+
+def _extract_docx(data: bytes) -> tuple[str, str]:
+    """Extract text from a DOCX via python-docx (lazy-installed)."""
+    try:
+        from tools.lazy_deps import ensure
+        ensure("rag.python_docx", prompt=False)
+    except ImportError:
+        pass
+    except Exception as exc:
+        return "", f"python-docx not available: {exc}"
+    try:
+        import io
+        from docx import Document
+        doc = Document(io.BytesIO(data))
+        parts = [p.text for p in doc.paragraphs if p.text.strip()]
+        text = "\n".join(parts).strip()
+        if not text:
+            return "", "DOCX contained no extractable text"
+        return text, ""
+    except Exception as exc:
+        return "", f"DOCX extraction failed: {exc}"
+
+
 async def ingest_files(
     rag,
     principal,
