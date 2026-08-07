@@ -1,6 +1,6 @@
 ---
 title: "feat: an inbound file registry — every file that arrives, with provenance, viewable and separately rememberable"
-status: draft — awaiting decisions
+status: approved — step 0 done, step 1 in progress
 date: 2026-08-07
 type: feature
 target_repo: ai-prentice-4-all
@@ -198,24 +198,26 @@ stored — ingested from a path on the box" line instead of a link that pretends
 Each step is a separate PR against `develop`, rebased before push — several
 agents are working this repo.
 
-## Decisions needed before step 1
+## Decisions taken
 
-1. **Which schema.** Memory runs in `dev` (`datastore.mode: dev`), but the
-   gateway resolves channel senders against `app_prod` (`gateway/run.py:3320`).
-   As it stands a Telegram file's owner and your `/memory` page live in
-   different schemas and the file would never show up as yours. Options: make
-   channel binding follow `datastore.mode` (my preference — one truth per
-   deployment), or move the live memory tier to `prod`.
-2. **What counts as a file.** Every attachment including images, voice notes and
-   stickers from group chats — or documents only, and/or only 1:1 conversations?
-   This decides whether the registry is a useful record or a meme archive.
-3. **Caps.** Per-file size limit for registration (agent-home's upload cap is
-   10 MB today) and any retention at all, given Supabase Storage is billed by
-   volume.
-4. **PDF/DOCX extraction.** Confirm adding `pypdf` (+ `python-docx`) as lazy
-   optional dependencies — without them item 2 covers almost none of your files.
-5. **Skill or tool.** `remember-file` as a skill driving the CLI (narrow-waist,
-   no new tool in every prompt) — or a first-class `remember_file` agent tool,
-   which is more reliable to trigger but costs a tool slot on every API call?
-6. **Nav placement.** `Files` in the secondary nav, or promoted into the
-   five-item bottom bar on the phone (which would push something out)?
+1. **Schema — done, 2026-08-07.** The live box now runs `app_prod` end to end.
+   Memory ran in `dev` while `resolve_mode()` forces every channel session to
+   `prod` (`hermes_cli/datastore.py:114`), so a Telegram file's owner and the
+   `/memory` page were in different schemas. Rather than relax that deliberate
+   guard, the deployment moved: `datastore.mode: prod`,
+   `AGENT_HOME_DATASTORE_MODE=prod`, the prod `memories.embedding` column
+   widened from `vector(256)` to `vector(1024)` with `memory vectors reembed`,
+   the 109 memories copied, and the single RAG document re-ingested (the prod
+   rag tables did not exist, so re-ingesting was cheaper and safer than copying
+   rows). `app_dev` is untouched, plus a `backup_20260807_085028` schema.
+2. **Every attachment counts** — images, voice notes and stickers each get their
+   own row, in groups as well as 1:1. The registry records what arrived;
+   curation is what step 4 is for.
+3. **Caps** — register up to 25 MB per file, no expiry. The content hash
+   collapses re-sends, which is where most duplicate volume comes from.
+4. **PDF/DOCX** — `pypdf` and `python-docx` as optional dependencies behind the
+   existing `tools.lazy_deps` pattern.
+5. **A skill, not a tool** — `remember-file` is a CLI command plus a skill, so
+   no tool slot is spent on every API call (footprint ladder rung 2).
+6. **Nav** — `Files` in `SECONDARY_NAV`, beside Activity; the five-item phone
+   bottom bar is unchanged.
