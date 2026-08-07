@@ -249,8 +249,28 @@ def process_triage_result(event, attendees, result, db):
           f"memory_facts={len(result.get('memory_facts', []))}")
 
 
+def _table_exists(db, table_name):
+    """Check if a SQLite table exists."""
+    row = db.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+        (table_name,)
+    ).fetchone()
+    return row is not None
+
+
 def ensure_schema(db):
-    """Add triage columns to calendar_events if they don't exist."""
+    """Ensure calendar tables and triage columns exist.
+
+    If the calendar_events table doesn't exist yet (calendar poller not
+    deployed), print a helpful message instead of crashing. The triage
+    agent will keep retrying until the table is created by the migration.
+    """
+    if not _table_exists(db, 'calendar_events'):
+        print("[calendar-triage] WARNING: calendar_events table does not exist.")
+        print("[calendar-triage] Run: python custom/migrations/create_calendar_tables.py")
+        print("[calendar-triage] Waiting for table to be created...")
+        return
+
     for col, coltype in [
         ('importance', 'TEXT'),
         ('importance_reason', 'TEXT'),
@@ -275,14 +295,26 @@ def main():
     print(f"[calendar-triage] Skills dir: {SKILLS_DIR}")
     print(f"[calendar-triage] Poll interval: {poll_interval}s")
 
-    # Ensure schema has triage columns
+    # Ensure schema has triage columns (may be deferred if table doesn't exist yet)
     db = get_db()
     ensure_schema(db)
     db.close()
+    schema_ensured = _table_exists(get_db(), 'calendar_events')
 
     while True:
         try:
             db = get_db()
+
+            if not _table_exists(db, 'calendar_events'):
+                db.close()
+                time.sleep(poll_interval)
+                continue
+
+            # Ensure schema on first successful table access (in case table
+            # was created after startup by the migration script)
+            if not schema_ensured:
+                ensure_schema(db)
+                schema_ensured = True
 
             # Get untriaged events
             events = get_untriaged_events(db, limit=10)
