@@ -15,8 +15,14 @@ export const dynamic = "force-dynamic";
  * interactive {@link ChatPane}. Sending routes back through `/api/chat/*` to
  * the principal-scoped `POST /api/sessions/{id}/chat` endpoint.
  */
-export default async function Page() {
+export default async function Page({
+  searchParams,
+}: {
+  searchParams: Promise<{ session?: string }>;
+}) {
   await requirePrincipal();
+  // `?session=<id>` is where a memory's citation link lands.
+  const { session: requested } = await searchParams;
 
   let sessions: SessionSummary[] = [];
   let sessionId: string | null = null;
@@ -26,8 +32,20 @@ export default async function Page() {
     const client = await apiClientForRequest();
     const list = await client.sessions({ source: "agent_home", order: "recent" });
     sessions = list.sessions;
-    if (sessions.length > 0) {
+    if (requested && !sessions.some((s) => s.id === requested)) {
+      // A memory can be written by any surface (gateway, cron, the CLI), so
+      // the linked conversation is often outside the agent_home list: fetch
+      // it unfiltered and prepend it rather than silently opening another.
+      const all = await client.sessions({ order: "recent", limit: 200 });
+      const match = all.sessions.find((s) => s.id === requested);
+      if (match) sessions = [match, ...sessions];
+    }
+    if (requested && sessions.some((s) => s.id === requested)) {
+      sessionId = requested;
+    } else if (sessions.length > 0) {
       sessionId = sessions[0].id;
+    }
+    if (sessionId) {
       const transcript = await client.sessionMessages(sessionId);
       messages = transcript.messages;
     }

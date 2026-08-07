@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { MemoryMap } from "@/components/memory/MemoryMap";
-import { describeSource } from "@/components/memory/citation";
+import { describeSource, sourceLink } from "@/components/memory/citation";
 import type {
   MemoryProjection,
   MemoryQueryPlacement,
@@ -27,16 +27,24 @@ import type {
 export function MemoryView({
   summary,
   initialRows,
+  documentId = null,
 }: {
   summary: MemorySummary;
   initialRows: MemoryRowsResponse;
+  /** `?document=<id>`: open on that document's passages (a citation link). */
+  documentId?: string | null;
 }) {
   const [rows, setRows] = useState<MemoryRow[]>(initialRows.rows);
   const [total, setTotal] = useState(initialRows.total);
   const [offset, setOffset] = useState(initialRows.offset);
   const [limit] = useState(initialRows.limit);
   const [q, setQ] = useState("");
-  const [browse, setBrowse] = useState<BrowseKind>("memory");
+  const [browse, setBrowse] = useState<BrowseKind>(
+    documentId ? "chunk" : "memory",
+  );
+  // A citation link (`?document=`) narrows the list to one document's
+  // passages until the reader clears it.
+  const [docFilter, setDocFilter] = useState<string | null>(documentId);
   const [loading, setLoading] = useState(false);
   const [searching, setSearching] = useState(false);
   const [rowsError, setRowsError] = useState<string | null>(null);
@@ -48,14 +56,22 @@ export function MemoryView({
   // list. It arms on the first keystroke.
   const searchArmed = useRef(false);
   const doSearch = useCallback(
-    async (query: string, kind: BrowseKind = browse) => {
+    async (
+      query: string,
+      kind: BrowseKind = browse,
+      doc: string | null = docFilter,
+    ) => {
       setLoading(true);
       setSearching(!!query.trim());
       setRowsError(null);
       try {
         const sp = new URLSearchParams();
         if (query.trim()) sp.set("q", query.trim());
-        if (kind === "chunk") sp.set("kind", "chunk");
+        if (kind === "chunk") {
+          sp.set("kind", "chunk");
+          // For chunks the explorer reads `topic` as the document filter.
+          if (doc) sp.set("topic", doc);
+        }
         sp.set("limit", String(limit));
         sp.set("offset", "0");
         const res = await fetch(`/api/memory/rows?${sp.toString()}`);
@@ -73,7 +89,7 @@ export function MemoryView({
         setLoading(false);
       }
     },
-    [limit, browse],
+    [limit, browse, docFilter],
   );
 
   const switchBrowse = useCallback(
@@ -81,10 +97,16 @@ export function MemoryView({
       if (kind === browse) return;
       setBrowse(kind);
       searchArmed.current = true;
-      void doSearch(q, kind);
+      void doSearch(q, kind, docFilter);
     },
-    [browse, doSearch, q],
+    [browse, doSearch, q, docFilter],
   );
+
+  const clearDocFilter = useCallback(() => {
+    setDocFilter(null);
+    searchArmed.current = true;
+    void doSearch(q, "chunk", null);
+  }, [doSearch, q]);
 
   useEffect(() => {
     if (!searchArmed.current) {
@@ -107,7 +129,10 @@ export function MemoryView({
     try {
       const sp = new URLSearchParams();
       if (q.trim()) sp.set("q", q.trim());
-      if (browse === "chunk") sp.set("kind", "chunk");
+      if (browse === "chunk") {
+        sp.set("kind", "chunk");
+        if (docFilter) sp.set("topic", docFilter);
+      }
       sp.set("limit", String(limit));
       sp.set("offset", String(nextOffset));
       const res = await fetch(`/api/memory/rows?${sp.toString()}`);
@@ -123,7 +148,7 @@ export function MemoryView({
     } finally {
       setLoading(false);
     }
-  }, [offset, limit, total, q, browse]);
+  }, [offset, limit, total, q, browse, docFilter]);
 
   // --- Map (fetched after first paint) ------------------------------------
   const [projection, setProjection] = useState<MemoryProjection | null>(null);
@@ -284,6 +309,20 @@ export function MemoryView({
             />
           </div>
         )}
+        {docFilter && (
+          <div className="flex items-center justify-between gap-2 rounded-lg bg-[var(--color-surface)] px-2 py-1 text-xs">
+            <span className="truncate">
+              {rows[0]?.document_title || "One document"}
+            </span>
+            <button
+              type="button"
+              onClick={clearDocFilter}
+              className="shrink-0 text-[var(--color-accent)]"
+            >
+              Show all
+            </button>
+          </div>
+        )}
         {browse === "chunk" && q.trim() && (
           <p className="text-xs text-[var(--color-muted)]">
             Document chunks are listed newest first — typed text doesn&apos;t
@@ -372,6 +411,7 @@ function Pill({ label, value }: { label: string; value: number }) {
 
 function MemoryCard({ row }: { row: MemoryRow }) {
   const source = describeSource(row);
+  const link = sourceLink(row);
   return (
     <div
       data-component="MemoryCard"
@@ -404,7 +444,18 @@ function MemoryCard({ row }: { row: MemoryRow }) {
           className="mt-1 truncate text-xs text-[var(--color-muted)]"
           title={source.detail ?? source.label}
         >
-          {source.label}
+          {link ? (
+            <a
+              href={link.href}
+              target={link.external ? "_blank" : undefined}
+              rel={link.external ? "noreferrer" : undefined}
+              className="underline decoration-dotted underline-offset-2"
+            >
+              {source.label}
+            </a>
+          ) : (
+            source.label
+          )}
         </p>
       )}
     </div>

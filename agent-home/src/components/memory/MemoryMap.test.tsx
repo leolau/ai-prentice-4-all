@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   MemoryMap,
+  MemoryMapLegend,
   MemoryPointModal,
   computeViewBox,
   topicColor,
@@ -183,6 +184,57 @@ describe("MemoryMap rendered states", () => {
   });
 });
 
+describe("map sizing and legend", () => {
+  const proj: MemoryProjection = {
+    algorithm: "pca",
+    computed_at: "2026-08-05T03:00:00Z",
+    stale: false,
+    unprojected_count: 0,
+    points: [
+      { id: "a", x: 1, y: 2, owner_user_id: "u", topic: "t", kind: "memory", elevated: false, provenance: "", label: "a memory" },
+      { id: "b", x: 2, y: 1, owner_user_id: "u", topic: "t", kind: "chunk", elevated: false, provenance: "", label: "a chunk" },
+    ],
+  };
+
+  it("draws the plot at 85% width, still square", () => {
+    // 15% less height with the same aspect ratio means 15% less width too.
+    const html = renderToStaticMarkup(
+      <MemoryMap projection={proj} queryResult={null} />,
+    );
+    const svg = /<svg[^>]*viewBox="0 0 100 100"[^>]*>/.exec(html)?.[0] ?? "";
+    expect(svg).toContain("w-[85%]");
+    expect(svg).not.toContain("w-full");
+    expect(svg).toContain("aspect-ratio:1");
+  });
+
+  it("distinguishes a chunk from a memory by shape", () => {
+    const html = renderToStaticMarkup(
+      <MemoryMap projection={proj} queryResult={null} />,
+    );
+    // The chunk is the only <rect>; both still get a circular hit target.
+    expect([...html.matchAll(/<rect /g)].length).toBe(1);
+  });
+
+  it("offers a legend button", () => {
+    const html = renderToStaticMarkup(
+      <MemoryMap projection={proj} queryResult={null} />,
+    );
+    expect(html).toContain(">Legend</button>");
+  });
+
+  it("explains both the shapes and the colours", () => {
+    const html = decodeHtml(
+      renderToStaticMarkup(<MemoryMapLegend onClose={() => {}} />),
+    );
+    expect(html).toContain('data-component="MemoryMapLegend"');
+    expect(html).toContain("Dot — a memory");
+    expect(html).toContain("Square — a document chunk");
+    expect(html).toContain("Outer ring — someone else's");
+    expect(html).toContain("Hollow double ring — your query");
+    expect(html).toContain("Colour — the topic");
+  });
+});
+
 describe("MemoryPointModal", () => {
   const POINT: MemoryProjectionPoint = {
     id: "p1",
@@ -239,6 +291,53 @@ describe("MemoryPointModal", () => {
     );
     expect(html).toContain("From a chat");
     expect(html).toContain("sess-42");
+  });
+
+  it("links a chunk to the rest of its document's passages", () => {
+    const html = decodeHtml(
+      renderToStaticMarkup(
+        <MemoryPointModal
+          point={{ ...POINT, document_id: "doc-9" }}
+          onClose={() => {}}
+        />,
+      ),
+    );
+    expect(html).toContain('href="/memory?document=doc-9"');
+    expect(html).toContain("See this document's passages");
+  });
+
+  it("links a Drive document straight out to Drive", () => {
+    const html = renderToStaticMarkup(
+      <MemoryPointModal
+        point={{
+          ...POINT,
+          document_id: "doc-9",
+          source_kind: "drive",
+          source_ref: "https://docs.google.com/document/d/abc",
+        }}
+        onClose={() => {}}
+      />,
+    );
+    expect(html).toContain('href="https://docs.google.com/document/d/abc"');
+    expect(html).toContain('target="_blank"');
+  });
+
+  it("links a chat memory to its conversation", () => {
+    const html = renderToStaticMarkup(
+      <MemoryPointModal
+        point={{
+          ...POINT,
+          kind: "memory",
+          document_title: null,
+          section: null,
+          source_kind: null,
+          source_ref: null,
+          source_session: "sess-42",
+        }}
+        onClose={() => {}}
+      />,
+    );
+    expect(html).toContain('href="/chat?session=sess-42"');
   });
 
   it("shows no source block when nothing was recorded", () => {

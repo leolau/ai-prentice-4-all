@@ -17,8 +17,16 @@ export const dynamic = "force-dynamic";
  * A 409 here means "authenticated, but no principal" — render a plain sentence
  * (an enrolment problem, not a bug) rather than raw JSON.
  */
-export default async function Page() {
+export default async function Page({
+  searchParams,
+}: {
+  searchParams: Promise<{ document?: string }>;
+}) {
   await requirePrincipal();
+  // `?document=<id>` arrives from a citation link: open on that document's
+  // passages instead of the whole memory list.
+  const { document } = await searchParams;
+  const documentId = document || null;
 
   let summary: MemorySummary | null = null;
   let first: MemoryRowsResponse | null = null;
@@ -29,7 +37,9 @@ export default async function Page() {
     const client = await apiClientForRequest();
     [summary, first] = await Promise.all([
       client.memorySummary(),
-      client.memoryRows({ limit: 25 }),
+      documentId
+        ? client.memoryRows({ limit: 25, kind: "chunk", topic: documentId })
+        : client.memoryRows({ limit: 25 }),
     ]);
   } catch (err) {
     // The status, not the message: `HermesApiError.message` embeds the request
@@ -59,7 +69,11 @@ export default async function Page() {
           Couldn&apos;t load memory ({error}).
         </div>
       ) : (
-        <MemoryView summary={summary} initialRows={first} />
+        <MemoryView
+          summary={summary}
+          initialRows={first}
+          documentId={documentId}
+        />
       )}
     </MobileShell>
   );
