@@ -26,6 +26,9 @@ DB_PATH = '/opt/data/whatsapp-messages/whatsapp_data.db'
 CONFIG_PATH = '/opt/data/email-messages/config.json'
 HEALTH_PORT = 7901
 
+# Make custom/shared importable so the poller can register attachment files.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 def get_db():
     conn = sqlite3.connect(DB_PATH, timeout=30)
     conn.row_factory = sqlite3.Row
@@ -89,10 +92,17 @@ def extract_email_body(msg):
     return text_body, html_body
 
 def extract_attachments(msg):
-    """Extract attachment metadata (name, mimetype, size) without downloading."""
+    """Extract attachment metadata and bytes from an email message.
+
+    Returns ``(metadata, payloads)``: *metadata* is a list of dicts suitable
+    for JSON serialisation into the ``attachment_info`` SQLite column
+    (name, mimetype, size); *payloads* is a list of dicts with the same keys
+    plus ``data`` (the raw attachment bytes) for file registration.
+    """
     attachments = []
+    payloads = []
     if not msg.is_multipart():
-        return attachments
+        return attachments, payloads
 
     for part in msg.walk():
         content_disp = str(part.get('Content-Disposition', ''))
@@ -108,7 +118,13 @@ def extract_attachments(msg):
                     'mimetype': mimetype,
                     'size': size
                 })
-    return attachments
+                if payload:
+                    payloads.append({
+                        'name': filename,
+                        'mimetype': mimetype,
+                        'data': payload,
+                    })
+    return attachments, payloads
 
 def extract_thread_id(msg):
     """Extract thread ID from References or In-Reply-To headers."""
@@ -141,6 +157,48 @@ def parse_address_list(raw):
         if addr:
             addrs.append({'name': name, 'address': addr})
     return json.dumps(addrs)
+
+
+def _register_email_attachments(payloads, *, account_id, conversation,
+                                 sender_id, sender_name, message_id,
+                                 received_dt):
+    """Register email attachment bytes in the file registry.
+
+    Best-effort: failures are logged but never raise into the poller path.
+    Uses the shared file_registration module which resolves the owner
+    principal and calls store_and_register() directly.
+    """
+    try:
+        from shared.file_registration import register_files_batch
+    except ImportError:
+        print("[poller] file_registration module not available; skipping attachment registration")
+        return
+
+    # Ensure received_dt has UTC timezone for the registry.
+    if received_dt is not None:
+        if received_dt.tzinfo is None:
+            received_dt = received_dt.replace(tzinfo=timezone.utc)
+    else:
+        received_dt = datetime.now(timezone.utc)
+
+    items = [
+        {
+            'data': p['data'],
+            'surface': 'email',
+            'filename': p['name'],
+            'content_type': p.get('mimetype', 'application/octet-stream'),
+            'account_id': account_id,
+            'conversation': conversation,
+            'sender_id': sender_id,
+            'sender_name': sender_name,
+            'message_id': message_id,
+            'received_at': received_dt,
+        }
+        for p in payloads
+    ]
+    registered = register_files_batch(items)
+    if registered:
+        print(f"[poller] Registered {registered} attachment file(s) from email {message_id}")
 
 def poll_account(account, db):
     """Poll a single IMAP account for new emails."""
@@ -230,7 +288,7 @@ def poll_account(account, db):
                         thread_id = extract_thread_id(msg)
 
                         text_body, html_body = extract_email_body(msg)
-                        attachments = extract_attachments(msg)
+                        attachments, attachment_payloads = extract_attachments(msg)
                         has_attachments = 1 if attachments else 0
                         attachment_info = json.dumps(attachments) if attachments else None
 
@@ -240,6 +298,7 @@ def poll_account(account, db):
                             received_dt = parsedate_to_datetime(date_header)
                             received_at = received_dt.isoformat()
                         except Exception:
+                            received_dt = None
                             received_at = datetime.now(timezone.utc).isoformat()
 
                         # Extract key headers for debugging
@@ -263,6 +322,20 @@ def poll_account(account, db):
                                  message_id, in_reply_to, thread_id, folder, received_at, raw_headers)
                             )
                             total_new += 1
+
+                            # Register attachment files in the file registry.
+                            # Best-effort: failures are logged but never break
+                            # email processing.
+                            if attachment_payloads:
+                                _register_email_attachments(
+                                    attachment_payloads,
+                                    account_id=account_id,
+                                    conversation=thread_id or message_id,
+                                    sender_id=from_addr,
+                                    sender_name=from_name,
+                                    message_id=message_id,
+                                    received_dt=received_dt,
+                                )
                         except sqlite3.IntegrityError:
                             pass  # Duplicate message_id — already stored
 
