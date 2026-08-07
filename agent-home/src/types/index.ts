@@ -712,3 +712,54 @@ export interface MemoryDocument {
 export interface MemoryDocumentsResponse {
   documents: MemoryDocument[]; total: number;
 }
+
+/**
+ * A registered inbound file from `/api/registry/files` — one arrival, with the
+ * provenance the receiving surface knew and nothing downstream does.
+ *
+ * `remembered` is the deliberate split from memory: a file is stored on
+ * arrival, but only appears in the RAG corpus once somebody decided it matters
+ * (`document_id` set, `remembered_by` naming the user or the triage skill).
+ */
+export interface FileAsset {
+  id: string;
+  owner_user_id: string;
+  visibility: string;
+  surface: string;                 // agent_home | telegram | whatsapp | email | calendar | …
+  account_id: string | null;       // the receiving inbox/bot identity
+  conversation: string | null;     // chat/thread/event this arrived in
+  sender_id: string | null;
+  sender_name: string | null;
+  message_id: string | null;
+  received_at: string | null;
+  filename: string;
+  content_type: string;
+  byte_size: number;
+  sha256: string;
+  storage_path: string;            // an object key, never a path on the box
+  document_id: string | null;
+  remembered_at: string | null;
+  remembered_by: string | null;
+  remembered: boolean;
+}
+
+/** Paginated registry listing. */
+export interface FileAssetsResponse {
+  files: FileAsset[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+/** Surfaces the caller actually has files from, for the filter chips. */
+export interface FileSurfacesResponse {
+  surfaces: { surface: string; count: number }[];
+}
+
+/** A short-lived signed link to a registered file's bytes. */
+export interface FileLinkResponse {
+  url: string;
+  expires_in: number;
+  filename: string;
+  content_type: string;
+}

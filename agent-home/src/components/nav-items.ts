@@ -28,6 +28,7 @@ export const PRIMARY_NAV: NavItem[] = [
  * "More" section in the desktop sidebar where there is room for them.
  */
 export const SECONDARY_NAV: NavItem[] = [
+  { href: "/files", label: "Files", glyph: "▤", hint: "Everything that arrived" },
   { href: "/activity", label: "Activity", glyph: "≋", hint: "Interaction traces" },
   { href: "/onboarding", label: "Getting started", glyph: "◐", hint: "FG-15 readiness" },
   { href: "/tools", label: "Tools", glyph: "⚙", hint: "FG-07 registry" },

@@ -5,13 +5,27 @@
  * Storage server-side (the browser never holds the storage key), and returns
  * the attachment reference the composer attaches to the outgoing message.
  * Responds 501 when Storage is not configured on the box.
+ *
+ * The upload is also recorded in the inbound file registry, so a file sent from
+ * here shows up on `/files` beside the ones that arrived over Telegram or email.
+ * Registration is best-effort: it must not be able to fail an upload the user
+ * already watched succeed.
  */
 import { NextResponse } from "next/server";
 
-import { getPrincipal } from "@/lib/auth/principal";
+import { apiClientForRequest, getPrincipal } from "@/lib/auth/principal";
+import { mediaBucket } from "@/lib/env";
 import { storageAvailable, uploadChatMedia } from "@/lib/supabase/storage";
 
 const MAX_BYTES = 10 * 1024 * 1024;
+
+/** SHA-256 of the bytes — the registry's identity for a file. */
+async function digest(bytes: ArrayBuffer): Promise<string> {
+  const hash = await crypto.subtle.digest("SHA-256", bytes);
+  return Array.from(new Uint8Array(hash))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
 
 export async function POST(request: Request): Promise<NextResponse> {
   const principal = await getPrincipal();
@@ -47,11 +61,27 @@ export async function POST(request: Request): Promise<NextResponse> {
   }
 
   try {
+    const bytes = await file.arrayBuffer();
     const attachment = await uploadChatMedia(principal, sessionId, {
       name: file.name || "upload",
       contentType: file.type || "application/octet-stream",
-      bytes: await file.arrayBuffer(),
+      bytes,
     });
+    try {
+      const client = await apiClientForRequest();
+      await client.registerFile({
+        filename: attachment.name,
+        content_type: attachment.content_type,
+        byte_size: attachment.size,
+        sha256: await digest(bytes),
+        storage_bucket: mediaBucket(),
+        storage_path: attachment.path,
+        conversation: sessionId || undefined,
+      });
+    } catch {
+      // The bytes are safely in the bucket; a missing registry row is
+      // repairable by the backfill, so this never fails the upload.
+    }
     return NextResponse.json(attachment);
   } catch (err) {
     return NextResponse.json(

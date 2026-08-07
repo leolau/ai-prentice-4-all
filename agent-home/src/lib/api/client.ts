@@ -22,6 +22,10 @@ import type {
   ChatMessagesResponse,
   ChatSendResponse,
   CoreManifestResponse,
+  FileAsset,
+  FileAssetsResponse,
+  FileLinkResponse,
+  FileSurfacesResponse,
   GtsGraphResponse,
   MemberCreateResponse,
   MemberOkResponse,
@@ -528,6 +532,66 @@ export class HermesApiClient {
   /** The C2-scoped RAG documents list (empty until ingestion runs). */
   async memoryDocuments(): Promise<MemoryDocumentsResponse> {
     return this.request("/api/memory/explorer/documents");
+  }
+
+  /** A page of the inbound file registry (arrivals, not memories). */
+  async files(
+    opts: {
+      q?: string;
+      surface?: string;
+      remembered?: boolean;
+      limit?: number;
+      offset?: number;
+    } = {},
+  ): Promise<FileAssetsResponse> {
+    const p = new URLSearchParams();
+    if (opts.q) p.set("q", opts.q);
+    if (opts.surface) p.set("surface", opts.surface);
+    if (opts.remembered != null) p.set("remembered", String(opts.remembered));
+    p.set("limit", String(opts.limit ?? 50));
+    p.set("offset", String(opts.offset ?? 0));
+    return this.request(`/api/registry/files?${p.toString()}`);
+  }
+
+  /** The surfaces the caller actually has files from, with counts. */
+  async fileSurfaces(): Promise<FileSurfacesResponse> {
+    return this.request("/api/registry/files/surfaces");
+  }
+
+  /** One registered file. 404s when it is absent *or* not visible. */
+  async file(id: string): Promise<FileAsset> {
+    return this.request(`/api/registry/files/${encodeURIComponent(id)}`);
+  }
+
+  /** A short-lived signed link to the bytes, minted after the access check. */
+  async fileLink(id: string, download = false): Promise<FileLinkResponse> {
+    const qs = download ? "?download=true" : "";
+    return this.request(
+      `/api/registry/files/${encodeURIComponent(id)}/link${qs}`,
+    );
+  }
+
+  /**
+   * Record a file agent-home has already written to Storage.
+   *
+   * agent-home owns the bucket credentials for its own uploads, so it uploads
+   * the bytes and posts only where they landed — shipping them twice would
+   * double the cost of every attachment.
+   */
+  async registerFile(payload: {
+    filename: string;
+    content_type: string;
+    byte_size: number;
+    sha256: string;
+    storage_bucket: string;
+    storage_path: string;
+    conversation?: string;
+    surface?: string;
+  }): Promise<FileAsset> {
+    return this.request("/api/registry/files/register", {
+      method: "POST",
+      json: { surface: "agent_home", ...payload },
+    });
   }
 }
 
