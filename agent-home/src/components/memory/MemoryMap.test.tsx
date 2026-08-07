@@ -215,12 +215,8 @@ describe("map sizing and legend", () => {
     expect([...html.matchAll(/<rect /g)].length).toBe(1);
   });
 
-  it("offers a legend button", () => {
-    const html = renderToStaticMarkup(
-      <MemoryMap projection={proj} queryResult={null} />,
-    );
-    expect(html).toContain(">Legend</button>");
-  });
+  // The Legend button itself now lives in MemoryHeaderActions (in the
+  // MobileShell header); see MemoryHeaderActions.test.tsx.
 
   it("explains both the shapes and the colours", () => {
     const html = decodeHtml(

@@ -3,6 +3,7 @@
 import { useEffect, useState, type ReactNode } from "react";
 
 import { describeSource, sourceLink } from "@/components/memory/citation";
+import { memoryHeaderActionsRef } from "@/lib/memory/header-actions";
 import type {
   MemoryProjection,
   MemoryProjectionPoint,
@@ -102,6 +103,16 @@ export function MemoryMap({
   const [selected, setSelected] = useState<MemoryProjectionPoint | null>(null);
   const [legendOpen, setLegendOpen] = useState(false);
 
+  // Bridge to the header: `MemoryHeaderActions` (in the MobileShell header,
+  // a sibling of this component) reads `openLegend` from the shared ref at
+  // click time; this effect keeps it populated and resets to noop on unmount.
+  useEffect(() => {
+    memoryHeaderActionsRef.current.openLegend = () => setLegendOpen(true);
+    return () => {
+      memoryHeaderActionsRef.current.openLegend = () => {};
+    };
+  }, []);
+
   // --- Empty / degenerate states (all of which occur) --------------------
   if (projection.algorithm == null || projection.points.length === 0) {
     return (
@@ -163,18 +174,9 @@ export function MemoryMap({
       {sampledBanner && (
         <p className="text-xs text-[var(--color-muted)]">{sampledBanner}</p>
       )}
-      <div className="flex items-start justify-between gap-3">
-        <p className="text-xs text-[var(--color-muted)]">
-          A 2-D projection always distorts — positions are relative, not exact.
-        </p>
-        <button
-          type="button"
-          onClick={() => setLegendOpen(true)}
-          className="shrink-0 rounded-lg border border-[var(--color-border)] px-2 py-1 text-xs text-[var(--color-muted)]"
-        >
-          Legend
-        </button>
-      </div>
+      <p className="text-xs text-[var(--color-muted)]">
+        A 2-D projection always distorts — positions are relative, not exact.
+      </p>
 
       {/* 85% of the column width: the plot is square, so trimming the width
           is the only way to lose 15% of its height and still keep the

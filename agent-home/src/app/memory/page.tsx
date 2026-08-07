@@ -1,3 +1,4 @@
+import { MemoryHeaderActions } from "@/components/memory/MemoryHeaderActions";
 import { MobileShell } from "@/components/MobileShell";
 import { MemoryView } from "@/components/memory/MemoryView";
 import { HermesApiError } from "@/lib/api/client";
@@ -52,7 +53,15 @@ export default async function Page({
   }
 
   return (
-    <MobileShell title="Memory" wide>
+    <MobileShell
+      title="Memory"
+      wide
+      actions={
+        noPrincipal || error || !summary || !first ? null : (
+          <MemoryHeaderActions />
+        )
+      }
+    >
       {noPrincipal ? (
         <div
           data-component="MemoryNoPrincipal"
