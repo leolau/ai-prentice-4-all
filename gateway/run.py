@@ -11002,12 +11002,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         try:
             from hermes_cli.interactions import (
                 bind_trace,
-                create_gateway_trace,
+                create_trace,
                 observe,
             )
 
             _trace_config = _load_gateway_runtime_config()
-            _interaction_trace, _interaction_ledger = create_gateway_trace(
+            _interaction_trace, _interaction_ledger = create_trace(
                 config=_trace_config,
                 source=source,
                 actor_user_id=(

@@ -127,7 +127,7 @@ async def test_gateway_mints_one_trace_and_propagates_it_through_turn(
         return trace, Ledger()
 
     monkeypatch.setattr(
-        "hermes_cli.interactions.create_gateway_trace",
+        "hermes_cli.interactions.create_trace",
         create_trace,
     )
 
@@ -202,7 +202,7 @@ async def test_gateway_trace_flush_failure_is_fail_open(
             raise RuntimeError("datastore unavailable")
 
     monkeypatch.setattr(
-        "hermes_cli.interactions.create_gateway_trace",
+        "hermes_cli.interactions.create_trace",
         lambda **_kwargs: (trace, FailingLedger()),
     )
     runner._run_agent = AsyncMock(
