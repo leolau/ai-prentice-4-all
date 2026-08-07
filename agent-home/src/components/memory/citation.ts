@@ -58,10 +58,21 @@ export function sourceLink(row: {
   document_id?: string | null;
   source_kind?: string | null;
   source_ref?: string | null;
+  file_asset_id?: string | null;
 }): SourceLink | null {
   const ref = row.source_ref || "";
   if (/^https?:\/\//i.test(ref)) {
     return { href: ref, text: "Open the document", external: true };
+  }
+  // A document ingested from a registered file links to the file's
+  // content endpoint (a signed-URL 307) — before the document_id
+  // fallback, which only re-filters the same list.
+  if (row.file_asset_id) {
+    return {
+      href: `/api/files/${encodeURIComponent(row.file_asset_id)}/content`,
+      text: "Open the file",
+      external: false,
+    };
   }
   if (row.document_id) {
     return {

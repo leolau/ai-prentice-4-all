@@ -19,6 +19,7 @@ from hermes_cli.rag_cmd import register_rag_subparser
 from hermes_cli.rag_files import (
     MAX_BYTES,
     collect_files,
+    extract_text_from_bytes,
     ingest_files,
     read_document,
 )
@@ -233,6 +234,117 @@ async def test_progress_reports_every_file_including_the_skipped_ones(tmp_path) 
 
     assert seen[0] == ("a.md", "ingested (3 chunks)")
     assert seen[1][0] == "b.pdf" and "skipped" in seen[1][1]
+
+
+# ---------------------------------------------------------------------------
+# extract_text_from_bytes — the in-memory path for the remember-file command.
+# Mirrors read_document but works on downloaded bytes, not disk paths.
+# ---------------------------------------------------------------------------
+
+def test_extract_text_from_bytes_decodes_a_text_suffix() -> None:
+    """A .md payload comes back as UTF-8 text."""
+    text, reason = extract_text_from_bytes("notes.md", b"# Hello\nworld")
+    assert reason == ""
+    assert text == "# Hello\nworld"
+
+
+def test_extract_text_from_bytes_rejects_empty_data() -> None:
+    text, reason = extract_text_from_bytes("empty.txt", b"")
+    assert text == ""
+    assert reason == "empty"
+
+
+def test_extract_text_from_bytes_rejects_whitespace_only() -> None:
+    text, reason = extract_text_from_bytes("blank.md", b"   \n\t\n")
+    assert text == ""
+    assert reason == "empty"
+
+
+def test_extract_text_from_bytes_rejects_non_utf8_text() -> None:
+    text, reason = extract_text_from_bytes("latin.txt", b"caf\xe9 not utf-8")
+    assert text == ""
+    assert "UTF-8" in reason
+
+
+def test_extract_text_from_bytes_refuses_an_oversized_payload() -> None:
+    text, reason = extract_text_from_bytes(
+        "huge.txt", b"x" * (MAX_BYTES + 1)
+    )
+    assert text == ""
+    assert "exceeds" in reason
+
+
+def test_extract_text_from_bytes_rejects_an_unsupported_suffix() -> None:
+    text, reason = extract_text_from_bytes("data.bin", b"\x00\x01")
+    assert text == ""
+    assert "unsupported suffix" in reason
+
+
+def test_extract_text_from_bytes_rejects_legacy_doc() -> None:
+    text, reason = extract_text_from_bytes("old.doc", b"\xd0\xcf\x11\xe0")
+    assert text == ""
+    assert ".doc" in reason and "convert" in reason
+
+
+def test_extract_text_from_bytes_rejects_rtf_as_not_directly_extractable() -> None:
+    text, reason = extract_text_from_bytes("file.rtf", b"{\\rtf1}")
+    assert text == ""
+    assert "not directly extractable" in reason
+
+
+def test_extract_pdf_extraction_skips_gracefully_without_pypdf() -> None:
+    """If pypdf is not installed the function returns a skip reason, not a crash.
+
+    The lazy-deps mechanism may not have installed pypdf in the test venv;
+    the function must degrade to a clear skip message, not raise.
+    """
+    text, reason = extract_text_from_bytes("scan.pdf", b"%PDF-1.4")
+    # Either pypdf is installed (and the garbage bytes fail to parse) or it
+    # is not (and we get a "not available" reason).  In both cases the text
+    # is empty and a reason is given — never a crash.
+    assert text == ""
+    assert reason
+    assert "empty" not in reason  # not the empty-data path
+
+
+def test_extract_docx_extraction_skips_gracefully_without_python_docx() -> None:
+    """Same contract for DOCX — skip, never crash."""
+    text, reason = extract_text_from_bytes("file.docx", b"PK\x03\x04")
+    assert text == ""
+    assert reason
+
+
+# ---------------------------------------------------------------------------
+# CLI parser — remember-file and backfill-files subcommands.
+# ---------------------------------------------------------------------------
+
+def test_the_cli_exposes_remember_file_with_its_defaults() -> None:
+    parser = argparse.ArgumentParser()
+    memory = parser.add_subparsers(dest="memory_command")
+    register_rag_subparser(memory)
+
+    args = parser.parse_args(
+        ["rag", "--as", "leo_owner", "remember-file", "asset-uuid-1"]
+    )
+
+    assert args.rag_command == "remember-file"
+    assert args.asset_id == "asset-uuid-1"
+    assert args.remembered_by == "user"
+    assert args.force is False
+
+
+def test_the_cli_exposes_backfill_files_with_its_defaults() -> None:
+    parser = argparse.ArgumentParser()
+    memory = parser.add_subparsers(dest="memory_command")
+    register_rag_subparser(memory)
+
+    args = parser.parse_args(
+        ["rag", "--as", "leo_owner", "backfill-files"]
+    )
+
+    assert args.rag_command == "backfill-files"
+    assert args.prefix is None
+    assert args.dry_run is False
 
 
 def test_the_cli_exposes_ingest_files_with_its_defaults() -> None:

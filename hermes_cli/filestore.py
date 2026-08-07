@@ -169,3 +169,30 @@ class SupabaseStorage:
                 f"Supabase Storage delete failed ({response.status_code}): "
                 f"{response.text[:200]}"
             )
+
+    async def list_objects(
+        self, prefix: str = "", *, limit: int = 1000
+    ) -> list[dict]:
+        """List objects under ``prefix``. Returns ``[{name, id, created_at, metadata}]``.
+
+        Used by the backfill command to discover pre-existing objects that
+        predate the registry. Each entry's ``name`` is the full object key
+        (the ``storage_path``), and ``created_at`` is the object's upload time.
+        """
+        import httpx
+
+        url = (
+            f"{self.url}/storage/v1/object/list/{self.bucket}"
+            f"?prefix={prefix}&limit={limit}"
+        )
+        async with httpx.AsyncClient(timeout=self.timeout) as client:
+            response = await client.post(url, headers=self._headers)
+        if response.status_code >= 400:
+            raise RuntimeError(
+                f"Supabase Storage list failed ({response.status_code}): "
+                f"{response.text[:200]}"
+            )
+        items = response.json()
+        if not isinstance(items, list):
+            return []
+        return items

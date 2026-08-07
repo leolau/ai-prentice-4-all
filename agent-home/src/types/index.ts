@@ -661,7 +661,7 @@ export interface MemoryRow {
   source_kind?: string | null;
   source_ref?: string | null;
   ordinal?: number;
-}
+  file_asset_id?: string | null;  // set when this chunk's document was ingested from a registered file
 
 /** Paginated rows response. */
 export interface MemoryRowsResponse {
@@ -681,6 +681,7 @@ export interface MemoryProjectionPoint {
   section?: string | null;
   source_kind?: string | null;
   source_ref?: string | null;
+  file_asset_id?: string | null;  // set when this point's chunk was ingested from a registered file
 }
 
 /** The `/api/memory/explorer/projection` response. */
@@ -706,7 +707,7 @@ export interface MemoryDocument {
   id: string; owner_user_id: string; visibility: string; source_kind: string;
   source_ref: string; title: string; chunk_count: number;
   ingested_at: string | null;
-}
+  file_asset_id?: string | null;  // set when this document was ingested from a registered file
 
 /** Paginated documents response. */
 export interface MemoryDocumentsResponse {

@@ -562,6 +562,22 @@ async def _rows_chunks(
 
     where = " AND ".join(clauses) if clauses else "TRUE"
 
+    # Guard the file_assets join so a box without the table still works.
+    files_exist = await conn.fetchval(
+        "SELECT to_regclass(current_schema() || '.file_assets')"
+    )
+    file_join = (
+        "LEFT JOIN file_assets fa "
+        "ON fa.document_id = rag_chunks.document_id"
+        if files_exist
+        else ""
+    )
+    file_col = (
+        "fa.id AS file_asset_id"
+        if files_exist
+        else "NULL AS file_asset_id"
+    )
+
     async with conn.transaction():
         await bind_principal(conn, principal)
         await bind_elevated_reads(conn, store.role_reads)
@@ -574,10 +590,12 @@ async def _rows_chunks(
                        rag_documents.source_kind, rag_documents.source_ref,
                        (SELECT pr.role FROM principals pr
                          WHERE pr.user_id = rag_chunks.owner_user_id)
-                           AS owner_role
+                           AS owner_role,
+                       {file_col}
                 FROM rag_chunks
                 LEFT JOIN rag_documents
                        ON rag_documents.id = rag_chunks.document_id
+                {file_join}
                 WHERE {where}
                 ORDER BY rag_chunks.created_at DESC
                 LIMIT {limit_val} OFFSET {offset_val}""",
@@ -618,6 +636,9 @@ async def _rows_chunks(
             "ordinal": int(row["ordinal"]),
             "source_kind": row["source_kind"],
             "source_ref": row["source_ref"],
+            "file_asset_id": (
+                str(row["file_asset_id"]) if row["file_asset_id"] else None
+            ),
         })
     return {
         "rows": rows_out,
@@ -702,22 +723,38 @@ async def get_projection(
             "SELECT to_regclass(current_schema() || '.rag_chunks')"
         )
         chunk_label = "LEFT(c.text, 120)" if chunks_exist else "NULL"
+        # Guard the file_assets join so a box without the table still works.
+        files_exist = await conn.fetchval(
+            "SELECT to_regclass(current_schema() || '.file_assets')"
+        )
         # A chunk's citation is its document, so the label join carries the
         # document row too: without it a clicked chunk says only "chunk".
+        file_join_clause = (
+            " LEFT JOIN file_assets fa ON fa.document_id = c.document_id"
+            if files_exist
+            else ""
+        )
         chunk_join = (
             f"LEFT JOIN {RAG_CHUNKS_TABLE} c ON c.id = p.id "
             "LEFT JOIN rag_documents d ON d.id = c.document_id"
+            + file_join_clause
             if chunks_exist
             else ""
+        )
+        file_col = (
+            ", fa.id AS file_asset_id"
+            if chunks_exist and files_exist
+            else ", NULL AS file_asset_id"
         )
         chunk_columns = (
             "c.section, c.document_id, d.title AS document_title, "
             "d.source_kind, d.source_ref"
+            + file_col
             if chunks_exist
             else (
                 "NULL AS section, NULL AS document_id, "
                 "NULL AS document_title, NULL AS source_kind, "
-                "NULL AS source_ref"
+                "NULL AS source_ref, NULL AS file_asset_id"
             )
         )
 
@@ -820,6 +857,9 @@ async def get_projection(
                 "section": row["section"],
                 "source_kind": row["source_kind"],
                 "source_ref": row["source_ref"],
+                "file_asset_id": (
+                    str(row["file_asset_id"]) if row["file_asset_id"] else None
+                ),
             })
 
         # Staleness: rows without projection, or model mismatch.
@@ -1042,13 +1082,33 @@ async def get_documents(request: Request, mode: Optional[str] = None):
             role_elevation=store.role_reads,
         )
 
+        # The file_assets join is guarded so a box without the table still
+        # returns documents — the registry shipped after the first deployments.
+        files_exist = await conn.fetchval(
+            "SELECT to_regclass(current_schema() || '.file_assets')"
+        )
+        file_join = (
+            "LEFT JOIN file_assets fa ON fa.document_id = rag_documents.id"
+            if files_exist
+            else ""
+        )
+        file_col = (
+            "fa.id AS file_asset_id"
+            if files_exist
+            else "NULL AS file_asset_id"
+        )
+
         async with conn.transaction():
             await bind_principal(conn, principal)
             await bind_elevated_reads(conn, store.role_reads)
             rows = await conn.fetch(
-                f"""SELECT id, owner_user_id, visibility, source_kind,
-                           source_ref, title, chunk_count, ingested_at
+                f"""SELECT rag_documents.id, rag_documents.owner_user_id,
+                           rag_documents.visibility, rag_documents.source_kind,
+                           rag_documents.source_ref, rag_documents.title,
+                           rag_documents.chunk_count, rag_documents.ingested_at,
+                           {file_col}
                     FROM rag_documents
+                    {file_join}
                     WHERE {predicate.sql}
                     ORDER BY ingested_at DESC""",
                 *predicate.params,
@@ -1064,6 +1124,9 @@ async def get_documents(request: Request, mode: Optional[str] = None):
                 "title": str(row["title"]),
                 "chunk_count": int(row["chunk_count"]),
                 "ingested_at": row["ingested_at"].isoformat() if row["ingested_at"] else None,
+                "file_asset_id": (
+                    str(row["file_asset_id"]) if row["file_asset_id"] else None
+                ),
             }
             for row in rows
         ]
