@@ -23,6 +23,9 @@ from urllib.error import URLError
 sys.path.insert(0, '/opt/data')
 from track_credit_helper import track_inference
 
+# Shared modules (triage_handlers, memory_bridge)
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 # Paths
 CONFIG_PATH = '/opt/data/whatsapp-messages/config.json'
 DB_PATH = '/opt/data/whatsapp-messages/whatsapp_data.db'
@@ -56,12 +59,24 @@ def get_db():
     return conn
 
 
-def load_skills():
-    """Load all skill .md files from the skills directory."""
+def load_skills(config=None):
+    """Load all skill .md files from configured skill directories.
+
+    Reads skills_dirs and skills_subdirs from config.json's 'triage' section.
+    Falls back to SKILLS_DIR + 'custom' subdirectory for backward compatibility.
+    """
     skills_content = []
-    skill_dirs = [SKILLS_DIR, os.path.join(SKILLS_DIR, 'custom')]
-    
-    for sdir in skill_dirs:
+
+    triage_cfg = (config or {}).get('triage', {})
+    base_dirs = triage_cfg.get('skills_dirs', [SKILLS_DIR])
+    subdirs = triage_cfg.get('skills_subdirs', ['custom'])
+
+    search_dirs = list(base_dirs)
+    for bd in base_dirs:
+        for sd in subdirs:
+            search_dirs.append(os.path.join(bd, sd))
+
+    for sdir in search_dirs:
         if not os.path.isdir(sdir):
             continue
         for f in sorted(glob.glob(os.path.join(sdir, '*.md'))):
@@ -70,7 +85,7 @@ def load_skills():
             with open(f) as fh:
                 content = fh.read()
             skills_content.append(f"## Skill: {os.path.basename(f)}\n{content}")
-    
+
     return "\n\n---\n\n".join(skills_content)
 
 
@@ -106,7 +121,7 @@ def call_deepseek(messages, temperature=0.3, max_tokens=2000):
 
 def triage_batch(batch):
     """Run triage on a message batch."""
-    skills_text = load_skills()
+    skills_text = load_skills(config)
     sender_phone = batch['sender_phone']
     source_phone = batch['source_phone']
     is_family = batch.get('is_family', sender_phone in FAMILY_PHONES)
@@ -127,30 +142,13 @@ def triage_batch(batch):
 2. Extract any tasks or action items
 3. Extract any notes worth remembering
 4. Determine if this batch should be escalated (pushed immediately to the user)
+5. Extract any facts worth persisting to long-term memory
 
 {skills_text}
 
-ESCALATION RULES:
-- ANY message from a family contact -> ESCALATE (reason: "family")
-- Business requests needing immediate attention -> ESCALATE (reason: "urgent_business")
-- Sales opportunities needing immediate attention -> ESCALATE (reason: "sales_opportunity")
-- Everything else -> DO NOT escalate (will surface in hourly digest)
 {family_info}
 
-Respond in JSON format:
-{{
-  "classification": "task|reminder|note|urgent_business|sales_opportunity|informational|ignorable",
-  "summary": "brief 1-2 sentence summary of the batch",
-  "escalate": true/false,
-  "escalation_reason": "family|urgent_business|sales_opportunity|null",
-  "escalation_priority": "high|medium|low",
-  "tasks": [
-    {{"description": "...", "due_date": "YYYY-MM-DD or null", "priority": "high|medium|low"}}
-  ],
-  "notes": [
-    {{"content": "..."}}
-  ]
-}}
+Analyze the batch and respond according to the response schema defined in the skills above.
 """
     
     user_prompt = f"""Triage this message batch:
@@ -180,55 +178,52 @@ Messages:
 
 
 def process_triage_result(batch, result):
-    """Write triage results to SQLite."""
+    """Write triage results to SQLite via the handler registry."""
     db = get_db()
-    now = datetime.now(timezone.utc).isoformat()
-    
-    # Write tasks
-    for task in result.get('tasks', []):
-        task_id = str(uuid.uuid4())
-        try:
-            db.execute(
-                """INSERT INTO wa_tasks (id, source_phone, source_msg_id, description, due_date, status, priority, created_at)
-                   VALUES (?, ?, ?, ?, ?, 'pending', ?, ?)""",
-                (task_id, batch['source_phone'], batch['messages'][0]['msg_id'],
-                 task['description'], task.get('due_date'), task.get('priority', 'medium'), now)
-            )
-        except Exception as e:
-            print(f"[triage] Error inserting task: {e}")
-    
-    # Write notes
-    for note in result.get('notes', []):
-        note_id = str(uuid.uuid4())
-        try:
-            db.execute(
-                """INSERT INTO wa_notes (id, source_phone, source_msg_id, content, created_at)
-                   VALUES (?, ?, ?, ?, ?)""",
-                (note_id, batch['source_phone'], batch['messages'][0]['msg_id'],
-                 note['content'], now)
-            )
-        except Exception as e:
-            print(f"[triage] Error inserting note: {e}")
-    
-    # Write escalation if needed
-    if result.get('escalate'):
-        esc_id = str(uuid.uuid4())
-        try:
-            db.execute(
-                """INSERT INTO escalations (id, source_phone, source_msg_id, sender_phone, reason, summary, priority, status, created_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?)""",
-                (esc_id, batch['source_phone'], batch['messages'][0]['msg_id'],
-                 batch['sender_phone'], result.get('escalation_reason', 'unknown'),
-                 result.get('summary', ''), result.get('escalation_priority', 'medium'), now)
-            )
-        except Exception as e:
-            print(f"[triage] Error inserting escalation: {e}")
-    
+    batch['_channel'] = 'whatsapp'
+    try:
+        from shared.triage_handlers import process_result
+        process_result(result, batch, db)
+    except ImportError:
+        # Fallback to inline processing if shared module is not available
+        now = datetime.now(timezone.utc).isoformat()
+        for task in result.get('tasks', []):
+            try:
+                db.execute(
+                    """INSERT INTO wa_tasks (id, source_phone, source_msg_id, description, due_date, status, priority, created_at)
+                       VALUES (?, ?, ?, ?, ?, 'pending', ?, ?)""",
+                    (str(uuid.uuid4()), batch['source_phone'], batch['messages'][0]['msg_id'],
+                     task['description'], task.get('due_date'), task.get('priority', 'medium'), now)
+                )
+            except Exception as e:
+                print(f"[triage] Error inserting task: {e}")
+        for note in result.get('notes', []):
+            try:
+                db.execute(
+                    """INSERT INTO wa_notes (id, source_phone, source_msg_id, content, created_at)
+                       VALUES (?, ?, ?, ?, ?)""",
+                    (str(uuid.uuid4()), batch['source_phone'], batch['messages'][0]['msg_id'],
+                     note['content'], now)
+                )
+            except Exception as e:
+                print(f"[triage] Error inserting note: {e}")
+        if result.get('escalate'):
+            try:
+                db.execute(
+                    """INSERT INTO escalations (id, source_phone, source_msg_id, sender_phone, reason, summary, priority, status, created_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?)""",
+                    (str(uuid.uuid4()), batch['source_phone'], batch['messages'][0]['msg_id'],
+                     batch['sender_phone'], result.get('escalation_reason', 'unknown'),
+                     result.get('summary', ''), result.get('escalation_priority', 'medium'), now)
+                )
+            except Exception as e:
+                print(f"[triage] Error inserting escalation: {e}")
     db.commit()
     db.close()
-    
+
     print(f"[triage] Result: class={result.get('classification')}, escalate={result.get('escalate')}, "
-          f"tasks={len(result.get('tasks', []))}, notes={len(result.get('notes', []))}")
+          f"tasks={len(result.get('tasks', []))}, notes={len(result.get('notes', []))}, "
+          f"memory_facts={len(result.get('memory_facts', []))}")
 
 
 def process_batch_file(batch_path):
