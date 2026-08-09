@@ -3399,7 +3399,17 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         try:
             from gateway.inbound_files import register_event_files
 
-            task = asyncio.create_task(register_event_files(event, source))
+            # Pass the principal store so an unenrolled sender's file falls
+            # back to the deployment owner instead of being dropped — the
+            # local cache prunes at 24 h, and a skipped file is unrecoverable.
+            principal_store = self._get_principal_store()
+            task = asyncio.create_task(
+                register_event_files(
+                    event,
+                    source,
+                    principal_store=principal_store,
+                )
+            )
             self._file_registry_tasks.add(task)
             task.add_done_callback(self._file_registry_tasks.discard)
         except Exception:
