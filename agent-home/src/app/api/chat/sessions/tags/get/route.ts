@@ -1,7 +1,7 @@
 /**
- * GET /api/chat/sessions — BFF conversation list (FG-20 Wave C1). Forwards to
- * the Python API `GET /api/sessions` (agent_home source, recent-first) under
- * the bridged C1 principal so the mobile chat list can refresh after a send.
+ * GET /api/chat/sessions/tags/get?sessionId=… — BFF per-session tag list.
+ * Forwards to the Python API `GET /api/sessions/{id}/tags` under the bridged
+ * C1 principal so the SessionModal can show tags for the open conversation.
  */
 import { NextResponse } from "next/server";
 
@@ -13,20 +13,16 @@ export async function GET(request: Request): Promise<NextResponse> {
   if (!principal) {
     return NextResponse.json({ error: "unauthenticated" }, { status: 401 });
   }
-  const url = new URL(request.url);
-  const raw = url.searchParams.get("archived");
-  const archived =
-    raw === "only" || raw === "include" || raw === "exclude" ? raw : undefined;
+  const sessionId = new URL(request.url).searchParams.get("sessionId");
+  if (!sessionId) {
+    return NextResponse.json(
+      { error: "missing_session", detail: "sessionId is required" },
+      { status: 400 },
+    );
+  }
   try {
     const client = await apiClientForRequest();
-    const data = await client.sessions({
-      source: "agent_home",
-      order: "recent",
-      archived,
-      tags: url.searchParams.get("tags") ?? undefined,
-      excludeTags: url.searchParams.get("exclude_tags") ?? undefined,
-      tagMatch: url.searchParams.get("tag_match") ?? undefined,
-    });
+    const data = await client.getSessionTags(sessionId);
     return NextResponse.json(data);
   } catch (err) {
     if (err instanceof HermesApiError) {

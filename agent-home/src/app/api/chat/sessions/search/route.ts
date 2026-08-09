@@ -1,7 +1,7 @@
 /**
- * GET /api/chat/sessions — BFF conversation list (FG-20 Wave C1). Forwards to
- * the Python API `GET /api/sessions` (agent_home source, recent-first) under
- * the bridged C1 principal so the mobile chat list can refresh after a send.
+ * GET /api/chat/sessions/search — BFF cross-session keyword search.
+ * Forwards `?q=...` to the Python API `GET /api/sessions/search` under the
+ * bridged C1 principal so the mobile chat can search across all sessions.
  */
 import { NextResponse } from "next/server";
 
@@ -13,20 +13,14 @@ export async function GET(request: Request): Promise<NextResponse> {
   if (!principal) {
     return NextResponse.json({ error: "unauthenticated" }, { status: 401 });
   }
-  const url = new URL(request.url);
-  const raw = url.searchParams.get("archived");
-  const archived =
-    raw === "only" || raw === "include" || raw === "exclude" ? raw : undefined;
+  const q = new URL(request.url).searchParams.get("q") ?? "";
+  const limit = Number(new URL(request.url).searchParams.get("limit") ?? "20");
+  if (!q.trim()) {
+    return NextResponse.json({ results: [] });
+  }
   try {
     const client = await apiClientForRequest();
-    const data = await client.sessions({
-      source: "agent_home",
-      order: "recent",
-      archived,
-      tags: url.searchParams.get("tags") ?? undefined,
-      excludeTags: url.searchParams.get("exclude_tags") ?? undefined,
-      tagMatch: url.searchParams.get("tag_match") ?? undefined,
-    });
+    const data = await client.searchSessions(q, limit);
     return NextResponse.json(data);
   } catch (err) {
     if (err instanceof HermesApiError) {

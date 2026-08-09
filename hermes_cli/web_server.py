@@ -4770,6 +4770,9 @@ async def get_sessions(
     exclude_sources: str = None,
     cwd_prefix: str = None,
     profile: Optional[str] = None,
+    tags: str = None,
+    exclude_tags: str = None,
+    tag_match: str = "any",
 ):
     """List sessions.
 
@@ -4807,6 +4810,19 @@ async def get_sessions(
             # uses these to split recents (exclude=cron) from the cron-jobs
             # section (source=cron) into two independent lists.
             exclude_list = [s for s in (exclude_sources or "").split(",") if s.strip()]
+            # Tag filtering: if tags/exclude_tags are provided, compute the
+            # matching session-id set and filter the list in Python (the tag
+            # tables are small; a SQL JOIN into list_sessions_rich's recursive
+            # CTE would be fragile).
+            tag_include = [t for t in (tags or "").split(",") if t.strip()] if tags else None
+            tag_exclude = [t for t in (exclude_tags or "").split(",") if t.strip()] if exclude_tags else None
+            filtered_ids = None
+            if tag_include or tag_exclude:
+                filtered_ids = db.filter_session_ids_by_tags(
+                    include_tags=tag_include,
+                    exclude_tags=tag_exclude,
+                    match=tag_match,
+                )
             sessions = db.list_sessions_rich(
                 source=source or None,
                 exclude_sources=exclude_list or None,
@@ -4818,6 +4834,9 @@ async def get_sessions(
                 archived_only=archived_only,
                 order_by_last_active=order == "recent",
             )
+            if filtered_ids is not None:
+                id_set = set(filtered_ids)
+                sessions = [s for s in sessions if s["id"] in id_set]
             total = db.session_count(
                 source=source or None,
                 cwd_prefix=(cwd_prefix or None),
@@ -9431,6 +9450,34 @@ def _open_session_db_for_profile(profile: Optional[str]):
     return SessionDB(db_path=Path(home) / "state.db")
 
 
+# ---------------------------------------------------------------------------
+# Session tag endpoints — literal paths registered *before* the
+# parameterized ``/api/sessions/{session_id}`` routes so ``tags`` is not
+# captured as a session id.
+# ---------------------------------------------------------------------------
+@app.get("/api/sessions/tags")
+async def list_session_tags(profile: Optional[str] = None):
+    """List all tags with session counts."""
+    db = _open_session_db_for_profile(profile)
+    try:
+        return {"tags": db.list_tags()}
+    finally:
+        db.close()
+
+
+@app.delete("/api/sessions/tags/{tag_id}")
+async def delete_session_tag(tag_id: str, profile: Optional[str] = None):
+    """Delete a tag entirely (removes all session assignments)."""
+    db = _open_session_db_for_profile(profile)
+    try:
+        deleted = db.delete_tag(tag_id)
+        if not deleted:
+            raise HTTPException(404, "Tag not found")
+        return {"ok": True}
+    finally:
+        db.close()
+
+
 @app.get("/api/sessions/{session_id}")
 async def get_session_detail(session_id: str, profile: Optional[str] = None):
     db = _open_session_db_for_profile(profile)
@@ -9471,6 +9518,151 @@ async def get_session_messages(session_id: str, profile: Optional[str] = None):
         return {"session_id": sid, "messages": messages}
     finally:
         db.close()
+
+
+# ---------------------------------------------------------------------------
+# Per-session tag endpoints
+# ---------------------------------------------------------------------------
+@app.get("/api/sessions/{session_id}/tags")
+async def get_session_tags(session_id: str, profile: Optional[str] = None):
+    """Return tags attached to *session_id*."""
+    db = _open_session_db_for_profile(profile)
+    try:
+        sid = db.resolve_session_id(session_id) or session_id
+        return {"tags": db.get_session_tags(sid)}
+    finally:
+        db.close()
+
+
+@app.post("/api/sessions/{session_id}/tags")
+async def add_session_tag(
+    session_id: str,
+    request: Request,
+    profile: Optional[str] = None,
+):
+    """Attach an existing-or-new tag to *session_id*.
+
+    Body: ``{"name": "bug", "color": "red"?}``
+    """
+    body = await request.json()
+    name = (body or {}).get("name", "").strip()
+    color = (body or {}).get("color", "blue")
+    if not name:
+        raise HTTPException(400, "name is required")
+    db = _open_session_db_for_profile(profile)
+    try:
+        sid = db.resolve_session_id(session_id) or session_id
+        tag = db.add_tag_to_session(sid, name, color=color, source="manual")
+        return {"tag": tag}
+    finally:
+        db.close()
+
+
+@app.delete("/api/sessions/{session_id}/tags/{tag_id}")
+async def remove_session_tag(
+    session_id: str,
+    tag_id: str,
+    profile: Optional[str] = None,
+):
+    """Detach *tag_id* from *session_id*."""
+    db = _open_session_db_for_profile(profile)
+    try:
+        sid = db.resolve_session_id(session_id) or session_id
+        removed = db.remove_tag_from_session(sid, tag_id)
+        return {"ok": removed}
+    finally:
+        db.close()
+
+
+@app.post("/api/sessions/{session_id}/tags/suggest")
+async def suggest_session_tags(
+    session_id: str,
+    request: Request,
+    profile: Optional[str] = None,
+):
+    """Use an LLM to suggest tags for this session.
+
+    Returns a list of ``{"tag_name": "...", "is_new": true/false,
+    "reason": "...", "confidence": 0.8}``.
+    """
+    db = _open_session_db_for_profile(profile)
+    try:
+        sid = db.resolve_session_id(session_id) or session_id
+        messages = db.get_messages(sid, limit=20)
+        existing_tags = [t["name"] for t in db.list_tags()]
+    finally:
+        db.close()
+
+    # Build a condensed transcript for the LLM.
+    transcript_parts = []
+    for msg in messages[:20]:
+        role = msg.get("role", "?")
+        content = (msg.get("content") or "")[:500]
+        if content:
+            transcript_parts.append(f"{role}: {content}")
+    transcript = "\n".join(transcript_parts)
+    if not transcript:
+        return {"suggestions": []}
+
+    existing_str = ", ".join(existing_tags) if existing_tags else "(none)"
+
+    prompt = (
+        "You are a session tagger. Analyze the conversation transcript below "
+        "and suggest 0-5 concise tags (1-3 words each, lowercase, no # prefix). "
+        f"Existing tags in the workspace: {existing_str}.\n\n"
+        f"Transcript:\n{transcript}\n\n"
+        "Return ONLY a JSON object: {\"suggestions\": [{\"tag_name\": \"...\", "
+        "\"reason\": \"brief why\", \"confidence\": 0.0-1.0}]}. "
+        "If the session is too short to tag, return an empty array."
+    )
+
+    try:
+        suggestions = await _llm_tag_suggest(prompt)
+    except Exception:
+        return {"suggestions": []}
+
+    # Mark which suggestions are new vs existing.
+    existing_lower = {t.lower() for t in existing_tags}
+    for s in suggestions:
+        s["is_new"] = s["tag_name"].strip().lower() not in existing_lower
+
+    return {"suggestions": suggestions}
+
+
+async def _llm_tag_suggest(prompt: str) -> list:
+    """Call a lightweight LLM (DeepSeek if available) for tag suggestions."""
+    import os
+    from hermes_state import SessionDB
+
+    api_key = os.environ.get("DEEPSEEK_API_KEY") or os.environ.get("OPENAI_API_KEY", "")
+    base_url = "https://api.deepseek.com/v1" if os.environ.get("DEEPSEEK_API_KEY") else (
+        os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1")
+    )
+    model = "deepseek-chat" if os.environ.get("DEEPSEEK_API_KEY") else "gpt-4o-mini"
+    if not api_key:
+        return []
+
+    import json as _json
+    import httpx
+
+    async with httpx.AsyncClient(timeout=15) as client:
+        resp = await client.post(
+            f"{base_url}/chat/completions",
+            headers={"Authorization": f"Bearer {api_key}"},
+            json={
+                "model": model,
+                "messages": [{"role": "user", "content": prompt}],
+                "response_format": {"type": "json_object"},
+                "max_tokens": 512,
+                "temperature": 0.3,
+            },
+        )
+        resp.raise_for_status()
+        data = resp.json()
+
+    content = data["choices"][0]["message"]["content"]
+    parsed = _json.loads(content)
+    return parsed.get("suggestions", [])
 
 
 @app.post("/api/sessions/{session_id}/chat")

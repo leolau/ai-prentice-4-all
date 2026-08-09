@@ -42,7 +42,9 @@ import type {
   Principal,
   Role,
   SessionCreateResponse,
+  SessionTag,
   SessionsResponse,
+  TagSuggestion,
   StoreMode,
   ToolsResponse,
   TraceDetailResponse,
@@ -198,6 +200,9 @@ export class HermesApiClient {
       limit?: number;
       order?: "created" | "recent";
       archived?: "exclude" | "only" | "include";
+      tags?: string;
+      excludeTags?: string;
+      tagMatch?: string;
     } = {},
   ): Promise<SessionsResponse> {
     const params = new URLSearchParams();
@@ -205,6 +210,9 @@ export class HermesApiClient {
     params.set("limit", String(opts.limit ?? 30));
     params.set("order", opts.order ?? "recent");
     if (opts.archived) params.set("archived", opts.archived);
+    if (opts.tags) params.set("tags", opts.tags);
+    if (opts.excludeTags) params.set("exclude_tags", opts.excludeTags);
+    if (opts.tagMatch) params.set("tag_match", opts.tagMatch);
     return this.request(`/api/sessions?${params.toString()}`);
   }
 
@@ -253,6 +261,81 @@ export class HermesApiClient {
       method: "PATCH",
       json: { archived },
     });
+  }
+
+  // ── Session tags ──────────────────────────────────────────────────
+
+  /** List all tags in the workspace with session counts. */
+  async listTags(): Promise<{ tags: SessionTag[] }> {
+    return this.request(`/api/sessions/tags`);
+  }
+
+  /** Get tags attached to a session. */
+  async getSessionTags(sessionId: string): Promise<{ tags: SessionTag[] }> {
+    return this.request(
+      `/api/sessions/${encodeURIComponent(sessionId)}/tags`,
+    );
+  }
+
+  /** Attach an existing-or-new tag to a session. */
+  async addSessionTag(
+    sessionId: string,
+    name: string,
+    color?: string,
+  ): Promise<{ tag: SessionTag }> {
+    return this.request(`/api/sessions/${encodeURIComponent(sessionId)}/tags`, {
+      method: "POST",
+      json: { name, color: color ?? "blue" },
+    });
+  }
+
+  /** Remove a tag from a session. */
+  async removeSessionTag(
+    sessionId: string,
+    tagId: string,
+  ): Promise<{ ok: boolean }> {
+    return this.request(
+      `/api/sessions/${encodeURIComponent(sessionId)}/tags/${encodeURIComponent(tagId)}`,
+      { method: "DELETE" },
+    );
+  }
+
+  /** Delete a tag entirely (removes all session assignments). */
+  async deleteTag(tagId: string): Promise<{ ok: boolean }> {
+    return this.request(`/api/sessions/tags/${encodeURIComponent(tagId)}`, {
+      method: "DELETE",
+    });
+  }
+
+  /** LLM-suggested tags for a session (awaiting user confirmation). */
+  async suggestSessionTags(
+    sessionId: string,
+  ): Promise<{ suggestions: TagSuggestion[] }> {
+    return this.request(
+      `/api/sessions/${encodeURIComponent(sessionId)}/tags/suggest`,
+      { method: "POST" },
+    );
+  }
+
+  // ── Cross-session search ─────────────────────────────────────────
+
+  /** FTS5 search across all sessions, returning matching snippets. */
+  async searchSessions(
+    query: string,
+    limit = 20,
+  ): Promise<{
+    results: Array<{
+      session_id: string;
+      snippet: string;
+      role: string;
+      source: string;
+      model?: string;
+      session_started?: number;
+      title?: string | null;
+    }>;
+  }> {
+    const params = new URLSearchParams({ q: query, limit: String(limit) });
+    return this.request(`/api/sessions/search?${params.toString()}`);
   }
 
   /**
