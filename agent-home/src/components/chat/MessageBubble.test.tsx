@@ -125,4 +125,5 @@ describe("MessageBubble", () => {
     expect(html).not.toContain('data-component="ChatFile"');
     expect(html).toContain("[docs](https://example.com)");
   });
+
 });
