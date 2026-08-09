@@ -180,6 +180,45 @@ def download_media(bridge_port, msg_id):
         return None, None
 
 
+def _save_and_register_media(media_data, filename, content_type, msg_id,
+                             media_path, db, source_phone, chat_id,
+                             sender_phone, sender_name, timestamp):
+    """Save media bytes to MEDIA_DIR, update DB, and register in file registry."""
+    try:
+        with open(media_path, 'wb') as f:
+            f.write(media_data)
+        db.execute(
+            "UPDATE messages SET media_path = ? WHERE id = ?",
+            (media_path, msg_id),
+        )
+        db.commit()
+    except Exception as e:
+        print(f"[batcher] Error saving media for {msg_id}: {e}")
+        return
+
+    # Register in the file registry (Supabase + file_assets table).
+    try:
+        from shared.file_registration import register_file
+        registered = register_file(
+            media_data,
+            surface='whatsapp',
+            filename=filename,
+            content_type=content_type,
+            account_id=source_phone,
+            conversation=chat_id,
+            sender_id=sender_phone,
+            sender_name=sender_name or '',
+            message_id=msg_id,
+            received_at=datetime.fromisoformat(timestamp) if timestamp else None,
+        )
+        if registered:
+            print(f"[batcher] Registered media file: {filename}")
+    except ImportError:
+        pass  # shared.file_registration not available
+    except Exception as e:
+        print(f"[batcher] File registration failed for {msg_id}: {e}")
+
+
 def process_message(msg, source_phone, bridge_port=None):
     """Process a single message: write to DB, download media, add to batch."""
     msg_id = msg.get('messageId') or msg.get('key', {}).get('id') or str(uuid.uuid4())
@@ -223,46 +262,48 @@ def process_message(msg, source_phone, bridge_port=None):
     # Download media from the bridge and register in the file registry.
     # Best-effort: a failed download or registration never blocks
     # message processing.
+    #
+    # The bridge pre-downloads media via Baileys' downloadMediaMessage() and
+    # provides local file paths in the ``mediaUrls`` field on each message.
+    # Use those directly instead of trying the non-existent GET /media/{id}
+    # endpoint.  Fall back to the legacy HTTP download for bridges that don't
+    # pre-download.
     if media_type and bridge_port:
-        media_data, media_ct = download_media(bridge_port, msg_id)
-        if media_data:
-            filename = _media_filename(msg, msg_id, media_type, media_mimetype or media_ct)
-            media_path = os.path.join(MEDIA_DIR, filename)
-            try:
-                with open(media_path, 'wb') as f:
-                    f.write(media_data)
-                db.execute(
-                    "UPDATE messages SET media_path = ? WHERE id = ?",
-                    (media_path, msg_id),
+        media_urls = msg.get('mediaUrls') or []
+        if media_urls:
+            for media_url in media_urls:
+                if not os.path.exists(media_url):
+                    print(f"[batcher] Media file not found on disk: {media_url}")
+                    continue
+                try:
+                    with open(media_url, 'rb') as f:
+                        media_data = f.read()
+                except Exception as e:
+                    print(f"[batcher] Error reading media file {media_url}: {e}")
+                    continue
+                media_ct = mimetypes.guess_type(media_url)[0] or 'application/octet-stream'
+                filename = os.path.basename(media_url)
+                media_path = os.path.join(MEDIA_DIR, filename)
+                _save_and_register_media(
+                    media_data, filename,
+                    media_mimetype or media_ct or 'application/octet-stream',
+                    msg_id, media_path, db, source_phone, chat_id,
+                    sender_phone, sender_name, timestamp,
                 )
-                db.commit()
-            except Exception as e:
-                print(f"[batcher] Error saving media for {msg_id}: {e}")
-                media_path = None
-
-            # Register in the file registry (Supabase + file_assets table).
-            try:
-                from shared.file_registration import register_file
-                registered = register_file(
-                    media_data,
-                    surface='whatsapp',
-                    filename=filename,
-                    content_type=media_mimetype or media_ct or 'application/octet-stream',
-                    account_id=source_phone,
-                    conversation=chat_id,
-                    sender_id=sender_phone,
-                    sender_name=sender_name or '',
-                    message_id=msg_id,
-                    received_at=datetime.fromisoformat(timestamp) if timestamp else None,
-                )
-                if registered:
-                    print(f"[batcher] Registered media file: {filename}")
-            except ImportError:
-                pass  # shared.file_registration not available
-            except Exception as e:
-                print(f"[batcher] File registration failed for {msg_id}: {e}")
         else:
-            print(f"[batcher] Could not download media for {msg_id} (bridge may not support /media endpoint)")
+            # Fallback: try the bridge's /media/{id} endpoint.
+            media_data, media_ct = download_media(bridge_port, msg_id)
+            if media_data:
+                filename = _media_filename(msg, msg_id, media_type, media_mimetype or media_ct)
+                media_path = os.path.join(MEDIA_DIR, filename)
+                _save_and_register_media(
+                    media_data, filename,
+                    media_mimetype or media_ct or 'application/octet-stream',
+                    msg_id, media_path, db, source_phone, chat_id,
+                    sender_phone, sender_name, timestamp,
+                )
+            else:
+                print(f"[batcher] Could not download media for {msg_id} (bridge has no mediaUrls and /media endpoint unavailable)")
 
     # Update contact
     try:

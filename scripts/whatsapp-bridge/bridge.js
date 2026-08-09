@@ -24,12 +24,21 @@ import express from 'express';
 import { Boom } from '@hapi/boom';
 import pino from 'pino';
 import path from 'path';
+import dns from 'dns';
 import { mkdirSync, readFileSync, writeFileSync, existsSync, readdirSync, unlinkSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { randomBytes, createHash } from 'crypto';
 import { execSync } from 'child_process';
 import { tmpdir } from 'os';
 import qrcode from 'qrcode-terminal';
+
+// Force IPv4-first DNS resolution.  Node.js ≥17's native fetch() (used by
+// Baileys' downloadMediaMessage) prefers IPv6 by default.  On hosts where
+// IPv6 connectivity is broken (common on cloud VMs), every media download
+// fails with "Failed to fetch stream" even though curl (which falls back to
+// IPv4 via Happy Eyeballs) succeeds.  Setting ipv4first makes undici resolve
+// A records before AAAA, so fetch() connects over IPv4.
+dns.setDefaultResultOrder('ipv4first');
 import { matchesAllowedUser, parseAllowedUsers } from './allowlist.js';
 import { createOutboundIdTracker } from './outbound_ids.js';
 import { classifyOwnerMessageGate } from './owner_message_gate.js';
