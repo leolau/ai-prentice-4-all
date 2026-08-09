@@ -23,20 +23,34 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 # Cache the resolved owner principal so we don't hit Postgres on every file.
+# A retry-after guard (not a sticky cache) so a startup race — Supabase env
+# not yet loaded, owner row created after the service starts, transient DB
+# blip — recovers without hammering Postgres on every message.
 _owner_principal: Optional[object] = None
 _owner_resolved: bool = False
+_owner_last_attempt: float = 0.0
+_OWNER_RETRY_INTERVAL_SEC: float = 60.0
 
 
 async def _resolve_owner():
     """Resolve the owner principal from the PrincipalStore.
 
     Returns the cached principal on subsequent calls.  Returns ``None`` if the
-    principal store is unconfigured or no owner exists.
+    principal store is unconfigured or no owner exists — but unlike a sticky
+    cache, a ``None`` result is retried after :data:`_OWNER_RETRY_INTERVAL_SEC`
+    so the owner row appearing later (or env coming up after the service) is
+    picked up without a restart.
     """
-    global _owner_principal, _owner_resolved
+    import time
+
+    global _owner_principal, _owner_resolved, _owner_last_attempt
     if _owner_resolved:
         return _owner_principal
-    _owner_resolved = True
+    now = time.monotonic()
+    if now - _owner_last_attempt < _OWNER_RETRY_INTERVAL_SEC:
+        # Still inside the backoff window from the last failed attempt.
+        return _owner_principal
+    _owner_last_attempt = now
     try:
         from hermes_cli.config import load_config
         from hermes_cli.datastore import get_store
@@ -45,15 +59,24 @@ async def _resolve_owner():
         config = load_config() or {}
         app_store = get_store("supabase-app", "prod", config=config)
         store = PrincipalStore(app_store)
-        _owner_principal = await store.get_owner()
-        if _owner_principal is None:
-            logger.warning(
-                "file registration: no owner principal found in PrincipalStore; "
-                "files from standalone services will not be registered"
-            )
+        principal = await store.get_owner()
+        if principal is not None:
+            _owner_principal = principal
+            _owner_resolved = True
+            return principal
+        logger.warning(
+            "file registration: no owner principal found in PrincipalStore; "
+            "files from standalone services will not be registered "
+            "(retrying in %ds)",
+            int(_OWNER_RETRY_INTERVAL_SEC),
+        )
     except Exception as exc:
-        logger.warning("file registration: could not resolve owner: %s", exc)
-        _owner_principal = None
+        logger.warning(
+            "file registration: could not resolve owner: %s "
+            "(retrying in %ds)",
+            exc,
+            int(_OWNER_RETRY_INTERVAL_SEC),
+        )
     return _owner_principal
 
 

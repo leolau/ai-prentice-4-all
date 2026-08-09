@@ -7,6 +7,7 @@ from typing import Any, Optional
 
 import pytest
 
+import gateway.inbound_files as inbound_files_mod
 from gateway.inbound_files import (
     cached_display_name,
     register_event_files,
@@ -116,7 +117,11 @@ async def test_the_content_type_is_guessed_when_the_adapter_declares_none(
 
 @pytest.mark.asyncio
 async def test_an_unenrolled_sender_registers_nothing(tmp_path) -> None:
-    """A row needs an owner; parking it under someone else would be worse."""
+    """A row needs an owner; parking it under someone else would be worse.
+
+    No ``principal_store`` is passed, so the owner fallback does not fire
+    and the original skip-on-unenrolled behaviour is preserved.
+    """
     cached = tmp_path / "doc_0123456789ab_x.bin"
     cached.write_bytes(b"x")
     registry = _Registry()
@@ -126,6 +131,87 @@ async def test_an_unenrolled_sender_registers_nothing(tmp_path) -> None:
         _Source(internal_user_id=None),
         registry=registry,
         storage=_Storage(),
+    )
+    assert written == []
+    assert registry.calls == []
+
+
+@dataclass
+class _OwnerPrincipal:
+    user_id: str = "leo"
+    display: str = "Leo"
+    role: str = "owner"
+
+
+class _PrincipalStore:
+    """Mock PrincipalStore for the owner-fallback tests.
+
+    ``owner=None`` (the default) means "no owner in the store" so the
+    fallback stays inactive; pass an ``_OwnerPrincipal`` to simulate a
+    personal-agent deployment with a single owner.
+    """
+
+    def __init__(self, owner: Optional[_OwnerPrincipal] = None) -> None:
+        self._owner = owner
+
+    async def get_owner(self):
+        return self._owner
+
+
+@pytest.mark.asyncio
+async def test_unenrolled_sender_falls_back_to_owner(tmp_path) -> None:
+    """An unenrolled sender's file is attributed to the deployment owner.
+
+    Without the fallback the file would be skipped and the 24-hour cache
+    prune would delete it unrecoverably.  With a principal store the owner
+    principal is resolved and the file is registered under it.
+    """
+    # Reset the module-level owner cache so this test is independent.
+    inbound_files_mod._owner_principal = None
+    inbound_files_mod._owner_resolved = False
+    inbound_files_mod._owner_last_attempt = 0.0
+
+    cached = tmp_path / "doc_0123456789ab_resume.pdf"
+    cached.write_bytes(b"%PDF-1.7 resume")
+    registry, storage = _Registry(), _Storage()
+    store = _PrincipalStore(owner=_OwnerPrincipal(user_id="leo", display="Leo"))
+
+    written = await register_event_files(
+        _Event(media_urls=[str(cached)], media_types=["application/pdf"]),
+        _Source(internal_user_id=None),
+        registry=registry,
+        storage=storage,
+        principal_store=store,
+    )
+
+    assert len(written) == 1
+    call = registry.calls[0]
+    # Registered under the owner, not the unenrolled sender.
+    assert call["owner"] == "leo"
+    # Provenance still records the actual sender and channel.
+    assert call["surface"] == "telegram"
+    assert call["sender_id"] == "tg-9001"
+    assert call["sender_name"] == "Ada Wong"
+    assert storage.uploads[0][1] == b"%PDF-1.7 resume"
+
+
+@pytest.mark.asyncio
+async def test_unenrolled_sender_with_no_owner_still_skips(tmp_path) -> None:
+    """When the store has no owner, the fallback is inactive and skips."""
+    inbound_files_mod._owner_principal = None
+    inbound_files_mod._owner_resolved = False
+    inbound_files_mod._owner_last_attempt = 0.0
+
+    cached = tmp_path / "doc_0123456789ab_x.bin"
+    cached.write_bytes(b"x")
+    registry = _Registry()
+
+    written = await register_event_files(
+        _Event(media_urls=[str(cached)]),
+        _Source(internal_user_id=None),
+        registry=registry,
+        storage=_Storage(),
+        principal_store=_PrincipalStore(owner=None),
     )
     assert written == []
     assert registry.calls == []
