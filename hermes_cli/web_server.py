@@ -9465,6 +9465,26 @@ async def list_session_tags(profile: Optional[str] = None):
         db.close()
 
 
+@app.post("/api/sessions/tags")
+async def create_tag(profile: Optional[str] = None, request: Request = None):
+    """Create a standalone tag (not attached to any session).
+
+    Body: ``{"name": "bug", "color": "red"?}``
+    Case-insensitive dedup — if the tag already exists, return it.
+    """
+    body = await request.json() if request else {}
+    name = (body or {}).get("name", "").strip()
+    color = (body or {}).get("color", "blue")
+    if not name:
+        raise HTTPException(400, "name is required")
+    db = _open_session_db_for_profile(profile)
+    try:
+        tag = db.create_tag(name, color=color)
+        return {"tag": tag}
+    finally:
+        db.close()
+
+
 @app.delete("/api/sessions/tags/{tag_id}")
 async def delete_session_tag(tag_id: str, profile: Optional[str] = None):
     """Delete a tag entirely (removes all session assignments)."""

@@ -31,6 +31,34 @@ describe("HermesApiClient session tags + search", () => {
     expect(fetchMock.mock.calls[0][0]).toBe("http://api.test/api/sessions/tags");
   });
 
+  it("createTag POSTs name + color to /api/sessions/tags", async () => {
+    const payload = { tag: { id: "t1", name: "bug", color: "red" } };
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(ok(payload));
+
+    const client = new HermesApiClient({ baseUrl: "http://api.test" });
+    const res = await client.createTag("bug", "red");
+
+    expect(res).toEqual(payload);
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe("http://api.test/api/sessions/tags");
+    expect(init?.method).toBe("POST");
+    expect(JSON.parse(String(init?.body))).toEqual({ name: "bug", color: "red" });
+  });
+
+  it("createTag defaults color to blue when omitted", async () => {
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(ok({ tag: { id: "t1", name: "x", color: "blue" } }));
+
+    const client = new HermesApiClient({ baseUrl: "http://api.test" });
+    await client.createTag("x");
+
+    expect(JSON.parse(String(fetchMock.mock.calls[0][1]?.body))).toEqual({
+      name: "x",
+      color: "blue",
+    });
+  });
+
   it("getSessionTags GETs the encoded path", async () => {
     const payload = { tags: [] };
     const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(ok(payload));

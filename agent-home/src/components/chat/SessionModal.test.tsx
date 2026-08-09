@@ -26,6 +26,12 @@ const TAGS: SessionTag[] = [
   { id: "t2", name: "feature", color: "green" },
 ];
 
+const ALL_TAGS: SessionTag[] = [
+  ...TAGS,
+  { id: "t3", name: "urgent", color: "amber" },
+  { id: "t4", name: "docs", color: "blue" },
+];
+
 const SUGGESTIONS: TagSuggestion[] = [
   { tag_name: "debugging", is_new: true, reason: "conversation about debugging", confidence: 0.9 },
   { tag_name: "bug", is_new: false, reason: "bug-related discussion", confidence: 0.7 },
@@ -88,15 +94,31 @@ describe("SessionModal", () => {
     expect(html).toContain("No tags yet");
   });
 
-  it("renders tag input when onAddTag is provided", () => {
-    const html = render({ tags: TAGS, onAddTag: async () => {} });
-    expect(html).toContain("placeholder=\"Add tag");
-    expect(html).toContain("+");
+  it("renders association picker when onAddTag and allTags are provided", () => {
+    const html = render({ tags: TAGS, allTags: ALL_TAGS, onAddTag: async () => {} });
+    expect(html).toContain("Associate tag");
+    // Unassociated tags appear as options
+    expect(html).toContain("urgent");
+    expect(html).toContain("docs");
+    // Already-associated tags do not appear as options (only in the tag chips)
+    // The select should not contain "bug" or "feature" as options
+    // (they're already shown as chips above)
   });
 
-  it("does not render tag input when onAddTag is not provided", () => {
-    const html = render({ tags: TAGS });
-    expect(html).not.toContain("placeholder=\"Add tag");
+  it("shows 'All tags associated' when no unassociated tags remain", () => {
+    const html = render({ tags: ALL_TAGS, allTags: ALL_TAGS, onAddTag: async () => {} });
+    expect(html).toContain("All tags associated");
+    expect(html).not.toContain("Associate tag");
+  });
+
+  it("shows 'No tags defined yet' when allTags is empty", () => {
+    const html = render({ tags: [], allTags: [], onAddTag: async () => {} });
+    expect(html).toContain("No tags defined yet");
+  });
+
+  it("does not render association picker when onAddTag is not provided", () => {
+    const html = render({ tags: TAGS, allTags: ALL_TAGS });
+    expect(html).not.toContain("Associate tag");
   });
 
   it("renders tag remove button when onRemoveTag is provided", () => {

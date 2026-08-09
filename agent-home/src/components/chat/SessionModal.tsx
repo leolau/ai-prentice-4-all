@@ -70,6 +70,7 @@ export function SessionModal({
   onRename,
   onArchive,
   tags,
+  allTags,
   tagSuggestions,
   onAddTag,
   onRemoveTag,
@@ -81,6 +82,7 @@ export function SessionModal({
   onRename: (title: string) => Promise<void>;
   onArchive: () => Promise<void>;
   tags?: SessionTag[];
+  allTags?: SessionTag[];
   tagSuggestions?: TagSuggestion[];
   onAddTag?: (tagName: string) => Promise<void>;
   onRemoveTag?: (tagId: string) => Promise<void>;
@@ -92,7 +94,6 @@ export function SessionModal({
   const [archiving, setArchiving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [ctxCollapsed, setCtxCollapsed] = useState(false);
-  const [tagInput, setTagInput] = useState("");
   const [tagBusy, setTagBusy] = useState(false);
 
   const inputTokens = session.input_tokens ?? 0;
@@ -130,16 +131,14 @@ export function SessionModal({
     }
   }
 
-  async function addTag() {
-    const trimmed = tagInput.trim();
-    if (!trimmed || !onAddTag || tagBusy) return;
+  async function addTag(tagName: string) {
+    if (!tagName || !onAddTag || tagBusy) return;
     setTagBusy(true);
     setError(null);
     try {
-      await onAddTag(trimmed);
-      setTagInput("");
+      await onAddTag(tagName);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to add tag.");
+      setError(err instanceof Error ? err.message : "Failed to associate tag.");
     } finally {
       setTagBusy(false);
     }
@@ -358,32 +357,42 @@ export function SessionModal({
                 <span className="text-xs text-[var(--color-muted)]">No tags yet.</span>
               )}
             </div>
-            {onAddTag && (
-              <div className="mt-2 flex gap-1.5">
-                <input
-                  type="text"
-                  value={tagInput}
-                  onChange={(e) => setTagInput(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") {
-                      e.preventDefault();
-                      void addTag();
-                    }
+            {onAddTag && allTags && (() => {
+              const associatedNames = new Set((tags ?? []).map((t) => t.name.toLowerCase()));
+              const available = allTags.filter(
+                (t) => !associatedNames.has(t.name.toLowerCase()),
+              );
+              if (available.length === 0) {
+                return (
+                  <p className="mt-2 text-xs text-[var(--color-muted)]">
+                    {tags && tags.length > 0
+                      ? "All tags associated."
+                      : "No tags defined yet. Create them in Settings."}
+                  </p>
+                );
+              }
+              return (
+                <select
+                  value=""
+                  onChange={(e) => {
+                    const v = e.target.value;
+                    if (v) void addTag(v);
+                    e.target.value = "";
                   }}
-                  placeholder="Add tag…"
-                  maxLength={50}
-                  className="flex-1 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-1 text-xs text-[var(--color-fg)]"
-                />
-                <button
-                  type="button"
-                  onClick={() => void addTag()}
-                  disabled={tagBusy || !tagInput.trim()}
-                  className="shrink-0 rounded-lg border border-[var(--color-border)] px-2 py-1 text-xs text-[var(--color-muted)] disabled:opacity-60"
+                  disabled={tagBusy}
+                  className="mt-2 w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-1 text-xs text-[var(--color-fg)] disabled:opacity-60"
                 >
-                  +
-                </button>
-              </div>
-            )}
+                  <option value="" disabled>
+                    Associate tag…
+                  </option>
+                  {available.map((t) => (
+                    <option key={t.id} value={t.name}>
+                      {t.name}
+                    </option>
+                  ))}
+                </select>
+              );
+            })()}
           </div>
         )}
 
