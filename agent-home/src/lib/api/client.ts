@@ -270,6 +270,17 @@ export class HermesApiClient {
     return this.request(`/api/sessions/tags`);
   }
 
+  /** Create a standalone tag (not attached to any session). */
+  async createTag(
+    name: string,
+    color?: string,
+  ): Promise<{ tag: SessionTag }> {
+    return this.request(`/api/sessions/tags`, {
+      method: "POST",
+      json: { name, color: color ?? "blue" },
+    });
+  }
+
   /** Get tags attached to a session. */
   async getSessionTags(sessionId: string): Promise<{ tags: SessionTag[] }> {
     return this.request(

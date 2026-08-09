@@ -3007,6 +3007,34 @@ class SessionDB:
             )
             return [dict(r) for r in cursor.fetchall()]
 
+    def create_tag(self, name: str, color: str = "blue") -> Dict[str, Any]:
+        """Create a standalone tag (not attached to any session).
+
+        Returns the tag dict (id, name, color).  Case-insensitive dedup —
+        if a tag with the same name already exists, return it.
+        """
+        import time, uuid
+        name = name.strip()
+        if not name:
+            raise ValueError("tag name cannot be empty")
+        if color not in self.TAG_COLORS:
+            color = "blue"
+        now = time.time()
+        tag_id = uuid.uuid4().hex
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT id, name, color FROM session_tags WHERE LOWER(name) = LOWER(?)",
+                (name,)
+            ).fetchone()
+            if row:
+                return dict(row)
+            self._conn.execute(
+                "INSERT INTO session_tags (id, name, color, created_at) VALUES (?, ?, ?, ?)",
+                (tag_id, name, color, now)
+            )
+            self._conn.commit()
+        return {"id": tag_id, "name": name, "color": color}
+
     def get_session_tags(self, session_id: str) -> List[Dict[str, Any]]:
         """Return tags attached to *session_id* (ordered by name)."""
         with self._lock:

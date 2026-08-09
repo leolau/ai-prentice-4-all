@@ -66,6 +66,34 @@ def _seed_session(client, sid, title=None):
     db.close()
 
 
+class TestCreateTag:
+    def test_create_tag_endpoint(self, client):
+        res = client.post("/api/sessions/tags", json={"name": "bug", "color": "red"})
+        assert res.status_code == 200
+        tag = res.json()["tag"]
+        assert tag["name"] == "bug"
+        assert tag["color"] == "red"
+        assert tag["id"]
+        # Verify it appears in list_tags with session_count = 0
+        tags = client.get("/api/sessions/tags").json()["tags"]
+        assert len(tags) == 1
+        assert tags[0]["session_count"] == 0
+
+    def test_create_tag_missing_name(self, client):
+        res = client.post("/api/sessions/tags", json={})
+        assert res.status_code == 400
+
+    def test_create_tag_idempotent(self, client):
+        first = client.post("/api/sessions/tags", json={"name": "bug", "color": "red"})
+        second = client.post("/api/sessions/tags", json={"name": "Bug", "color": "green"})
+        assert first.status_code == 200
+        assert second.status_code == 200
+        assert first.json()["tag"]["id"] == second.json()["tag"]["id"]
+        # Only one tag row
+        tags = client.get("/api/sessions/tags").json()["tags"]
+        assert len(tags) == 1
+
+
 class TestListTags:
     def test_list_tags_empty(self, client):
         res = client.get("/api/sessions/tags")

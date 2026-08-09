@@ -141,6 +141,44 @@ class TestDeleteTag:
         db.close()
 
 
+class TestCreateTag:
+    def test_create_tag_standalone(self, tmp_path):
+        """create_tag inserts a tag row with no session association."""
+        db = _make_db(tmp_path)
+        tag = db.create_tag("bug", color="red")
+        assert tag["name"] == "bug"
+        assert tag["color"] == "red"
+        assert tag["id"]
+        # Appears in list_tags with session_count = 0
+        tags = db.list_tags()
+        assert len(tags) == 1
+        assert tags[0]["name"] == "bug"
+        assert tags[0]["session_count"] == 0
+        db.close()
+
+    def test_create_tag_case_insensitive_dedup(self, tmp_path):
+        """Creating a tag with the same name (different case) returns the existing tag."""
+        db = _make_db(tmp_path)
+        first = db.create_tag("bug", color="red")
+        second = db.create_tag("Bug", color="green")
+        assert first["id"] == second["id"]
+        assert second["color"] == "red"  # original color preserved
+        assert len(db.list_tags()) == 1
+        db.close()
+
+    def test_create_tag_empty_name_raises(self, tmp_path):
+        db = _make_db(tmp_path)
+        with pytest.raises(ValueError):
+            db.create_tag("   ")
+        db.close()
+
+    def test_create_tag_invalid_color_falls_back(self, tmp_path):
+        db = _make_db(tmp_path)
+        tag = db.create_tag("test", color="not-a-color")
+        assert tag["color"] == "blue"
+        db.close()
+
+
 class TestListTags:
     def test_list_tags_with_count(self, tmp_path):
         db = _make_db(tmp_path)

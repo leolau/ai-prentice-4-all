@@ -784,6 +784,7 @@ export function ChatPane({
           onRename={renameSession}
           onArchive={archiveSession}
           tags={sessionTags}
+          allTags={allTags}
           tagSuggestions={tagSuggestions}
           onAddTag={addTag}
           onRemoveTag={removeTag}
