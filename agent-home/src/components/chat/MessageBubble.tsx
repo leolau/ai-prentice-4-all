@@ -1,3 +1,5 @@
+import type { ReactNode } from "react";
+
 import { ChatFile } from "@/components/chat/ChatFile";
 import { ChatMedia } from "@/components/chat/ChatMedia";
 import { RichText } from "@/components/chat/RichText";
@@ -41,11 +43,11 @@ function segment(content: string): Segment[] {
  * via `![alt](ref)`, other files (PDF/DOC/XLS/…) render as `[name](ref)`
  * download chips.
  */
-function UserContent({ content }: { content: string }) {
+function UserContent({ content, highlightTerm }: { content: string; highlightTerm?: string }) {
   return (
     <>
       {segment(content).map((s, i) => {
-        if (s.kind === "text") return <span key={i}>{s.value}</span>;
+        if (s.kind === "text") return <span key={i}>{highlightText(s.value, highlightTerm ?? "")}</span>;
         if (s.kind === "file") {
           const filePath = mediaRefPath(s.value);
           return filePath ? (
@@ -77,12 +79,49 @@ function UserContent({ content }: { content: string }) {
  * (tables, lists, headings, code, links, inline media). User turns stay literal
  * text (their input is never interpreted as markup) plus any media they sent.
  */
-export function MessageBubble({ message }: { message: ChatMessage }) {
+/** Highlight *term* inside *text*, returning React nodes. */
+function highlightText(text: string, term: string): ReactNode {
+  if (!term) return text;
+  const lower = text.toLowerCase();
+  const needle = term.toLowerCase();
+  const parts: ReactNode[] = [];
+  let i = 0;
+  let key = 0;
+  while (i < text.length) {
+    const idx = lower.indexOf(needle, i);
+    if (idx < 0) {
+      parts.push(text.slice(i));
+      break;
+    }
+    if (idx > i) parts.push(text.slice(i, idx));
+    parts.push(
+      <mark
+        key={key++}
+        className="rounded bg-[var(--color-accent)] px-0.5 text-[var(--color-accent-fg)]"
+      >
+        {text.slice(idx, idx + term.length)}
+      </mark>,
+    );
+    i = idx + term.length;
+  }
+  return parts.length > 1 ? parts : text;
+}
+
+export function MessageBubble({
+  message,
+  msgIndex,
+  highlightTerm,
+}: {
+  message: ChatMessage;
+  msgIndex?: number;
+  highlightTerm?: string;
+}) {
   const isUser = message.role === "user";
   const content = message.content ?? "";
   return (
     <div
       data-component="MessageBubble"
+      data-msg-index={msgIndex}
       className={`flex ${isUser ? "justify-end" : "justify-start"}`}
     >
       <div
@@ -93,7 +132,7 @@ export function MessageBubble({ message }: { message: ChatMessage }) {
         }`}
       >
         {isUser ? (
-          <UserContent content={content} />
+          <UserContent content={content} highlightTerm={highlightTerm} />
         ) : (
           <RichText content={content} />
         )}

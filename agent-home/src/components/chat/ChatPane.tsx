@@ -4,11 +4,14 @@ import { useEffect, useMemo, useRef, useState } from "react";
 
 import { ApprovalCard } from "@/components/chat/ApprovalCard";
 import { ArchivedModal } from "@/components/chat/ArchivedModal";
+import { InSessionSearch } from "@/components/chat/InSessionSearch";
 import { MessageBubble } from "@/components/chat/MessageBubble";
 import { Composer } from "@/components/chat/Composer";
 import { SessionModal } from "@/components/chat/SessionModal";
+import { SessionSearchBar } from "@/components/chat/SessionSearchBar";
 import { SessionTabs } from "@/components/chat/SessionTabs";
 import { StatusIndicator } from "@/components/chat/StatusIndicator";
+import { TagFilterBar } from "@/components/chat/TagFilterBar";
 import { chatHeaderActionsRef } from "@/lib/chat/header-actions";
 import {
   setLastAssistantContent,
@@ -28,6 +31,8 @@ import type {
   ChatAttachment,
   ChatMessage,
   SessionSummary,
+  SessionTag,
+  TagSuggestion,
 } from "@/types";
 
 /** Map key for a not-yet-created ("New conversation") session. */
@@ -116,6 +121,27 @@ export function ChatPane({
   // One AbortController per in-flight turn (keyed like the buffers) so the user
   // can stop the turn for the conversation currently on screen.
   const abortRef = useRef<Map<string, AbortController>>(new Map());
+
+  // ── Tagging state ──
+  const [allTags, setAllTags] = useState<SessionTag[]>([]);
+  const [sessionTags, setSessionTags] = useState<SessionTag[]>([]);
+  const [tagSuggestions, setTagSuggestions] = useState<TagSuggestion[]>([]);
+  const [includeTags, setIncludeTags] = useState<string[]>([]);
+  const [excludeTags, setExcludeTags] = useState<string[]>([]);
+  const [matchMode, setMatchMode] = useState<"any" | "all">("any");
+
+  // ── Search state ──
+  const [crossSearchOpen, setCrossSearchOpen] = useState(false);
+  const [inSearchOpen, setInSearchOpen] = useState(false);
+  const [highlightTerm, setHighlightTerm] = useState<string | undefined>();
+  const highlightCallbackRef = useRef<((msgIndex: number, term: string) => void) | null>(null);
+
+  // Wire the InSessionSearch callback so it sets the highlight term.
+  useEffect(() => {
+    highlightCallbackRef.current = (_msgIndex: number, term: string) => {
+      setHighlightTerm(term || undefined);
+    };
+  }, []);
 
   useEffect(() => {
     selectedRef.current = sessionId;
@@ -351,7 +377,13 @@ export function ChatPane({
 
   async function refreshSessions() {
     try {
-      const res = await fetch("/api/chat/sessions", { cache: "no-store" });
+      const params = new URLSearchParams();
+      if (includeTags.length > 0) params.set("tags", includeTags.join(","));
+      if (excludeTags.length > 0) params.set("exclude_tags", excludeTags.join(","));
+      params.set("tag_match", matchMode);
+      const res = await fetch(`/api/chat/sessions?${params.toString()}`, {
+        cache: "no-store",
+      });
       if (!res.ok) return;
       const body = (await res.json()) as { sessions?: SessionSummary[] };
       if (body.sessions) setSessions(body.sessions);
@@ -422,14 +454,248 @@ export function ChatPane({
     void refreshSessions();
   }
 
+  // ── Tag handlers ──────────────────────────────────────────────────
+
+  async function loadAllTags() {
+    try {
+      const res = await fetch("/api/chat/sessions/tags", { cache: "no-store" });
+      if (res.ok) {
+        const body = (await res.json()) as { tags?: SessionTag[] };
+        if (body.tags) setAllTags(body.tags);
+      }
+    } catch { /* non-fatal */ }
+  }
+
+  // Load session tags when the SessionModal opens.
+  async function onOpenDetails(s: SessionSummary) {
+    setDetailsSession(s);
+    setTagSuggestions([]);
+    setSessionTags([]);
+    if (s.id) {
+      try {
+        const res = await fetch(
+          `/api/chat/sessions/tags/get?sessionId=${encodeURIComponent(s.id)}`,
+          { cache: "no-store" },
+        );
+        if (res.ok) {
+          const body = (await res.json()) as { tags?: SessionTag[] };
+          if (body.tags) setSessionTags(body.tags);
+        }
+      } catch { /* non-fatal */ }
+    }
+  }
+
+  async function addTag(name: string) {
+    const s = detailsSession;
+    if (!s) return;
+    const res = await fetch("/api/chat/sessions/tags/add", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ sessionId: s.id, name }),
+    });
+    if (!res.ok) throw new Error("Failed to add tag.");
+    const body = (await res.json()) as { tag?: SessionTag };
+    if (body.tag) {
+      setSessionTags((prev) =>
+        prev.some((t) => t.name === body.tag!.name)
+          ? prev
+          : [...prev, body.tag!],
+      );
+      void loadAllTags();
+    }
+  }
+
+  async function removeTag(tagId: string) {
+    const s = detailsSession;
+    if (!s) return;
+    const res = await fetch("/api/chat/sessions/tags/remove", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ sessionId: s.id, tagId }),
+    });
+    if (!res.ok) throw new Error("Failed to remove tag.");
+    setSessionTags((prev) => prev.filter((t) => t.id !== tagId));
+    void loadAllTags();
+  }
+
+  async function suggestTags() {
+    const s = detailsSession;
+    if (!s) return;
+    const res = await fetch("/api/chat/sessions/tags/suggest", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ sessionId: s.id }),
+    });
+    if (!res.ok) throw new Error("Failed to suggest tags.");
+    const body = (await res.json()) as { suggestions?: TagSuggestion[] };
+    setTagSuggestions(body.suggestions ?? []);
+  }
+
+  async function acceptSuggestion(suggestion: TagSuggestion) {
+    const s = detailsSession;
+    if (!s) return;
+    const res = await fetch("/api/chat/sessions/tags/add", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ sessionId: s.id, name: suggestion.tag_name }),
+    });
+    if (!res.ok) throw new Error("Failed to add tag.");
+    const body = (await res.json()) as { tag?: SessionTag };
+    if (body.tag) {
+      setSessionTags((prev) =>
+        prev.some((t) => t.name === body.tag!.name)
+          ? prev
+          : [...prev, body.tag!],
+      );
+      void loadAllTags();
+    }
+    setTagSuggestions((prev) => prev.filter((t) => t !== suggestion));
+  }
+
+  async function dismissSuggestion(suggestion: TagSuggestion) {
+    setTagSuggestions((prev) => prev.filter((t) => t !== suggestion));
+  }
+
+  // Auto-suggest tags when opening the SessionModal if the session has 5+ messages.
+  useEffect(() => {
+    if (detailsSession && detailsSession.message_count >= 5 && tagSuggestions.length === 0) {
+      void suggestTags();
+    }
+  }, [detailsSession]);
+
+  // Load all tags on mount.
+  useEffect(() => {
+    void loadAllTags();
+  }, []);
+
+  // ── Tag filter handlers ──
+
+  function toggleTagFilter(name: string) {
+    if (includeTags.includes(name)) {
+      // include → exclude
+      setIncludeTags((prev) => prev.filter((n) => n !== name));
+      setExcludeTags((prev) => [...prev, name]);
+    } else if (excludeTags.includes(name)) {
+      // exclude → clear
+      setExcludeTags((prev) => prev.filter((n) => n !== name));
+    } else {
+      // none → include
+      setIncludeTags((prev) => [...prev, name]);
+    }
+  }
+
+  // Re-fetch sessions when tag filter changes.
+  useEffect(() => {
+    void refreshSessions();
+  }, [includeTags, excludeTags, matchMode]);
+
+  // ── Search handlers ──────────────────────────────────────────────
+
+  async function crossSessionSearch(q: string) {
+    const res = await fetch(
+      `/api/chat/sessions/search?q=${encodeURIComponent(q)}`,
+      { cache: "no-store" },
+    );
+    if (!res.ok) return [];
+    const body = (await res.json()) as {
+      results?: Array<{
+        session_id: string;
+        snippet: string;
+        role: string;
+        title?: string | null;
+      }>;
+    };
+    return body.results ?? [];
+  }
+
+  async function jumpToSearchResult(
+    result: { session_id: string; snippet: string },
+  ) {
+    await openConversation(result.session_id);
+    // After loading, highlight the snippet text in the message list.
+    const term = result.snippet
+      .replace(/>>>/g, "")
+      .replace(/<<</g, "")
+      .trim()
+      .slice(0, 30);
+    setHighlightTerm(term);
+    setInSearchOpen(true);
+  }
+
   return (
     <div data-component="ChatPane" className="flex min-h-0 flex-1 flex-col">
+      {/* Tag filter bar */}
+      <TagFilterBar
+        tags={allTags}
+        includeTags={includeTags}
+        excludeTags={excludeTags}
+        matchMode={matchMode}
+        onToggle={toggleTagFilter}
+        onMatchModeChange={setMatchMode}
+      />
+
+      {/* Search toggle buttons */}
+      <div className="flex items-center gap-2 border-b border-[var(--color-border)] px-3 py-1">
+        <button
+          type="button"
+          onClick={() => {
+            setCrossSearchOpen((v) => !v);
+            setInSearchOpen(false);
+          }}
+          className={`rounded-lg px-2 py-0.5 text-xs ${
+            crossSearchOpen
+              ? "bg-[var(--color-accent)] text-[var(--color-accent-fg)]"
+              : "text-[var(--color-muted)] border border-[var(--color-border)]"
+          }`}
+        >
+          🔍 All sessions
+        </button>
+        {sessionId && (
+          <button
+            type="button"
+            onClick={() => {
+              setInSearchOpen((v) => !v);
+              setCrossSearchOpen(false);
+              setHighlightTerm(undefined);
+            }}
+            className={`rounded-lg px-2 py-0.5 text-xs ${
+              inSearchOpen
+                ? "bg-[var(--color-accent)] text-[var(--color-accent-fg)]"
+                : "text-[var(--color-muted)] border border-[var(--color-border)]"
+            }`}
+          >
+            🔍 In conversation
+          </button>
+        )}
+      </div>
+
+      {/* Cross-session search bar */}
+      {crossSearchOpen && (
+        <SessionSearchBar
+          onSearch={crossSessionSearch}
+          onJumpToResult={(result) => void jumpToSearchResult(result)}
+          onClose={() => setCrossSearchOpen(false)}
+        />
+      )}
+
+      {/* In-session search bar */}
+      {inSearchOpen && (
+        <InSessionSearch
+          messages={messages}
+          onClose={() => {
+            setInSearchOpen(false);
+            setHighlightTerm(undefined);
+          }}
+          highlightRef={highlightCallbackRef}
+        />
+      )}
+
       <SessionTabs
         sessions={orderedSessions}
         activeId={sessionId}
         busyKeys={sendingKeys}
         onSelect={openConversation}
-        onOpenDetails={setDetailsSession}
+        onOpenDetails={onOpenDetails}
         onNew={startNewConversation}
         onReorder={reorderSessions}
       />
@@ -451,7 +717,14 @@ export function ChatPane({
         ) : (
           messages
             .filter((m) => m.role !== "assistant" || m.content !== "")
-            .map((m, i) => <MessageBubble key={m.id ?? i} message={m} />)
+            .map((m, i) => (
+              <MessageBubble
+                key={m.id ?? i}
+                message={m}
+                msgIndex={i}
+                highlightTerm={highlightTerm}
+              />
+            ))
         )}
         {selDecision ? (
           <div
@@ -503,9 +776,19 @@ export function ChatPane({
       {detailsSession ? (
         <SessionModal
           session={detailsSession}
-          onClose={() => setDetailsSession(null)}
+          onClose={() => {
+            setDetailsSession(null);
+            setTagSuggestions([]);
+            setSessionTags([]);
+          }}
           onRename={renameSession}
           onArchive={archiveSession}
+          tags={sessionTags}
+          tagSuggestions={tagSuggestions}
+          onAddTag={addTag}
+          onRemoveTag={removeTag}
+          onAcceptSuggestion={acceptSuggestion}
+          onDismissSuggestion={dismissSuggestion}
         />
       ) : null}
 

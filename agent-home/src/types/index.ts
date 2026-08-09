@@ -333,6 +333,22 @@ export interface ChatMessage {
  * id, its human title/preview, message count, and last-active timestamp used to
  * order the mobile conversation list.
  */
+/** A tag attached to a session (mirror of `session_tags` table). */
+export interface SessionTag {
+  id: string;
+  name: string;
+  color: string;
+  session_count?: number;
+}
+
+/** An LLM-produced tag suggestion awaiting user confirmation. */
+export interface TagSuggestion {
+  tag_name: string;
+  is_new: boolean;
+  reason?: string;
+  confidence?: number;
+}
+
 export interface SessionSummary {
   id: string;
   source: string;
@@ -344,6 +360,14 @@ export interface SessionSummary {
   ended_at: number | null;
   is_active?: boolean;
   archived?: boolean;
+  /** Persisted token totals from the sessions table (used by context-window UI). */
+  input_tokens?: number;
+  output_tokens?: number;
+  cache_read_tokens?: number;
+  cache_write_tokens?: number;
+  reasoning_tokens?: number;
+  /** Tags assigned to this session (populated by tag endpoints). */
+  tags?: SessionTag[];
 }
 
 /** The list of conversations from `GET /api/sessions`. */
