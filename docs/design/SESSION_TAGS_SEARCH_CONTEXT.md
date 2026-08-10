@@ -1,9 +1,14 @@
 # Session Tags, Search & Context Window — Design Plan
 
+> **Implementation status:** Features 1–5 shipped (PR #155). Tag management
+> refactored to Settings + association picker (PR #158). All 82 tests passing.
+> Deployed to ECS at `9c15e15bb`.
+
 ## Overview
 
 Five features for the agent-home chat surface (`/chat`), touching the
-`SessionModal` popup, the `SessionTabs` strip, and the `ChatPane` thread:
+`SessionModal` popup, the `SessionTabs` strip, the `SettingsView` page, and
+the `ChatPane` thread:
 
 1. **Context window size** in the session detail popup + collapse button
 2. **Tagging system** across all sessions (manual + LLM auto-tag suggestions)
@@ -218,11 +223,20 @@ Implementation:
 
 ### Goal
 
-- User can see a list of all tags
-- User can add and remove tags on a session
+- User can **define tags** (name + color) in the Settings page
+- User can **delete tags** from the Settings page (cascades to all sessions)
+- User can **associate / disassociate** existing tags with a session via the
+  SessionModal popup (picks from a dropdown of pre-existing tags — no
+  free-text creation)
 - System auto-suggests tags via LLM analysis
 - System asks the user to confirm or dismiss suggested tags
-- User can untag (remove a tag from a session)
+
+> **Design decision (PR #158):** Tags must be defined in Settings before
+> they can be associated with sessions. The SessionModal's original free-text
+> "Add tag" input was replaced with an "Associate tag" `<select>` dropdown
+> that only shows pre-existing unassociated tags. This enforces the separation
+> between tag *definition* (a workspace-level concern) and tag *association*
+> (a per-session concern).
 
 ### Design
 
@@ -259,18 +273,24 @@ The `source` field tracks whether a tag was:
 - `auto-suggested` — LLM suggested it, user hasn't responded yet
 - `auto-confirmed` — user confirmed the LLM's suggestion
 
-#### Python API endpoints (new, in `hermes_cli/web_server.py`)
+#### Python API endpoints (in `hermes_cli/web_server.py`)
 
 ```
-GET    /api/sessions/tags                    — list all tags
-POST   /api/sessions/tags                    — create a tag {name, color}
+GET    /api/sessions/tags                    — list all tags (with session_count)
+POST   /api/sessions/tags                    — create a standalone tag {name, color}  ← PR #158
 DELETE /api/sessions/tags/{tag_id}           — delete a tag (cascades to map)
 
 GET    /api/sessions/{id}/tags               — list tags for a session
-POST   /api/sessions/{id}/tags               — add tag to session {tag_id}
+POST   /api/sessions/{id}/tags               — attach tag to session {name, color}
 DELETE /api/sessions/{id}/tags/{tag_id}      — remove tag from session
 POST   /api/sessions/{id}/tags/suggest       — LLM suggests tags for this session
 ```
+
+**`POST /api/sessions/tags`** (added in PR #158) accepts `{"name": str,
+"color": str?}` and calls `db.create_tag(name, color)`. Returns
+`{"tag": {"id", "name", "color"}}`. Case-insensitive dedup — if a tag
+with the same name (case-insensitive) already exists, returns the existing
+tag. This is the "define a new tag" API used by the Settings page.
 
 **`GET /api/sessions/tags`** returns:
 ```json
@@ -324,16 +344,17 @@ POST   /api/chat/sessions/[sessionId]/tags/suggest — trigger LLM auto-tag
 Each follows the existing BFF pattern: resolve principal → forward to Python
 API via `HermesApiClient` → return JSON.
 
-#### API client methods (new, in `agent-home/src/lib/api/client.ts`)
+#### API client methods (in `agent-home/src/lib/api/client.ts`)
 
 ```typescript
-async sessionTags(): Promise<SessionTagsResponse>
-async createSessionTag(name: string, color?: string): Promise<SessionTag>
-async deleteSessionTag(tagId: string): Promise<void>
-async sessionTagsForSession(sessionId: string): Promise<SessionTag[]>
-async addSessionTag(sessionId: string, tagId: string): Promise<void>
-async removeSessionTag(sessionId: string, tagId: string): Promise<void>
-async suggestSessionTags(sessionId: string): Promise<TagSuggestion[]>
+async listTags(): Promise<{ tags: SessionTag[] }>
+async createTag(name: string, color?: string): Promise<{ tag: SessionTag }>  // ← PR #158
+async deleteTag(tagId: string): Promise<{ ok: boolean }>
+async getSessionTags(sessionId: string): Promise<{ tags: SessionTag[] }>
+async addSessionTag(sessionId: string, name: string, color?: string): Promise<{ tag: SessionTag }>
+async removeSessionTag(sessionId: string, tagId: string): Promise<{ ok: boolean }>
+async suggestSessionTags(sessionId: string): Promise<{ suggestions: TagSuggestion[] }>
+async searchSessions(query: string, limit?: number): Promise<SessionSearchResponse>
 ```
 
 #### Types (new, in `agent-home/src/types/index.ts`)
@@ -365,24 +386,51 @@ interface SessionSummary {
 **Tag chips in SessionTabs:** Each session chip shows small tag dots below
 the title when tags are present.
 
-**Tag section in SessionModal:** Between name and context window:
+**Tag section in SessionModal** (refactored in PR #158): Between name and
+context window. Tags are displayed as chips with a × to remove. Instead of a
+free-text input, an "Associate tag…" `<select>` dropdown lists pre-existing
+tags that are NOT already associated with this session:
 
 ```
-│ Tags                          [+]  │
-│ [deployment] [bug-fix]            │
-│                                     │
-│ ┌─ Suggested ────────────────────┐ │
-│ │ 💡 refactoring (87% confident)  │ │
-│ │    [Accept] [Dismiss]           │ │
-│ └─────────────────────────────────┘ │
+│ Tags                                  │
+│ [deployment ×] [bug-fix ×]            │
+│ [Associate tag… ▼]                     │  ← select dropdown
+│                                         │
+│ ┌─ Suggested ────────────────────┐     │
+│ │ 💡 refactoring (87% confident)  │     │
+│ │    [Accept] [Dismiss]           │     │
+│ └─────────────────────────────────┘     │
 ```
 
-- `[+]` button opens a tag picker (list of all tags + create new)
-- Clicking a tag chip removes it (with confirm)
+- The `<select>` only shows unassociated tags (filters out tags already
+  on this session by case-insensitive name match)
+- If all tags are associated: shows "All tags associated."
+- If no tags exist at all: shows "No tags defined yet. Create them in Settings."
+- `allTags` is passed from `ChatPane` (which fetches `/api/chat/sessions/tags`)
 - Suggested tags show an accept/dismiss call-to-action
 - When a new session turn completes and the session has no tags, the system
   can call `suggestSessionTags` in the background and surface suggestions in
   the SessionModal next time it's opened
+
+**Tags management section in SettingsView** (added in PR #158): Below the
+theme selector on the `/settings` page:
+
+```
+│ Tags                                    │
+│ Define tags here, then associate them   │
+│ with conversations from the chat.        │
+│                                          │
+│ [Tag name____] [Color ▼] [Create]       │
+│                                          │
+│ ● bug (2) ×    ● feature (0) ×           │
+│ ● urgent (5) ×  ● docs (0) ×            │
+```
+
+- Create form: name input + color dropdown (Blue/Red/Green/Amber/Purple/Gray)
+  + Create button → POST `/api/chat/sessions/tags`
+- Tag list: chips with color dot, name, session count, and × delete button
+- Delete confirms before cascading removal from all sessions
+- Empty state: "No tags defined yet. Create one above."
 
 **Auto-tag trigger:** After a session's first turn completes (in
 `ChatPane.send()` callback), if the session has no tags and has ≥ 3
@@ -390,28 +438,29 @@ messages, call `POST /api/sessions/{id}/tags/suggest` in the background.
 Store suggestions as `auto-suggested`. When the user next opens the
 SessionModal, show the suggestions with accept/dismiss buttons.
 
-**Tag list modal:** A separate modal (from ChatHeaderActions or a new nav
-item) that shows all tags with session counts, and lets the user
-create/delete/rename tags.
+**Tag management in Settings:** The Settings page (`/settings`) now hosts a
+Tags section (below the theme selector) for defining, listing, and deleting
+tags. This replaces the original "tag list modal" concept.
 
-#### Files to create/modify
+#### Files created/modified
 
-| File | Action |
-|------|--------|
-| `hermes_state.py` | Add tag tables to schema v18 migration; add tag CRUD methods |
-| `hermes_cli/web_server.py` | Add `/api/sessions/tags/*` and `/api/sessions/{id}/tags/*` endpoints |
-| `agent-home/src/types/index.ts` | Add `SessionTag`, `TagSuggestion` types; extend `SessionSummary` |
-| `agent-home/src/lib/api/client.ts` | Add tag CRUD + suggest methods |
-| `agent-home/src/app/api/chat/sessions/tags/route.ts` | Create — BFF list/create tags |
-| `agent-home/src/app/api/chat/sessions/tags/[tagId]/route.ts` | Create — BFF delete tag |
-| `agent-home/src/app/api/chat/sessions/[sessionId]/tags/route.ts` | Create — BFF list/add session tags |
-| `agent-home/src/app/api/chat/sessions/[sessionId]/tags/[tagId]/route.ts` | Create — BFF remove session tag |
-| `agent-home/src/app/api/chat/sessions/[sessionId]/tags/suggest/route.ts` | Create — BFF auto-tag suggest |
-| `agent-home/src/components/chat/SessionModal.tsx` | Add tag section + suggested-tag UI |
-| `agent-home/src/components/chat/SessionTabs.tsx` | Show tag dots on chips |
-| `agent-home/src/components/chat/ChatPane.tsx` | Wire auto-tag trigger after first turn |
-| `agent-home/src/components/chat/TagPicker.tsx` | Create — tag picker dropdown |
-| `agent-home/src/components/chat/TagListModal.tsx` | Create — all-tags management modal |
+| File | Action | PR |
+|------|--------|----|
+| `hermes_state.py` | Add tag tables (schema v18); tag CRUD methods + `create_tag()` | #155, #158 |
+| `hermes_cli/web_server.py` | Add `/api/sessions/tags/*` and `/api/sessions/{id}/tags/*` endpoints + `POST /api/sessions/tags` | #155, #158 |
+| `agent-home/src/types/index.ts` | Add `SessionTag`, `TagSuggestion` types; extend `SessionSummary` | #155 |
+| `agent-home/src/lib/api/client.ts` | Add tag CRUD + suggest + search methods + `createTag()` | #155, #158 |
+| `agent-home/src/app/api/chat/sessions/tags/route.ts` | BFF list (GET) + create (POST) tags | #155, #158 |
+| `agent-home/src/app/api/chat/sessions/tags/add/route.ts` | BFF add tag to session | #155 |
+| `agent-home/src/app/api/chat/sessions/tags/remove/route.ts` | BFF remove tag from session | #155 |
+| `agent-home/src/app/api/chat/sessions/tags/get/route.ts` | BFF get session tags | #155 |
+| `agent-home/src/app/api/chat/sessions/tags/suggest/route.ts` | BFF auto-tag suggest | #155 |
+| `agent-home/src/app/api/chat/sessions/search/route.ts` | BFF cross-session search | #155 |
+| `agent-home/src/components/settings/SettingsView.tsx` | Add Tags section (create, list, delete) | #158 |
+| `agent-home/src/components/chat/SessionModal.tsx` | Tag chips + association picker + suggested-tag UI + context window | #155, #158 |
+| `agent-home/src/components/chat/SessionTabs.tsx` | Show tag dots on chips | #155 |
+| `agent-home/src/components/chat/ChatPane.tsx` | Wire tag state, auto-tag trigger, pass `allTags` to SessionModal | #155, #158 |
+| `agent-home/src/components/chat/TagFilterBar.tsx` | Create — tag filter UI (AND/OR/NOT) | #155 |
 
 ---
 
@@ -787,22 +836,26 @@ The auto-tagging endpoint uses DeepSeek (same as triage agents) with
 
 ### Python-side tests
 
-- `tests/test_session_tags.py` — tag CRUD, session-tag mapping, tag-filter
-  SQL (AND/OR/NOT), auto-tag suggestion endpoint with mocked DeepSeek
-- Extend `tests/test_hermes_state.py` — v18 migration, tag tables exist,
-  cascade delete works
+| File | Tests | Coverage |
+|------|-------|----------|
+| `tests/test_session_tags.py` | 23 | Tag CRUD (`add_tag_to_session`, `create_tag`, `get_session_tags`, `remove_tag_from_session`, `delete_tag`, `list_tags`, `filter_session_ids_by_tags` with AND/OR/NOT), schema v18 migration |
+| `tests/hermes_cli/test_web_server_tags.py` | 18 | API endpoint tests: list, create, add, get, remove, delete, tag filter on `GET /api/sessions`, LLM suggest (mocked) |
 
-### Agent-home tests
+### Agent-home tests (TypeScript / vitest)
 
-- `agent-home/src/components/chat/SessionModal.test.tsx` — context window
-  section renders, collapse button works, tag section renders
-- `agent-home/src/components/chat/TagFilterBar.test.tsx` — AND/OR/NOT
-  filter state
-- `agent-home/src/components/chat/SessionSearchBar.test.tsx` — debounced
-  search, results render
-- `agent-home/src/components/chat/SearchNav.test.tsx` — next/previous
-  navigation
-- `agent-home/src/lib/chat/search.test.ts` — match-finding logic
+| File | Tests | Coverage |
+|------|-------|----------|
+| `agent-home/src/lib/api/client.tags.test.ts` | 12 | `listTags`, `createTag`, `getSessionTags`, `addSessionTag`, `removeSessionTag`, `deleteTag`, `suggestSessionTags`, `searchSessions`, tag filter params |
+| `agent-home/src/app/api/chat/sessions/tags/route.test.ts` | 8 | BFF GET (list tags) + POST (create tag): 401/400/200/502 |
+| `agent-home/src/app/api/chat/sessions/tags/add/route.test.ts` | 5 | BFF add tag to session: 401/400/200/502, color forwarding |
+| `agent-home/src/app/api/chat/sessions/tags/remove/route.test.ts` | 4 | BFF remove tag: 401/200/502 |
+| `agent-home/src/app/api/chat/sessions/search/route.test.ts` | 6 | BFF search: empty q, missing q, forwarding, limit default |
+| `agent-home/src/components/chat/SessionModal.test.tsx` | 16 | Context window, tag chips, association picker, suggestions, statistics |
+| `agent-home/src/components/chat/TagFilterBar.test.tsx` | 8 | Tag chip states (include/exclude/neutral), AND/OR toggle |
+| `agent-home/src/components/chat/SearchNav.test.tsx` | 5 | Match count display, disabled state when total=0 |
+| `agent-home/src/components/settings/SettingsView.test.tsx` | 5 | Tags section header, create form, color dropdown, loading state |
+
+**Total: 82 tests (23 Python + 18 Python API + 41 TypeScript), all passing.**
 
 ### E2E verification
 
@@ -830,5 +883,60 @@ The auto-tagging endpoint uses DeepSeek (same as triage agents) with
 4. **Cross-session search uses the existing FTS5 endpoint** — no new search
    infrastructure needed; the Python API's `/api/sessions/search` already
    handles lineage dedup and snippet generation
-5. **In-session search is client-side** — searches through loaded messages
+5.  **In-session search is client-side** — searches through loaded messages
    only, no server round-trip needed
+
+---
+
+## Implementation History
+
+### PR #155 — Initial implementation (all 5 features)
+
+- Schema v18 migration (`session_tags`, `session_tag_map` tables)
+- All Python API endpoints + BFF routes + API client methods
+- Context window section in SessionModal (collapsible, token breakdown bar)
+- Tag system with free-text "Add tag" input in SessionModal
+- Tag filter bar (include/exclude/AND/OR) above SessionTabs
+- Cross-session search via FTS5 + in-session search (client-side)
+- SearchNav component with next/previous navigation
+- LLM auto-tag suggestions with accept/dismiss flow
+- 83 tests across 11 files
+
+### PR #157 — Comprehensive test suite
+
+- Added `tests/test_session_tags.py` (19 Python backend tests)
+- Added `tests/hermes_cli/test_web_server_tags.py` (15 Python API tests)
+- Added 6 TypeScript test files (client, BFF routes, components)
+- Total: 83 tests, all passing
+
+### PR #158 — Tag management refactoring
+
+**Problem:** The original SessionModal had a free-text "Add tag" input that
+created tags on-the-fly. This conflated tag *definition* (a workspace-level
+concern) with tag *association* (a per-session concern).
+
+**Solution:** Separated the two concerns:
+
+1. **Settings page** (`/settings`) — tag CRUD: define new tags (name +
+   color), list all tags with session counts, delete tags (cascades to all
+   sessions)
+2. **SessionModal** — association only: "Associate tag…" `<select>` dropdown
+   that lists pre-existing unassociated tags. No free-text creation.
+
+**Changes:**
+
+- `hermes_state.py`: Added `create_tag(name, color)` — standalone tag
+  creation with case-insensitive dedup
+- `hermes_cli/web_server.py`: Added `POST /api/sessions/tags` endpoint
+- `agent-home/src/lib/api/client.ts`: Added `createTag()` method
+- `agent-home/src/app/api/chat/sessions/tags/route.ts`: Added `POST` export
+- `agent-home/src/components/settings/SettingsView.tsx`: Added Tags section
+  (create form + tag list + delete)
+- `agent-home/src/components/chat/SessionModal.tsx`: Replaced free-text input
+  with `<select>` association picker; added `allTags` prop
+- `agent-home/src/components/chat/ChatPane.tsx`: Passes `allTags` to SessionModal
+- 4 new Python `TestCreateTag` tests, 2 new `createTag` client tests, 5 new
+  POST route tests, 4 new association picker tests, 5 new SettingsView tests
+- Total: 82 tests, all passing
+
+**Deployed to ECS** at commit `9c15e15bb` on `2026-08-10`.
