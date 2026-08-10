@@ -1283,8 +1283,8 @@ class TestEventBridgePollE2E:
         # poll (its message landed on an earlier tick), but sessions.json was
         # only updated with this conversation now — the bridge has not yet seen
         # the current sessions.json content.
-        bridge._state_db_mtime = db_path.stat().st_mtime
-        bridge._sessions_json_mtime = 0.0
+        bridge._state_db_mtime = mcp_serve._file_change_stamp(db_path)
+        bridge._sessions_json_mtime = ""
 
         bridge._poll_once(DB())
 

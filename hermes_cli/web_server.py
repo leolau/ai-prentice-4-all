@@ -9610,7 +9610,7 @@ async def suggest_session_tags(
     db = _open_session_db_for_profile(profile)
     try:
         sid = db.resolve_session_id(session_id) or session_id
-        messages = db.get_messages(sid, limit=20)
+        messages = db.get_messages(sid)
         existing_tags = [t["name"] for t in db.list_tags()]
     finally:
         db.close()

@@ -20,6 +20,7 @@ from gateway.platforms.base import (
     MessageEvent,
     MessageType,
     SendResult,
+    SessionSource,
     _reply_anchor_for_event,
     _thread_metadata_for_source,
 )
@@ -114,6 +115,15 @@ def _inject_fake_telegram(monkeypatch):
     monkeypatch.setitem(sys.modules, "telegram.constants", _fake_telegram_constants)
     monkeypatch.setitem(sys.modules, "telegram.ext", _fake_telegram_ext)
     monkeypatch.setitem(sys.modules, "telegram.request", _fake_telegram_request)
+
+    # The adapter binds ``ChatType`` / ``ParseMode`` as module globals on first
+    # import. Another test file importing it first would leave those bound to
+    # its own doubles (or None), and every chat-type branch here would silently
+    # take the DM path, so rebind them whenever the module is already loaded.
+    adapter_mod = sys.modules.get("plugins.platforms.telegram.adapter")
+    if adapter_mod is not None:
+        monkeypatch.setattr(adapter_mod, "ChatType", _fake_telegram_constants.ChatType)
+        monkeypatch.setattr(adapter_mod, "ParseMode", _fake_telegram_constants.ParseMode)
 
 
 def _make_adapter():
@@ -531,7 +541,7 @@ async def test_gateway_runner_busy_ack_replies_to_triggering_message_for_telegra
         def get_activity_summary(self):
             return {}
 
-    source = SimpleNamespace(
+    source = SessionSource(
         platform=Platform.TELEGRAM,
         chat_id="12345",
         chat_type="dm",

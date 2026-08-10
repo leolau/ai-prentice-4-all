@@ -161,7 +161,7 @@ class TestTextBatching:
 
         def _key(thread_id: str) -> str:
             return build_session_key(
-                SimpleNamespace(
+                SessionSource(
                     platform=Platform.TELEGRAM,
                     chat_id="12345",
                     chat_type="dm",
