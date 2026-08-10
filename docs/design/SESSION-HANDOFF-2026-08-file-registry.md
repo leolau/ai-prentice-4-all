@@ -161,32 +161,46 @@ unchanged (do not re-key old objects).
 **Make it idempotent on `storage_path`, not on the hash** — see §4. Re-running
 must not invent arrivals that never happened.
 
-### 3.4 Email / WhatsApp / calendar attachment paths — unverified
+### 3.4 Email / WhatsApp / calendar attachment paths — partially verified
 
 The gateway hook covers everything that arrives as a `MessageEvent` with
-`media_urls`, which is Telegram and WhatsApp for certain. Still to check:
+`media_urls`, which is Telegram and WhatsApp for certain.
 
-- **Email**: confirm the adapter materialises attachments into `media_urls`
-  (rather than dropping them or inlining text), and that `message_id`/thread and
-  the receiving inbox land in `account_id`/`conversation`.
+- **WhatsApp** (verified 2026-08-10): Two stacked bugs were found and fixed
+  in PR #156. The WhatsApp **batcher** (`custom/whatsapp/batcher.py`) was
+  calling a non-existent `GET /media/{id}` endpoint on the bridge instead of
+  reading the `mediaUrls` file paths the bridge already provides. Separately,
+  the WhatsApp **bridge** (`scripts/whatsapp-bridge/bridge.js`) failed to
+  download media because Node.js v20's `fetch()` prefers IPv6, which is broken
+  on the ECS instance. Fixed with `dns.setDefaultResultOrder('ipv4first')` and
+  by reading `mediaUrls` directly. See
+  `docs/design/file-registry-owner-fallback.md` §"Post-deploy" for full
+  details. The standalone batcher path now calls `register_file()` directly.
+- **Email** (verified 2026-08-09): The email poller reads IMAP attachments
+  directly and calls `register_file()` in `custom/shared/file_registration.py`.
+  6 of the 7 pre-fix registered files came from this path. The owner-fallback
+  fix (PR #153) resolved the `_resolve_owner()` sticky-None bug that was
+  blocking it.
 - **Calendar**: events arrive as `InboundEvent`s from `gateway/producers.py` and
   carry no file payload today. Nothing registers until a poller supplies
   attachments; the seam is the same, but the calendar/event IDs must be carried
   into `account_id`/`conversation`/`message_id` rather than flattened into chat
   fields.
 
-### 3.5 Deploy + live verification — not started
+### 3.5 Deploy + live verification — done
 
-Nothing of §2 is on the box. After merge: `sudo /opt/data/hermes-agent/deploy/hermes-deploy.sh`,
-then confirm `SUPABASE_URL` and a service-role key are readable by the *gateway*
-process (they currently live only in `agent-home.env`; `hermes_cli/filestore.py`
-reads `SUPABASE_URL` + `SUPABASE_SERVICE_ROLE_KEY`/`SUPABASE_SERVICE_KEY`). This
-is the single most likely reason registration silently no-ops in production —
-`store_and_register()` swallows the failure by design.
+Deployed at commit `9c15e15bb` via `hermes-deploy.sh` on 2026-08-10. All 13
+services active. The WhatsApp-specific fixes (PR #156) were deployed in the
+same run. `SUPABASE_URL` and the service-role key are confirmed readable by
+the gateway process — the email poller successfully registered 6 files after
+the owner-fallback fix.
 
-Then walk `/files` end-to-end with the testing agent (upload in chat, send a
-Telegram attachment, check both appear with correct provenance, open View and
-Download).
+End-to-end WhatsApp media registration is pending new media messages arriving
+after the fix (the bridge cache has 444+ images, 113 documents, 11 audio files
+from pre-fix traffic, but those were never registered and the 24-hour prune
+may have already cleaned the local copies). New WhatsApp media messages will
+flow through the full pipeline: bridge download → batcher reads `mediaUrls` →
+`register_file()` → Supabase Storage + `file_assets` row.
 
 ---
 
