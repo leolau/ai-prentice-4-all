@@ -1706,6 +1706,11 @@ from gateway.whatsapp_identity import (
 logger = logging.getLogger(__name__)
 
 
+# Sentinel distinguishing "principal store not yet resolved" from a resolved
+# ``None`` (app DB not configured), so the FG-03 lookup is cached exactly once.
+_UNSET_PRINCIPAL_STORE = object()
+
+
 _OWN_POLICY_OPEN_ENV = {
     Platform.WECOM: ("WECOM_DM_POLICY", "WECOM_GROUP_POLICY", "WECOM_ALLOW_ALL_USERS"),
     Platform.WEIXIN: ("WEIXIN_DM_POLICY", "WEIXIN_GROUP_POLICY", "WEIXIN_ALLOW_ALL_USERS"),
@@ -2626,6 +2631,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # sites are untouched when multiplexing is off (this dict is empty).
         # Populated by _start_secondary_profile_adapters().
         self._profile_adapters: Dict[str, Dict[Platform, BasePlatformAdapter]] = {}
+        # In-flight file-registry uploads, held so the event loop cannot
+        # garbage-collect a background task before it finishes.
+        self._file_registry_tasks: set = set()
         self._warn_if_docker_media_delivery_is_risky()
         _gateway_runner_ref = _weakref.ref(self)
 
@@ -3281,6 +3289,131 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
     @property
     def exit_code(self) -> Optional[int]:
         return self._exit_code
+
+    def _get_principal_store(self):
+        """Return a C1 :class:`PrincipalStore` for channel identity resolution.
+
+        FG-03 live-gateway wiring: channel senders are mapped to an internal
+        system :class:`~hermes_cli.access.Principal` so a session keys per
+        *internal* user (RLS-scoped shared/private data), not per raw channel
+        handle. Returns ``None`` — a no-op that leaves keying on channel
+        identity — unless ``datastore.supabase_app.dsn`` is configured, so
+        single-account / DB-less deployments are unaffected and session keys
+        stay byte-identical. Cached (including the ``None`` result) so the
+        config read and store construction happen once.
+        """
+        cached = getattr(self, "_principal_store_cache", _UNSET_PRINCIPAL_STORE)
+        if cached is not _UNSET_PRINCIPAL_STORE:
+            return cached
+        store = None
+        try:
+            from hermes_cli.config import load_config_readonly
+            from hermes_cli.datastore import SupabaseAppStore, _config_get
+
+            cfg = load_config_readonly()
+            raw_dsn = _config_get(
+                cfg, "datastore", "supabase_app", "dsn", default=""
+            )
+            dsn = os.path.expandvars(str(raw_dsn or "")).strip()
+            # An unexpanded ``${VAR}`` placeholder means the env var is unset —
+            # treat that (and empty) as "app DB not configured".
+            if dsn and "${" not in dsn:
+                from hermes_cli.access import PrincipalStore
+
+                # Channels are prod-only (D5/C3), so bind to the prod schema.
+                app_store = SupabaseAppStore("prod", "app_prod", dsn)
+                store = PrincipalStore(app_store)
+        except Exception:
+            logger.debug(
+                "Principal store unavailable; channel sessions will key on "
+                "channel identity only.",
+                exc_info=True,
+            )
+            store = None
+        self._principal_store_cache = store
+        return store
+
+    async def _enrich_channel_source_identity(
+        self, source: SessionSource
+    ) -> SessionSource:
+        """FG-03: stamp the receiving ``account_id`` + resolve the internal user.
+
+        Called once at the inbound chokepoint so the live gateway realises the
+        one-brain / per-internal-user contract instead of keying purely on the
+        raw channel handle:
+
+        * ``account_id`` — the receiving adapter's inbox identity, so two of my
+          accounts on one platform never collide and egress leaves via the
+          right account.
+        * ``internal_user_id`` — resolved from the channel sender via the C1
+          ``bind_channel_principal`` seam (pairing/enrolment owned by
+          ``gateway/pairing.py``), so several channel handles for one person
+          share one internal-user-scoped core.
+
+        Both are additive and gated: when the adapter exposes no ``account_id``
+        and no principal store is configured, ``source`` is returned unchanged
+        (byte-identical session key). Never raises into the message path — a
+        resolution failure logs and falls back to channel-identity keying.
+        """
+        try:
+            adapter = self.adapters.get(source.platform) if self.adapters else None
+        except Exception:
+            adapter = None
+        account_id = None
+        if adapter is not None:
+            try:
+                account_id = adapter.account_id
+            except Exception:
+                account_id = None
+        if account_id and not source.account_id:
+            source = dataclasses.replace(source, account_id=str(account_id))
+
+        if not source.internal_user_id:
+            store = self._get_principal_store()
+            if store is not None:
+                try:
+                    from gateway.inbound import bind_channel_principal
+
+                    await bind_channel_principal(source, store=store)
+                except Exception:
+                    logger.debug(
+                        "Channel principal resolution failed for %s; keying on "
+                        "channel identity.",
+                        source.platform,
+                        exc_info=True,
+                    )
+        return source
+
+    def _spawn_inbound_file_registration(
+        self, event: Any, source: SessionSource
+    ) -> None:
+        """Record this event's attachments in the file registry, off the turn.
+
+        Fire-and-forget on purpose: uploading to Supabase Storage is network
+        I/O, and the reply must not wait on it. The task holds its own
+        reference until it finishes so the loop cannot garbage-collect it
+        mid-upload, and every failure inside is already non-fatal.
+        """
+        if not getattr(event, "media_urls", None):
+            return
+        try:
+            from gateway.inbound_files import register_event_files
+
+            # Pass the principal store so an unenrolled sender's file falls
+            # back to the deployment owner instead of being dropped — the
+            # local cache prunes at 24 h, and a skipped file is unrecoverable.
+            principal_store = self._get_principal_store()
+            task = asyncio.create_task(
+                register_event_files(
+                    event,
+                    source,
+                    principal_store=principal_store,
+                )
+            )
+            self._file_registry_tasks.add(task)
+            task.add_done_callback(self._file_registry_tasks.discard)
+        except Exception:
+            logger.debug("file registry: could not schedule registration", exc_info=True)
 
     def _session_key_for_source(self, source: SessionSource) -> str:
         """Resolve the current session key for a source, honoring gateway config when available."""
@@ -8918,6 +9051,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             if _cmd_def_inner and _cmd_def_inner.name == "kanban":
                 return await self._handle_kanban_command(event)
 
+            # Durable goal management is independent coordination state. It is
+            # safe during an active run and only affects appended future
+            # context/tool results, never the live prompt or toolset.
+            if _cmd_def_inner and _cmd_def_inner.name == "goals":
+                return await self._handle_goals_command(event)
+
             # /goal is safe mid-run for status/pause/clear/wait (inspection
             # and control-plane only — doesn't interrupt the running turn).
             # Setting a new goal text mid-run is rejected with the same
@@ -9443,6 +9582,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
         if canonical == "goal":
             return await self._handle_goal_command(event)
+
+        if canonical == "goals":
+            return await self._handle_goals_command(event)
 
         if canonical == "moa":
             # /moa is one-shot sugar only: run a single prompt through the
@@ -10154,6 +10296,22 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 event.source = source
             except Exception:
                 pass
+
+        # FG-03 one-brain wiring: stamp the receiving account and resolve the
+        # channel sender to an internal principal so this turn keys per-account
+        # and per-internal-user (a no-op that leaves ``source`` unchanged when
+        # neither is configured — see ``_enrich_channel_source_identity``).
+        source = await self._enrich_channel_source_identity(source)
+        try:
+            event.source = source
+        except Exception:
+            pass
+
+        # Record any attachment in the durable file registry, with the
+        # provenance this chokepoint has and nowhere downstream does. Runs in
+        # the background: the upload is network I/O and a file arriving must
+        # never make the reply slower or fail it.
+        self._spawn_inbound_file_registration(event, source)
 
         session_entry = self.session_store.get_or_create_session(source)
         session_key = session_entry.session_key
@@ -10878,6 +11036,42 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             run_generation,
         )
 
+        _interaction_trace = None
+        _interaction_ledger = None
+        _interaction_context = None
+        try:
+            from hermes_cli.interactions import (
+                bind_trace,
+                create_trace,
+                observe,
+            )
+
+            _trace_config = _load_gateway_runtime_config()
+            _interaction_trace, _interaction_ledger = create_trace(
+                config=_trace_config,
+                source=source,
+                actor_user_id=(
+                    getattr(source, "internal_user_id", None)
+                    or source.user_id
+                    or "unknown"
+                ),
+                session_key=session_key,
+                platform=_platform_name,
+            )
+            _interaction_context = bind_trace(_interaction_trace)
+            _interaction_context.__enter__()
+            if _interaction_trace is not None:
+                observe(
+                    "inbound",
+                    ref=str(
+                        getattr(event, "message_id", None)
+                        or _interaction_trace.trace_id
+                    ),
+                    summary="Gateway inbound message",
+                )
+        except Exception as _trace_err:
+            logger.warning("Interaction trace setup failed: %s", _trace_err)
+
         try:
             # Emit agent:start hook
             hook_ctx = {
@@ -10888,6 +11082,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 "chat_type": getattr(source, "chat_type", "") or "",
                 "session_id": session_entry.session_id,
                 "message": message_text[:500],
+                "trace_id": (
+                    _interaction_trace.trace_id if _interaction_trace else ""
+                ),
             }
             await self.hooks.emit("agent:start", hook_ctx)
 
@@ -11431,8 +11628,26 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                             )
                     except Exception as _e:
                         logger.debug("trailing footer send failed: %s", _e)
+                if _interaction_trace is not None:
+                    observe(
+                        "outbound",
+                        ref=str(
+                            getattr(event, "message_id", None)
+                            or _interaction_trace.trace_id
+                        ),
+                        summary="Gateway streamed response",
+                    )
                 return None
 
+            if _interaction_trace is not None:
+                observe(
+                    "outbound",
+                    ref=str(
+                        getattr(event, "message_id", None)
+                        or _interaction_trace.trace_id
+                    ),
+                    summary=f"Gateway response ({len(response)} chars)",
+                )
             return response
             
         except Exception as e:
@@ -11444,6 +11659,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             except Exception:
                 pass
             logger.exception("Agent error in session %s", session_key)
+            if _interaction_trace is not None:
+                observe(
+                    "error",
+                    ref=type(e).__name__,
+                    summary=f"Gateway agent error: {type(e).__name__}",
+                )
             # Crash-resilience for failures that happen before AIAgent enters
             # run_conversation() (for example: provider/httpx client init
             # failures). In that path the agent cannot persist the current
@@ -11525,18 +11746,48 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 # 500 with a large session often means the payload is too large
                 # for the API to process — treat it the same way.
                 if _hist_len > 50:
-                    return (
+                    _gateway_error_response = (
                         "⚠️ Session too large for the model's context window.\n"
                         "Use /compact to compress the conversation, or "
                         "/reset to start fresh."
                     )
+                    if _interaction_trace is not None:
+                        observe(
+                            "outbound",
+                            ref=str(
+                                getattr(event, "message_id", None)
+                                or _interaction_trace.trace_id
+                            ),
+                            summary=f"Gateway error response ({len(_gateway_error_response)} chars)",
+                        )
+                    return _gateway_error_response
                 elif status_code == 400:
                     status_hint = " The request was rejected by the API."
-            return (
+            _gateway_error_response = (
                 f"Sorry, I encountered an unexpected error.{status_hint}\n"
                 "Try again or use /reset to start a fresh session."
             )
+            if _interaction_trace is not None:
+                observe(
+                    "outbound",
+                    ref=str(
+                        getattr(event, "message_id", None)
+                        or _interaction_trace.trace_id
+                    ),
+                    summary=f"Gateway error response ({len(_gateway_error_response)} chars)",
+                )
+            return _gateway_error_response
         finally:
+            if _interaction_ledger is not None and _interaction_trace is not None:
+                try:
+                    await _interaction_ledger.flush(_interaction_trace)
+                except Exception as _trace_err:
+                    logger.warning("Interaction trace flush failed: %s", _trace_err)
+            if _interaction_context is not None:
+                try:
+                    _interaction_context.__exit__(None, None, None)
+                except Exception:
+                    logger.debug("Interaction trace context reset failed", exc_info=True)
             # Restore session context variables to their pre-handler state
             self._clear_session_env(_session_env_tokens)
 
@@ -17077,6 +17328,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     chat_type=source.chat_type,
                     thread_id=source.thread_id,
                     gateway_session_key=session_key,
+                    internal_user_id=source.internal_user_id,
+                    internal_user_role=source.internal_user_role,
+                    session_task=source.task,
                     session_db=getattr(self._session_db, "_db", self._session_db),
                     fallback_model=self._fallback_model,
                 )

@@ -1,0 +1,355 @@
+"""Unit / invariant tests for the C1 principal model + C2 visibility helpers."""
+
+from __future__ import annotations
+
+import pytest
+
+from hermes_cli.access import (
+    GRANT_ACTIVE_STATUSES,
+    GRANT_ITEM_KINDS,
+    GRANT_STATUSES,
+    GRANT_TYPES,
+    ITEM_GRANTS_TABLE,
+    Principal,
+    ROLE_RANK,
+    ROLES,
+    SHARED,
+    can_read,
+    can_read_row,
+    normalize_role,
+    normalize_visibility,
+    parse_private_owner,
+    private,
+    reads_by_elevation,
+    reads_role_below,
+    role_rank,
+    scope_filter,
+)
+
+
+def _p(user_id: str, role: str) -> Principal:
+    return Principal(user_id=user_id, display=user_id.title(), role=role)  # type: ignore[arg-type]
+
+
+def test_role_vocabulary_is_the_locked_set() -> None:
+    assert ROLES == ("owner", "admin", "member", "viewer")
+
+
+def test_normalize_role_passes_through_every_real_role() -> None:
+    for role in ROLES:
+        assert normalize_role(role) == role
+
+
+def test_normalize_role_degrades_unknown_values_to_base_privilege() -> None:
+    """Whatever the identity seam could not resolve must not be elevated.
+
+    ``member`` is the base rung — own private tier plus shared, nothing of
+    anyone else's — so a missing, wrongly-cased or invented role can never buy
+    read access to another user's data.
+    """
+    for bogus in (None, "", "  ", "OWNER", "Owner", "root", "superuser", 0, True, ["owner"]):
+        assert normalize_role(bogus) == "member"
+    assert can_read(_p("u", normalize_role("root")), private("someone_else")) is False
+
+
+def test_principal_rejects_unknown_role_and_empty_id() -> None:
+    with pytest.raises(ValueError):
+        Principal(user_id="u1", display="U", role="root")  # type: ignore[arg-type]
+    with pytest.raises(ValueError):
+        Principal(user_id="   ", display="U", role="member")
+
+
+def test_only_owner_reports_is_owner() -> None:
+    assert _p("u1", "owner").is_owner is True
+    for role in ("admin", "member", "viewer"):
+        assert _p("u1", role).is_owner is False
+
+
+def test_private_and_parse_round_trip() -> None:
+    assert private("bob") == "private:bob"
+    assert parse_private_owner("private:bob") == "bob"
+    assert parse_private_owner(SHARED) is None
+    assert parse_private_owner("private:") is None
+    assert normalize_visibility("shared") == "shared"
+    assert normalize_visibility("private:bob") == "private:bob"
+    with pytest.raises(ValueError):
+        normalize_visibility("secret")
+
+
+def test_shared_rows_are_readable_by_every_member() -> None:
+    for role in ROLES:
+        assert can_read(_p("anyone", role), SHARED) is True
+
+
+def test_negative_access_private_row_is_isolated_per_user() -> None:
+    """C2 negative-access invariant at the app layer.
+
+    A member cannot read another user's ``private:<other>`` row; the owner can;
+    the private owner can read their own.
+    """
+    member_a = _p("alice", "member")
+    member_b = _p("bob", "member")
+    owner = _p("root", "owner")
+
+    bobs_private = private("bob")
+
+    # Alice (a different member) is denied Bob's private row.
+    assert can_read(member_a, bobs_private) is False
+    # Bob reads his own private row.
+    assert can_read(member_b, bobs_private) is True
+    # The owner bypasses the filter and sees everything.
+    assert can_read(owner, bobs_private) is True
+
+
+def test_admin_and_viewer_do_not_bypass_private_scope() -> None:
+    # Only the single owner bypasses; admin/viewer are still scoped.
+    assert can_read(_p("adm", "admin"), private("bob")) is False
+    assert can_read(_p("vw", "viewer"), private("bob")) is False
+
+
+def test_can_read_row_fails_closed_on_missing_visibility() -> None:
+    member = _p("alice", "member")
+    assert can_read_row(member, {"visibility": SHARED}) is True
+    assert can_read_row(member, {"visibility": private("alice")}) is True
+    assert can_read_row(member, {"visibility": private("bob")}) is False
+    # Missing/blank visibility is unreadable for a non-owner, readable for owner.
+    assert can_read_row(member, {}) is False
+    assert can_read_row(member, {"visibility": ""}) is False
+    assert can_read_row(_p("root", "owner"), {}) is True
+
+
+def test_scope_filter_owner_bypasses_with_no_params() -> None:
+    pred = scope_filter(_p("root", "owner"))
+    assert pred.sql == "TRUE"
+    assert pred.params == ()
+
+
+def test_scope_filter_member_is_parameterized_and_shared_plus_own() -> None:
+    pred = scope_filter(_p("alice", "member"))
+    assert pred.sql == "(visibility = 'shared' OR visibility = $1)"
+    assert pred.params == ("private:alice",)
+
+
+def test_scope_filter_honors_column_and_start_index() -> None:
+    pred = scope_filter(_p("alice", "member"), column="mem.visibility", start_index=3)
+    assert pred.sql == "(mem.visibility = 'shared' OR mem.visibility = $3)"
+    assert pred.params == ("private:alice",)
+
+
+def test_scope_filter_rejects_unsafe_column() -> None:
+    with pytest.raises(ValueError):
+        scope_filter(_p("alice", "member"), column="visibility; DROP TABLE x")
+
+
+# --- FG-19: per-item grant vocabulary + grant-aware C2 helpers -------------
+
+
+def test_grant_vocabulary_is_the_locked_set() -> None:
+    # 'memory' joined the set in FG-21 P3 and 'document' in P4: one shared row,
+    # or one shared ingested document, is the sideways case the role ladder
+    # deliberately does not cover.
+    assert GRANT_ITEM_KINDS == ("goal", "task", "memory", "document")
+    assert GRANT_TYPES == ("assignee", "watcher")
+    assert GRANT_STATUSES == ("pending", "accepted", "declined", "revoked")
+    # Only pending/accepted grants confer visibility.
+    assert GRANT_ACTIVE_STATUSES == ("pending", "accepted")
+
+
+def test_can_read_grant_admits_only_the_granted_item() -> None:
+    """A grant reads *that* row without downgrading its private visibility."""
+    bob = _p("bob", "member")
+    owners_private = private("alice")
+    # No grant → Bob cannot read Alice's private row.
+    assert can_read(bob, owners_private) is False
+    # An active grant for THIS item → readable, even though it stays private:alice.
+    assert can_read(bob, owners_private, granted=True) is True
+    # can_read_row honours the same flag (and still fails closed otherwise).
+    assert can_read_row(bob, {"visibility": owners_private}) is False
+    assert can_read_row(bob, {"visibility": owners_private}, granted=True) is True
+
+
+def test_scope_filter_grant_clause_binds_principal_and_correlates_item() -> None:
+    pred = scope_filter(
+        _p("bob", "member"), grant_item_kind="task", id_column="tasks.id"
+    )
+    # shared OR own-private OR an active grant on THIS row's id to the principal.
+    assert "visibility = 'shared'" in pred.sql
+    assert "visibility = $1" in pred.sql
+    assert f"FROM {ITEM_GRANTS_TABLE} ig" in pred.sql
+    assert "ig.item_kind = 'task'" in pred.sql
+    assert "ig.item_id = tasks.id" in pred.sql
+    assert "ig.user_id = $2" in pred.sql
+    assert "ig.status IN ('pending', 'accepted')" in pred.sql
+    # Two bound params: the private tag ($1) and the principal id ($2).
+    assert pred.params == ("private:bob", "bob")
+
+
+def test_scope_filter_grant_clause_honours_indices_and_id_column() -> None:
+    pred = scope_filter(
+        _p("bob", "member"),
+        column="g.visibility",
+        start_index=2,
+        grant_item_kind="goal",
+        id_column="g.id",
+    )
+    assert "g.visibility = $2" in pred.sql
+    assert "ig.item_id = g.id" in pred.sql
+    assert "ig.user_id = $3" in pred.sql
+    assert pred.params == ("private:bob", "bob")
+
+
+def test_grant_clause_refuses_an_unqualified_id_column() -> None:
+    """``item_grants`` has its own ``id``, so a bare name binds to the wrong one.
+
+    The clause would then match nothing and grant nothing, with no error — a
+    grant that silently confers no access. Cheaper to refuse than to debug.
+    """
+    with pytest.raises(ValueError, match="table-qualified"):
+        scope_filter(_p("bob", "member"), grant_item_kind="task")
+
+
+def test_scope_filter_owner_bypass_ignores_grant_kind() -> None:
+    pred = scope_filter(
+        _p("root", "owner"), grant_item_kind="task", id_column="tasks.id"
+    )
+    assert pred.sql == "TRUE"
+    assert pred.params == ()
+
+
+def test_scope_filter_rejects_unknown_grant_kind_and_unsafe_id_column() -> None:
+    with pytest.raises(ValueError):
+        scope_filter(_p("bob", "member"), grant_item_kind="skill")
+    with pytest.raises(ValueError):
+        scope_filter(
+            _p("bob", "member"),
+            grant_item_kind="task",
+            id_column="tasks.id; DROP TABLE x",
+        )
+
+
+# --- FG-21 P3: the role ladder, downward only ------------------------------
+
+
+def test_the_ladder_reads_down_and_never_sideways_or_up() -> None:
+    """The whole access decision, as a matrix.
+
+    Written exhaustively because every False here is a boundary somebody could
+    remove with a one-character change to a comparison operator.
+    """
+    assert [role_rank(role) for role in ROLES] == [0, 1, 2, 3]
+
+    assert reads_role_below("owner", "admin") is True
+    assert reads_role_below("owner", "viewer") is True
+    assert reads_role_below("admin", "member") is True
+    assert reads_role_below("member", "viewer") is True
+
+    # Sideways: never.
+    for role in ROLES:
+        assert reads_role_below(role, role) is False
+    # Upward: never.
+    assert reads_role_below("admin", "owner") is False
+    assert reads_role_below("member", "admin") is False
+    assert reads_role_below("viewer", "member") is False
+
+
+def test_an_unknown_role_can_be_read_but_cannot_read() -> None:
+    """Fail closed in the direction that matters: garbage gains nothing."""
+    assert role_rank("wizard") == max(ROLE_RANK.values())
+    assert reads_role_below("wizard", "viewer") is False
+    assert reads_role_below("owner", "wizard") is True
+
+
+def test_role_elevation_is_off_unless_asked_for() -> None:
+    plain = scope_filter(_p("ada", "admin"))
+    assert "principals" not in plain.sql
+    assert plain.params == ("private:ada",)
+
+
+def test_scope_filter_elevation_clause_ranks_the_owner_from_the_table() -> None:
+    pred = scope_filter(_p("ada", "admin"), role_elevation=True)
+    # The subject's role is looked up, never taken from the row: a demotion has
+    # to take effect on the next read.
+    assert "FROM principals p" in pred.sql
+    assert "p.user_id = owner_user_id" in pred.sql
+    assert "owner_user_id <> $2" in pred.sql
+    # The reader's own rank is inlined from the ladder (admin == 1), and only
+    # strictly-higher ranks (numerically greater) are readable.
+    assert "> 1))" in pred.sql
+    assert pred.params == ("private:ada", "ada")
+
+
+def test_scope_filter_composes_grant_and_elevation_placeholders() -> None:
+    """Both optional clauses at once still number their params correctly."""
+    pred = scope_filter(
+        _p("ada", "admin"),
+        start_index=4,
+        grant_item_kind="memory",
+        id_column="memories.id",
+        role_elevation=True,
+    )
+    assert "visibility = $4" in pred.sql
+    assert "ig.user_id = $5" in pred.sql
+    assert "owner_user_id <> $6" in pred.sql
+    assert pred.params == ("private:ada", "ada", "ada")
+
+
+def test_a_viewer_gains_no_elevation_clause() -> None:
+    """Nothing is below the bottom rung, so the clause would be dead SQL."""
+    pred = scope_filter(_p("vic", "viewer"), role_elevation=True)
+    assert "principals" not in pred.sql
+    assert pred.params == ("private:vic",)
+
+
+def test_elevation_never_widens_the_owner_bypass() -> None:
+    pred = scope_filter(_p("root", "owner"), role_elevation=True)
+    assert pred.sql == "TRUE"
+    assert pred.params == ()
+
+
+def test_scope_filter_rejects_an_unsafe_owner_column() -> None:
+    with pytest.raises(ValueError):
+        scope_filter(
+            _p("ada", "admin"),
+            role_elevation=True,
+            owner_column="owner_user_id; DROP TABLE x",
+        )
+
+
+def test_reads_by_elevation_labels_only_the_rows_that_needed_rank() -> None:
+    ada = _p("ada", "admin")
+
+    # A member's private row: readable only because ada outranks mia.
+    assert (
+        reads_by_elevation(
+            ada,
+            {"owner_user_id": "mia", "visibility": private("mia")},
+            owner_role="member",
+        )
+        is True
+    )
+    # Ada's own row, and a shared row: readable anyway, so not an elevated read.
+    assert (
+        reads_by_elevation(
+            ada,
+            {"owner_user_id": "ada", "visibility": private("ada")},
+            owner_role="admin",
+        )
+        is False
+    )
+    assert (
+        reads_by_elevation(
+            ada,
+            {"owner_user_id": "mia", "visibility": SHARED},
+            owner_role="member",
+        )
+        is False
+    )
+    # A peer admin's private row is not readable at all, so never labelled.
+    assert (
+        reads_by_elevation(
+            ada,
+            {"owner_user_id": "abe", "visibility": private("abe")},
+            owner_role="admin",
+        )
+        is False
+    )

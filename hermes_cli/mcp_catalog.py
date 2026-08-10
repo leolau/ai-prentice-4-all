@@ -64,6 +64,10 @@ class EnvVarSpec:
 class AuthSpec:
     type: str  # "api_key" | "oauth" | "none"
     env: List[EnvVarSpec] = field(default_factory=list)
+    # api_key over an http transport: the request header carrying the
+    # credential. ``value`` is a template resolved at connect time.
+    header: str = "Authorization"
+    header_value: Optional[str] = None
     # OAuth-specific (case 2: third-party provider like Google)
     provider: Optional[str] = None
     scopes: List[str] = field(default_factory=list)
@@ -206,9 +210,26 @@ def _parse_manifest(path: Path) -> CatalogEntry:
     if not isinstance(env_list_raw, list):
         raise CatalogError(f"{path}: auth.env must be a list")
     env_list = [_parse_env_spec(e) for e in env_list_raw]
+    header = auth_raw.get("header") or "Authorization"
+    if not isinstance(header, str):
+        raise CatalogError(f"{path}: auth.header must be a string")
+    header_value = auth_raw.get("header_value")
+    if header_value is not None and not isinstance(header_value, str):
+        raise CatalogError(f"{path}: auth.header_value must be a string")
+    if header_value:
+        declared = {s.name for s in env_list}
+        referenced = set(re.findall(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}", header_value))
+        unknown = referenced - declared
+        if unknown:
+            raise CatalogError(
+                f"{path}: auth.header_value references undeclared env var(s): "
+                f"{', '.join(sorted(unknown))}"
+            )
     auth = AuthSpec(
         type=a_type,
         env=env_list,
+        header=header,
+        header_value=header_value,
         provider=auth_raw.get("provider"),
         scopes=list(auth_raw.get("scopes") or []),
         env_var=auth_raw.get("env_var"),
@@ -458,21 +479,61 @@ def _prompt_env_vars(specs: List[EnvVarSpec]) -> Dict[str, str]:
 
 
 def _build_server_config(
-    entry: CatalogEntry, install_dir: Optional[Path]
+    entry: CatalogEntry,
+    install_dir: Optional[Path],
+    env_names: Optional[List[str]] = None,
 ) -> dict:
     """Translate a manifest into the ``mcp_servers.<name>`` block format used
-    by hermes_cli/mcp_config.py."""
+    by hermes_cli/mcp_config.py.
+
+    *env_names* are the manifest env vars that hold a value in ``.env``. A
+    stdio subprocess is spawned with a filtered environment
+    (``tools/mcp_tool.py:_build_safe_env``), so a credential in ``.env`` only
+    reaches the server when the config names it; each one is written as a
+    ``${VAR}`` placeholder, resolved at connect time. Names with no value are
+    skipped — an unresolved placeholder is passed through literally, which the
+    server would read as a real value.
+    """
     cfg: dict = {}
     t = entry.transport
     if t.type == "stdio":
         cfg["command"] = _expand_install_dir(t.command or "", install_dir)
         if t.args:
             cfg["args"] = [_expand_install_dir(a, install_dir) for a in t.args]
+        passthrough = [s.name for s in entry.auth.env if s.name in (env_names or [])]
+        if passthrough:
+            cfg["env"] = {name: "${" + name + "}" for name in passthrough}
     elif t.type == "http":
         cfg["url"] = t.url
         if entry.auth.type == "oauth":
             cfg["auth"] = "oauth"
+        elif entry.auth.type == "api_key":
+            header_value = _api_key_header_value(entry.auth, env_names or [])
+            if header_value:
+                cfg["headers"] = {entry.auth.header: header_value}
     return cfg
+
+
+def _api_key_header_value(auth: AuthSpec, env_names: List[str]) -> Optional[str]:
+    """Return the auth header value for an http api_key server, or None.
+
+    An http transport spawns no subprocess, so a credential in ``.env`` only
+    reaches the server through a request header. The value is written as a
+    ``${VAR}`` template, resolved at connect time — the same contract as the
+    stdio ``env`` block, so the key never lands in ``config.yaml``.
+
+    Returns None when no declared credential has a value in ``.env``, so an
+    unresolved placeholder is never sent as a literal Authorization header.
+    """
+    have = [s.name for s in auth.env if s.name in env_names]
+    if not have:
+        return None
+    if auth.header_value:
+        referenced = set(re.findall(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}", auth.header_value))
+        if not referenced.issubset(set(have)):
+            return None
+        return auth.header_value
+    return "Bearer ${" + have[0] + "}"
 
 
 def _read_prior_tool_selection(name: str) -> Optional[List[str]]:
@@ -671,7 +732,9 @@ def install_entry(entry: CatalogEntry, *, enable: bool = True) -> None:
 
     Steps:
         1. If ``install.type == git``, clone + run bootstrap commands.
-        2. If ``auth.type == api_key``, prompt for env vars, save to .env.
+        2. If ``auth.type == api_key``, prompt for env vars, save to .env, and
+           name them in the server's ``env`` block so a stdio subprocess (which
+           gets a filtered environment) actually receives them.
         3. If ``auth.type == oauth`` (remote MCP / case 1), write the
            ``auth: oauth`` marker (MCP client handles browser on first connect
            in the non-pre-authenticated case).
@@ -696,10 +759,11 @@ def install_entry(entry: CatalogEntry, *, enable: bool = True) -> None:
         install_dir = _do_git_install(entry)
 
     # Auth
+    env_names: List[str] = []
     if entry.auth.type == "api_key":
         print()
         print(color("  Configure credentials:", Colors.CYAN))
-        _prompt_env_vars(entry.auth.env)
+        env_names = list(_prompt_env_vars(entry.auth.env))
     elif entry.auth.type == "oauth":
         if entry.auth.provider:
             # Case 2: provider-mediated (Google, GitHub, etc.). We rely on
@@ -727,7 +791,7 @@ def install_entry(entry: CatalogEntry, *, enable: bool = True) -> None:
 
     # Build and write the mcp_servers entry (without tools filter yet;
     # _apply_tool_selection() finalizes it below).
-    server_cfg = _build_server_config(entry, install_dir)
+    server_cfg = _build_server_config(entry, install_dir, env_names)
     server_cfg["enabled"] = enable
 
     from hermes_cli.mcp_config import _save_mcp_server

@@ -898,6 +898,34 @@ DEFAULT_CONFIG = {
     "fallback_providers": [],
     "credential_pool_strategies": {},
     "toolsets": ["hermes-cli"],
+    "datastore": {
+        # Local authoring surfaces can opt into dev; channel sessions are
+        # always forced to prod by hermes_cli.datastore.resolve_mode.
+        "mode": "prod",
+        "supabase_app": {
+            # Keep the credential in .env and reference it here as
+            # ${DATABASE_URL}; an empty value leaves Supabase disabled.
+            "dsn": "",
+        },
+        "overrides": {
+            "dev": {"supabase_app": {"dsn": ""}},
+            "prod": {"supabase_app": {"dsn": ""}},
+        },
+    },
+    # C8 interaction tracing is an append-only application-datastore side
+    # channel. Sampling applies only to tool_call/tool_result spans.
+    "action_tracking": {
+        "enabled": True,
+        "retention_days": 30,
+        "rollup": True,
+        "sample": 1.0,
+    },
+    "tasks": {
+        "discovery": {
+            "threshold": 3,
+            "proposal_cooldown_seconds": 3600,
+        },
+    },
     # Global active chat session cap across CLI, TUI/dashboard, and messaging.
     # None/0 = unbounded.
     "max_concurrent_sessions": None,

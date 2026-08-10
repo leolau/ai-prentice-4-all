@@ -1,0 +1,48 @@
+; Hermes memory-projection fit — redraws the memory explorer's 2-D map.
+; See docs/design/master-plan/feature-groups/FG-22-memory-visualizer.md.
+;
+; Tracked in git and installed from here, not hand-written on the box:
+;   install -m 644 deploy/hermes-memory-projection.service /etc/systemd/system/
+;   install -m 644 deploy/hermes-memory-projection.timer   /etc/systemd/system/
+;   systemctl daemon-reload && systemctl enable --now hermes-memory-projection.timer
+;
+; deploy_state.py's unit glob is `hermes-*`, so the installed copy and its hash
+; land in the deployment-state repo and a divergence from this file shows up in
+; the weekly drift check.
+;
+; Why a timer at all: a fit is a whole-corpus SVD, so it must never happen in a
+; page request — and without a scheduled one the map only ever shows the corpus
+; as it was on the day someone last ran the command by hand. Every memory
+; written since then is reported as "N new" and drawn nowhere, so the page
+; drifts from the tier it exists to describe.
+
+[Unit]
+Description=Hermes memory projection fit (PCA over the layer-4 vector store)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=hermes
+Group=hermes
+WorkingDirectory=/opt/data/hermes-agent
+Environment=HERMES_HOME=/opt/data/hermes-home-staging
+ExecStart=/opt/data/hermes-agent/.venv/bin/hermes memory projection fit \
+    --algorithm pca
+
+; The SVD is CPU-bound and the gateway shares these 4 vCPUs. A map redraw
+; losing to a live conversation is the correct outcome.
+Nice=15
+IOSchedulingClass=idle
+CPUWeight=20
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/opt/data/hermes-home-staging /opt/data/hermes-agent
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes

@@ -6,7 +6,8 @@
  * and exposes HTTP endpoints for the Python gateway adapter.
  *
  * Endpoints (matches gateway/platforms/whatsapp.py expectations):
- *   GET  /messages       - Long-poll for new incoming messages
+ *   GET  /messages       - Drain queued incoming messages (returns immediately,
+ *                          possibly empty — clients must pace their polling)
  *   POST /send           - Send a message { chatId, message, replyTo? }
  *   POST /edit           - Edit a sent message { chatId, messageId, message }
  *   POST /send-media     - Send media natively { chatId, filePath, mediaType?, caption?, fileName? }
@@ -23,12 +24,21 @@ import express from 'express';
 import { Boom } from '@hapi/boom';
 import pino from 'pino';
 import path from 'path';
+import dns from 'dns';
 import { mkdirSync, readFileSync, writeFileSync, existsSync, readdirSync, unlinkSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { randomBytes, createHash } from 'crypto';
 import { execSync } from 'child_process';
 import { tmpdir } from 'os';
 import qrcode from 'qrcode-terminal';
+
+// Force IPv4-first DNS resolution.  Node.js ≥17's native fetch() (used by
+// Baileys' downloadMediaMessage) prefers IPv6 by default.  On hosts where
+// IPv6 connectivity is broken (common on cloud VMs), every media download
+// fails with "Failed to fetch stream" even though curl (which falls back to
+// IPv4 via Happy Eyeballs) succeeds.  Setting ipv4first makes undici resolve
+// A records before AAAA, so fetch() connects over IPv4.
+dns.setDefaultResultOrder('ipv4first');
 import { matchesAllowedUser, parseAllowedUsers } from './allowlist.js';
 import { createOutboundIdTracker } from './outbound_ids.js';
 import { classifyOwnerMessageGate } from './owner_message_gate.js';
@@ -574,7 +584,8 @@ app.use((req, res, next) => {
   next();
 });
 
-// Poll for new messages (long-poll style)
+// Drain the queue. This returns immediately, empty queue included — a client
+// looping on it without a delay will spin at this endpoint's response rate.
 app.get('/messages', (req, res) => {
   const msgs = messageQueue.splice(0, messageQueue.length);
   res.json(msgs);

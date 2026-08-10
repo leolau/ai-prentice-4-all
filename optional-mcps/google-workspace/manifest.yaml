@@ -1,0 +1,156 @@
+# Nous-approved MCP catalog entry.
+# Presence in this directory = approval. Merged via PR review.
+manifest_version: 1
+
+name: google-workspace
+description: Read and write Google Calendar events, Google Docs, and Drive files across multiple accounts.
+source: https://github.com/taylorwilsdon/google_workspace_mcp
+
+# Google ships no hosted MCP server for Workspace, so this is a local stdio
+# process and the OAuth credentials stay on this machine. The server talks
+# only to Google's APIs using *your* OAuth client — no vendor backend, no
+# telemetry.
+#
+# Multi-account by design: credentials are one JSON file per address in
+# WORKSPACE_MCP_CREDENTIALS_DIR, and every tool takes a `user_google_email`
+# argument, so a single server serves all of your accounts instead of one
+# process per identity.
+#
+# The version is pinned; `hermes mcp install google-workspace` after a repo
+# update is what moves it. 1.22.2 rather than the newest release — a week of
+# public exposure is cheap insurance against a compromised publish.
+#
+# `--tools calendar docs drive --tool-tier core` is deliberate: the server
+# covers twelve services and 120+ tools, and every tool ships in the schema on
+# every API call. This launch line registers 15. Gmail is excluded on purpose —
+# adding it here would give the agent a second, conflicting view of an inbox.
+#
+# The `cd` in front of `uvx` is load-bearing. The server's settings come from
+# pydantic-settings, which stats `.env` relative to the process working
+# directory — inherited from whatever launched Hermes. In a directory it cannot
+# read, startup dies with `PermissionError: '.env'` and the server never
+# registers; in a directory that holds Hermes' own `.env`, it would read those
+# secrets as its settings. Pinning the working directory to the credentials
+# parent avoids both.
+transport:
+  type: stdio
+  command: /bin/sh
+  args:
+    - "-c"
+    - "cd \"$(dirname \"$WORKSPACE_MCP_CREDENTIALS_DIR\")\" && exec uvx --from workspace-mcp==1.22.2 workspace-mcp --tools calendar docs drive --tool-tier core"
+  version: 1.22.2
+
+auth:
+  type: api_key
+  # An OAuth client (Desktop app) from Google Cloud Console, plus a directory
+  # holding one credential file per account. Consent needs a browser, so on a
+  # headless host obtain the credential files elsewhere and copy them in:
+  #
+  #   python3 custom/calendar/calendar_auth.py --email you@example.com \
+  #       --scopes calendar documents drive.file drive.readonly \
+  #       --credentials-out /path/to/credentials-dir
+  #
+  # Drop `drive.readonly` only if you also drop the document-reading tools —
+  # see the tool notes below.
+  #
+  # Each file is mode 0600 and holds a refresh token and the client secret.
+  env:
+    - name: GOOGLE_OAUTH_CLIENT_ID
+      prompt: "Google OAuth client ID (Desktop app)"
+      required: true
+      secret: true
+    - name: GOOGLE_OAUTH_CLIENT_SECRET
+      prompt: "Google OAuth client secret"
+      required: true
+      secret: true
+    - name: WORKSPACE_MCP_CREDENTIALS_DIR
+      prompt: "Directory holding one credential JSON per Google account"
+      required: true
+      secret: false
+
+# Tool selection at install time:
+# The core tier registers 15 tools; the eight below carry the intent — calendar
+# read/write, Docs read/create/edit, and enough Drive to find and read a
+# document.
+#
+# Three of them need more than `drive.file`. The server resolves each tool
+# against a scope group (auth/scopes.py), and Google's scope hierarchy lets
+# `drive` stand in for `drive.readonly`/`drive.file` but *not* `drive.file`
+# for `drive.readonly`:
+#
+#   get_doc_content         drive_read + docs_read   needs drive.readonly
+#   search_drive_files      drive_read               needs drive.readonly
+#   get_drive_file_content  drive_read               needs drive.readonly
+#
+# So the scope set is the real tool filter. With `calendar documents
+# drive.file` those three return an auth-required prompt instead of working,
+# and Docs is effectively write-only — the agent can create and edit a
+# document but cannot read one back, not even one it just created. Adding
+# `drive.readonly` enables them; it cannot modify or delete anything, but it
+# reads *everything the account owns*, which is the blast radius of a
+# successful prompt injection. Grant it and keep all eight, or omit it and
+# drop those three from the enabled set — do not leave them enabled without
+# the scope.
+#
+# The seven remaining core-tier tools are Drive/import plumbing:
+# create_drive_file (which will also fetch an arbitrary fileUrl into your
+# Drive), create_drive_folder, get_drive_file_download_url,
+# get_drive_shareable_link, and the import_to_google_{doc,sheets,slides}
+# converters — the Sheets and Slides ones cannot work at all unless you also
+# grant those scopes.
+tools:
+  default_enabled:
+    - list_calendars
+    - get_events
+    - manage_event
+    - get_doc_content
+    - create_doc
+    - modify_doc_text
+    - search_drive_files
+    - get_drive_file_content
+
+post_install: |
+  Scope is the real boundary here, not the approval prompt. Two choices matter:
+
+  1. `drive.file` rather than `drive`. `drive.file` limits the agent to files
+     it created or that you explicitly opened with it; `drive` is read/write
+     across everything the account owns. The credential files live where the
+     Hermes user can read them, so treat their scope as the blast radius of a
+     successful prompt injection. The cost is real and worth measuring before
+     you choose: with `drive.file` alone the three Drive/document *read* tools
+     stay unavailable (see the tool notes above), so Docs is write-only. The
+     enabled set above assumes you also granted `drive.readonly`; with it,
+     reads reach the whole Drive while writes stay confined to files the app
+     created — a write to any other file fails with HTTP 403 "has not granted
+     the app write access to the file".
+
+  2. Deletion cannot be removed by dropping a tool. There is no `delete_event`
+     tool in this version — `manage_event` takes `action="create" | "update" |
+     "delete" | "rsvp"`, so deleting is an argument, not a tool. Either accept
+     it and rely on the approval prompt (which shows the action and the event
+     id), or leave `manage_event` out of the enabled set and run the calendar
+     read-only. Google publishes no "write but never delete" scope.
+
+  Approval-gate the tools. In config.yaml:
+
+    plugins:
+      enabled: [tool-approval]
+    approvals:
+      tools: ["mcp_google_workspace_*"]
+
+  Every call then asks first, and the prompt shows which account it targets —
+  `user_google_email` is an argument on every tool.
+
+  Two operational traps:
+
+  - While the OAuth consent screen is in **Testing**, Google expires refresh
+    tokens after 7 days and the integration breaks weekly. Publish the app
+    ("In production"); for self-use you can click past the unverified-app
+    warning without submitting for review.
+  - Consent needs a browser. On a headless host, obtain the credential files
+    on a machine that has one and copy them into
+    WORKSPACE_MCP_CREDENTIALS_DIR (`0700`, files `0600`).
+
+  Restart your Hermes session so the tools are loaded, or re-run the tool
+  checklist with:
+    hermes mcp configure google-workspace

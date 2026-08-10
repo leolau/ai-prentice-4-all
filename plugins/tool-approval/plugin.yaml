@@ -1,0 +1,6 @@
+name: tool-approval
+version: "0.1.0"
+description: "Require explicit user approval before named tools run. Match tool names with fnmatch patterns in approvals.tools (e.g. mcp_aws_api_*) and every call is routed through Hermes' approval surface (Telegram/Slack buttons, CLI prompt) before it executes. Fails closed: a timeout, a decline, or a session with no approval channel blocks the call."
+author: "Hermes"
+hooks:
+  - pre_tool_call

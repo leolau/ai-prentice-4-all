@@ -19,6 +19,22 @@ This principle takes precedence over any other detail in this document.
 
 ---
 
+## ★ KEY UI PRINCIPLE — `agent-home` is the main UI ★
+
+**`agent-home/` is the key, main, user-facing UI of ai-prentice-4-all. The
+`web/` dashboard is NOT — it is the secondary operator/admin console.**
+
+**Unless a request explicitly names another surface, every UI improvement —
+new screens, redesigns, UX/mobile/polish work, new user-facing features — is
+built in `agent-home/`.**
+
+Recorded as decision **D20** (with **D16**) in the
+[master plan](./master-plan/README.md); see
+[FG-20](./master-plan/feature-groups/FG-20-agent-home-nextjs-supabase.md) and
+[`agent-home/README.md`](../../agent-home/README.md).
+
+---
+
 ## 0. Executive summary
 
 You want three things layered onto the existing WhatsApp + email triage pipeline:

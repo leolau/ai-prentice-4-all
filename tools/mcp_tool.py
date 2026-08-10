@@ -1948,6 +1948,33 @@ class MCPServerTask:
     # an MCP endpoint.
     _MCP_CONTENT_TYPES = ("application/json", "text/event-stream")
 
+    async def _speaks_mcp_on_post(self, client, url: str, headers: dict) -> bool:
+        """Return True if *url* answers an ``initialize`` POST like MCP.
+
+        Second opinion for :meth:`_preflight_content_type` when HEAD/GET
+        returned a non-MCP content type. The verdict is the response's content
+        type, not its status: an MCP endpoint answers the handshake in JSON or
+        SSE whether it accepts it (2xx) or refuses it (401 missing token, 400
+        bad session), whereas a plain web app answers POST with an HTML error
+        page (or ``501 Unsupported method``).
+        """
+        probe_headers = dict(headers)
+        probe_headers.setdefault("Accept", ", ".join(self._MCP_CONTENT_TYPES))
+        probe_headers.setdefault("Content-Type", "application/json")
+        payload = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": {"name": "hermes-preflight", "version": "1"},
+            },
+        }
+        resp = await client.post(url, headers=probe_headers, json=payload)
+        ct = resp.headers.get("content-type", "").split(";")[0].strip().lower()
+        return not ct or ct in self._MCP_CONTENT_TYPES
+
     async def _preflight_content_type(
         self,
         url: str,
@@ -1968,9 +1995,10 @@ class MCPServerTask:
 
         Detection is allow-list based: a 2xx response is rejected only when it
         carries a definite content type that is NOT one an MCP endpoint uses
-        (``application/json`` / ``text/event-stream``). A missing or empty
-        content type, non-2xx status, or any network/transport error passes
-        through silently — the probe is strictly best-effort, and the real
+        (``application/json`` / ``text/event-stream``) *and* an ``initialize``
+        POST to the same URL also answers with a non-MCP content type. A
+        missing or empty content type, non-2xx status, or any network/transport
+        error passes through silently — the probe is strictly best-effort, and the real
         handshake remains the source of truth for everything except the
         unambiguous "this is a web page, not MCP" case.
 
@@ -2000,19 +2028,29 @@ class MCPServerTask:
                 resp = await client.head(url, headers=probe_headers)
                 if resp.status_code in (405, 501):
                     resp = await client.get(url, headers=probe_headers)
+
+                # Only judge successful responses. A 4xx/5xx may be an auth
+                # challenge or a transient error the real handshake handles
+                # correctly.
+                if not (200 <= resp.status_code < 300):
+                    return
+
+                ct_base = resp.headers.get("content-type", "").split(";")[0].strip().lower()
+                if not ct_base:
+                    return  # No content type advertised — don't second-guess the SDK.
+                if ct_base in self._MCP_CONTENT_TYPES:
+                    return  # Looks like a real MCP endpoint.
+
+                # A real Streamable-HTTP endpoint may still answer HEAD/GET with
+                # a landing page while speaking MCP on POST (AWS Knowledge MCP,
+                # https://knowledge-mcp.global.api.aws/mcp, serves HTML on GET
+                # and JSON-RPC on POST). Confirm with the handshake's own shape
+                # before rejecting, so the guard keeps catching genuine
+                # wrong-URL typos without blocking POST-only endpoints.
+                if await self._speaks_mcp_on_post(client, url, probe_headers):
+                    return
         except _httpx.HTTPError:
             return  # DNS/connect/timeout/transport error — let the SDK try.
-
-        # Only judge successful responses. A 4xx/5xx may be an auth challenge
-        # or a transient error the real handshake handles correctly.
-        if not (200 <= resp.status_code < 300):
-            return
-
-        ct_base = resp.headers.get("content-type", "").split(";")[0].strip().lower()
-        if not ct_base:
-            return  # No content type advertised — don't second-guess the SDK.
-        if ct_base in self._MCP_CONTENT_TYPES:
-            return  # Looks like a real MCP endpoint.
 
         raise NonMcpEndpointError(
             f"MCP server '{self.name}' at {url} returned Content-Type "

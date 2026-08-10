@@ -1,0 +1,14 @@
+; Nightly, off-peak, with jitter so a restart storm does not align the runs.
+
+[Unit]
+Description=Nightly Hermes Drive ingestion pass
+
+[Timer]
+OnCalendar=*-*-* 03:20:00
+RandomizedDelaySec=20m
+; A box that was off at 03:20 still catches up, once, rather than skipping a day.
+Persistent=true
+Unit=hermes-rag-ingest.service
+
+[Install]
+WantedBy=timers.target

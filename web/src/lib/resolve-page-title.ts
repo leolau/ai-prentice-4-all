@@ -4,6 +4,7 @@ const BUILTIN: Record<string, keyof Translations["app"]["nav"]> = {
   "/chat": "chat",
   "/sessions": "sessions",
   "/analytics": "analytics",
+  "/memory": "memory",
   "/models": "models",
   "/logs": "logs",
   "/cron": "cron",

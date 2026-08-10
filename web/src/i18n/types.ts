@@ -89,6 +89,7 @@ export interface Translations {
     nav: {
       analytics: string;
       chat: string;
+      memory: string;
       config: string;
       cron: string;
       documentation: string;

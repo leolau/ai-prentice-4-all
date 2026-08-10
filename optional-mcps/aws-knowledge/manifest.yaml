@@ -1,0 +1,25 @@
+# Nous-approved MCP catalog entry.
+# Presence in this directory = approval. Merged via PR review.
+manifest_version: 1
+
+name: aws-knowledge
+description: Search and read AWS documentation, regional availability, and AWS skills.
+source: https://docs.aws.amazon.com/mcp/latest/userguide/aws-knowledge-mcp-server.html
+
+# AWS's hosted Knowledge MCP server: Streamable HTTP, no authentication and no
+# AWS account required. It is documentation/reference only — it does not touch
+# your AWS resources. For account access, AWS ships local stdio servers
+# (awslabs.aws-api-mcp-server et al.) that need IAM credentials; those are a
+# separate concern and are not part of this entry.
+transport:
+  type: http
+  url: https://knowledge-mcp.global.api.aws/mcp
+
+# No `auth:` key — the endpoint is public and rate-limited per client.
+
+post_install: |
+  Nothing to authorize. Restart your Hermes session so the tools are loaded
+  (aws___search_documentation, aws___read_documentation, aws___list_regions,
+  aws___get_regional_availability, aws___retrieve_skill), or re-run the tool
+  checklist with:
+    hermes mcp configure aws-knowledge

@@ -985,6 +985,43 @@ export const api = {
       },
     ),
 
+  // ── Admin: Tools (FG-07 in-house tool registry + dashboard) ─────────
+  getTools: (mode?: ToolMode) =>
+    fetchJSON<ToolsResponse>(
+      `/api/tools${mode ? `?mode=${encodeURIComponent(mode)}` : ""}`,
+    ),
+  setToolEnabled: (name: string, enabled: boolean, mode?: ToolMode) =>
+    fetchJSON<Tool>(`/api/tools/${encodeURIComponent(name)}/enabled`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ enabled, mode }),
+    }),
+  setToolConfig: (name: string, config: Record<string, unknown>, mode?: ToolMode) =>
+    fetchJSON<Tool>(`/api/tools/${encodeURIComponent(name)}/config`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ config, mode }),
+    }),
+  promoteTool: (name: string, mode?: ToolMode) =>
+    fetchJSON<ToolPromotionResult>(
+      `/api/tools/${encodeURIComponent(name)}/promote`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mode }),
+      },
+    ),
+  getToolHealth: (name: string, mode?: ToolMode) =>
+    fetchJSON<ToolHealth>(
+      `/api/tools/${encodeURIComponent(name)}/health${
+        mode ? `?mode=${encodeURIComponent(mode)}` : ""
+      }`,
+    ),
+  getToolChanges: (mode?: ToolMode) =>
+    fetchJSON<ToolChangesResponse>(
+      `/api/tools/changes${mode ? `?mode=${encodeURIComponent(mode)}` : ""}`,
+    ),
+
   // ── Admin: Pairing ──────────────────────────────────────────────────
   getPairing: () => fetchJSON<PairingResponse>("/api/pairing"),
   approvePairing: (platform: string, code: string) =>
@@ -1191,7 +1228,518 @@ export const api = {
     fetchJSON<SkillHubScan>(
       `/api/skills/hub/scan?identifier=${encodeURIComponent(identifier)}`,
     ),
+
+  // ── FG-10 human comms (Telegram + web parity) ──────────────────────────
+  // C1-authenticated, C2-scoped reads; approvals/asks are one shared surface
+  // de-duplicated with Telegram (answering here clears the Telegram item).
+  getCommsWhoami: () => fetchJSON<CommsWhoamiResponse>("/api/comms/whoami"),
+  getCommsNotifications: (kind?: CommsNotificationKind) =>
+    fetchJSON<CommsNotificationsResponse>(
+      `/api/comms/notifications${kind ? `?kind=${encodeURIComponent(kind)}` : ""}`,
+    ),
+  answerCommsNotification: (id: string, answer: string) =>
+    fetchJSON<CommsAnswerResponse>(
+      `/api/comms/notifications/${encodeURIComponent(id)}/answer`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ answer }),
+      },
+    ),
+  getCommsGoals: (status?: string) =>
+    fetchJSON<CommsGoalsResponse>(
+      `/api/comms/goals${status ? `?status=${encodeURIComponent(status)}` : ""}`,
+    ),
+  createCommsGoal: (body: {
+    title: string;
+    description?: string;
+    priority?: string;
+    visibility?: string;
+  }) =>
+    fetchJSON<CommsGoalResponse>("/api/comms/goals", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
+  prioritiseCommsGoal: (id: string, priority: string) =>
+    fetchJSON<CommsGoalResponse>(
+      `/api/comms/goals/${encodeURIComponent(id)}/priority`,
+      {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ priority }),
+      },
+    ),
+  linkCommsGoal: (
+    id: string,
+    resource_kind: CommsGoalResourceKind,
+    resource_ref: string,
+  ) =>
+    fetchJSON<CommsGoalLinkResponse>(
+      `/api/comms/goals/${encodeURIComponent(id)}/links`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ resource_kind, resource_ref }),
+      },
+    ),
+  advanceCommsGoal: (id: string, body: CommsGoalAdvanceRequest) =>
+    fetchJSON<CommsGoalAdvanceResponse>(
+      `/api/comms/goals/${encodeURIComponent(id)}/advance`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      },
+    ),
+  closeCommsGoal: (id: string) =>
+    fetchJSON<CommsGoalResponse>(
+      `/api/comms/goals/${encodeURIComponent(id)}/close`,
+      { method: "POST" },
+    ),
+  getCommsGoalContext: (id: string) =>
+    fetchJSON<CommsGoalContextResponse>(
+      `/api/comms/goals/${encodeURIComponent(id)}/context`,
+    ),
+  getCommsChanges: () => fetchJSON<CommsChangesResponse>("/api/comms/changes"),
+  undoCommsChange: (id: string) =>
+    fetchJSON<CommsChangeActionResponse>(
+      `/api/comms/changes/${encodeURIComponent(id)}/undo`,
+      { method: "POST" },
+    ),
+  redoCommsChange: (id: string) =>
+    fetchJSON<CommsChangeActionResponse>(
+      `/api/comms/changes/${encodeURIComponent(id)}/redo`,
+      { method: "POST" },
+    ),
+  getCommsMemory: () => fetchJSON<CommsMemoryResponse>("/api/comms/memory"),
+
+  // FG-16 interaction trace (C8) — read-only list + detail, C2-scoped. Reused
+  // by the FG-17b Core-area view. ``as`` narrows the owner-operator's C2 view
+  // to a specific principal (an inspection aid, never an escalation).
+  getCommsTraces: (opts?: { as?: string; limit?: number }) => {
+    const params = new URLSearchParams();
+    if (opts?.as) params.set("as", opts.as);
+    if (opts?.limit) params.set("limit", String(opts.limit));
+    const qs = params.toString();
+    return fetchJSON<CommsTracesResponse>(
+      `/api/comms/traces${qs ? `?${qs}` : ""}`,
+    );
+  },
+  getCommsTrace: (traceId: string, opts?: { as?: string }) => {
+    const qs = opts?.as ? `?as=${encodeURIComponent(opts.as)}` : "";
+    return fetchJSON<CommsTraceDetailResponse>(
+      `/api/comms/traces/${encodeURIComponent(traceId)}${qs}`,
+    );
+  },
+
+  // FG-14 Core-area boundary projection (C7) — read-only.
+  getCoreManifest: () => fetchJSON<CoreManifestResponse>("/api/core/manifest"),
+
+  // FG-18 GTS Centre graph (C9) — read-only, C2-scoped.
+  getGtsGraph: (opts?: { as?: string }) => {
+    const qs = opts?.as ? `?as=${encodeURIComponent(opts.as)}` : "";
+    return fetchJSON<GtsGraphResponse>(`/api/gts/graph${qs}`);
+  },
+
+  // FG-15 onboarding readiness (first-run wizard).
+  getOnboardingReadiness: () =>
+    fetchJSON<OnboardingReadinessResponse>("/api/onboarding/readiness"),
+
+  // FG-17b agent webview (CDP) — consent-gated (C6) + traced (C8). Default-deny:
+  // nothing runs until a session is opened with an explicit consent scope.
+  getWebviewSession: (opts?: { as?: string }) => {
+    const qs = opts?.as ? `?as=${encodeURIComponent(opts.as)}` : "";
+    return fetchJSON<WebviewSessionResponse>(`/api/webview/session${qs}`);
+  },
+  openWebviewSession: (scope: {
+    allowed_domains: string[];
+    mode: "read_only" | "interactive";
+  }) =>
+    fetchJSON<WebviewSessionResponse>("/api/webview/session", {
+      method: "POST",
+      body: JSON.stringify(scope),
+    }),
+  closeWebviewSession: () =>
+    fetchJSON<{ ok: boolean; closed: boolean }>("/api/webview/session", {
+      method: "DELETE",
+    }),
+  requestWebviewAction: (action: {
+    kind: string;
+    url?: string | null;
+    credentialed?: boolean;
+    destructive?: boolean;
+  }) =>
+    fetchJSON<WebviewActionResponse>("/api/webview/action", {
+      method: "POST",
+      body: JSON.stringify(action),
+    }),
+  resolveWebviewApproval: (approvalId: string, grant: boolean) =>
+    fetchJSON<WebviewActionResponse>(
+      `/api/webview/approval/${encodeURIComponent(approvalId)}`,
+      { method: "POST", body: JSON.stringify({ grant }) },
+    ),
 };
+
+export type CommsNotificationKind = "approval" | "proactive_ask";
+
+export interface CommsPrincipal {
+  user_id: string;
+  display: string;
+  role: string;
+  channels: string[];
+  is_owner: boolean;
+}
+
+export interface CommsWhoamiResponse {
+  configured: boolean;
+  principal: CommsPrincipal | null;
+}
+
+export interface CommsNotification {
+  id: string;
+  kind: CommsNotificationKind;
+  owner_user_id: string;
+  visibility: string;
+  title: string;
+  body: string;
+  command: string;
+  reversible: boolean;
+  status: string;
+  answer: string | null;
+  answered_by: string | null;
+  answered_via: string | null;
+  delivered: boolean;
+  created_at: string | null;
+  answered_at: string | null;
+}
+
+export interface CommsNotificationsResponse {
+  configured: boolean;
+  principal?: string | null;
+  notifications: CommsNotification[];
+}
+
+export interface CommsAnswerResponse {
+  ok: boolean;
+  newly_answered: boolean;
+  notification: CommsNotification;
+}
+
+export interface CommsGoal {
+  id: string;
+  title: string;
+  description: string;
+  priority: string;
+  status: string;
+  visibility: string;
+  owner_user_id: string;
+}
+
+export interface CommsGoalsResponse {
+  configured: boolean;
+  principal?: string | null;
+  goals: CommsGoal[];
+}
+
+export type CommsGoalResourceKind = "memory" | "task" | "tool";
+
+export interface CommsGoalLink {
+  goal_id: string;
+  resource_kind: CommsGoalResourceKind;
+  resource_ref: string;
+  owner_user_id: string;
+  visibility: string;
+  created_at: string | null;
+}
+
+export interface CommsGoalResponse {
+  ok: boolean;
+  goal: CommsGoal;
+}
+
+export interface CommsGoalLinkResponse {
+  ok: boolean;
+  link: CommsGoalLink;
+}
+
+export type CommsGoalAdvanceRequest =
+  | { target: "task"; task_id: string; state: string }
+  | {
+      target: "metric";
+      metric_name: string;
+      value: number;
+      note?: string;
+    }
+  | { target: "note"; note: string };
+
+export interface CommsGoalAdvanceResponse {
+  ok: boolean;
+  task?: Record<string, unknown>;
+  metric?: Record<string, unknown>;
+}
+
+export interface CommsGoalContext {
+  goal: CommsGoal;
+  metrics: Record<string, unknown>[];
+  progress: Record<string, unknown>[];
+  resources: {
+    link: CommsGoalLink;
+    resource: Record<string, unknown>;
+  }[];
+}
+
+export interface CommsGoalContextResponse {
+  configured: boolean;
+  principal?: string | null;
+  context: CommsGoalContext;
+}
+
+export interface CommsChange {
+  id: string;
+  actor_user_id: string | null;
+  mode: string;
+  target_kind: string;
+  reversible: boolean;
+  visibility: string;
+  undone: boolean;
+}
+
+export interface CommsChangesResponse {
+  configured: boolean;
+  principal?: string | null;
+  changes: CommsChange[];
+}
+
+export interface CommsChangeActionResponse {
+  ok: boolean;
+  change_ref: string;
+  target_kind: string;
+}
+
+export interface CommsMemory {
+  id: string;
+  kind: string;
+  topic: string | null;
+  content: string;
+  visibility: string;
+  created_at: string | null;
+}
+
+export interface CommsMemoryResponse {
+  configured: boolean;
+  principal?: string | null;
+  memories: CommsMemory[];
+}
+
+// ── FG-16 interaction trace (C8) ─────────────────────────────────────
+export interface CommsTraceSummary {
+  trace_id: string;
+  first_ts: string;
+  last_ts: string;
+  actor_user_id: string | null;
+  session_key: string | null;
+  platform: string | null;
+  mode: string;
+  event_count: number;
+  kind_counts: Record<string, number>;
+  rolled_up: boolean;
+}
+
+export interface CommsTracesResponse {
+  configured: boolean;
+  principal?: string | null;
+  traces: CommsTraceSummary[];
+}
+
+export interface CommsInteraction {
+  id: string;
+  trace_id: string;
+  parent_id: string | null;
+  ts: string;
+  actor_user_id: string | null;
+  session_key: string | null;
+  platform: string | null;
+  kind: string;
+  ref: string | null;
+  summary: string | null;
+  payload_ref: string | null;
+  mode: string;
+}
+
+export interface CommsTraceDetailResponse {
+  configured: boolean;
+  principal?: string | null;
+  trace_id: string;
+  interactions: CommsInteraction[];
+  rollup: CommsTraceSummary | null;
+}
+
+// ── FG-14 Core-area boundary projection (C7) ─────────────────────────
+export interface CoreDenial {
+  id: string;
+  ts: number;
+  actor_user_id: string;
+  mode: string;
+  summary: string;
+  op?: { kind?: string; op?: string; path?: string; matched_glob?: string };
+}
+
+export interface CoreManifestResponse {
+  core_root: string;
+  manifest_path: string;
+  manifest_present: boolean;
+  manifest_parseable: boolean;
+  fallback_active: boolean;
+  self_protected: boolean;
+  globs: string[];
+  glob_count: number;
+  audit_log_path: string;
+  denials: CoreDenial[];
+}
+
+// ── FG-18 GTS Centre graph (C9) ──────────────────────────────────────
+export interface GtsObservation {
+  source: string;
+  prompt: string;
+  ref?: Record<string, unknown>;
+}
+
+export interface GtsEvaluationMethod {
+  set_by_user_id: string | null;
+  locked: boolean;
+  measurable: boolean;
+  observation: GtsObservation | null;
+  scoring_prompt: string;
+}
+
+// FG-19 per-item grant (assignee + read-only watchers) attached to a node.
+export interface GtsItemGrant {
+  id: string;
+  item_kind: string;
+  item_id: string;
+  user_id: string;
+  grant: "assignee" | "watcher" | string;
+  granted_by: string;
+  status: string;
+}
+
+export interface GtsGoal {
+  id: string;
+  owner_user_id: string;
+  visibility: string;
+  title: string;
+  priority: string;
+  status: string;
+  level: string;
+  parent_goal_id: string | null;
+  score: number | null;
+  evaluation_method: GtsEvaluationMethod;
+  assignee_user_id: string | null;
+  grants: GtsItemGrant[];
+}
+
+export interface GtsTask {
+  id: string;
+  owner_user_id: string;
+  visibility: string;
+  title: string;
+  priority: string;
+  status: string;
+  current_state: string;
+  parent_task_id: string | null;
+  score: number | null;
+  evaluation_method: GtsEvaluationMethod;
+  assignee_user_id: string | null;
+  grants: GtsItemGrant[];
+}
+
+export interface GtsSkill {
+  id: string;
+  owner_user_id: string;
+  visibility: string;
+  name: string;
+  skill_ref: string;
+}
+
+export interface GtsGraphResponse {
+  configured: boolean;
+  principal?: string | null;
+  mode?: string;
+  goals: GtsGoal[];
+  tasks: GtsTask[];
+  skills: GtsSkill[];
+  task_goals: { task_id: string; goal_id: string }[];
+  task_skills: { task_id: string; skill_id: string }[];
+  assignment: { enabled: boolean; scheme: string };
+}
+
+// ── FG-15 onboarding readiness (first-run wizard) ────────────────────
+export interface OnboardingItem {
+  key: string;
+  label: string;
+  required: boolean;
+  rationale: string;
+  fix_command: string;
+  contract: string;
+  met: boolean;
+  detail: string;
+}
+
+export interface OnboardingReadinessResponse {
+  score: number;
+  score_pct: number;
+  ready_for_prod: boolean;
+  required_total: number;
+  required_met: number;
+  optional_total: number;
+  optional_met: number;
+  optional_coverage: number;
+  missing_required: string[];
+  items: OnboardingItem[];
+}
+
+// ── FG-17b agent webview (CDP) — consent-gated (C6) + traced (C8) ────
+export interface WebviewScope {
+  allowed_domains: string[];
+  mode: "read_only" | "interactive";
+}
+
+export interface WebviewPendingApproval {
+  id: string;
+  kind: string;
+  url: string | null;
+  credentialed?: boolean;
+  destructive?: boolean;
+  reason: string;
+  created_at: number;
+  resolved?: boolean | null;
+}
+
+export interface WebviewSession {
+  id: string;
+  owner_user_id: string;
+  scope: WebviewScope;
+  profile_dir?: string;
+  created_at: number;
+  trace_id: string;
+  pending: WebviewPendingApproval[];
+}
+
+export interface WebviewSessionResponse {
+  configured: boolean;
+  principal?: string | null;
+  session: WebviewSession | null;
+}
+
+export interface WebviewActionResponse {
+  decision: "allow" | "escalate" | "deny";
+  reason: string;
+  executed?: boolean;
+  detail?: string;
+  granted?: boolean;
+  approval?: WebviewPendingApproval;
+}
 
 /** Identity payload returned by ``GET /api/auth/me`` (Phase 7).
  *
@@ -1321,6 +1869,64 @@ export interface SkillHubScan {
 }
 
 // ── Admin types ───────────────────────────────────────────────────────
+
+export type ToolMode = "dev" | "prod";
+export type ToolKind = "in_house" | "remote" | "builtin";
+export type ToolStatus = "enabled" | "disabled";
+
+export interface Tool {
+  id: string;
+  name: string;
+  kind: ToolKind;
+  stack: string;
+  owner_user_id: string;
+  visibility: string;
+  mode: ToolMode;
+  status: ToolStatus;
+  enabled: boolean;
+  mcp_endpoint_ref: string | null;
+  web_url: string | null;
+  config_json: Record<string, unknown>;
+}
+
+export interface ToolsResponse {
+  configured: boolean;
+  mode: ToolMode;
+  tools: Tool[];
+  detail?: string;
+}
+
+export interface ToolPromotionResult {
+  ok: boolean;
+  tool_name: string;
+  approval_ref: string;
+  change_ref: string;
+  promotion_ref: string;
+}
+
+export interface ToolHealth {
+  name: string;
+  reachable: boolean;
+  detail?: string;
+  web_url?: string;
+}
+
+export interface ToolChange {
+  id: string;
+  actor_user_id: string | null;
+  mode: string;
+  target_kind: string;
+  reversible: boolean;
+  visibility: string;
+  undone: boolean;
+  payload: unknown;
+}
+
+export interface ToolChangesResponse {
+  configured: boolean;
+  changes: ToolChange[];
+  detail?: string;
+}
 
 export interface McpServer {
   name: string;

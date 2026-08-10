@@ -16,6 +16,21 @@
   <a href="README.es.md"><img src="https://img.shields.io/badge/Lang-Español-orange?style=for-the-badge" alt="Español"></a>
 </p>
 
+> ### ★ ai-prentice-4-all: the main UI is `agent-home`, not the dashboard ★
+>
+> This fork's **key, main, user-facing UI is [`agent-home/`](agent-home/README.md)** — the mobile-first
+> Next.js app on the three-tier stack (Next.js UI → Python AI layer → Supabase).
+> The `web/` dashboard is a **secondary operator/admin console**, and the TUI /
+> Electron desktop app are developer/power-user surfaces.
+>
+> **Unless a request explicitly names another surface, all UI improvements —
+> new screens, redesigns, UX/mobile/polish, new user-facing features — are done
+> in `agent-home/`.**
+>
+> Design record: decision **D20** (and **D16**) in the
+> [master plan](docs/design/master-plan/README.md) and
+> [FG-20](docs/design/master-plan/feature-groups/FG-20-agent-home-nextjs-supabase.md).
+
 **The self-improving AI agent built by [Nous Research](https://nousresearch.com).** It's the only agent with a built-in learning loop — it creates skills from experience, improves them during use, nudges itself to persist knowledge, searches its own past conversations, and builds a deepening model of who you are across sessions. Run it on a $5 VPS, a GPU cluster, or serverless infrastructure that costs nearly nothing when idle. It's not tied to your laptop — talk to it from Telegram while it works on a cloud VM.
 
 Use any model you want — [Nous Portal](https://portal.nousresearch.com), OpenRouter, OpenAI, your own endpoint, and [many others](https://hermes-agent.nousresearch.com/docs/integrations/providers). Switch with `hermes model` — no code changes, no lock-in.

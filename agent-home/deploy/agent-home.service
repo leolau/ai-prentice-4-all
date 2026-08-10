@@ -1,0 +1,57 @@
+# systemd unit for agent-home (FG-20 mobile PWA, Next.js BFF) on the prod box.
+#
+# Serves the production build on loopback only (127.0.0.1:3100, set via PORT in
+# the EnvironmentFile; :3000 is the WhatsApp bridge). Caddy terminates TLS on
+# the public subdomain and reverse-proxies to it (see Caddyfile.agent-home). The
+# Next server makes server-side calls to the Python AI layer at
+# AGENT_HOME_API_URL (127.0.0.1:9119) — the Python API is never exposed on the
+# public agent-home origin.
+#
+# FG-23 A0.1: runs from the main checkout (/opt/data/hermes-agent), not a
+# second clone. One `git pull` moves the whole system; the deploy script
+# (deploy/hermes-deploy.sh) builds and restarts it when agent-home/ changes.
+#
+# FG-23 A0.5: runs as `hermes` (not root) with the same hardening the
+# hermes-* units carry. `.next` must be writable because `next start` writes
+# its cache there.
+#
+# Install (adjust paths/User to the box; see deploy/DEPLOY.md):
+#   sudo cp agent-home/deploy/agent-home.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now agent-home.service
+#
+# Secrets are read from an EnvironmentFile that is NOT committed
+# (agent-home/agent-home.env — NOT .env.production, which Next's dotenv would
+# auto-load and choke on; 0600).
+
+[Unit]
+Description=agent-home (FG-20 mobile PWA, Next.js) behind Caddy
+Documentation=https://github.com/leolau/ai-prentice-4-all/blob/develop/agent-home/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=hermes
+Group=hermes
+WorkingDirectory=/opt/data/hermes-agent/agent-home
+EnvironmentFile=/opt/data/hermes-agent/agent-home/agent-home.env
+# PATH must resolve node/npm for the service user. Verify with `command -v npm`
+# on the box during deploy and edit this line if node lives elsewhere (e.g. nvm).
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStart=/opt/data/hermes-agent/agent-home/deploy/start.sh
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+# Hardening (A0.5) — mirror the hermes-* units' unprivileged stance.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=yes
+# next start writes its cache into .next/, so that subtree must be writable.
+ReadWritePaths=/opt/data/hermes-agent/agent-home/.next
+
+[Install]
+WantedBy=multi-user.target

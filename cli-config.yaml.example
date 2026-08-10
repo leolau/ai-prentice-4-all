@@ -524,6 +524,101 @@ memory:
   # every N user turns. Set to 0 to disable. Only active when memory is enabled.
   nudge_interval: 10        # Nudge every 10 user turns (0 = disabled)
 
+  # Embeddings for the pgvector live-memory tier (memory.provider:
+  # supabase_pgvector). The default 'hashing' embedder needs no model, no
+  # service and no credentials, but it matches VOCABULARY, not meaning — and it
+  # produces a zero vector for text with no [a-z0-9] tokens (e.g. Chinese), for
+  # which there is no ranking at all.
+  #
+  # 'local_http' embeds with a real model over loopback (see
+  # docs/deployment/local-embeddings.md for the service). Nothing leaves the
+  # machine. `dim` must match both the service's model and the vector(N)
+  # column — a mismatch is refused rather than stored, because two embedding
+  # spaces in one column silently ruin ranking for every row.
+  # embedding:
+  #   provider: local_http          # 'hashing' (default) | 'local_http'
+  #   endpoint: http://127.0.0.1:8791
+  #   model: BAAI/bge-m3
+  #   dim: 1024
+  #   timeout_seconds: 120
+  #
+  # `timeout_seconds` covers one whole request, and a request is a BATCH: a
+  # re-embed sends 16 texts at once, which on a 4-vCPU CPU-only box takes ~16 s
+  # with bge-m3 against ~0.2 s for the single text a live write embeds. Size it
+  # for the batch or the migration times out while ordinary writes look fine.
+  #
+  # Changing the embedder is a DATA migration, not a config change: vectors are
+  # only comparable within one model, so existing rows must be rewritten with
+  # 'hermes memory vectors reembed'. Rows from another model are excluded from
+  # recall (never ranked against the current model), and a dimension change is
+  # refused at startup until the re-embed has run. 'hermes memory vectors
+  # status' reports the column width and the rows per model.
+
+  # Automatic recall from the pgvector tier. Every turn, the most relevant rows
+  # the user may see are appended to that turn's message at API-call time only —
+  # the system prompt and the stored conversation are never touched, so prompt
+  # caching survives. Without this the tier is write-only.
+  # recall:
+  #   auto: true               # false = recall only via the memory_query tool
+  #   top_k: 5                 # rows considered per turn
+  #   min_score: 0.35          # cosine floor; without one, recall is never empty
+  #                            # CALIBRATE PER MODEL — see below
+  #   max_chars: 1200          # hard budget so recall can't crowd out the turn
+  #   min_query_chars: 8       # skip "ok" / "thanks" — no retrievable intent
+  #   dedup_threshold: 0.97    # a re-stated fact updates nothing, adds no row
+  #
+  # min_score is not portable between embedders. Semantic models pack unrelated
+  # text far higher than the hashing embedder this default was set for: measured
+  # on one deployment's corpus, bge-m3 scored genuine matches 0.60-0.78 and
+  # unrelated questions up to 0.61, so 0.35 admits everything. Measure your own
+  # highest-unrelated score and set the floor above it (that box uses 0.65).
+
+  # Cross-user memory reads (multi-user instances only). Layer-4 memory is owned
+  # per person; with role_reads on, a principal also recalls the private memory
+  # of anyone it ranks STRICTLY ABOVE on owner > admin > member > viewer. Reads
+  # go DOWN only: two admins cannot read each other, and nobody reads upward.
+  #
+  # Off by default, and it stays a deliberate decision because it is the one
+  # setting that lets one person read another's private rows without that person
+  # doing anything. When it is on:
+  #   * every such read is recorded (reader, role, subject, rows, query, session)
+  #     and BOTH sides can see the ledger — 'hermes memory sharing --as <user>
+  #     audit' shows a user what they read and what was read of them;
+  #   * recalled rows are labelled "from <user>'s memory", so a fact is never
+  #     presented as belonging to the person being talked to;
+  #   * Postgres RLS enforces the same matrix independently of the app filter.
+  #
+  # Sideways sharing is never granted by role: to share one memory with a peer,
+  # its OWNER runs 'hermes memory sharing --as <owner> share <memory-id> <user>'
+  # (revocable, and it shares exactly that row).
+  # sharing:
+  #   role_reads: false
+
+  # Document retrieval (RAG) over the same pgvector tier. Ingested documents —
+  # Google Drive files today — are chunked around headings, embedded with the
+  # SAME model as memory (two models in one instance would each be internally
+  # consistent and mutually meaningless), and searched with two arms fused by
+  # reciprocal rank: cosine similarity for meaning and paraphrase across
+  # languages, and a tsquery for exact strings a vector cannot represent (a
+  # tender number). Every passage carries the document and section it came from,
+  # so the agent can cite what it used.
+  #
+  # Off by default: enabling it adds the 'rag_search' tool to EVERY API call for
+  # the life of a conversation, which is not worth paying for on an instance with
+  # nothing ingested. Ingest first ('hermes memory rag --as <user> ingest-drive'),
+  # then turn this on.
+  #
+  # Access is identical to memory's, deliberately: a document is owned by the
+  # person who ingested it and is private to them, reachable by others only
+  # through a downward role read (above) or an explicit per-document grant
+  # ('hermes memory rag --as <owner> share <document-id> <user>'). A file merely
+  # shared WITH an account is not a file the whole instance may read.
+  # rag:
+  #   enabled: false
+  #   top_k: 5                 # passages per search (the model may lower this)
+  #   min_score: 0.35          # cosine floor on the vector arm; the lexical arm
+  #                            # needs none — a tsquery either matches or doesn't
+
   # Memory flush: give the agent one turn to save memories before context is
   # lost (compression, /new, /reset, exit). Set to 0 to disable.
   # For exit/reset, only fires if the session had at least this many user turns.
@@ -555,6 +650,13 @@ session_reset:
   mode: both           # "both", "idle", "daily", or "none"
   idle_minutes: 1440   # Inactivity timeout in minutes (default: 1440 = 24 hours)
   at_hour: 4           # Daily reset hour, 0-23 local time (default: 4 AM)
+
+# Repeated user intents can be proposed as durable tasks. Proposals remain
+# approval-gated and never execute a discovered task automatically.
+tasks:
+  discovery:
+    threshold: 3
+    proposal_cooldown_seconds: 3600
 
 # Maximum number of simultaneously active chat sessions across CLI, TUI,
 # dashboard chat, and messaging gateway. Set to null, 0, or omit to allow
@@ -1234,6 +1336,19 @@ display:
 
 
 # =============================================================================
+# Action Tracking / Interaction Trace
+# =============================================================================
+# C8 records gateway, turn, tool, cost, change, approval, and error metadata in
+# the C3-routed application schema. It never modifies model messages.
+action_tracking:
+  enabled: true
+  retention_days: 30
+  rollup: true
+  # Deterministic sample rate for tool_call/tool_result spans only (0.0–1.0).
+  sample: 1.0
+
+
+# =============================================================================
 # Update Behavior
 # =============================================================================
 updates:
@@ -1325,3 +1440,44 @@ updates:
 #       # This is a CREDENTIAL: prefer setting HERMES_DASHBOARD_OIDC_CLIENT_SECRET
 #       # in ~/.hermes/.env over putting it here in config.yaml.
 #       #   client_secret: ""
+#
+# -----------------------------------------------------------------------------
+# Supabase (GoTrue) email/password dashboard auth. Use this to gate the
+# dashboard / agent-home with a self-hosted Supabase Auth server: members sign
+# in with an email + password, GoTrue owns the password hashing, and the
+# verified user UUID (the JWT 'sub') becomes the Hermes principal id used by the
+# multi-user RLS layer. The bundled 'supabase' plugin verifies GoTrue access
+# tokens locally (HS256, the shared jwt_secret). Each setting can be overridden
+# by an environment variable (env wins when non-empty); the bare SUPABASE_* /
+# GOTRUE_JWT_SECRET names are recognised as fallbacks so a box that already
+# exports them for the Python backend needs no duplicate HERMES_-prefixed vars:
+#
+#   dashboard.supabase_auth.url         <-  HERMES_DASHBOARD_SUPABASE_URL       (fallback: SUPABASE_URL)
+#   dashboard.supabase_auth.anon_key    <-  HERMES_DASHBOARD_SUPABASE_ANON_KEY  (fallback: SUPABASE_ANON_KEY)
+#   dashboard.supabase_auth.jwt_secret  <-  HERMES_DASHBOARD_SUPABASE_JWT_SECRET (fallback: SUPABASE_JWT_SECRET, GOTRUE_JWT_SECRET)
+#   dashboard.supabase_auth.audience    <-  HERMES_DASHBOARD_SUPABASE_AUDIENCE
+#
+# dashboard:
+#   supabase_auth:
+#     url: "https://supabase.example.com"   # required; GoTrue base (Kong)
+#     anon_key: "<supabase anon key>"        # required; sent as the apikey header
+#     audience: "authenticated"              # optional; GoTrue default
+#
+#     # jwt_secret verifies the access token — it is a CREDENTIAL, so prefer
+#     # HERMES_DASHBOARD_SUPABASE_JWT_SECRET in ~/.hermes/.env over config.yaml.
+#     #   jwt_secret: "<GoTrue GOTRUE_JWT_SECRET>"
+#
+# This provider NEVER performs signup — it only logs existing members in.
+# Disable open signup at the GoTrue server itself (GOTRUE_DISABLE_SIGNUP=true)
+# so new accounts can only be created by an admin.
+#
+# Member management ('hermes member' + the owner/admin-only /api/comms/members
+# API) creates those accounts through GoTrue's *admin* API. That reuses the url
+# above and additionally needs the GoTrue SERVICE-ROLE key — which can mint and
+# delete any account, so it is a CREDENTIAL: put it in ~/.hermes/.env (or the
+# process env), NEVER in config.yaml and NEVER in a browser. Recognised names
+# (first non-empty wins):
+#
+#   HERMES_DASHBOARD_SUPABASE_SERVICE_ROLE_KEY
+#   HERMES_SUPABASE_SERVICE_ROLE_KEY
+#   SUPABASE_SERVICE_ROLE_KEY  /  SUPABASE_SERVICE_KEY

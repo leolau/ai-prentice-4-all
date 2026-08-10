@@ -396,19 +396,37 @@ class MemoryManager:
             self._has_external = True
 
         self._providers.append(provider)
+        self._index_tools(provider)
 
-        # Core tool names are reserved — a memory provider must never register
-        # a tool that shadows a built-in (e.g. ``clarify``, ``delegate_task``).
-        # Built-ins always win, so such a tool is dropped at agent init and
-        # would otherwise linger in ``_tool_to_provider`` and hijack dispatch
-        # (#40466). Reject it here, at the door, so it never enters the routing
-        # table at all — matching the built-ins-always-win invariant used by
-        # the TTS/browser/search provider registries.
+        logger.info(
+            "Memory provider '%s' registered (%d tools)",
+            provider.name,
+            len(provider.get_tool_schemas()),
+        )
+
+    def _index_tools(self, provider: MemoryProvider) -> None:
+        """Index this provider's current tool names → provider, for routing.
+
+        Called at registration *and* again after ``initialize()``, because a
+        provider's toolset is not fixed until it has seen its config: the
+        pgvector provider only offers ``rag_search`` once document retrieval is
+        enabled and its store is up. Indexing once at registration left such a
+        tool advertised to the model (``get_all_tool_schemas`` reads the
+        provider live) but absent from the routing table, so every call came
+        back "no provider handles this tool".
+
+        Core tool names are reserved — a memory provider must never register a
+        tool that shadows a built-in (e.g. ``clarify``, ``delegate_task``).
+        Built-ins always win, so such a tool is dropped at agent init and would
+        otherwise linger in ``_tool_to_provider`` and hijack dispatch (#40466).
+        Reject it here, at the door, so it never enters the routing table at
+        all — matching the built-ins-always-win invariant used by the
+        TTS/browser/search provider registries.
+        """
         from toolsets import _HERMES_CORE_TOOLS
 
         _core_tool_names = set(_HERMES_CORE_TOOLS)
 
-        # Index tool names → provider for routing
         for raw_schema in provider.get_tool_schemas():
             schema = normalize_tool_schema(raw_schema)
             if schema is None:
@@ -424,7 +442,7 @@ class MemoryManager:
                 continue
             if tool_name and tool_name not in self._tool_to_provider:
                 self._tool_to_provider[tool_name] = provider
-            elif tool_name in self._tool_to_provider:
+            elif self._tool_to_provider.get(tool_name) is not provider:
                 logger.warning(
                     "Memory tool name conflict: '%s' already registered by %s, "
                     "ignoring from %s",
@@ -432,12 +450,6 @@ class MemoryManager:
                     self._tool_to_provider[tool_name].name,
                     provider.name,
                 )
-
-        logger.info(
-            "Memory provider '%s' registered (%d tools)",
-            provider.name,
-            len(provider.get_tool_schemas()),
-        )
 
     @property
     def providers(self) -> List[MemoryProvider]:
@@ -1079,3 +1091,5 @@ class MemoryManager:
                     "Memory provider '%s' initialize failed: %s",
                     provider.name, e,
                 )
+            # A provider may only know its full toolset once initialized.
+            self._index_tools(provider)

@@ -11925,15 +11925,15 @@ _BUILTIN_SUBCOMMANDS = frozenset(
     {
         "acp", "auth", "backup", "bundles", "checkpoints", "claw", "completion",
         "computer-use",
-        "config", "cron", "curator", "dashboard", "serve", "debug", "doctor",
+        "changes", "config", "cron", "curator", "dashboard", "serve", "debug", "doctor",
         "dump", "fallback", "gateway", "hooks", "import", "insights",
         "gui", "desktop", "kanban", "login", "logout", "logs", "lsp", "mcp", "memory", "migrate", "moa",
         "journey", "memory-graph", "learning",
-        "model", "pairing", "pets", "plugins", "portal", "postinstall", "profile",
-        "project", "proxy",
+        "model", "owner", "pairing", "pets", "plugins", "portal", "postinstall", "profile",
+        "project", "promote", "proxy",
         "prompt-size",
         "send", "sessions", "setup",
-        "skills", "slack", "status", "tools", "uninstall", "update",
+        "skills", "slack", "status", "tool", "tools", "uninstall", "update",
         "version", "webhook", "whatsapp", "whatsapp-cloud", "chat", "secrets", "security",
         # Help-ish invocations — plugin commands not being listed in
         # top-level --help is an acceptable trade-off for skipping an
@@ -12250,6 +12250,26 @@ def _try_termux_fast_tui_launch() -> bool:
 
 def cmd_memory(args):
     sub = getattr(args, "memory_command", None)
+    if sub == "vectors":
+        from hermes_cli.memory_vectors import cmd_memory_vectors
+
+        cmd_memory_vectors(args)
+        return
+    if sub == "sharing":
+        from hermes_cli.memory_sharing import cmd_memory_sharing
+
+        cmd_memory_sharing(args)
+        return
+    if sub == "projection":
+        from hermes_cli.memory_projection import cmd_memory_projection
+
+        cmd_memory_projection(args)
+        return
+    if sub == "rag":
+        from hermes_cli.rag_cmd import cmd_memory_rag
+
+        cmd_memory_rag(args)
+        return
     if sub == "off":
         from hermes_cli.config import load_config, save_config
 
@@ -12637,6 +12657,49 @@ def main():
     # =========================================================================
     from hermes_cli.send_cmd import register_send_subparser
     register_send_subparser(subparsers)
+
+    # =========================================================================
+    # promote command — approval-gated dev-to-prod artifact promotion
+    # =========================================================================
+    from hermes_cli.promote import register_promote_subparser
+
+    register_promote_subparser(subparsers)
+
+    # =========================================================================
+    # tool command — create/manage in-house tools + the C2/C3 tool registry
+    # =========================================================================
+    from hermes_cli.tool_cmd import register_tool_subparser
+
+    register_tool_subparser(subparsers)
+
+    # =========================================================================
+    # oss command — acquire OSS capabilities (remote adapt-and-wrap or
+    # in-house rebuild), approval-gated + provenance-tracked (FG-08)
+    # =========================================================================
+    from hermes_cli.oss_cmd import register_oss_subparser
+
+    register_oss_subparser(subparsers)
+
+    # =========================================================================
+    # owner command — inspect/transfer the single shared-brain owner (C1)
+    # =========================================================================
+    from hermes_cli.owner import register_owner_subparser
+
+    register_owner_subparser(subparsers)
+
+    # =========================================================================
+    # member command — owner/admin management of additional members (C1)
+    # =========================================================================
+    from hermes_cli.member import register_member_subparser
+
+    register_member_subparser(subparsers)
+
+    # =========================================================================
+    # changes command — review/undo/redo recorded change events (C5/FG-12)
+    # =========================================================================
+    from hermes_cli.changes_cli import register_changes_subparser
+
+    register_changes_subparser(subparsers)
 
     # =========================================================================
     # login command  (parser built in hermes_cli/subcommands/login.py)

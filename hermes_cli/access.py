@@ -1,0 +1,1537 @@
+"""Multi-user access model for the single shared Hermes brain (contracts C1, C2).
+
+This module publishes the two Wave-0 access contracts consumed by later
+feature groups (memory, skills, goals, tasks, tools, assets):
+
+* **C1 — principal/identity.** :class:`Principal` binds a system ``user_id`` to
+  a single :data:`Role` (``owner`` | ``admin`` | ``member`` | ``viewer``) plus
+  the channel identities that map to it. :func:`resolve_principal` is the
+  gateway seam that turns an inbound channel identity into a principal, reusing
+  ``gateway/pairing.py`` for enrolment. Identities are backed by self-hosted
+  Supabase: ``principals.user_id`` **is** the GoTrue subject id, and the
+  ``channel_identities`` table maps ``(platform, channel_user_id)`` onto it.
+
+* **C2 — visibility/scoping.** Every scoped row carries ``owner_user_id`` and a
+  ``visibility`` of either :data:`SHARED` (readable by all members) or
+  ``private:<user_id>`` (readable only by that user). :func:`can_read` and
+  :func:`scope_filter` are the app-layer filter; :func:`apply_scope_rls`
+  installs the equivalent **Postgres row-level security** so the boundary is
+  enforced at the database and cannot be bypassed from the app layer. The owner
+  role bypasses the filter and sees everything.
+
+  **Per-item grants (FG-19).** On top of shared/private, a row may be
+  *granted* to specific users through the :data:`ITEM_GRANTS_TABLE` — a
+  cross-user assignment that does **not** downgrade the row's visibility (the
+  owner's *other* private rows stay hidden). :func:`scope_filter` and
+  :func:`apply_scope_rls` take an optional ``grant_item_kind`` so a
+  grant-scoped table (a GTS goal/task) additionally reads a row when an active
+  (``pending``/``accepted``) grant to the requesting principal exists for that
+  exact item. This is a narrow extension of the existing C2 helpers, not a
+  second access system.
+
+Datastore routing always goes through contract C3
+(:func:`hermes_cli.datastore.get_store`) — this module never opens a raw
+connection or re-implements mode routing.
+"""
+
+from __future__ import annotations
+
+import json
+import re
+import uuid
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from typing import TYPE_CHECKING, Callable, Literal, Mapping, Protocol
+
+if TYPE_CHECKING:
+    import asyncpg
+
+    from hermes_cli.datastore import SupabaseAppStore
+
+
+# ---------------------------------------------------------------------------
+# C1 — principal / identity model
+# ---------------------------------------------------------------------------
+
+Role = Literal["owner", "admin", "member", "viewer"]
+
+ROLES: tuple[Role, ...] = ("owner", "admin", "member", "viewer")
+
+#: Roles that may read every private tier (the owner bypasses scope filtering).
+_OWNER_ROLE: Role = "owner"
+
+#: The role assumed for an identity whose principal could not be resolved.
+#: ``member`` — the base rung: its own private data plus what is shared, and
+#: nothing of anyone else's. An unresolved identity must never land on a role
+#: that can read other users' private rows.
+_UNRESOLVED_ROLE: Role = "member"
+
+SHARED: Literal["shared"] = "shared"
+_PRIVATE_PREFIX = "private:"
+
+_VALID_USER_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+
+
+class ChannelOrigin(Protocol):
+    """Minimal inbound-source contract needed to resolve a principal."""
+
+    @property
+    def platform(self) -> object:
+        """Return the origin platform (an enum exposing ``value``, or a str)."""
+        ...
+
+    @property
+    def user_id(self) -> str | None:
+        """Return the channel-native user identifier, if any."""
+        ...
+
+
+@dataclass(frozen=True)
+class Principal:
+    """A resolved system user and its single role (contract C1).
+
+    ``user_id`` is the stable system identity — the Supabase GoTrue subject id.
+    ``channels`` lists the ``platform:channel_user_id`` identities that map onto
+    this principal. Exactly one principal in the shared brain may hold the
+    ``owner`` role at a time (enforced by a partial unique index and by the
+    approval-gated transfer flow).
+    """
+
+    user_id: str
+    display: str
+    role: Role
+    channels: tuple[str, ...] = field(default_factory=tuple)
+    created_at: datetime | None = None
+
+    def __post_init__(self) -> None:
+        if self.role not in ROLES:
+            raise ValueError(f"Unknown role: {self.role!r}")
+        if not self.user_id or not self.user_id.strip():
+            raise ValueError("Principal.user_id cannot be empty")
+
+    @property
+    def is_owner(self) -> bool:
+        """Whether this principal holds the single owner role (bypasses scope)."""
+        return self.role == _OWNER_ROLE
+
+    @property
+    def private_visibility(self) -> str:
+        """The ``private:<user_id>`` tag for rows only this principal may read."""
+        return private(self.user_id)
+
+
+def normalize_role(role: object) -> Role:
+    """Coerce a possibly-unresolved role onto the C2 ladder.
+
+    Callers hand this whatever the identity seam produced — a real role from the
+    ``principals`` table, ``None`` when resolution failed or the identity is not
+    enrolled, or a value read from somewhere less trustworthy. Anything that is
+    not exactly one of :data:`ROLES` becomes :data:`_UNRESOLVED_ROLE`, so a
+    missing or malformed role degrades to base privilege instead of being passed
+    through to a reader that would treat an unexpected string as "not a member,
+    therefore unrestricted".
+    """
+    if isinstance(role, str) and role in ROLES:
+        return role  # type: ignore[return-value]
+    return _UNRESOLVED_ROLE
+
+
+def private(user_id: str) -> str:
+    """Return the ``private:<user_id>`` visibility tag for a user."""
+    if not user_id or not user_id.strip():
+        raise ValueError("private() requires a non-empty user_id")
+    return f"{_PRIVATE_PREFIX}{user_id}"
+
+
+def parse_private_owner(visibility: str) -> str | None:
+    """Return the user id embedded in a ``private:<user_id>`` tag, else ``None``."""
+    if isinstance(visibility, str) and visibility.startswith(_PRIVATE_PREFIX):
+        owner = visibility[len(_PRIVATE_PREFIX):]
+        return owner or None
+    return None
+
+
+def normalize_visibility(visibility: str) -> str:
+    """Validate and normalize a visibility tag (``shared`` or ``private:<u>``)."""
+    if visibility == SHARED:
+        return SHARED
+    owner = parse_private_owner(visibility)
+    if owner is None:
+        raise ValueError(
+            f"Invalid visibility {visibility!r}; expected 'shared' or "
+            "'private:<user_id>'"
+        )
+    return private(owner)
+
+
+# ---------------------------------------------------------------------------
+# C2 — per-item grants (FG-19): cross-user assignment as a per-row grant
+# ---------------------------------------------------------------------------
+
+#: The per-item grant table (FG-19). A grant is a cross-user share of one
+#: specific GTS item — an ``assignee`` (single, may act) or a read-only
+#: ``watcher`` — layered on top of the shared/private ``visibility`` tag. It
+#: never rewrites ``visibility``, so the owner's *other* private rows stay
+#: hidden from the grantee.
+ITEM_GRANTS_TABLE = "item_grants"
+
+#: Kinds of item a grant may target: the C9 GTS nodes, plus a single live
+#: ``memory`` row (FG-21 P3) and a single ingested ``document`` (P4) so one
+#: person can share one row with a peer the role hierarchy deliberately does not
+#: reach — the sideways case, granted by an explicit act rather than by rank.
+GRANT_ITEM_KINDS: tuple[str, ...] = ("goal", "task", "memory", "document")
+#: Grant roles: a single ``assignee`` (may advance progress) + read-only
+#: ``watcher``s.
+GRANT_TYPES: tuple[str, ...] = ("assignee", "watcher")
+#: Grant lifecycle states. Only :data:`GRANT_ACTIVE_STATUSES` confer access.
+GRANT_STATUSES: tuple[str, ...] = ("pending", "accepted", "declined", "revoked")
+#: The statuses that actually confer read/act access (a declined/revoked grant
+#: confers nothing).
+GRANT_ACTIVE_STATUSES: tuple[str, ...] = ("pending", "accepted")
+
+_GRANT_KINDS_SQL = ", ".join(f"'{kind}'" for kind in GRANT_ITEM_KINDS)
+
+ITEM_GRANTS_SCHEMA_SQL = f"""
+CREATE TABLE IF NOT EXISTS {ITEM_GRANTS_TABLE} (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    item_kind TEXT NOT NULL CHECK (item_kind IN ({_GRANT_KINDS_SQL})),
+    item_id UUID NOT NULL,
+    user_id TEXT NOT NULL,
+    grant_type TEXT NOT NULL CHECK (grant_type IN ('assignee', 'watcher')),
+    granted_by TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'accepted'
+        CHECK (status IN ('pending', 'accepted', 'declined', 'revoked')),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (item_kind, item_id, user_id)
+);
+CREATE INDEX IF NOT EXISTS {ITEM_GRANTS_TABLE}_grantee_idx
+    ON {ITEM_GRANTS_TABLE} (user_id, status);
+CREATE INDEX IF NOT EXISTS {ITEM_GRANTS_TABLE}_item_idx
+    ON {ITEM_GRANTS_TABLE} (item_kind, item_id);
+-- The single-assignee invariant (D15): at most one *active* assignee per item.
+CREATE UNIQUE INDEX IF NOT EXISTS {ITEM_GRANTS_TABLE}_single_assignee
+    ON {ITEM_GRANTS_TABLE} (item_kind, item_id)
+    WHERE grant_type = 'assignee' AND status IN ('pending', 'accepted');
+
+-- A table created before ``memory`` joined GRANT_ITEM_KINDS still carries the
+-- old two-value CHECK, and CREATE TABLE IF NOT EXISTS cannot widen it. Replace
+-- the constraint so the enum has exactly one source of truth (the tuple above)
+-- on a new install and on an existing deployment alike.
+ALTER TABLE {ITEM_GRANTS_TABLE}
+    DROP CONSTRAINT IF EXISTS {ITEM_GRANTS_TABLE}_item_kind_check;
+ALTER TABLE {ITEM_GRANTS_TABLE}
+    ADD CONSTRAINT {ITEM_GRANTS_TABLE}_item_kind_check
+    CHECK (item_kind IN ({_GRANT_KINDS_SQL}));
+"""
+
+
+def _grant_exists_sql(item_kind: str, id_expr: str, user_expr: str) -> str:
+    """SQL ``EXISTS`` clause: an active grant of ``item_kind`` to ``user_expr``.
+
+    ``item_kind`` is validated against :data:`GRANT_ITEM_KINDS` and inlined
+    (it is a fixed enum, never user input); ``id_expr`` / ``user_expr`` are
+    caller-controlled SQL fragments (a validated column reference and either a
+    ``$n`` placeholder or a ``current_setting(...)`` call).
+    """
+    if item_kind not in GRANT_ITEM_KINDS:
+        raise ValueError(f"Unknown grant item_kind: {item_kind!r}")
+    statuses = ", ".join(f"'{status}'" for status in GRANT_ACTIVE_STATUSES)
+    return (
+        f"EXISTS (SELECT 1 FROM {ITEM_GRANTS_TABLE} ig "
+        f"WHERE ig.item_kind = '{item_kind}' AND ig.item_id = {id_expr} "
+        f"AND ig.user_id = {user_expr} AND ig.status IN ({statuses}))"
+    )
+
+
+# ---------------------------------------------------------------------------
+# C2 — role hierarchy (FG-21 P3): downward-only elevated reads
+# ---------------------------------------------------------------------------
+
+#: The role ladder as ranks, lower number = more privilege. A reader may read a
+#: subject's private rows only when its rank is **strictly** lower — reads go
+#: *down* the hierarchy, never sideways. Two admins therefore cannot read each
+#: other, which is the difference between a hierarchy and a free-for-all among
+#: peers; and ``member``/``member`` stays mutually invisible, which is the
+#: property C2 already guaranteed and this must not weaken.
+ROLE_RANK: dict[Role, int] = {"owner": 0, "admin": 1, "member": 2, "viewer": 3}
+
+#: Roles that can be *above* somebody, i.e. that a downward read can start from.
+#: Kept explicit so a future role added to :data:`ROLES` cannot silently acquire
+#: elevated reads by sorting above another role.
+ELEVATED_READER_ROLES: tuple[Role, ...] = ("owner", "admin", "member")
+
+#: GUC that turns database-level elevated reads on. Absent or anything other
+#: than ``'on'`` means off, so a connection that forgets to bind it gets the
+#: plain C2 policy — the fail-closed direction.
+_GUC_ELEVATION = "hermes.elevated_reads"
+_ELEVATION_ON = "on"
+
+
+def role_rank(role: object) -> int:
+    """Rank of ``role`` on the ladder; an unrecognised role gets the last rung.
+
+    Deliberately *not* :func:`normalize_role`, whose unknown-value default is
+    ``member`` (the right base privilege for an unresolvable session identity,
+    and one rung above the bottom). Here the value is being used to decide
+    whether one person reads another's private rows, so an unrecognised role
+    must rank least-privileged: it can be read, it cannot read. This also
+    matches the ``ELSE`` branch of :func:`_role_rank_sql`, so the app filter and
+    the RLS policy agree about a malformed role instead of disagreeing silently.
+    """
+    if isinstance(role, str) and role in ROLE_RANK:
+        return ROLE_RANK[role]  # type: ignore[index]
+    return max(ROLE_RANK.values())
+
+
+def reads_role_below(reader: object, subject: object) -> bool:
+    """Whether ``reader``'s role may read ``subject``'s role by hierarchy.
+
+    Strictly downward: ``owner`` reads everyone, ``admin`` reads members and
+    viewers but **not** other admins, and nobody reads their own peers. This is
+    the role part of the decision only — the caller still has to be a different
+    person, and the instance still has to have elevation enabled.
+    """
+    return role_rank(reader) < role_rank(subject)
+
+
+def _role_rank_sql(role_expr: str) -> str:
+    """SQL expression mapping a role expression onto :data:`ROLE_RANK`.
+
+    Written as a ``CASE`` rather than a helper function so no migration or
+    ``CREATE FUNCTION`` privilege is needed for the RLS policy to use it, and so
+    the ladder lives in exactly one place in Python. An unrecognised role falls
+    through to the least-privileged rank, matching :func:`role_rank`.
+    """
+    branches = " ".join(
+        f"WHEN '{role}' THEN {rank}" for role, rank in ROLE_RANK.items()
+    )
+    lowest = max(ROLE_RANK.values())
+    return f"(CASE {role_expr} {branches} ELSE {lowest} END)"
+
+
+def _elevated_read_sql(
+    owner_expr: str,
+    *,
+    reader_id_expr: str,
+    reader_rank_sql: str,
+    principals_table: str = "principals",
+) -> str:
+    """SQL clause: ``owner_expr`` belongs to somebody the reader ranks above.
+
+    Correlated against the ``principals`` table because the row itself does not
+    carry its owner's role — and must not: a role change has to take effect on
+    the next read, not be frozen into every row the user ever wrote.
+    """
+    return (
+        f"({owner_expr} <> {reader_id_expr} AND EXISTS ("
+        f"SELECT 1 FROM {principals_table} p "
+        f"WHERE p.user_id = {owner_expr} "
+        f"AND {_role_rank_sql('p.role')} > {reader_rank_sql}))"
+    )
+
+
+# ---------------------------------------------------------------------------
+# C2 — visibility / scoping helpers (app-layer filter)
+# ---------------------------------------------------------------------------
+
+
+def can_read(
+    principal: Principal,
+    visibility: str,
+    *,
+    granted: bool = False,
+) -> bool:
+    """Whether ``principal`` may read a row with the given ``visibility``.
+
+    The owner role bypasses the filter (sees everything). ``shared`` rows are
+    readable by every member; a ``private:<u>`` row is readable only by ``u``.
+    ``granted`` (FG-19) is set by the caller when an active per-item grant to
+    ``principal`` exists for the row — a grant confers read access to *that*
+    item without touching its ``visibility`` tag.
+    """
+    if principal.is_owner:
+        return True
+    if visibility == SHARED:
+        return True
+    if granted:
+        return True
+    owner = parse_private_owner(visibility)
+    return owner is not None and owner == principal.user_id
+
+
+def can_read_row(
+    principal: Principal,
+    row: Mapping[str, object],
+    *,
+    granted: bool = False,
+) -> bool:
+    """Convenience wrapper of :func:`can_read` for a row mapping.
+
+    Reads the ``visibility`` key; a missing/empty value is treated as an
+    unreadable private-to-nobody row (fail closed) unless the caller is owner
+    or holds an active per-item grant (``granted``, FG-19).
+    """
+    if principal.is_owner or granted:
+        return True
+    visibility = row.get("visibility")
+    if not isinstance(visibility, str) or not visibility:
+        return False
+    return can_read(principal, visibility)
+
+
+@dataclass(frozen=True)
+class ScopePredicate:
+    """A SQL read-visibility predicate + positional params for asyncpg.
+
+    ``sql`` slots into a ``WHERE`` clause; ``params`` are the ``$n`` bind
+    values in order. ``start_index`` controls the first placeholder number so
+    the predicate composes with a caller's existing parameters.
+    """
+
+    sql: str
+    params: tuple[str, ...]
+
+
+def scope_filter(
+    principal: Principal,
+    *,
+    column: str = "visibility",
+    start_index: int = 1,
+    grant_item_kind: str | None = None,
+    id_column: str = "id",
+    role_elevation: bool = False,
+    owner_column: str = "owner_user_id",
+) -> ScopePredicate:
+    """Return the read-visibility predicate for ``principal`` (contract C2).
+
+    The owner role bypasses scoping (``TRUE`` with no params). A non-owner sees
+    ``shared`` rows plus its own ``private:<user_id>`` rows. The predicate is
+    parameterized to keep it injection-safe when composed into an asyncpg query.
+
+    When ``grant_item_kind`` (FG-19) is given, the predicate also matches a row
+    whose ``id_column`` has an active per-item grant to ``principal`` — the
+    "assigned/granted to me" clause. This never widens access to the owner's
+    *other* private rows: the grant is correlated to the row's own id. The
+    grant clause binds one extra positional param (the principal's user id) at
+    ``start_index + 1``, so a caller composing further placeholders must offset
+    by 2 rather than 1.
+
+    With ``role_elevation`` (FG-21 P3) the predicate additionally matches rows
+    owned by someone the principal ranks **strictly above** on the role ladder —
+    the downward-only hierarchy read. It is off by default and must stay that
+    way: it is the one clause here that lets one person read another's private
+    rows by role rather than by their own act, so it is enabled deliberately,
+    per table, by a caller that also audits the read. Like the grant clause it
+    binds the principal's user id as one extra param.
+    """
+    if not _VALID_COLUMN.fullmatch(column):
+        raise ValueError(f"Invalid column name for scope_filter: {column!r}")
+    if principal.is_owner:
+        return ScopePredicate("TRUE", ())
+    placeholder = f"${start_index}"
+    clauses = [f"{column} = 'shared'", f"{column} = {placeholder}"]
+    params: tuple[str, ...] = (principal.private_visibility,)
+    if grant_item_kind is not None:
+        if not _VALID_COLUMN.fullmatch(id_column):
+            raise ValueError(f"Invalid id_column for scope_filter: {id_column!r}")
+        if "." not in id_column:
+            # The grant clause is a sub-select over item_grants, which has its
+            # own `id` column, so an unqualified name binds to *that* one and the
+            # clause silently matches nothing. A caller would see grants that
+            # never confer access and no error anywhere.
+            raise ValueError(
+                f"id_column must be table-qualified for the grant clause "
+                f"(got {id_column!r}; use '<table>.{id_column}')"
+            )
+        grant_placeholder = f"${start_index + 1}"
+        clauses.append(
+            _grant_exists_sql(grant_item_kind, id_column, grant_placeholder)
+        )
+        params = (principal.private_visibility, principal.user_id)
+    if role_elevation and principal.role in ELEVATED_READER_ROLES:
+        if not _VALID_COLUMN.fullmatch(owner_column):
+            raise ValueError(f"Invalid owner_column for scope_filter: {owner_column!r}")
+        id_placeholder = f"${start_index + len(params)}"
+        clauses.append(
+            _elevated_read_sql(
+                owner_column,
+                reader_id_expr=id_placeholder,
+                reader_rank_sql=str(role_rank(principal.role)),
+            )
+        )
+        params = (*params, principal.user_id)
+    sql = "(" + " OR ".join(clauses) + ")"
+    return ScopePredicate(sql, params)
+
+
+def reads_by_elevation(
+    principal: Principal,
+    row: Mapping[str, object],
+    *,
+    owner_role: object,
+) -> bool:
+    """Whether ``principal`` sees this row **only** because it ranks above.
+
+    Used to label and audit a read rather than to permit it: a row the reader
+    could already see (its own, or ``shared``) is not an elevated read even when
+    the reader outranks its owner, and auditing it as one would bury the reads
+    that matter in noise.
+    """
+    owner_user_id = row.get("owner_user_id")
+    if not isinstance(owner_user_id, str) or owner_user_id == principal.user_id:
+        return False
+    if row.get("visibility") == SHARED:
+        return False
+    return reads_role_below(principal.role, owner_role)
+
+
+_VALID_COLUMN = re.compile(r"^[A-Za-z_][A-Za-z0-9_.]*$")
+#: A column name a policy builder will qualify itself, so it must NOT already
+#: carry a table prefix: passing ``"memory_projection.id"`` where ``"id"`` is
+#: expected yields ``memory_projection.memory_projection.id``, which Postgres
+#: rejects only when the policy is created — long after the typo.
+_VALID_BARE_COLUMN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_VALID_SCHEMA = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+# ---------------------------------------------------------------------------
+# Database schema (Supabase app layer) — principals, identities, RLS
+# ---------------------------------------------------------------------------
+
+# Row-level security keys the read decision off two GUCs that mirror the JWT
+# claims PostgREST/GoTrue would expose (``request.jwt.claims``): the requesting
+# principal id and role. On the deployed stack these come from the verified
+# access token; in direct-asyncpg tests they are set via :func:`bind_principal`.
+_GUC_ID = "hermes.principal_id"
+_GUC_ROLE = "hermes.principal_role"
+
+#: Public names of the two GUCs, for modules writing their own RLS policy over a
+#: table this module doesn't know about (e.g. the memory audit ledger, whose
+#: read rule is reader-or-subject rather than C2 visibility). Exported so such a
+#: policy references the same GUCs as :func:`bind_principal` instead of
+#: re-typing the strings and silently drifting.
+GUC_PRINCIPAL_ID = _GUC_ID
+GUC_PRINCIPAL_ROLE = _GUC_ROLE
+
+ACCESS_SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS principals (
+    user_id TEXT PRIMARY KEY,
+    display TEXT NOT NULL DEFAULT '',
+    role TEXT NOT NULL CHECK (role IN ('owner', 'admin', 'member', 'viewer')),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Exactly-one-owner invariant: at most one principal may hold the owner role.
+CREATE UNIQUE INDEX IF NOT EXISTS principals_single_owner
+    ON principals (role) WHERE role = 'owner';
+
+CREATE TABLE IF NOT EXISTS channel_identities (
+    platform TEXT NOT NULL,
+    channel_user_id TEXT NOT NULL,
+    user_id TEXT NOT NULL REFERENCES principals(user_id) ON DELETE CASCADE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (platform, channel_user_id)
+);
+CREATE INDEX IF NOT EXISTS channel_identities_user
+    ON channel_identities (user_id);
+
+-- Login-subject aliases: map an auth provider's stable subject id (e.g. a
+-- Supabase/GoTrue ``sub`` UUID) onto an existing principal whose ``user_id``
+-- is *not* that subject. New members are enrolled with their subject *as* the
+-- user_id and need no alias; this table exists for principals enrolled before
+-- the auth provider (the bootstrap owner) so their web login still resolves to
+-- them without re-keying historical rows.
+CREATE TABLE IF NOT EXISTS principal_aliases (
+    alias_subject TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES principals(user_id) ON DELETE CASCADE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS principal_aliases_user
+    ON principal_aliases (user_id);
+"""
+
+
+async def initialize_access(connection: asyncpg.Connection) -> None:
+    """Create the C1 principal/identity tables in the connection's schema.
+
+    Idempotent. The connection's ``search_path`` selects the ``app_dev`` or
+    ``app_prod`` schema (contract C3), so the same DDL yields schema parity
+    across dev and prod as FG-01 requires.
+    """
+    await connection.execute(ACCESS_SCHEMA_SQL)
+
+
+async def apply_scope_rls(
+    connection: asyncpg.Connection,
+    table: str,
+    *,
+    grant_item_kind: str | None = None,
+    id_column: str = "id",
+    role_elevation: bool = False,
+    owner_column: str = "owner_user_id",
+) -> None:
+    """Enforce contract-C2 visibility on ``table`` via Postgres RLS.
+
+    ``table`` must carry ``owner_user_id`` and ``visibility`` columns. Installs
+    a ``FORCE``d row-level-security read policy so that — even for the table
+    owner — a session sees a row only when the bound principal is the owner
+    role, the row is ``shared``, or the row is that principal's own
+    ``private:<user_id>``. This is the database-level mirror of
+    :func:`scope_filter`; the app-layer filter is defense in depth on top.
+
+    When ``grant_item_kind`` (FG-19) is given, the policy gains the
+    database-level "granted to me" clause: a row of ``table`` is also visible
+    when an active per-item grant to the bound principal exists for that exact
+    ``id_column`` — the Postgres mirror of :func:`scope_filter`'s grant clause.
+    Re-invoking this (the grant-aware call replaces the plain policy) is safe
+    because the policy is dropped and recreated.
+
+    ``role_elevation`` (FG-21 P3) adds the database mirror of
+    :func:`scope_filter`'s downward-only hierarchy clause: a row owned by
+    somebody the bound principal ranks strictly above is also visible — but
+    **only while** the :data:`_GUC_ELEVATION` GUC is bound ``on`` by
+    :func:`bind_elevated_reads`. Installing the policy therefore does not by
+    itself grant anyone anything; a connection that never binds the GUC reads
+    exactly what plain C2 allows. Two gates, both of which must be deliberate.
+    """
+    if not _VALID_COLUMN.fullmatch(table):
+        raise ValueError(f"Invalid table name: {table!r}")
+    grant_clause = ""
+    if grant_item_kind is not None:
+        if not _VALID_BARE_COLUMN.fullmatch(id_column):
+            raise ValueError(
+                f"Invalid id_column: {id_column!r} — pass the bare column "
+                f"name; the policy qualifies it with {table!r} itself"
+            )
+        grant_clause = "\n                OR " + _grant_exists_sql(
+            grant_item_kind,
+            f"{table}.{id_column}",
+            f"current_setting('{_GUC_ID}', true)",
+        )
+    elevation_clause = ""
+    if role_elevation:
+        if not _VALID_BARE_COLUMN.fullmatch(owner_column):
+            raise ValueError(
+                f"Invalid owner_column: {owner_column!r} — pass the bare "
+                f"column name; the policy qualifies it with {table!r} itself"
+            )
+        elevated = _elevated_read_sql(
+            f"{table}.{owner_column}",
+            reader_id_expr=f"current_setting('{_GUC_ID}', true)",
+            reader_rank_sql=_role_rank_sql(
+                f"current_setting('{_GUC_ROLE}', true)"
+            ),
+        )
+        elevation_clause = (
+            "\n                OR (current_setting"
+            f"('{_GUC_ELEVATION}', true) = '{_ELEVATION_ON}' AND {elevated})"
+        )
+    await connection.execute(
+        f"""
+        ALTER TABLE {table} ENABLE ROW LEVEL SECURITY;
+        ALTER TABLE {table} FORCE ROW LEVEL SECURITY;
+        DROP POLICY IF EXISTS hermes_scope_read ON {table};
+        CREATE POLICY hermes_scope_read ON {table}
+            FOR SELECT
+            USING (
+                current_setting('{_GUC_ROLE}', true) = 'owner'
+                OR visibility = 'shared'
+                OR visibility = 'private:' || current_setting('{_GUC_ID}', true){grant_clause}{elevation_clause}
+            );
+        """
+    )
+
+
+async def apply_item_grants_rls(connection: asyncpg.Connection) -> None:
+    """Enforce read RLS on the FG-19 :data:`ITEM_GRANTS_TABLE`.
+
+    A ``FORCE``d read policy so a session sees a grant row only when it is the
+    owner role, the grantee (``user_id``), or the granter (``granted_by``).
+    This keeps the grant ledger itself scoped, and — because the goal/task
+    read policies reference this table in a correlated sub-select — it lets a
+    grantee's own grant satisfy those policies without exposing anyone else's
+    grants.
+    """
+    await connection.execute(
+        f"""
+        ALTER TABLE {ITEM_GRANTS_TABLE} ENABLE ROW LEVEL SECURITY;
+        ALTER TABLE {ITEM_GRANTS_TABLE} FORCE ROW LEVEL SECURITY;
+        DROP POLICY IF EXISTS hermes_grant_read ON {ITEM_GRANTS_TABLE};
+        CREATE POLICY hermes_grant_read ON {ITEM_GRANTS_TABLE}
+            FOR SELECT
+            USING (
+                current_setting('{_GUC_ROLE}', true) = 'owner'
+                OR user_id = current_setting('{_GUC_ID}', true)
+                OR granted_by = current_setting('{_GUC_ID}', true)
+            );
+        """
+    )
+
+
+async def grant_item(
+    connection: asyncpg.Connection,
+    *,
+    item_kind: str,
+    item_id: str,
+    user_id: str,
+    granted_by: str,
+) -> None:
+    """Give ``user_id`` read access to exactly one row of ``item_kind``.
+
+    The row-specific counterpart to a role read: it shares the item it names and
+    nothing else the granter owns. Reactivates an existing grant rather than
+    inserting a second one, so re-sharing after a revoke is one row with a
+    history instead of a duplicate.
+
+    Callers are responsible for checking that ``granted_by`` may share the item
+    (ownership is table-specific and lives with the table).
+    """
+    if item_kind not in GRANT_ITEM_KINDS:
+        raise ValueError(f"Unknown grant item_kind: {item_kind!r}")
+    await connection.execute(
+        f"""
+        INSERT INTO {ITEM_GRANTS_TABLE}
+            (item_kind, item_id, user_id, grant_type, granted_by, status)
+        VALUES ($1, $2::uuid, $3, 'watcher', $4, 'accepted')
+        ON CONFLICT (item_kind, item_id, user_id) DO UPDATE
+            SET status = 'accepted', granted_by = EXCLUDED.granted_by,
+                updated_at = NOW()
+        """,
+        item_kind,
+        item_id,
+        user_id,
+        granted_by,
+    )
+
+
+async def revoke_item_grant(
+    connection: asyncpg.Connection,
+    *,
+    item_kind: str,
+    item_id: str,
+    user_id: str,
+    granted_by: str,
+) -> bool:
+    """Withdraw one grant made by ``granted_by``; True if one was active.
+
+    Revoked, never deleted: that the row *was* shared for a period is part of the
+    audit trail, and only :data:`GRANT_ACTIVE_STATUSES` confer access, so
+    keeping the history costs nothing at read time.
+    """
+    if item_kind not in GRANT_ITEM_KINDS:
+        raise ValueError(f"Unknown grant item_kind: {item_kind!r}")
+    revoked = await connection.fetchval(
+        f"""
+        UPDATE {ITEM_GRANTS_TABLE} SET status = 'revoked', updated_at = NOW()
+        WHERE item_kind = $1 AND item_id = $2::uuid AND user_id = $3
+          AND granted_by = $4 AND status = ANY($5::text[])
+        RETURNING id
+        """,
+        item_kind,
+        item_id,
+        user_id,
+        granted_by,
+        list(GRANT_ACTIVE_STATUSES),
+    )
+    return revoked is not None
+
+
+async def bind_principal(
+    connection: asyncpg.Connection,
+    principal: Principal,
+) -> None:
+    """Bind ``principal`` to the connection for the length of the transaction.
+
+    Sets the ``hermes.principal_id`` / ``hermes.principal_role`` GUCs the RLS
+    policy reads. Uses ``set_config(..., is_local => true)`` so the binding is
+    scoped to the current transaction, mirroring how a per-request JWT scopes
+    ``request.jwt.claims`` on the deployed PostgREST/GoTrue stack.
+    """
+    await connection.execute(
+        "SELECT set_config($1, $2, true), set_config($3, $4, true)",
+        _GUC_ID,
+        principal.user_id,
+        _GUC_ROLE,
+        principal.role,
+    )
+
+
+async def bind_elevated_reads(
+    connection: asyncpg.Connection,
+    enabled: bool,
+) -> None:
+    """Turn database-level downward reads on for this transaction (FG-21 P3).
+
+    Separate from :func:`bind_principal` on purpose. Binding a principal is what
+    every request does; asking to read *other people's* private rows is a
+    distinct decision made by one code path that also writes the audit trail,
+    and keeping it a separate call means no request acquires elevation just by
+    identifying itself. Transaction-local, like the principal binding, so it
+    cannot leak onto a pooled connection's next user.
+    """
+    await connection.execute(
+        "SELECT set_config($1, $2, true)",
+        _GUC_ELEVATION,
+        _ELEVATION_ON if enabled else "off",
+    )
+
+
+#: The least-privilege application role. It has DML on the app schema but is
+#: ``NOBYPASSRLS``/``NOSUPERUSER``, so the C2 read policies actually fire when a
+#: request runs under it (``SET LOCAL ROLE``). The privileged login role that
+#: owns the schema keeps doing DDL/migrations; only request-serving paths drop
+#: to this role after binding a principal.
+APP_ROLE_NAME = "hermes_app"
+
+
+#: The dedicated request-serving *login* role for read-only surfaces (e.g. the
+#: ``agent-home`` Next.js app). Unlike :data:`APP_ROLE_NAME` this role is
+#: ``LOGIN`` and is connected to *directly* — no ``SET ROLE`` and, crucially, no
+#: ``GRANT <role> TO CURRENT_USER`` role-membership statement, which faults the
+#: event trigger on some managed Postgres builds (see :func:`ensure_app_role`).
+READ_ROLE_NAME = "agent_home_app"
+
+
+def _quote_literal(value: str) -> str:
+    """Quote a string as a Postgres literal (DDL like ``PASSWORD`` can't bind).
+
+    ``standard_conforming_strings`` is on by default, so only the single quote
+    needs escaping. NUL/newline are rejected outright rather than escaped.
+    """
+    if "\x00" in value or "\n" in value or "\r" in value:
+        raise ValueError("password may not contain NUL or newline characters")
+    return "'" + value.replace("'", "''") + "'"
+
+
+async def ensure_app_role(
+    connection: asyncpg.Connection,
+    schema: str,
+    *,
+    role_name: str = APP_ROLE_NAME,
+    grant_membership: bool = True,
+) -> None:
+    """Provision the least-privilege, non-BYPASSRLS app role (idempotent).
+
+    Creates ``role_name`` (``NOLOGIN NOSUPERUSER NOBYPASSRLS NOCREATEROLE``),
+    grants it ``USAGE`` on ``schema`` and DML on the schema's current + future
+    tables/sequences, and (when ``grant_membership``) grants membership to the
+    current (privileged) login role so a request-serving connection can
+    ``SET LOCAL ROLE`` to it.
+
+    This is the DB half of the security foundation: the RLS policies installed
+    by :func:`apply_scope_rls` are inert against a ``BYPASSRLS`` connection, so
+    a request must run its queries under this role for the database to enforce
+    C2 visibility as defense-in-depth on top of the app-layer
+    :func:`scope_filter`.
+
+    ``grant_membership=False`` skips only the ``GRANT {role} TO CURRENT_USER``
+    statement. That statement faults the ``ddl_command_end`` event trigger on
+    some managed Postgres builds (notably self-hosted Supabase), terminating the
+    backend. On such builds provision a *login* serving role with
+    :func:`ensure_read_role` and connect to it directly instead of dropping to
+    a ``NOLOGIN`` role via ``SET ROLE``.
+    """
+    if not _VALID_COLUMN.fullmatch(role_name):
+        raise ValueError(f"Invalid role name: {role_name!r}")
+    if not _VALID_SCHEMA.fullmatch(schema):
+        raise ValueError(f"Invalid schema name: {schema!r}")
+    await connection.execute(
+        f"""
+        DO $$
+        BEGIN
+            IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{role_name}')
+            THEN
+                CREATE ROLE {role_name}
+                    NOLOGIN NOSUPERUSER NOBYPASSRLS NOCREATEROLE NOCREATEDB;
+            END IF;
+        END $$;
+        GRANT USAGE ON SCHEMA {schema} TO {role_name};
+        GRANT SELECT, INSERT, UPDATE, DELETE
+            ON ALL TABLES IN SCHEMA {schema} TO {role_name};
+        GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA {schema} TO {role_name};
+        ALTER DEFAULT PRIVILEGES IN SCHEMA {schema}
+            GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO {role_name};
+        ALTER DEFAULT PRIVILEGES IN SCHEMA {schema}
+            GRANT USAGE, SELECT ON SEQUENCES TO {role_name};
+        """
+    )
+    if grant_membership:
+        await connection.execute(f"GRANT {role_name} TO CURRENT_USER;")
+
+
+async def ensure_read_role(
+    connection: asyncpg.Connection,
+    schema: str,
+    *,
+    password: str,
+    role_name: str = READ_ROLE_NAME,
+    extra_schemas: tuple[str, ...] = (),
+) -> None:
+    """Provision a read-only ``LOGIN`` serving role (idempotent, crash-safe).
+
+    Creates ``role_name`` as ``LOGIN NOSUPERUSER NOBYPASSRLS NOCREATEDB
+    NOCREATEROLE NOINHERIT`` and grants it ``CONNECT`` on the current database,
+    ``USAGE`` on ``schema`` (plus ``extra_schemas``), and ``SELECT`` **only on
+    tables that have ``FORCE`` row-level security** — so a table without RLS is
+    unreadable (fail-closed) rather than fully exposed to this non-BYPASSRLS
+    role. A request-serving process (e.g. ``agent-home``) connects *as* this
+    role directly, so Postgres RLS enforces C2 visibility on its reads.
+
+    Unlike :func:`ensure_app_role` this never issues a role-membership grant,
+    which is what crashes the event trigger on some managed Postgres builds.
+
+    Re-run after promoting new RLS-forced tables to extend the SELECT grants;
+    the password is reset on every run (attribute changes are avoided on the
+    idempotent path because altering role attributes needs superuser on some
+    builds).
+    """
+    if not _VALID_COLUMN.fullmatch(role_name):
+        raise ValueError(f"Invalid role name: {role_name!r}")
+    schemas = (schema, *extra_schemas)
+    for name in schemas:
+        if not _VALID_SCHEMA.fullmatch(name):
+            raise ValueError(f"Invalid schema name: {name!r}")
+    if not password:
+        raise ValueError("read role requires a non-empty password")
+    literal = _quote_literal(password)
+    attrs = "LOGIN NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOINHERIT"
+    exists = await connection.fetchval(
+        "SELECT 1 FROM pg_roles WHERE rolname = $1", role_name
+    )
+    if exists:
+        # Password-only ALTER: restating attributes needs superuser on some
+        # builds, and the attributes are already correct from CREATE.
+        await connection.execute(f"ALTER ROLE {role_name} PASSWORD {literal};")
+    else:
+        await connection.execute(
+            f"CREATE ROLE {role_name} {attrs} PASSWORD {literal};"
+        )
+    current_db = await connection.fetchval("SELECT current_database()")
+    await connection.execute(
+        f'GRANT CONNECT ON DATABASE "{current_db}" TO {role_name};'
+    )
+    schema_list = ", ".join(f"'{name}'" for name in schemas)
+    await connection.execute(
+        f"""
+        GRANT USAGE ON SCHEMA {", ".join(schemas)} TO {role_name};
+        DO $$
+        DECLARE r record;
+        BEGIN
+            FOR r IN
+                SELECT n.nspname AS ns, c.relname AS rn
+                FROM pg_class c
+                JOIN pg_namespace n ON n.oid = c.relnamespace
+                WHERE n.nspname IN ({schema_list})
+                    AND c.relkind = 'r'
+                    AND c.relrowsecurity
+                    AND c.relforcerowsecurity
+            LOOP
+                EXECUTE format(
+                    'GRANT SELECT ON %I.%I TO {role_name}', r.ns, r.rn
+                );
+            END LOOP;
+        END $$;
+        """
+    )
+
+
+# ---------------------------------------------------------------------------
+# Principal store (C1 persistence + owner transfer)
+# ---------------------------------------------------------------------------
+
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _validate_user_id(user_id: str) -> str:
+    user_id = (user_id or "").strip()
+    if not _VALID_USER_ID.fullmatch(user_id):
+        raise ValueError(f"Invalid user_id: {user_id!r}")
+    return user_id
+
+
+def _row_to_principal(
+    row: Mapping[str, object],
+    channels: tuple[str, ...] = (),
+) -> Principal:
+    return Principal(
+        user_id=str(row["user_id"]),
+        display=str(row["display"] or ""),
+        role=_coerce_role(row["role"]),
+        channels=channels,
+        created_at=_coerce_dt(row.get("created_at")),
+    )
+
+
+def _coerce_role(value: object) -> Role:
+    for role in ROLES:
+        if value == role:
+            return role
+    raise ValueError(f"Unknown role loaded from store: {value!r}")
+
+
+def _coerce_dt(value: object) -> datetime | None:
+    return value if isinstance(value, datetime) else None
+
+
+@dataclass(frozen=True)
+class TransferResult:
+    """References emitted by one successful ownership transfer."""
+
+    from_user_id: str
+    to_user_id: str
+    approval_ref: str
+    change_ref: str
+
+
+class PrincipalStore:
+    """Async CRUD + owner-transfer over the Supabase ``principals`` table.
+
+    Every method routes through the contract-C3 :class:`SupabaseAppStore`; the
+    store's ``mode`` selects the ``app_dev`` / ``app_prod`` schema. Ownership
+    lives in prod (auth is prod), so :meth:`transfer_owner` requires a prod
+    store and records its approval + change-event there.
+    """
+
+    def __init__(self, store: SupabaseAppStore) -> None:
+        self._store = store
+
+    @property
+    def mode(self) -> str:
+        return self._store.mode
+
+    async def _channels_for(
+        self,
+        connection: asyncpg.Connection,
+        user_id: str,
+    ) -> tuple[str, ...]:
+        rows = await connection.fetch(
+            """
+            SELECT platform, channel_user_id
+            FROM channel_identities
+            WHERE user_id = $1
+            ORDER BY platform, channel_user_id
+            """,
+            user_id,
+        )
+        return tuple(f"{r['platform']}:{r['channel_user_id']}" for r in rows)
+
+    async def enroll(
+        self,
+        user_id: str,
+        *,
+        display: str = "",
+        role: Role = "member",
+        connection: asyncpg.Connection | None = None,
+    ) -> Principal:
+        """Create (or return) a principal. New users default to ``member``.
+
+        Enrolling the very first principal as ``owner`` bootstraps the single
+        owner; a second ``owner`` enrolment raises via the partial unique index.
+        """
+        user_id = _validate_user_id(user_id)
+        if role not in ROLES:
+            raise ValueError(f"Unknown role: {role!r}")
+
+        own_connection = connection is None
+        conn = connection or await self._store.connect()
+        try:
+            await initialize_access(conn)
+            row = await conn.fetchrow(
+                """
+                INSERT INTO principals (user_id, display, role)
+                VALUES ($1, $2, $3)
+                ON CONFLICT (user_id) DO UPDATE SET display = principals.display
+                RETURNING user_id, display, role, created_at
+                """,
+                user_id,
+                display,
+                role,
+            )
+            channels = await self._channels_for(conn, user_id)
+            return _row_to_principal(row, channels)
+        finally:
+            if own_connection:
+                await conn.close()
+
+    async def get(
+        self,
+        user_id: str,
+        *,
+        connection: asyncpg.Connection | None = None,
+    ) -> Principal | None:
+        """Return the principal for ``user_id`` (with channels), else ``None``."""
+        own_connection = connection is None
+        conn = connection or await self._store.connect()
+        try:
+            await initialize_access(conn)
+            row = await conn.fetchrow(
+                """
+                SELECT user_id, display, role, created_at
+                FROM principals WHERE user_id = $1
+                """,
+                user_id,
+            )
+            if row is None:
+                return None
+            channels = await self._channels_for(conn, user_id)
+            return _row_to_principal(row, channels)
+        finally:
+            if own_connection:
+                await conn.close()
+
+    async def list_principals(
+        self,
+        *,
+        connection: asyncpg.Connection | None = None,
+    ) -> list[Principal]:
+        """Return every enrolled principal (owner first), with channels.
+
+        Ordered owner → admin → member → viewer, then by enrolment time, so a
+        management UI/CLI lists the most privileged accounts first.
+        """
+        own_connection = connection is None
+        conn = connection or await self._store.connect()
+        try:
+            await initialize_access(conn)
+            rows = await conn.fetch(
+                """
+                SELECT user_id, display, role, created_at
+                FROM principals
+                ORDER BY
+                    CASE role
+                        WHEN 'owner' THEN 0
+                        WHEN 'admin' THEN 1
+                        WHEN 'member' THEN 2
+                        ELSE 3
+                    END,
+                    created_at,
+                    user_id
+                """
+            )
+            result: list[Principal] = []
+            for row in rows:
+                channels = await self._channels_for(conn, str(row["user_id"]))
+                result.append(_row_to_principal(row, channels))
+            return result
+        finally:
+            if own_connection:
+                await conn.close()
+
+    async def set_role(
+        self,
+        user_id: str,
+        role: Role,
+        *,
+        connection: asyncpg.Connection | None = None,
+    ) -> Principal:
+        """Change an enrolled principal's role (never touching ``owner``).
+
+        Guards the single-owner invariant: this path refuses to *grant* the
+        ``owner`` role and refuses to change the *current owner's* role — both
+        go through the approval-gated :meth:`transfer_owner` instead, so the
+        partial unique index can never be tripped from member management. Raises
+        :class:`KeyError` for an unknown principal.
+        """
+        user_id = _validate_user_id(user_id)
+        if role not in ROLES:
+            raise ValueError(f"Unknown role: {role!r}")
+        if role == _OWNER_ROLE:
+            raise ValueError(
+                "Cannot promote to owner here; use 'hermes owner transfer'."
+            )
+        own_connection = connection is None
+        conn = connection or await self._store.connect()
+        try:
+            await initialize_access(conn)
+            current = await conn.fetchrow(
+                "SELECT role FROM principals WHERE user_id = $1", user_id
+            )
+            if current is None:
+                raise KeyError(f"No such principal: {user_id}")
+            if current["role"] == _OWNER_ROLE:
+                raise ValueError(
+                    "Cannot change the owner's role here; use "
+                    "'hermes owner transfer' to hand off ownership first."
+                )
+            row = await conn.fetchrow(
+                """
+                UPDATE principals SET role = $2 WHERE user_id = $1
+                RETURNING user_id, display, role, created_at
+                """,
+                user_id,
+                role,
+            )
+            channels = await self._channels_for(conn, user_id)
+            return _row_to_principal(row, channels)
+        finally:
+            if own_connection:
+                await conn.close()
+
+    async def link_channel(
+        self,
+        user_id: str,
+        platform: str,
+        channel_user_id: str,
+        *,
+        connection: asyncpg.Connection | None = None,
+    ) -> None:
+        """Map an inbound ``(platform, channel_user_id)`` onto a principal."""
+        user_id = _validate_user_id(user_id)
+        own_connection = connection is None
+        conn = connection or await self._store.connect()
+        try:
+            await initialize_access(conn)
+            await conn.execute(
+                """
+                INSERT INTO channel_identities (platform, channel_user_id, user_id)
+                VALUES ($1, $2, $3)
+                ON CONFLICT (platform, channel_user_id)
+                DO UPDATE SET user_id = EXCLUDED.user_id
+                """,
+                platform,
+                channel_user_id,
+                user_id,
+            )
+        finally:
+            if own_connection:
+                await conn.close()
+
+    async def link_alias(
+        self,
+        alias_subject: str,
+        user_id: str,
+        *,
+        connection: asyncpg.Connection | None = None,
+    ) -> None:
+        """Map an auth-provider login subject onto an existing principal.
+
+        ``alias_subject`` is the stable subject the auth provider puts in the
+        verified session (e.g. a Supabase/GoTrue ``sub`` UUID). ``user_id`` is
+        the principal it should resolve to. Re-linking the same subject
+        repoints it (idempotent upsert). The principal must already exist (the
+        FK enforces this).
+        """
+        alias_subject = (alias_subject or "").strip()
+        if not alias_subject:
+            raise ValueError("alias_subject cannot be empty")
+        user_id = _validate_user_id(user_id)
+        own_connection = connection is None
+        conn = connection or await self._store.connect()
+        try:
+            await initialize_access(conn)
+            await conn.execute(
+                """
+                INSERT INTO principal_aliases (alias_subject, user_id)
+                VALUES ($1, $2)
+                ON CONFLICT (alias_subject)
+                DO UPDATE SET user_id = EXCLUDED.user_id
+                """,
+                alias_subject,
+                user_id,
+            )
+        finally:
+            if own_connection:
+                await conn.close()
+
+    async def resolve_alias(
+        self,
+        alias_subject: str,
+        *,
+        connection: asyncpg.Connection | None = None,
+    ) -> str | None:
+        """Return the principal ``user_id`` a login subject aliases to, else None.
+
+        A subject with no alias row resolves to ``None`` — the caller then
+        treats the subject *itself* as the principal ``user_id`` (the common
+        case: a member enrolled with their subject as their user_id).
+        """
+        alias_subject = (alias_subject or "").strip()
+        if not alias_subject:
+            return None
+        own_connection = connection is None
+        conn = connection or await self._store.connect()
+        try:
+            await initialize_access(conn)
+            row = await conn.fetchrow(
+                "SELECT user_id FROM principal_aliases WHERE alias_subject = $1",
+                alias_subject,
+            )
+            return str(row["user_id"]) if row is not None else None
+        finally:
+            if own_connection:
+                await conn.close()
+
+    async def resolve_by_channel(
+        self,
+        platform: str,
+        channel_user_id: str,
+        *,
+        connection: asyncpg.Connection | None = None,
+    ) -> Principal | None:
+        """Return the principal mapped to a channel identity, else ``None``."""
+        own_connection = connection is None
+        conn = connection or await self._store.connect()
+        try:
+            await initialize_access(conn)
+            row = await conn.fetchrow(
+                """
+                SELECT p.user_id, p.display, p.role, p.created_at
+                FROM channel_identities ci
+                JOIN principals p ON p.user_id = ci.user_id
+                WHERE ci.platform = $1 AND ci.channel_user_id = $2
+                """,
+                platform,
+                channel_user_id,
+            )
+            if row is None:
+                return None
+            channels = await self._channels_for(conn, str(row["user_id"]))
+            return _row_to_principal(row, channels)
+        finally:
+            if own_connection:
+                await conn.close()
+
+    async def get_owner(
+        self,
+        *,
+        connection: asyncpg.Connection | None = None,
+    ) -> Principal | None:
+        """Return the current single owner principal, if one exists."""
+        own_connection = connection is None
+        conn = connection or await self._store.connect()
+        try:
+            await initialize_access(conn)
+            row = await conn.fetchrow(
+                """
+                SELECT user_id, display, role, created_at
+                FROM principals WHERE role = 'owner'
+                """
+            )
+            if row is None:
+                return None
+            channels = await self._channels_for(conn, str(row["user_id"]))
+            return _row_to_principal(row, channels)
+        finally:
+            if own_connection:
+                await conn.close()
+
+    async def transfer_owner(
+        self,
+        new_owner_user_id: str,
+        *,
+        actor: str,
+        approved: bool = False,
+        approval_callback: Callable[..., str] | None = None,
+        demote_to: Role = "admin",
+    ) -> TransferResult:
+        """Atomically move the single owner role to ``new_owner_user_id``.
+
+        Approval-gated (contract C6): the current owner must approve. The
+        transfer demotes the outgoing owner (to ``demote_to``, default
+        ``admin``) and promotes the target in one transaction, so the
+        exactly-one-owner invariant never breaks. A C5 change-event + C6
+        approval row are recorded in ``app_prod``.
+        """
+        new_owner_user_id = _validate_user_id(new_owner_user_id)
+        if demote_to not in ROLES or demote_to == "owner":
+            raise ValueError(f"Invalid demote_to role: {demote_to!r}")
+        if self._store.mode != "prod":
+            raise ValueError("Ownership transfer requires a prod app store")
+
+        from hermes_cli.datastore import initialize_supabase_app
+
+        connection = await self._store.connect()
+        try:
+            await initialize_supabase_app(connection)
+            await initialize_access(connection)
+
+            current = await connection.fetchrow(
+                "SELECT user_id FROM principals WHERE role = 'owner'"
+            )
+            if current is None:
+                raise ValueError(
+                    "No current owner to transfer from; enroll an owner first"
+                )
+            from_user_id = str(current["user_id"])
+            if from_user_id == new_owner_user_id:
+                raise ValueError(
+                    f"{new_owner_user_id!r} is already the owner"
+                )
+            target = await connection.fetchrow(
+                "SELECT user_id FROM principals WHERE user_id = $1",
+                new_owner_user_id,
+            )
+            if target is None:
+                raise KeyError(
+                    f"Target principal not enrolled: {new_owner_user_id}"
+                )
+
+            if not approved and not _request_transfer_approval(
+                from_user_id,
+                new_owner_user_id,
+                approval_callback=approval_callback,
+            ):
+                raise PermissionError("Ownership transfer approval was denied")
+
+            approval_ref = f"apr_{uuid.uuid4().hex}"
+            change_ref = f"chg_{uuid.uuid4().hex}"
+            op = [
+                {
+                    "op": "transfer_owner",
+                    "path": "/principals/owner",
+                    "from": from_user_id,
+                    "to": new_owner_user_id,
+                }
+            ]
+            inverse_op = [
+                {
+                    "op": "transfer_owner",
+                    "path": "/principals/owner",
+                    "from": new_owner_user_id,
+                    "to": from_user_id,
+                }
+            ]
+
+            async with connection.transaction():
+                # Demote the outgoing owner FIRST so the partial unique index
+                # never sees two owners mid-transfer.
+                await connection.execute(
+                    "UPDATE principals SET role = $2 WHERE user_id = $1",
+                    from_user_id,
+                    demote_to,
+                )
+                await connection.execute(
+                    "UPDATE principals SET role = 'owner' WHERE user_id = $1",
+                    new_owner_user_id,
+                )
+                await connection.execute(
+                    """
+                    INSERT INTO app_prod.approvals
+                        (id, action, target_ref, actor, decision)
+                    VALUES ($1, 'owner.transfer', $2, $3, 'approved')
+                    """,
+                    approval_ref,
+                    f"owner:{new_owner_user_id}",
+                    actor,
+                )
+                await connection.execute(
+                    """
+                    INSERT INTO app_prod.changes
+                        (id, actor, mode, target_kind, op, inverse_op,
+                         reversible, approval_ref, backup_ref)
+                    VALUES ($1, $2, 'prod', 'data', $3::jsonb, $4::jsonb,
+                            TRUE, $5, NULL)
+                    """,
+                    change_ref,
+                    actor,
+                    json.dumps(op, sort_keys=True),
+                    json.dumps(inverse_op, sort_keys=True),
+                    approval_ref,
+                )
+        finally:
+            await connection.close()
+
+        return TransferResult(
+            from_user_id=from_user_id,
+            to_user_id=new_owner_user_id,
+            approval_ref=approval_ref,
+            change_ref=change_ref,
+        )
+
+
+def _request_transfer_approval(
+    from_user_id: str,
+    to_user_id: str,
+    *,
+    approval_callback: Callable[..., str] | None,
+) -> bool:
+    from tools.approval import prompt_dangerous_approval
+
+    choice = prompt_dangerous_approval(
+        f"hermes owner transfer {to_user_id}",
+        (
+            f"transfer the single owner role from {from_user_id} to "
+            f"{to_user_id} (irrevocable without a second transfer)"
+        ),
+        allow_permanent=False,
+        approval_callback=approval_callback,
+    )
+    return choice in ("once", "session")
+
+
+# ---------------------------------------------------------------------------
+# resolve_principal — the gateway seam (contract C1)
+# ---------------------------------------------------------------------------
+
+
+def _platform_value(source: ChannelOrigin) -> str:
+    platform = source.platform
+    value = getattr(platform, "value", platform)
+    return str(value).lower()
+
+
+async def resolve_principal(
+    source: ChannelOrigin,
+    *,
+    store: PrincipalStore,
+    auto_enroll_if_paired: bool = True,
+    is_paired: Callable[[str, str], bool] | None = None,
+) -> Principal | None:
+    """Map an inbound channel identity to a :class:`Principal` (contract C1).
+
+    Resolution order:
+
+    1. An existing ``channel_identities`` row wins.
+    2. Otherwise, if ``auto_enroll_if_paired`` and the user is pairing-approved
+       (``gateway/pairing.py`` via ``is_paired``), enrol them as ``member`` and
+       link the channel identity.
+    3. Otherwise return ``None`` (unenrolled / unauthorized).
+
+    Pairing/authorization stays owned by ``gateway/pairing.py`` +
+    ``gateway/authz_mixin.py``; this seam only maps an already-authorized
+    identity onto a system principal.
+    """
+    channel_user_id = source.user_id
+    if not channel_user_id:
+        return None
+    platform = _platform_value(source)
+
+    connection = await store._store.connect()
+    try:
+        existing = await store.resolve_by_channel(
+            platform, channel_user_id, connection=connection
+        )
+        if existing is not None:
+            return existing
+        if not auto_enroll_if_paired:
+            return None
+        if is_paired is None:
+            is_paired = _default_is_paired
+        if not is_paired(platform, channel_user_id):
+            return None
+        display = str(getattr(source, "user_name", "") or "")
+        principal = await store.enroll(
+            channel_user_id,
+            display=display,
+            role="member",
+            connection=connection,
+        )
+        await store.link_channel(
+            principal.user_id,
+            platform,
+            channel_user_id,
+            connection=connection,
+        )
+        # Re-read so the returned principal carries the linked channel.
+        return await store.get(principal.user_id, connection=connection)
+    finally:
+        await connection.close()
+
+
+def _default_is_paired(platform: str, channel_user_id: str) -> bool:
+    from gateway.pairing import PairingStore
+
+    return PairingStore().is_approved(platform, channel_user_id)
