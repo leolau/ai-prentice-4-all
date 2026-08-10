@@ -1,6 +1,34 @@
 # FG-28 — Multi-profile administration (one admin, several profiles)
 
-**Wave:** P6-C (Phase-6 **follow-on** — after FG-26; requires FG-27 Layers 1+3) · **Owner agent:** _unassigned_ · **Status:** PLAN — not started
+**Wave:** P6-C (Phase-6 follow-on — after FG-26; requires FG-27 Layers 3+1). **Also carries the one-gateway-for-all-profiles consolidation.** · **Owner agent:** _unassigned_ · **Status:** PLAN — not started
+
+## Reframing (2026-08-10) — this is the console over the goal tree
+
+The domain model changed after this FG was written, and it changes what the FG
+*is* more than what it builds.
+
+A **profile is not a tenant and not a cohort of people** — it is the *instrument
+for one sub-goal*, carrying the behaviour that sub-goal needs (FG-29). **People
+participate in as many profiles as their work spans**, holding a `principals`
+row in each under one shared GoTrue subject, with separate memory in each.
+
+Three consequences:
+
+1. **The "users belong to exactly one profile" constraint below was imported,
+   not imposed.** The same person can already hold rows in `finance` and
+   `product`. What is per-profile is their *data*, which is the isolation we
+   want. A CTO who works on cashflow and product quality is one login and two
+   working memories — no groups, no cross-profile identity work.
+2. **This is no longer "administration spanning tenants."** It is one console
+   over the entity's goal tree: the owner sees the whole tree, and each person
+   sees the participations they hold. Administration is a consequence of that
+   view, not its purpose.
+3. **It is also a runtime consolidation**, not only a UI — see "One gateway for
+   all profiles" below, which removes the per-profile daemon cost.
+
+The authority model, the routing, the owner-fallback hazard and the account-vs-
+enrolment split below are all unchanged by the reframing. Read them as written;
+only the *motivation* section above is superseded.
 
 ## Summary
 
@@ -158,6 +186,58 @@ per-profile. This is a **hypothesis from reading the code, not an observed
 failure** — the live box has one profile, so it cannot be exhibiting it.
 Confirming or refuting it is the **first task** of this FG, because if it is
 real it is a bug in shipped code and outranks the feature.
+
+## One gateway for all profiles (decided 2026-08-10)
+
+**In scope for this FG: run a single gateway per box, serving every profile.**
+The alternative — one daemon per profile — costs a measured **150 MB resident
+each** before any conversation, on top of ~225 MB for a per-profile console. At
+ten sub-goal profiles that is ~3.7 GB standing still, against 9.6 GB available
+on the current box.
+
+**The mechanism already exists and is substantially implemented.** Measured and
+read on 2026-08-10:
+
+- `gateway.multiplex_profiles` (default **false**, preserving one-gateway-per-
+  profile) turns it on; `profiles_to_serve(multiplex=True)` is the single
+  chokepoint for the served set.
+- `_profile_runtime_scope(profile_home)` in `gateway/run.py` combines the two
+  seams a multiplexer needs: `set_hermes_home_override` (config, skills, memory,
+  SOUL, sessions) **and** `set_secret_scope` (that profile's `.env`).
+- `agent/secret_scope.py` is the answer to the process-global environment
+  problem described above: a **context-local** secret scope that propagates into
+  the agent worker thread via `copy_context()`, deliberately does **not** mutate
+  `os.environ` (so subprocesses cannot inherit another profile's keys), and
+  **fails closed** — when multiplexing is active an unscoped read raises
+  `UnscopedSecretError` rather than silently returning the wrong profile's value.
+- Same-credential collision detection: two profiles polling one bot token is
+  refused at startup, at the only point that sees every profile's resolved
+  credentials together.
+- Port-binding platforms (`webhook`, `api_server`, `feishu`, `wecom_callback`,
+  `bluebubbles`, `sms`, `msgraph_webhook`) are restricted to the default
+  profile, which owns the single shared listener and serves the rest under a
+  `/p/<profile>/` URL prefix. A secondary profile enabling one is a hard startup
+  error, not a silently dropped adapter.
+- Served profiles are recorded in runtime status for `hermes status`.
+
+**So the work here is not implementation — it is finishing the migration.** The
+fail-closed guarantee only protects callers that go through `get_secret()`, and
+only **6 call sites** currently do, against ~2,250 direct `os.getenv`/
+`os.environ` reads in the tree. An unmigrated `get_secret` caller fails loudly;
+an unmigrated `os.getenv` caller **silently returns the wrong profile's value**.
+That asymmetry is the whole risk.
+
+Tasks:
+
+- Audit every credential-reading path reachable from a gateway turn — provider
+  keys, platform tokens, MCP server env, terminal backends, subprocess spawns —
+  and migrate each to `get_secret()`. Prioritise by whether the value can differ
+  per profile: bot tokens and model keys genuinely do; the app DSN and
+  service-role key do not (one shared Supabase), so they are not urgent.
+- A test that runs two profiles with **different** bot tokens and model keys
+  through one gateway and asserts each turn resolves its own — the regression
+  test the migration needs.
+- Then enable `gateway.multiplex_profiles` on the box and re-measure.
 
 ## Recommended architecture — fan-out, not multiplex
 
@@ -361,6 +441,7 @@ secret-isolation tests green on real Postgres; `scripts/run_tests.sh`, `ruff`,
 
 | Date | Edition | Author | Change | Rationale |
 |------|---------|--------|--------|-----------|
+| 2026-08-10 | 3 | devin (for Leo) | Reframed as the goal-tree console; one-gateway-for-all-profiles brought into scope | Leo's domain model: a **profile is the instrument for one sub-goal**, not a tenant and not a container of people, and **people participate in as many profiles as their work spans**. That retires this FG's "users belong to exactly one profile" premise — an imported constraint, not one the system imposes, since one shared GoTrue subject can hold a `principals` row in several profiles with separate memory in each — and it retires FG-25 for v1, because profiles now carry the cohort structure that hierarchical groups were designed to express. The mechanics below (authority via the `principals` row, target-profile routing, owner-fallback refusal, account-vs-enrolment split) are unchanged; only the motivation is. **Also brought one gateway per box into scope**, at Leo's request and on measured evidence: a per-profile daemon is 150 MB resident before any conversation (plus ~225 MB for a per-profile console), so ten sub-goal profiles cost ~3.7 GB idle against 9.6 GB available. Reading the code corrected an earlier claim of mine: `agent/secret_scope.py` **already solves** the process-global-environment problem for the gateway path with a context-local, fail-closed secret scope that never mutates `os.environ`, alongside same-token collision detection and a shared listener with `/p/<profile>/` routing. The remaining work is finishing the migration, not building it — and the risk is precisely asymmetric: an unmigrated `get_secret()` caller raises, while an unmigrated `os.getenv` caller silently returns the wrong profile's value, with only 6 of ~2,250 env reads migrated so far. |
 | 2026-08-10 | 2 | devin (for Leo) | Shared-Supabase decision resolved; account-vs-enrolment authority split added | Leo confirmed **all profiles share one Supabase instance**, closing prerequisite (1): one GoTrue, one subject namespace, so the no-new-tables entitlement model holds and the kanban identity ambiguity closes incidentally. Two corrections follow. **(a) The `os.environ` finding is weaker than written** — with one Supabase, `DATABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` are the *same value* in every profile, so the process-global environment cannot make them wrong and in-process multiplexing is feasible for the datastore. What survives is per-profile secrets that genuinely differ (model API keys) and the fact that the property holds only by coincidence — nothing declares or enforces that the values must match, so the day one profile gets its own key the multiplexed process silently uses the wrong one. Fan-out is therefore downgraded from hard blocker to strong recommendation, with an explicit fail-closed assertion required if multiplexing is chosen instead. **(b) A new hole, and the sharper one:** the account is now box-wide while authority stays per profile. `MemberService` performs ban/delete/reset through the GoTrue admin API with the shared service-role key, gated only by `require_member_admin` against the *current* profile — so an `hr` admin can ban an account enrolled in `engineers` and revoke access there. Split the verbs: "deactivate" in a profile means **un-enrol**, and account-level operations need owner or a target enrolled solely in profiles the actor administers. Symmetrically, every profile process holding that key means one compromised process is a box-wide account compromise, which argues for account operations living behind the control plane. Also promoted FG-27 Layer 3 to an absolute prerequisite: one Supabase means every profile shares a DSN, so without profile-derived schemas the second profile merges into the first on contact. |
 | 2026-08-10 | 1 | devin (for Leo) | Created FG doc | Leo asked for one admin to create users in several profiles (CTO → engineers+testers, CFO → hr) while users stay single-profile. Code reading found the entitlement model needs **no new tables** — the GoTrue `sub` is already `principal.user_id`, so a per-profile `principals` row *is* the per-profile grant, and `_comms_resolve_principal` already 409s for an authenticated-but-unenrolled subject. It also found the architectural constraint: `HERMES_HOME` is a contextvar but `os.environ` is not, and `dsn: ${DATABASE_URL}` resolves through `_expand_env_vars` reading `os.environ`, with ~2,250 env call sites and no context-local seam — so a single process cannot hold per-profile secrets, and the console must fan out to per-profile processes rather than multiplex in-process. Recorded the owner-fallback in `_comms_resolve_principal` as the most dangerous hole: correct today, an escalation to *the target profile's owner* the moment a sessionless service-to-service hop is introduced. Sequenced after FG-27 Layers 1+3 because per-profile schemas turn a wrong-DSN resolution from a silent merge into a detectable error. |
 
