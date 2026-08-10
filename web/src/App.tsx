@@ -21,7 +21,9 @@ import {
 import {
   Activity,
   BarChart3,
+  Bell,
   BookOpen,
+  Brain,
   Clock,
   Code,
   Cpu,
@@ -42,11 +44,13 @@ import {
   Puzzle,
   Radio,
   RotateCw,
+  Send,
   Settings,
   Shield,
   ShieldCheck,
   Sparkles,
   Star,
+  Target,
   Terminal,
   Users,
   Webhook,
@@ -72,25 +76,33 @@ import { ProfileSwitcher } from "@/components/ProfileSwitcher";
 import { ProfileScopeBanner } from "@/components/ProfileScopeBanner";
 import { useSystemActions } from "@/contexts/useSystemActions";
 import type { SystemAction } from "@/contexts/system-actions-context";
-import ConfigPage from "@/pages/ConfigPage";
-import DocsPage from "@/pages/DocsPage";
-import EnvPage from "@/pages/EnvPage";
-import FilesPage from "@/pages/FilesPage";
-import SessionsPage from "@/pages/SessionsPage";
-import LogsPage from "@/pages/LogsPage";
-import AnalyticsPage from "@/pages/AnalyticsPage";
-import ModelsPage from "@/pages/ModelsPage";
-import CronPage from "@/pages/CronPage";
-import ProfilesPage from "@/pages/ProfilesPage";
-import ProfileBuilderPage from "@/pages/ProfileBuilderPage";
-import SkillsPage from "@/pages/SkillsPage";
-import PluginsPage from "@/pages/PluginsPage";
-import McpPage from "@/pages/McpPage";
-import PairingPage from "@/pages/PairingPage";
-import ChannelsPage from "@/pages/ChannelsPage";
-import WebhooksPage from "@/pages/WebhooksPage";
-import SystemPage from "@/pages/SystemPage";
-import ChatPage from "@/pages/ChatPage";
+import ConfigPage from "@/screens/ConfigPage";
+import DocsPage from "@/screens/DocsPage";
+import EnvPage from "@/screens/EnvPage";
+import FilesPage from "@/screens/FilesPage";
+import SessionsPage from "@/screens/SessionsPage";
+import LogsPage from "@/screens/LogsPage";
+import AnalyticsPage from "@/screens/AnalyticsPage";
+import MemoryPage from "@/screens/MemoryPage";
+import ModelsPage from "@/screens/ModelsPage";
+import CronPage from "@/screens/CronPage";
+import ProfilesPage from "@/screens/ProfilesPage";
+import ProfileBuilderPage from "@/screens/ProfileBuilderPage";
+import SkillsPage from "@/screens/SkillsPage";
+import PluginsPage from "@/screens/PluginsPage";
+import McpPage from "@/screens/McpPage";
+import ToolsPage from "@/screens/ToolsPage";
+import PairingPage from "@/screens/PairingPage";
+import ChannelsPage from "@/screens/ChannelsPage";
+import WebhooksPage from "@/screens/WebhooksPage";
+import SystemPage from "@/screens/SystemPage";
+import CommsPage from "@/screens/CommsPage";
+import CorePage from "@/screens/CorePage";
+import GtsCentrePage from "@/screens/GtsCentrePage";
+import OnboardingPage from "@/screens/OnboardingPage";
+import WebviewPage from "@/screens/WebviewPage";
+import TelegramPage from "@/screens/TelegramPage";
+import ChatPage from "@/screens/ChatPage";
 import { LanguageSwitcher } from "@/components/LanguageSwitcher";
 import { ThemeSwitcher } from "@/components/ThemeSwitcher";
 import { useI18n } from "@/i18n";
@@ -135,13 +147,21 @@ const BUILTIN_ROUTES_CORE: Record<string, ComponentType> = {
   "/sessions": SessionsPage,
   "/files": FilesPage,
   "/analytics": AnalyticsPage,
+  "/memory": MemoryPage,
   "/models": ModelsPage,
   "/logs": LogsPage,
   "/cron": CronPage,
   "/skills": SkillsPage,
   "/plugins": PluginsPage,
   "/mcp": McpPage,
+  "/tools": ToolsPage,
   "/pairing": PairingPage,
+  "/comms": CommsPage,
+  "/core": CorePage,
+  "/gts": GtsCentrePage,
+  "/onboarding": OnboardingPage,
+  "/webview": WebviewPage,
+  "/telegram": TelegramPage,
   "/channels": ChannelsPage,
   "/webhooks": WebhooksPage,
   "/system": SystemPage,
@@ -185,9 +205,16 @@ const BUILTIN_NAV_REST: NavItem[] = [
   { path: "/skills", labelKey: "skills", label: "Skills", icon: Package },
   { path: "/plugins", labelKey: "plugins", label: "Plugins", icon: Puzzle },
   { path: "/mcp", label: "MCP", icon: Plug },
+  { path: "/tools", label: "Tools", icon: Zap },
   { path: "/channels", label: "Channels", icon: Radio },
   { path: "/webhooks", label: "Webhooks", icon: Webhook },
   { path: "/pairing", label: "Pairing", icon: ShieldCheck },
+  { path: "/comms", label: "Comms", icon: Bell },
+  { path: "/onboarding", label: "Getting started", icon: Sparkles },
+  { path: "/core", label: "Core area", icon: Shield },
+  { path: "/gts", label: "GTS Centre", icon: Target },
+  { path: "/telegram", label: "Telegram", icon: Send },
+  { path: "/webview", label: "Agent webview", icon: Globe },
   { path: "/profiles", labelKey: "profiles", label: "Profiles", icon: Users },
   { path: "/config", labelKey: "config", label: "Config", icon: Settings },
   { path: "/env", labelKey: "keys", label: "Keys", icon: KeyRound },
@@ -203,6 +230,7 @@ const BUILTIN_NAV_REST: NavItem[] = [
 const ICON_MAP: Record<string, ComponentType<{ className?: string }>> = {
   Activity,
   BarChart3,
+  Brain,
   Clock,
   Cpu,
   FileText,

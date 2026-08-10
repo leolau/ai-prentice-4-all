@@ -482,6 +482,9 @@ class AIAgent:
         chat_type: str = None,
         thread_id: str = None,
         gateway_session_key: str = None,
+        internal_user_id: Optional[str] = None,
+        internal_user_role: Optional[str] = None,
+        session_task: Optional[str] = None,
         skip_context_files: bool = False,
         load_soul_identity: bool = False,
         skip_memory: bool = False,
@@ -557,6 +560,9 @@ class AIAgent:
             chat_type=chat_type,
             thread_id=thread_id,
             gateway_session_key=gateway_session_key,
+            internal_user_id=internal_user_id,
+            internal_user_role=internal_user_role,
+            session_task=session_task,
             skip_context_files=skip_context_files,
             load_soul_identity=load_soul_identity,
             skip_memory=skip_memory,
@@ -2431,6 +2437,17 @@ class AIAgent:
         retryable: Optional[bool] = None,
         reason: Optional[str] = None,
     ) -> None:
+        try:
+            from hermes_cli.interactions import current_trace_id, observe
+
+            observe(
+                "error",
+                ref=api_request_id,
+                summary=f"{error_type}: {reason or 'api_request_error'}",
+            )
+            interaction_trace_id = current_trace_id() or ""
+        except Exception:
+            interaction_trace_id = ""
         # Lazy module import (not from-import) so tests that
         # ``monkeypatch.setattr("hermes_cli.plugins.has_hook", ...)`` still
         # take effect on this call site. After first call the import is a
@@ -2466,6 +2483,7 @@ class AIAgent:
                     "message": error_message,
                 },
                 request=self._api_request_payload_for_hook(api_kwargs),
+                trace_id=interaction_trace_id,
             )
         except Exception:
             pass

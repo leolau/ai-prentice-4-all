@@ -291,6 +291,179 @@ class TestInstall:
         assert get_env_value("DEMO_KEY") == "secret-val"
         assert "demo" in load_config()["mcp_servers"]
 
+    def test_install_api_key_stdio_passes_env_to_subprocess(
+        self, catalog_dir, monkeypatch
+    ):
+        """A stdio server gets a filtered environment, so credentials only
+        reach it when the config names them.
+
+        The config stores ``${VAR}`` placeholders resolved at connect time, so
+        the plaintext stays in ``.env`` — hence the raw-config read, since
+        ``load_config()`` expands them."""
+        body = _basic_manifest(
+            auth={
+                "type": "api_key",
+                "env": [
+                    {"name": "DEMO_KEY", "prompt": "key", "secret": True},
+                    {
+                        "name": "DEMO_MODE",
+                        "prompt": "mode",
+                        "secret": False,
+                        "default": "read",
+                    },
+                ],
+            }
+        )
+        _write_manifest(catalog_dir, "demo", body)
+
+        from hermes_cli import mcp_catalog
+
+        monkeypatch.setattr(mcp_catalog, "_prompt_input", lambda *a, **kw: "val")
+
+        from hermes_cli.mcp_catalog import install_entry
+        from hermes_cli.config import read_raw_config
+
+        install_entry(_entry("demo"), enable=True)
+
+        server = read_raw_config()["mcp_servers"]["demo"]
+        assert server["env"] == {
+            "DEMO_KEY": "${DEMO_KEY}",
+            "DEMO_MODE": "${DEMO_MODE}",
+        }
+
+    def test_install_skips_env_passthrough_for_unset_optional_var(
+        self, catalog_dir, monkeypatch
+    ):
+        """An unresolved ``${VAR}`` is passed through literally, so a var the
+        user skipped must not be named in the config at all."""
+        body = _basic_manifest(
+            auth={
+                "type": "api_key",
+                "env": [
+                    {"name": "DEMO_KEY", "prompt": "key", "secret": True},
+                    {
+                        "name": "DEMO_OPTIONAL",
+                        "prompt": "optional",
+                        "required": False,
+                        "secret": False,
+                    },
+                ],
+            }
+        )
+        _write_manifest(catalog_dir, "demo", body)
+
+        from hermes_cli import mcp_catalog
+
+        answers = {"key": "val", "optional": ""}
+        monkeypatch.setattr(
+            mcp_catalog, "_prompt_input", lambda prompt, **kw: answers[prompt]
+        )
+
+        from hermes_cli.mcp_catalog import install_entry
+        from hermes_cli.config import read_raw_config
+
+        install_entry(_entry("demo"), enable=True)
+
+        assert read_raw_config()["mcp_servers"]["demo"]["env"] == {
+            "DEMO_KEY": "${DEMO_KEY}"
+        }
+
+    def test_install_http_api_key_writes_no_env_block(self, catalog_dir, monkeypatch):
+        """HTTP transports carry credentials in headers, not a child env."""
+        body = _basic_manifest(
+            transport={"type": "http", "url": "https://mcp.example.com/mcp"},
+            auth={
+                "type": "api_key",
+                "env": [{"name": "DEMO_KEY", "prompt": "key", "secret": True}],
+            },
+        )
+        _write_manifest(catalog_dir, "demo", body)
+
+        from hermes_cli import mcp_catalog
+
+        monkeypatch.setattr(mcp_catalog, "_prompt_input", lambda *a, **kw: "val")
+
+        from hermes_cli.mcp_catalog import install_entry
+        from hermes_cli.config import read_raw_config
+
+        install_entry(_entry("demo"), enable=True)
+
+        server = read_raw_config()["mcp_servers"]["demo"]
+        assert "env" not in server
+        # No subprocess to inherit the key: the header is the only path the
+        # credential has to the server.
+        assert server["headers"] == {"Authorization": "Bearer ${DEMO_KEY}"}
+
+    def test_install_http_api_key_custom_header(self, catalog_dir, monkeypatch):
+        body = _basic_manifest(
+            transport={"type": "http", "url": "https://mcp.example.com/mcp"},
+            auth={
+                "type": "api_key",
+                "header": "X-Api-Key",
+                "header_value": "${DEMO_KEY}",
+                "env": [{"name": "DEMO_KEY", "prompt": "key", "secret": True}],
+            },
+        )
+        _write_manifest(catalog_dir, "demo", body)
+
+        from hermes_cli import mcp_catalog
+
+        monkeypatch.setattr(mcp_catalog, "_prompt_input", lambda *a, **kw: "val")
+
+        from hermes_cli.mcp_catalog import install_entry
+        from hermes_cli.config import read_raw_config
+
+        install_entry(_entry("demo"), enable=True)
+
+        assert read_raw_config()["mcp_servers"]["demo"]["headers"] == {
+            "X-Api-Key": "${DEMO_KEY}"
+        }
+
+    def test_install_http_api_key_unset_writes_no_header(self, catalog_dir, monkeypatch):
+        """An unresolved ${VAR} would be sent literally — write nothing instead."""
+        body = _basic_manifest(
+            transport={"type": "http", "url": "https://mcp.example.com/mcp"},
+            auth={
+                "type": "api_key",
+                "env": [
+                    {
+                        "name": "DEMO_UNSET_KEY",
+                        "prompt": "key",
+                        "required": False,
+                        "secret": True,
+                    }
+                ],
+            },
+        )
+        _write_manifest(catalog_dir, "demo", body)
+
+        from hermes_cli import mcp_catalog
+
+        monkeypatch.setattr(mcp_catalog, "_prompt_input", lambda *a, **kw: "")
+
+        from hermes_cli.mcp_catalog import install_entry
+        from hermes_cli.config import read_raw_config
+
+        install_entry(_entry("demo"), enable=True)
+
+        assert "headers" not in read_raw_config()["mcp_servers"]["demo"]
+
+    def test_manifest_header_value_undeclared_var_rejected(self, catalog_dir):
+        body = _basic_manifest(
+            transport={"type": "http", "url": "https://mcp.example.com/mcp"},
+            auth={
+                "type": "api_key",
+                "header_value": "Bearer ${OTHER_KEY}",
+                "env": [{"name": "DEMO_KEY", "prompt": "key", "secret": True}],
+            },
+        )
+        path = _write_manifest(catalog_dir, "demo", body)
+
+        from hermes_cli.mcp_catalog import CatalogError, _parse_manifest
+
+        with pytest.raises(CatalogError, match="OTHER_KEY"):
+            _parse_manifest(path)
+
     def test_install_http_oauth_writes_auth_marker(self, catalog_dir):
         body = _basic_manifest(
             transport={"type": "http", "url": "https://mcp.example.com/sse"},

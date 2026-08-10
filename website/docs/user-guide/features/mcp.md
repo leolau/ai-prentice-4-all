@@ -76,7 +76,11 @@ merging a PR.
 Catalog entries can require:
 
 - **API key** — Hermes prompts at install time and writes the value to
-  `~/.hermes/.env`. Non-secret values (base URLs) go to the same file.
+  `~/.hermes/.env`. Non-secret values (base URLs) go to the same file. For a
+  stdio server, each variable is also referenced from your config as
+  `env: {VAR: "${VAR}"}`, since stdio servers are launched with a filtered
+  environment and only see what the config names. The plaintext stays in
+  `.env`; the config holds the reference.
 - **OAuth** (remote MCP) — written as `auth: oauth` in your config; the MCP
   client opens a browser on first connection.
 - **OAuth** (third-party provider like Google/GitHub) — Hermes points you at
@@ -154,6 +158,32 @@ Note this is distinct from `${INSTALL_DIR}` in catalog manifests, which is
 substituted at install-time with the path the catalog cloned the entry's
 repo into.
 
+### How a catalog credential reaches the server
+
+`auth.type: api_key` prompts for the manifest's `env:` vars and saves them to
+`~/.hermes/.env`. Where the install writes the reference depends on the
+transport:
+
+- **stdio** — an `env:` block naming each var (`FOO: "${FOO}"`), since the
+  subprocess is spawned with a filtered environment and only sees what the
+  config names.
+- **http** — a request header, since there is no subprocess. The default is
+  `Authorization: Bearer ${FIRST_VAR}`; a manifest can override it:
+
+  ```yaml
+  auth:
+    type: api_key
+    header: X-Api-Key                 # default: Authorization
+    header_value: "${ACME_TOKEN}"     # default: "Bearer ${<first env var>}"
+    env:
+      - name: ACME_TOKEN
+        prompt: "Acme API token"
+  ```
+
+  `header_value` may only reference vars declared in `env:`. If none of them
+  has a value in `.env`, no header is written at all — an unresolved `${VAR}`
+  would otherwise be sent to the server as a literal credential.
+
 ### Updating tool selection later
 
 ```bash
@@ -211,7 +241,7 @@ Use HTTP servers when:
 
 ### OAuth-authenticated HTTP servers
 
-Most hosted MCP servers (Linear, Sentry, Atlassian, Asana, Figma, Stripe, …) require OAuth 2.1 instead of a static bearer token. Set `auth: oauth` and Hermes handles discovery, dynamic client registration, PKCE, token exchange, refresh, and step-up auth via the MCP Python SDK.
+Most hosted MCP servers (Linear, Canva, Sentry, Atlassian, Asana, Figma, Stripe, …) require OAuth 2.1 instead of a static bearer token. Set `auth: oauth` and Hermes handles discovery, dynamic client registration, PKCE, token exchange, refresh, and step-up auth via the MCP Python SDK.
 
 ```yaml
 mcp_servers:

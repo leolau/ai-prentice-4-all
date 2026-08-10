@@ -57,6 +57,7 @@ The repo ships these bundled plugins under `plugins/`. All are opt-in — enable
 |---|---|---|
 | `disk-cleanup` | hooks + slash command | Auto-track ephemeral files and clean them on session end |
 | `security-guidance` | hooks | Pattern-match dangerous code on `write_file`/`patch` and append a security warning (or block) — 25 rules (Apache-2.0 fork of Anthropic's `claude-plugins-official` patterns) |
+| `tool-approval` | hooks | Require explicit user approval before every call to a named tool (`approvals.tools` patterns) — e.g. an MCP server holding cloud credentials |
 | `observability/langfuse` | hooks | Trace turns / LLM calls / tools to [Langfuse](https://langfuse.com) |
 | `observability/nemo_relay` | hooks | Relay observability events (turns / LLM calls / tools) to an NVIDIA NeMo endpoint |
 | `teams_pipeline` | standalone | Microsoft Teams meeting pipeline — Graph-backed, transcript-first meeting summaries |
@@ -139,6 +140,36 @@ The file is still written. The model reads the warning in the next turn's tool m
 **Disabling again:** `hermes plugins disable security-guidance`.
 
 **What it does not do (yet):** the upstream Anthropic plugin has two more layers — an LLM diff review on each agent turn that touched files, and an agentic commit-time review that traces data flow across files. Neither is ported. The agent can already run those reviews on demand via `delegate_task`.
+
+### tool-approval
+
+Requires explicit user approval before a named tool runs. Hermes' built-in approval gate is command-shaped — it inspects terminal commands and executed code — so a tool that reaches outside the box through a structured API never passes through it. The motivating case is an MCP server holding cloud credentials: `mcp_aws_api_call_aws` can run `aws ec2 terminate-instances` with no prompt unless something asks first.
+
+Enable it and list the tools to gate:
+
+```yaml
+plugins:
+  enabled:
+    - tool-approval
+
+approvals:
+  tools:
+    - mcp_aws_api_*
+```
+
+`approvals.tools` holds fnmatch patterns matched case-sensitively against the tool name the model called (MCP tools are `mcp_<server>_<tool>`, with `-` in the server name becoming `_`). An empty or missing list makes the plugin a no-op.
+
+| Key | Default | Effect |
+|---|---|---|
+| `approvals.tools` | `[]` | Tool-name patterns that require per-call approval |
+| `approvals.tools_timeout` | 300 | Seconds to wait for the answer |
+| `approvals.tools_respect_bypass` | `false` | When `true`, `--yolo` / `approvals.mode: off` / a session `/yolo` skips these prompts too |
+
+The prompt goes to whichever surface owns the session — native approve/deny buttons on Telegram, Slack and Discord, the dangerous-command prompt on CLI/TUI — and shows the tool name plus its arguments, with credential-looking values redacted and long payloads truncated.
+
+**Every call prompts**; there is no session-wide "approve all", because that is the point of listing a tool here. It **fails closed**: decline, timeout, a session with no approval channel, or an error inside the approval machinery all block the call, and the model is told the call did not run and not to retry.
+
+Server-side consent flags are complementary, not equivalent. The AWS API MCP server's `REQUIRE_MUTATION_CONSENT=true` only elicits for calls its read-only operation list classifies as mutating, and its `elicitList` security policy needs one exact `aws <service> <operation>` string per API — neither covers "ask me before this tool does anything". Leaving the server flag on as well means writes are still gated if the plugin is ever disabled, at the cost of two prompts per write.
 
 ### observability/langfuse
 

@@ -1,0 +1,69 @@
+# Nous-approved MCP catalog entry.
+# Presence in this directory = approval. Merged via PR review.
+manifest_version: 1
+
+name: github
+description: Read and write GitHub repos, issues, pull requests, releases, and code search.
+source: https://github.com/github/github-mcp-server
+
+# GitHub's official remote MCP server: Streamable HTTP, hosted by GitHub, no
+# local install. The trailing slash matters — https://api.githubcopilot.com/mcp
+# (no slash) redirects and some clients drop the Authorization header across it.
+#
+# The endpoint also accepts toolset scoping in the path
+# (…/mcp/x/repos, …/mcp/x/issues, …/mcp/x/pull_requests) and read-only mode
+# (…/mcp/readonly). The bare path used here exposes the full ~44-tool surface;
+# scope it down if the tool schema cost per API call matters more than reach.
+transport:
+  type: http
+  url: https://api.githubcopilot.com/mcp/
+
+# The server authenticates with a GitHub PAT presented as a bearer token; it
+# does not require the OAuth flow, so it works on headless hosts.
+auth:
+  type: api_key
+  header: Authorization
+  header_value: "Bearer ${GITHUB_PERSONAL_ACCESS_TOKEN}"
+  env:
+    - name: GITHUB_PERSONAL_ACCESS_TOKEN
+      prompt: "GitHub PAT (fine-grained, or classic with the 'repo' scope)"
+      secret: true
+
+post_install: |
+  Token scope is the only real permission boundary here — the approval prompt
+  below is a speed bump, not a boundary. Prefer a fine-grained token limited to
+  the repositories you want the agent touching, with Contents / Pull requests /
+  Issues set to the least access you can live with. A classic token with `repo`
+  grants write on every repo you can reach, and `workflow` additionally lets the
+  agent edit CI definitions.
+
+  Verify the token independently before installing:
+    curl -s -H "Authorization: Bearer $GITHUB_PERSONAL_ACCESS_TOKEN" \
+      https://api.github.com/user
+
+  Two things worth setting up alongside it:
+
+  1. Approval-gate the tools. Add to config.yaml:
+       approvals:
+         tools: ["mcp_github_*"]
+       plugins:
+         enabled: [tool-approval]
+     Every GitHub call then asks before it runs.
+
+  2. Keep the credential off the general env. By default the installer writes
+     the token to .env, where every terminal/execute_code child inherits it —
+     so `gh`/`git`/`curl` reach GitHub with no prompt, and the gate above only
+     covers the MCP tools. To close that path, delete the token from .env and
+     inline the literal value in the server's headers block instead:
+       mcp_servers:
+         github:
+           url: https://api.githubcopilot.com/mcp/
+           headers:
+             Authorization: "Bearer github_pat_…"   # literal, not ${VAR}
+     Hermes only sends that header to this server, so nothing else on the host
+     picks the credential up by default. It remains readable in config.yaml by
+     anything running as the Hermes user.
+
+  Restart your Hermes session so the GitHub tools are loaded, or re-run the
+  tool checklist with:
+    hermes mcp configure github

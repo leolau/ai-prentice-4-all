@@ -33,12 +33,27 @@ import threading
 import time
 import urllib.error
 import urllib.parse
+import uuid
 import zipfile
 
 from hermes_cli._subprocess_compat import windows_detach_flags, windows_hide_flags
 import urllib.request
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, cast, Dict, List, Optional, Tuple, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from hermes_cli.gts import EvaluationMethod
+    from hermes_cli.access import Principal
+    from hermes_cli.interactions import (
+        InteractionKind,
+        InteractionLedger,
+        InteractionTrace,
+    )
+    from hermes_cli.webview import (
+        WebviewAction,
+        WebviewRegistry,
+        WebviewSession,
+    )
 
 import yaml
 
@@ -74,6 +89,7 @@ from hermes_cli.memory_providers import (
     ProviderField,
     get_memory_provider,
 )
+from hermes_cli.goal_management import RESOURCE_KINDS, ResourceKind
 from gateway.status import (
     derive_gateway_busy,
     derive_gateway_drainable,
@@ -90,7 +106,9 @@ try:
         WebSocket, WebSocketDisconnect,
     )
     from fastapi.middleware.cors import CORSMiddleware
-    from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
+    from fastapi.responses import (
+        FileResponse, HTMLResponse, JSONResponse, Response, StreamingResponse,
+    )
     from fastapi.staticfiles import StaticFiles
     from pydantic import BaseModel
 except ImportError:
@@ -105,7 +123,9 @@ except ImportError:
             WebSocket, WebSocketDisconnect,
         )
         from fastapi.middleware.cors import CORSMiddleware
-        from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
+        from fastapi.responses import (
+            FileResponse, HTMLResponse, JSONResponse, Response, StreamingResponse,
+        )
         from fastapi.staticfiles import StaticFiles
         from pydantic import BaseModel
     except Exception:
@@ -251,8 +271,12 @@ app = FastAPI(title="Hermes Agent", version=__version__, lifespan=_lifespan)
 
 # Memory-provider OAuth connect routes live in the memory layer, not here.
 from hermes_cli.memory_oauth import router as _memory_oauth_router  # noqa: E402
+from hermes_cli.memory_explorer import router as _memory_explorer_router  # noqa: E402
+from hermes_cli.files_api import router as _files_router  # noqa: E402
 
 app.include_router(_memory_oauth_router)
+app.include_router(_memory_explorer_router)
+app.include_router(_files_router)
 
 # ---------------------------------------------------------------------------
 # Session token for protecting sensitive endpoints (reveal).
@@ -3019,6 +3043,1262 @@ async def gateway_drain(request: Request):
     }
 
 
+# ─────────────────────────────────────────────────────────────────────────
+# FG-10 — human-comms parity (Telegram + web). C1-authenticated principals,
+# C2-scoped reads, C6-gated approvals, one pending-item surface shared with
+# Telegram (answering on web clears the Telegram item and vice-versa). All
+# datastore access routes through the C3 router at the *prod* schema so both
+# surfaces read/write the same rows. See docs/design/master-plan/
+# feature-groups/FG-10-human-comms.md.
+# ─────────────────────────────────────────────────────────────────────────
+
+
+class _CommsNotConfigured(RuntimeError):
+    """The Supabase app datastore isn't configured for this instance."""
+
+
+def _comms_app_store():
+    """Return the prod supabase-app store (C3). Channels + web share prod."""
+    from hermes_cli.datastore import get_store
+
+    return get_store("supabase-app", "prod", config=load_config() or {})
+
+
+def _comms_session_subject(request: "Request") -> str:
+    """The verified login subject of the current request, or ``""``.
+
+    The dashboard-auth gate attaches the verified :class:`Session` to
+    ``request.state.session`` on every interactive request it lets through; its
+    ``user_id`` is the auth provider's stable subject (e.g. a Supabase/GoTrue
+    ``sub``). Returns ``""`` for a request with no interactive session (a
+    token-authed service caller, an internal call, or a test client) so the
+    caller can fall back to the owner-operator identity.
+    """
+    # ``request.state`` raises AttributeError for an unset attribute, so the
+    # default-valued ``getattr`` is the idiomatic presence check here.
+    session = getattr(request.state, "session", None)
+    if session is None:
+        return ""
+    return (session.user_id or "").strip()
+
+
+async def _comms_resolve_principal(request: "Request", *, allow_as: bool = False):
+    """Resolve the C1 principal a web request acts under (contract C1).
+
+    Identity binding: a request carrying a verified interactive session
+    (``request.state.session``, attached by the dashboard-auth gate) acts as
+    **its own** principal — the logged-in user, for reads *and* writes. The
+    session's subject is mapped to a principal via the ``principal_aliases``
+    table when one exists (the bootstrap owner, enrolled before the auth
+    provider) and otherwise used directly as the ``user_id`` (the common case:
+    a member enrolled with their subject as their user_id). An authenticated
+    subject that maps to no enrolled principal is a 409 — never silently
+    upgraded to the owner.
+
+    Fallback: a request with **no** interactive session (an internal caller, a
+    token-authed service, or a test client) resolves to the enrolled **owner**
+    — the owner-operator identity for the machine-operator surface.
+
+    ``allow_as`` (read-only endpoints only) lets an **owner or admin** narrow
+    the C2 view to a specific principal via ``?as=`` / ``X-Hermes-User-Id`` — an
+    inspection aid, never an escalation (they may already read every row, so
+    scoping *down* exposes nothing new). A member/viewer's ``?as=`` is ignored:
+    they only ever see themselves. Write endpoints pass ``allow_as=False`` so a
+    mutation is always attributed to the acting principal and can never spoof
+    another identity.
+
+    Never invents a principal: an unknown ``?as=`` id is a 404, and a machine
+    with no principal to resolve is a 409.
+    """
+    from hermes_cli.access import PrincipalStore
+
+    store = _comms_app_store()
+    principals = PrincipalStore(store)
+    subject = _comms_session_subject(request)
+    requested = ""
+    if allow_as:
+        requested = (
+            request.query_params.get("as")
+            or request.headers.get("X-Hermes-User-Id")
+            or ""
+        ).strip()
+    try:
+        if subject:
+            user_id = await principals.resolve_alias(subject) or subject
+            actor = await principals.get(user_id)
+            if actor is None:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "Authenticated, but no principal is enrolled for this "
+                        "user."
+                    ),
+                )
+        else:
+            actor = await principals.get_owner()
+            if actor is None:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "No owner is enrolled yet; complete multi-user setup "
+                        "first."
+                    ),
+                )
+        # ?as= narrowing is an owner/admin-only read aid; ignored for others.
+        if requested and requested != actor.user_id and actor.role in (
+            "owner",
+            "admin",
+        ):
+            principal = await principals.get(requested)
+            if principal is None:
+                raise HTTPException(
+                    status_code=404, detail=f"No such principal: {requested}"
+                )
+            return principal
+        return actor
+    except HTTPException:
+        raise
+    except RuntimeError as exc:
+        # Unconfigured DSN (SupabaseAppStore.connect) — surface as a soft state
+        # the SPA renders as "multi-user datastore not configured".
+        raise _CommsNotConfigured(str(exc)) from exc
+
+
+def _comms_unconfigured_payload(key: str) -> dict:
+    return {"configured": False, key: [], "principal": None}
+
+
+@app.get("/api/comms/whoami")
+async def comms_whoami(request: Request):
+    """Return the resolved C1 principal + role for the current web request."""
+    try:
+        principal = await _comms_resolve_principal(request, allow_as=True)
+    except _CommsNotConfigured:
+        return {"configured": False, "principal": None}
+    return {
+        "configured": True,
+        "principal": {
+            "user_id": principal.user_id,
+            "display": principal.display,
+            "role": principal.role,
+            "channels": list(principal.channels),
+            "is_owner": principal.is_owner,
+        },
+    }
+
+
+async def _comms_member_service(request: "Request"):
+    """Resolve (actor, MemberService) for an owner/admin member-mgmt request.
+
+    Reuses :func:`_comms_resolve_principal` to bind the acting principal, then
+    enforces the owner/admin gate and builds a :class:`MemberService` over the
+    GoTrue admin client. Raises ``HTTPException`` 403 for a non-admin actor and
+    503 when member management isn't configured (no service-role key / url).
+    """
+    from hermes_cli.members import (
+        MemberService,
+        load_admin_client,
+        require_member_admin,
+    )
+
+    actor = await _comms_resolve_principal(request)
+    try:
+        require_member_admin(actor)
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    admin = load_admin_client()
+    if admin is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Member management is not configured on this server.",
+        )
+    from hermes_cli.access import PrincipalStore
+
+    service = MemberService(PrincipalStore(_comms_app_store()), admin)
+    return actor, service
+
+
+def _comms_member_error(exc: Exception) -> "HTTPException":
+    """Map a member-service error onto the right HTTP status."""
+    from hermes_cli.members import MemberConflictError, MemberError
+
+    if isinstance(exc, MemberConflictError):
+        return HTTPException(status_code=409, detail=str(exc))
+    if isinstance(exc, PermissionError):
+        return HTTPException(status_code=403, detail=str(exc))
+    if isinstance(exc, MemberError):
+        return HTTPException(status_code=400, detail=str(exc))
+    return HTTPException(status_code=400, detail=str(exc))
+
+
+@app.get("/api/comms/members")
+async def comms_list_members(request: Request):
+    """List enrolled members (owner/admin only)."""
+    try:
+        _actor, service = await _comms_member_service(request)
+        members = await service.list_members(_actor)
+    except _CommsNotConfigured:
+        return {"configured": False, "members": []}
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001 — mapped to a clean HTTP status
+        raise _comms_member_error(exc)
+    return {"configured": True, "members": [m.as_dict() for m in members]}
+
+
+@app.post("/api/comms/members")
+async def comms_create_member(request: Request):
+    """Create a Supabase account and enrol it as a principal (owner/admin)."""
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    body = body if isinstance(body, dict) else {}
+    email = str(body.get("email", "")).strip()
+    password = str(body.get("password", ""))
+    display = str(body.get("display", "")).strip()
+    role = str(body.get("role", "member")).strip() or "member"
+    try:
+        actor, service = await _comms_member_service(request)
+        principal = await service.create_member(
+            actor,
+            email=email,
+            password=password,
+            display=display,
+            role=role,
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001 — mapped to a clean HTTP status
+        raise _comms_member_error(exc)
+    return {
+        "ok": True,
+        "member": {
+            "user_id": principal.user_id,
+            "display": principal.display,
+            "role": principal.role,
+        },
+    }
+
+
+@app.put("/api/comms/members/{user_id}/role")
+async def comms_set_member_role(user_id: str, request: Request):
+    """Change a member's role (owner/admin; never the owner, never to owner)."""
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    role = str((body or {}).get("role", "")).strip()
+    if not role:
+        raise HTTPException(status_code=400, detail="role is required")
+    try:
+        actor, service = await _comms_member_service(request)
+        principal = await service.set_member_role(
+            actor, user_id=user_id, role=role
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001 — mapped to a clean HTTP status
+        raise _comms_member_error(exc)
+    return {"ok": True, "member": {"user_id": principal.user_id, "role": principal.role}}
+
+
+@app.post("/api/comms/members/{user_id}/password")
+async def comms_set_member_password(user_id: str, request: Request):
+    """Reset a member's temporary password (owner/admin only)."""
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    password = str((body or {}).get("password", ""))
+    if not password:
+        raise HTTPException(status_code=400, detail="password is required")
+    try:
+        actor, service = await _comms_member_service(request)
+        await service.set_member_password(
+            actor, user_id=user_id, password=password
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001 — mapped to a clean HTTP status
+        raise _comms_member_error(exc)
+    return {"ok": True}
+
+
+@app.post("/api/comms/members/{user_id}/deactivate")
+async def comms_deactivate_member(user_id: str, request: Request):
+    """Block a member's login without deleting the account (owner/admin)."""
+    return await _comms_set_member_active(user_id, request, active=False)
+
+
+@app.post("/api/comms/members/{user_id}/activate")
+async def comms_activate_member(user_id: str, request: Request):
+    """Restore a deactivated member's login (owner/admin only)."""
+    return await _comms_set_member_active(user_id, request, active=True)
+
+
+async def _comms_set_member_active(user_id: str, request: "Request", *, active: bool):
+    try:
+        actor, service = await _comms_member_service(request)
+        await service.set_member_active(actor, user_id=user_id, active=active)
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001 — mapped to a clean HTTP status
+        raise _comms_member_error(exc)
+    return {"ok": True, "active": active}
+
+
+@app.get("/api/comms/notifications")
+async def comms_list_notifications(request: Request):
+    """List pending approvals + proactive asks visible to the principal (C2)."""
+    from hermes_cli.human_comms import NotificationStore, parse_notification_kind
+
+    try:
+        principal = await _comms_resolve_principal(request, allow_as=True)
+    except _CommsNotConfigured:
+        return _comms_unconfigured_payload("notifications")
+    try:
+        kind = parse_notification_kind(request.query_params.get("kind"))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    ntf = NotificationStore(_comms_app_store(), config=load_config() or {})
+    try:
+        await ntf.initialize()
+        items = await ntf.list_pending(principal, kind=kind)
+    except RuntimeError:
+        return _comms_unconfigured_payload("notifications")
+    return {
+        "configured": True,
+        "principal": principal.user_id,
+        "notifications": [i.as_dict() for i in items],
+    }
+
+
+@app.post("/api/comms/notifications/{notification_id}/answer")
+async def comms_answer_notification(notification_id: str, request: Request):
+    """Answer a pending item from the web surface (dedupes with Telegram).
+
+    The answer is idempotent across surfaces: ``newly_answered`` is ``True``
+    only for the surface that settled the item first; a later answer from the
+    other surface returns the already-settled row with ``newly_answered``
+    ``False``.
+    """
+    from hermes_cli.human_comms import NotificationNotFound, NotificationStore
+
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    answer = str((body or {}).get("answer", "")).strip()
+    if not answer:
+        raise HTTPException(status_code=400, detail="answer is required")
+
+    principal = await _comms_resolve_principal(request)
+    ntf = NotificationStore(_comms_app_store(), config=load_config() or {})
+    try:
+        result = await ntf.answer(notification_id, principal, answer=answer, via="web")
+    except NotificationNotFound:
+        raise HTTPException(status_code=404, detail="No such notification")
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    return {
+        "ok": True,
+        "newly_answered": result.newly_answered,
+        "notification": result.notification.as_dict(),
+    }
+
+
+@app.get("/api/comms/goals")
+async def comms_list_goals(request: Request):
+    """List goals the principal may read through the shared FG-09 service."""
+
+    try:
+        principal = await _comms_resolve_principal(request, allow_as=True)
+    except _CommsNotConfigured:
+        return _comms_unconfigured_payload("goals")
+    status = request.query_params.get("status") or None
+    try:
+        service = await _comms_goal_service()
+        goals = await service.list_goals(principal, status=status)
+    except RuntimeError:
+        return _comms_unconfigured_payload("goals")
+    return {
+        "configured": True,
+        "principal": principal.user_id,
+        "goals": [goal.as_dict() for goal in goals],
+    }
+
+
+class CommsGoalCreate(BaseModel):
+    title: str
+    description: str = ""
+    priority: str = "medium"
+    visibility: Optional[str] = None
+
+
+class CommsGoalPriority(BaseModel):
+    priority: str
+
+
+class CommsGoalLink(BaseModel):
+    resource_kind: str
+    resource_ref: str
+
+
+class CommsGoalAdvance(BaseModel):
+    target: str = "note"
+    task_id: Optional[str] = None
+    state: Optional[str] = None
+    metric_name: Optional[str] = None
+    value: Optional[float] = None
+    note: str = ""
+
+
+async def _comms_goal_service():
+    from hermes_cli.goal_management import GoalManagementService
+
+    service = GoalManagementService(
+        _comms_app_store(),
+        audit_store=_comms_app_store(),
+    )
+    await service.initialize()
+    return service
+
+
+def _comms_goal_error(exc: Exception) -> "HTTPException":
+    if isinstance(exc, PermissionError):
+        return HTTPException(status_code=403, detail=str(exc))
+    if isinstance(exc, LookupError):
+        return HTTPException(status_code=404, detail=str(exc))
+    if isinstance(exc, (KeyError, ValueError)):
+        return HTTPException(status_code=400, detail=str(exc))
+    return HTTPException(status_code=503, detail=str(exc))
+
+
+@app.post("/api/comms/goals")
+async def comms_create_goal(body: CommsGoalCreate, request: Request):
+    principal = await _comms_resolve_principal(request)
+    try:
+        service = await _comms_goal_service()
+        goal = await service.create_goal(
+            principal,
+            body.title,
+            description=body.description,
+            priority=body.priority,
+            visibility=body.visibility,
+            surface="web",
+        )
+    except (KeyError, LookupError, PermissionError, RuntimeError, ValueError) as exc:
+        raise _comms_goal_error(exc)
+    return {"ok": True, "goal": goal.as_dict()}
+
+
+@app.put("/api/comms/goals/{goal_id}/priority")
+async def comms_prioritise_goal(
+    goal_id: str,
+    body: CommsGoalPriority,
+    request: Request,
+):
+    principal = await _comms_resolve_principal(request)
+    try:
+        service = await _comms_goal_service()
+        goal = await service.prioritise(
+            principal,
+            goal_id,
+            body.priority,
+            surface="web",
+        )
+    except (KeyError, LookupError, PermissionError, RuntimeError, ValueError) as exc:
+        raise _comms_goal_error(exc)
+    return {"ok": True, "goal": goal.as_dict()}
+
+
+@app.post("/api/comms/goals/{goal_id}/links")
+async def comms_link_goal(
+    goal_id: str,
+    body: CommsGoalLink,
+    request: Request,
+):
+    principal = await _comms_resolve_principal(request)
+    if body.resource_kind not in RESOURCE_KINDS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"resource_kind must be one of {', '.join(RESOURCE_KINDS)}",
+        )
+    try:
+        service = await _comms_goal_service()
+        link = await service.link(
+            principal,
+            goal_id,
+            cast(ResourceKind, body.resource_kind),
+            body.resource_ref,
+            surface="web",
+        )
+    except (KeyError, LookupError, PermissionError, RuntimeError, ValueError) as exc:
+        raise _comms_goal_error(exc)
+    return {"ok": True, "link": link.as_dict()}
+
+
+@app.post("/api/comms/goals/{goal_id}/advance")
+async def comms_advance_goal(
+    goal_id: str,
+    body: CommsGoalAdvance,
+    request: Request,
+):
+    principal = await _comms_resolve_principal(request)
+    try:
+        service = await _comms_goal_service()
+        if body.target == "task":
+            if not body.task_id or not body.state:
+                raise ValueError("task advance requires task_id and state")
+            task = await service.advance_task(
+                principal,
+                goal_id,
+                body.task_id,
+                body.state,
+                surface="web",
+            )
+            return {"ok": True, "task": task.as_dict()}
+        if body.target == "metric":
+            if not body.metric_name or body.value is None:
+                raise ValueError("metric advance requires metric_name and value")
+            metric = await service.advance_metric(
+                principal,
+                goal_id,
+                body.metric_name,
+                body.value,
+                note=body.note,
+                surface="web",
+            )
+            return {"ok": True, "metric": metric.to_dict()}
+        if body.target != "note":
+            raise ValueError("target must be task, metric, or note")
+        if not body.note.strip():
+            raise ValueError("note is required")
+        await service.record_progress(
+            principal,
+            goal_id,
+            body.note,
+            surface="web",
+        )
+        return {"ok": True}
+    except (KeyError, LookupError, PermissionError, RuntimeError, ValueError) as exc:
+        raise _comms_goal_error(exc)
+
+
+@app.post("/api/comms/goals/{goal_id}/close")
+async def comms_close_goal(goal_id: str, request: Request):
+    principal = await _comms_resolve_principal(request)
+    try:
+        service = await _comms_goal_service()
+        goal = await service.close_goal(principal, goal_id, surface="web")
+    except (KeyError, LookupError, PermissionError, RuntimeError, ValueError) as exc:
+        raise _comms_goal_error(exc)
+    return {"ok": True, "goal": goal.as_dict()}
+
+
+@app.get("/api/comms/goals/{goal_id}/context")
+async def comms_goal_context(goal_id: str, request: Request):
+    principal = await _comms_resolve_principal(request, allow_as=True)
+    try:
+        service = await _comms_goal_service()
+        context = await service.assemble_context(principal, goal_id)
+    except (KeyError, LookupError, PermissionError, RuntimeError, ValueError) as exc:
+        raise _comms_goal_error(exc)
+    return {
+        "configured": True,
+        "principal": principal.user_id,
+        "context": context.as_dict(),
+    }
+
+
+def _comms_change_dict(event) -> dict:
+    return {
+        "id": event.id,
+        "trace_id": event.trace_id,
+        "actor_user_id": event.actor_user_id,
+        "mode": event.mode,
+        "target_kind": event.target_kind,
+        "reversible": event.reversible,
+        "visibility": event.visibility,
+        "undone": event.undone,
+    }
+
+
+@app.get("/api/comms/changes")
+async def comms_list_changes(request: Request):
+    """List change events the principal may review (FG-12 log, C2-scoped)."""
+    from hermes_cli.changes import ChangeLog
+
+    try:
+        principal = await _comms_resolve_principal(request, allow_as=True)
+    except _CommsNotConfigured:
+        return _comms_unconfigured_payload("changes")
+    log = ChangeLog(config=load_config() or {})
+    try:
+        changes = await log.list_changes(principal)
+    except RuntimeError:
+        return _comms_unconfigured_payload("changes")
+    return {
+        "configured": True,
+        "principal": principal.user_id,
+        "changes": [_comms_change_dict(c) for c in changes],
+    }
+
+
+@app.get("/api/comms/traces")
+async def comms_list_traces(request: Request):
+    """List C8 traces visible to the selected C1/C2 principal."""
+    from hermes_cli.interactions import InteractionLedger
+
+    try:
+        principal = await _comms_resolve_principal(request, allow_as=True)
+    except _CommsNotConfigured:
+        return _comms_unconfigured_payload("traces")
+    try:
+        limit = min(500, max(1, int(request.query_params.get("limit", "100"))))
+    except ValueError:
+        raise HTTPException(status_code=400, detail="limit must be an integer")
+    ledger = InteractionLedger(_comms_app_store(), config=load_config() or {})
+    try:
+        await ledger.initialize()
+        traces = await ledger.list_traces(principal, limit=limit)
+    except RuntimeError:
+        return _comms_unconfigured_payload("traces")
+    return {
+        "configured": True,
+        "principal": principal.user_id,
+        "traces": [trace.as_dict() for trace in traces],
+    }
+
+
+@app.get("/api/comms/traces/{trace_id}")
+async def comms_get_trace(trace_id: str, request: Request):
+    """Return a C8 trace timeline/tree projection, enforcing C2 scope."""
+    from hermes_cli.interactions import InteractionLedger
+
+    try:
+        principal = await _comms_resolve_principal(request, allow_as=True)
+    except _CommsNotConfigured:
+        return {
+            "configured": False,
+            "principal": None,
+            "trace_id": trace_id,
+            "interactions": [],
+            "rollup": None,
+        }
+    ledger = InteractionLedger(_comms_app_store(), config=load_config() or {})
+    try:
+        await ledger.initialize()
+        interactions, rollup = await ledger.get_trace(trace_id, principal)
+    except RuntimeError:
+        return {
+            "configured": False,
+            "principal": None,
+            "trace_id": trace_id,
+            "interactions": [],
+            "rollup": None,
+        }
+    if not interactions and rollup is None:
+        raise HTTPException(status_code=404, detail="No such trace")
+    return {
+        "configured": True,
+        "principal": principal.user_id,
+        "trace_id": trace_id,
+        "interactions": [event.as_dict() for event in interactions],
+        "rollup": rollup.as_dict() if rollup else None,
+    }
+
+
+# ---------------------------------------------------------------------------
+# FG-17b Core-area view — FG-14 C7 boundary projection (read-only)
+# ---------------------------------------------------------------------------
+
+
+@app.get("/api/core/manifest")
+async def core_manifest_view(limit: int = 50):
+    """FG-14 Core-boundary projection for the FG-17 Core-area view (read-only).
+
+    Surfaces the machine-readable C7 boundary the runtime agent may never
+    cross: the active ``core_manifest.yaml`` globs, whether the manifest is
+    present + parseable (vs the fail-closed baked-in fallback set), and a tail
+    of the durable local Core-denial audit log (agent writes refused at the
+    boundary). Core is immutable to the runtime agent and is changed only by
+    humans through the repo/PR flow, so this endpoint is strictly read-only —
+    it exposes the boundary, it does not mutate it. FG-12 change log and FG-16
+    traces are surfaced separately by their existing scoped endpoints.
+    """
+    from agent.core_boundary import (
+        classify_core_path,
+        core_audit_log_path,
+        get_core_root,
+        load_core_globs,
+    )
+
+    core_root = get_core_root()
+    manifest_path = core_root / "core_manifest.yaml"
+
+    manifest_present = manifest_path.exists()
+    manifest_parseable = False
+    parsed_globs: list[str] = []
+    if manifest_present:
+        try:
+            raw = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
+            if isinstance(raw, dict) and isinstance(raw.get("core_globs"), list):
+                parsed_globs = [
+                    g.strip()
+                    for g in raw["core_globs"]
+                    if isinstance(g, str) and g.strip()
+                ]
+                manifest_parseable = bool(parsed_globs)
+        except Exception:
+            manifest_parseable = False
+
+    # The authoritative active globs (manifest when valid, else fail-closed
+    # fallback). ``fallback_active`` tells the UI the boundary is running on the
+    # baked-in copy because the manifest is missing/corrupt — a health signal.
+    active_globs = list(load_core_globs())
+    fallback_active = not (manifest_present and manifest_parseable)
+
+    # A self-check: the manifest + guard module classify as Core themselves
+    # (self-protecting boundary). Surfaced so the view can assert the guard is
+    # protecting its own definition.
+    self_protected = classify_core_path(manifest_path) is not None
+
+    try:
+        limit_n = min(500, max(1, int(limit)))
+    except (TypeError, ValueError):
+        limit_n = 50
+
+    denials: list[dict] = []
+    audit_path = core_audit_log_path()
+    try:
+        if audit_path.exists():
+            lines = audit_path.read_text(encoding="utf-8").splitlines()
+            for line in lines[-limit_n:]:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    denials.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+    except OSError:
+        denials = []
+    denials.reverse()  # most-recent first
+
+    return {
+        "core_root": core_root.name,
+        "manifest_path": "core_manifest.yaml",
+        "manifest_present": manifest_present,
+        "manifest_parseable": manifest_parseable,
+        "fallback_active": fallback_active,
+        "self_protected": self_protected,
+        "globs": active_globs,
+        "glob_count": len(active_globs),
+        "audit_log_path": str(audit_path),
+        "denials": denials,
+    }
+
+
+# ---------------------------------------------------------------------------
+# FG-17b GTS Centre — FG-18 C9 unified goal/task/skill graph (read-only)
+# ---------------------------------------------------------------------------
+
+
+def _gts_method_summary(method: "Optional[EvaluationMethod]") -> dict:
+    """Project an EvaluationMethod's observe/measure shape for the UI (no score)."""
+    from hermes_cli.gts import (
+        method_is_measurable,
+        method_scoring_prompt,
+        parse_observation,
+    )
+
+    raw = method.method if method is not None else {}
+    observation = parse_observation(raw)
+    return {
+        "set_by_user_id": method.set_by_user_id if method is not None else None,
+        "locked": bool(method.locked) if method is not None else False,
+        "measurable": method_is_measurable(raw),
+        "observation": observation.as_dict() if observation is not None else None,
+        "scoring_prompt": method_scoring_prompt(raw),
+    }
+
+
+@app.get("/api/gts/graph")
+async def gts_graph_view(request: Request):
+    """FG-18 GTS Centre graph for the FG-17 GTS Centre UI (C2-scoped, read-only).
+
+    Returns the unified goal→task→skill graph visible to the resolved C1/C2
+    principal: goal + task hierarchy (parent refs + level), priorities,
+    computed 0–100 scores, the M:N task↔goal and task↔skill edges, and each
+    node's user-owned observe/measure evaluation method (never the score, which
+    is always engine-computed). The GTS Centre is Core (D14): its data is read
+    here, never mutated — creation/scoring stay on the CLI/agent authority
+    paths. Per-user assignment (FG-19) is live: each task/sub-goal node carries
+    its ``assignee_user_id`` plus the per-item grants (assignee + watchers)
+    visible to the resolved principal, all scoped through the existing C2
+    ``?as=`` seam and the item_grants RLS.
+    """
+    from hermes_cli.gts import GtsCentre
+
+    try:
+        principal = await _comms_resolve_principal(request, allow_as=True)
+    except _CommsNotConfigured:
+        return {
+            "configured": False,
+            "principal": None,
+            "goals": [],
+            "tasks": [],
+            "skills": [],
+            "task_goals": [],
+            "task_skills": [],
+            "assignment": {"enabled": True, "scheme": "per-user"},
+        }
+
+    store = _comms_app_store()
+    centre = GtsCentre(store)
+    try:
+        conn = await store.connect()
+        await conn.execute(f'CREATE SCHEMA IF NOT EXISTS "{store.schema}"')
+    except RuntimeError:
+        return {
+            "configured": False,
+            "principal": None,
+            "goals": [],
+            "tasks": [],
+            "skills": [],
+            "task_goals": [],
+            "task_skills": [],
+            "assignment": {"enabled": True, "scheme": "per-user"},
+        }
+    try:
+        await centre.initialize(connection=conn)
+
+        goals = await centre.list_goals(principal, connection=conn)
+        goal_payload = []
+        for goal in goals:
+            method = await centre.get_evaluation_method(
+                principal, "goal", goal.id, connection=conn
+            )
+            entry = goal.as_dict()
+            entry["evaluation_method"] = _gts_method_summary(method)
+            entry["grants"] = [
+                g.as_dict()
+                for g in await centre.list_grants(
+                    principal, "goal", goal.id, connection=conn
+                )
+            ]
+            goal_payload.append(entry)
+
+        skills = await centre.list_skills(principal, connection=conn)
+
+        task_records = await centre.tasks.list_tasks(principal, connection=conn)
+        task_payload = []
+        task_goals: list[dict] = []
+        task_skills: list[dict] = []
+        for record in task_records:
+            task = await centre.get_task(principal, record.id, connection=conn)
+            if task is None:
+                continue
+            method = await centre.get_evaluation_method(
+                principal, "task", task.id, connection=conn
+            )
+            entry = task.as_dict()
+            entry["evaluation_method"] = _gts_method_summary(method)
+            entry["grants"] = [
+                g.as_dict()
+                for g in await centre.list_grants(
+                    principal, "task", task.id, connection=conn
+                )
+            ]
+            task_payload.append(entry)
+
+            for linked_goal in await centre.goals_for_task(
+                principal, task.id, connection=conn
+            ):
+                task_goals.append({"task_id": task.id, "goal_id": linked_goal.id})
+            for linked_skill in await centre.skills_for_task(
+                principal, task.id, connection=conn
+            ):
+                task_skills.append({"task_id": task.id, "skill_id": linked_skill.id})
+    finally:
+        await conn.close()
+
+    return {
+        "configured": True,
+        "principal": principal.user_id,
+        "mode": centre.mode,
+        "goals": goal_payload,
+        "tasks": task_payload,
+        "skills": [skill.as_dict() for skill in skills],
+        "task_goals": task_goals,
+        "task_skills": task_skills,
+        # FG-19 (merged): per-user assignment. Node payloads carry
+        # ``assignee_user_id`` and a ``grants`` list (assignee + watchers)
+        # scoped to the principal via item_grants RLS; top-level goals remain
+        # non-assignable.
+        "assignment": {"enabled": True, "scheme": "per-user"},
+    }
+
+
+# ---------------------------------------------------------------------------
+# FG-17b Agent webview — CDP-backed, consent-gated (C6) + traced (C8).
+# Consent model = Option B (session-scoped consent + escalation): default-deny
+# / opt-in, per-user CDP-profile isolation, in-scope reads autonomous,
+# off-scope / interactive-under-read-only / credentialed / destructive actions
+# escalate to per-action approval. See ``hermes_cli/webview.py`` for the pure
+# policy engine and the FG-17 doc for the scope model.
+# ---------------------------------------------------------------------------
+
+_webview_registry: "Optional[WebviewRegistry]" = None
+
+
+def _get_webview_registry() -> "WebviewRegistry":
+    """Process-wide per-user webview registry (browser sessions are ephemeral).
+
+    Profiles live under ``<hermes_home>/webview/profiles`` and are keyed per
+    principal so no two users share cookies/local-state — the C2 isolation
+    boundary for this surface.
+    """
+    global _webview_registry
+    if _webview_registry is None:
+        from hermes_cli.webview import WebviewRegistry
+
+        profiles_root = str(get_hermes_home() / "webview" / "profiles")
+        _webview_registry = WebviewRegistry(profiles_root)
+    return _webview_registry
+
+
+async def _webview_emit(
+    session: "WebviewSession",
+    principal: "Principal",
+    *,
+    kind: str,
+    ref: str,
+    summary: str,
+) -> None:
+    """Best-effort C8 trace of a webview decision (degrades when unconfigured).
+
+    Reuses the FG-16 interaction ledger + existing interaction kinds
+    (``tool_call`` for executed actions, ``approval`` for escalations) so the
+    action shows up in the same trace list/detail the Core-area view reads —
+    no new C8 contract. Never raises into the request path.
+    """
+    from datetime import datetime, timezone
+
+    try:
+        from hermes_cli.interactions import Interaction, InteractionLedger
+
+        store = _comms_app_store()
+        if getattr(store, "dsn", None) in (None, ""):
+            return
+        interaction = Interaction(
+            id=f"int_{uuid.uuid4().hex}",
+            trace_id=session.trace_id,
+            parent_id=None,
+            ts=datetime.now(timezone.utc),
+            actor_user_id=principal.user_id,
+            session_key=session.id,
+            platform="webview",
+            kind=kind,  # type: ignore[arg-type]
+            ref=ref,
+            summary=summary,
+            payload_ref=None,
+            mode=store.mode,
+        )
+        ledger = InteractionLedger(store, config=load_config() or {})
+        await ledger.append(interaction)
+    except Exception:
+        # C8 is observability-only; never let a trace failure block the action.
+        return
+
+
+# CDP method mapping for the safe, in-scope autonomous actions. Interactive /
+# escalated actions are dispatched by the same handoff once approved.
+_WEBVIEW_CDP_METHODS: Dict[str, str] = {
+    "navigate": "Page.navigate",
+    "screenshot": "Page.captureScreenshot",
+}
+
+
+def _webview_execute(action: "WebviewAction") -> dict:
+    """Hand an approved/allowed action to the existing CDP browser toolset.
+
+    Delegates to ``tools.browser_cdp_tool`` (the FG browser toolset) when a CDP
+    endpoint is configured; otherwise reports the action as dispatched-but-not
+    -driven, the same graceful degradation the datastore-backed endpoints use.
+    Per-user isolation upgrades to a provider-created session bound to the
+    session's ``profile_dir`` on the configured system-test box.
+    """
+    try:
+        from tools.browser_cdp_tool import _browser_cdp_check, browser_cdp
+    except Exception:
+        return {"executed": False, "detail": "browser toolset unavailable"}
+    if not _browser_cdp_check():
+        return {
+            "executed": False,
+            "detail": "no CDP browser attached (connect via /browser)",
+        }
+    method = _WEBVIEW_CDP_METHODS.get(action.kind)
+    if method is None:
+        return {"executed": False, "detail": f"no CDP mapping for {action.kind}"}
+    params = {"url": action.url} if action.kind == "navigate" and action.url else {}
+    result = browser_cdp(method, params)
+    return {"executed": True, "detail": result[:500]}
+
+
+@app.get("/api/webview/session")
+async def webview_get_session(request: Request):
+    """Return the caller's open webview session (C2-scoped), or the default-deny
+    empty state when none is open. ``?as=`` narrows the owner-operator's view to
+    a specific principal — who can only ever see their own session."""
+    try:
+        principal = await _comms_resolve_principal(request, allow_as=True)
+    except _CommsNotConfigured:
+        return {"configured": False, "session": None}
+    session = _get_webview_registry().get(principal.user_id)
+    return {
+        "configured": True,
+        "principal": principal.user_id,
+        "session": session.as_dict() if session is not None else None,
+    }
+
+
+@app.post("/api/webview/session")
+async def webview_open_session(request: Request):
+    """Opt in: open a webview session with a consent scope (allowed domains +
+    read-only/interactive). Default-deny means nothing runs until this is
+    called. Attributed to the owner principal (never spoofed)."""
+    from hermes_cli.webview import WebviewScope
+
+    try:
+        principal = await _comms_resolve_principal(request)
+    except _CommsNotConfigured:
+        raise HTTPException(status_code=409, detail="multi-user datastore not configured")
+    body = await request.json()
+    domains = body.get("allowed_domains") or []
+    if not isinstance(domains, list):
+        raise HTTPException(status_code=400, detail="allowed_domains must be a list")
+    mode = body.get("mode", "read_only")
+    if mode not in ("read_only", "interactive"):
+        raise HTTPException(status_code=400, detail="mode must be read_only|interactive")
+    scope = WebviewScope(
+        allowed_domains=tuple(str(d).strip() for d in domains if str(d).strip()),
+        mode=mode,
+    )
+    session = _get_webview_registry().open(principal.user_id, scope)
+    await _webview_emit(
+        session,
+        principal,
+        kind="approval",
+        ref="webview:session_open",
+        summary=f"opened webview session (mode={mode}, domains={len(scope.allowed_domains)})",
+    )
+    return {"configured": True, "principal": principal.user_id, "session": session.as_dict()}
+
+
+@app.delete("/api/webview/session")
+async def webview_close_session(request: Request):
+    """Close (opt out of) the caller's webview session."""
+    try:
+        principal = await _comms_resolve_principal(request)
+    except _CommsNotConfigured:
+        raise HTTPException(status_code=409, detail="multi-user datastore not configured")
+    closed = _get_webview_registry().close(principal.user_id)
+    return {"ok": True, "closed": closed}
+
+
+@app.post("/api/webview/action")
+async def webview_action(request: Request):
+    """Request an agent action against the live page. Default-deny: with no open
+    session the request is refused (403). Otherwise the Option-B policy decides
+    allow (run + trace) vs escalate (queue a per-action C6 approval + trace)."""
+    from hermes_cli.webview import WebviewAction, decide
+
+    try:
+        principal = await _comms_resolve_principal(request)
+    except _CommsNotConfigured:
+        raise HTTPException(status_code=409, detail="multi-user datastore not configured")
+    session = _get_webview_registry().get(principal.user_id)
+    if session is None:
+        # Default-deny: no opt-in, nothing to act on.
+        raise HTTPException(status_code=403, detail="no webview session open (default-deny)")
+
+    body = await request.json()
+    kind = body.get("kind")
+    if not kind or not isinstance(kind, str):
+        raise HTTPException(status_code=400, detail="action 'kind' is required")
+    action = WebviewAction(
+        kind=kind,  # type: ignore[arg-type]
+        url=body.get("url"),
+        credentialed=bool(body.get("credentialed", False)),
+        destructive=bool(body.get("destructive", False)),
+    )
+    verdict = decide(session.scope, action)
+
+    if verdict.decision == "allow":
+        outcome = _webview_execute(action)
+        await _webview_emit(
+            session,
+            principal,
+            kind="tool_call",
+            ref=f"webview:{action.kind}",
+            summary=f"{action.kind} {action.url or ''} -> allow",
+        )
+        return {"decision": "allow", "reason": verdict.reason, **outcome}
+
+    # escalate — queue a per-action C6 approval; the action does not run.
+    from hermes_cli.webview import PendingApproval
+    import time as _time
+
+    approval = PendingApproval(
+        id=f"wva_{uuid.uuid4().hex}",
+        action=action,
+        reason=verdict.reason,
+        created_at=_time.time(),
+    )
+    session.pending[approval.id] = approval
+    await _webview_emit(
+        session,
+        principal,
+        kind="approval",
+        ref=f"webview:{action.kind}",
+        summary=f"{action.kind} {action.url or ''} -> escalate ({verdict.reason})",
+    )
+    return {
+        "decision": "escalate",
+        "reason": verdict.reason,
+        "approval": approval.as_dict(),
+    }
+
+
+@app.post("/api/webview/approval/{approval_id}")
+async def webview_resolve_approval(approval_id: str, request: Request):
+    """Grant or deny a queued per-action C6 approval. On grant, the action runs
+    through the same CDP handoff; on deny, it is discarded. Owner-attributed."""
+    try:
+        principal = await _comms_resolve_principal(request)
+    except _CommsNotConfigured:
+        raise HTTPException(status_code=409, detail="multi-user datastore not configured")
+    session = _get_webview_registry().get(principal.user_id)
+    if session is None:
+        raise HTTPException(status_code=403, detail="no webview session open (default-deny)")
+    approval = session.pending.get(approval_id)
+    if approval is None:
+        raise HTTPException(status_code=404, detail="no such pending approval")
+    body = await request.json()
+    grant = bool(body.get("grant", False))
+    approval.resolved = grant
+    if not grant:
+        session.pending.pop(approval_id, None)
+        await _webview_emit(
+            session,
+            principal,
+            kind="approval",
+            ref=f"webview:{approval.action.kind}",
+            summary=f"denied {approval.action.kind} {approval.action.url or ''}",
+        )
+        return {"decision": "deny", "granted": False}
+    outcome = _webview_execute(approval.action)
+    session.pending.pop(approval_id, None)
+    await _webview_emit(
+        session,
+        principal,
+        kind="tool_call",
+        ref=f"webview:{approval.action.kind}",
+        summary=f"approved+ran {approval.action.kind} {approval.action.url or ''}",
+    )
+    return {"decision": "allow", "granted": True, **outcome}
+
+
+@app.post("/api/comms/changes/{change_ref}/undo")
+async def comms_undo_change(change_ref: str, request: Request):
+    """Undo a visible, reversible change (FG-12, C2 + D6 enforced)."""
+    from hermes_cli.changes import ChangeError, ChangeLog, ChangeNotFound
+
+    principal = await _comms_resolve_principal(request)
+    log = ChangeLog(config=load_config() or {})
+    try:
+        result = await log.undo(change_ref, principal)
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    except ChangeNotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ChangeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    return {"ok": True, "change_ref": result.change_ref, "target_kind": result.target_kind}
+
+
+@app.post("/api/comms/changes/{change_ref}/redo")
+async def comms_redo_change(change_ref: str, request: Request):
+    """Redo a previously-undone, visible change (FG-12, C2 enforced)."""
+    from hermes_cli.changes import ChangeError, ChangeLog, ChangeNotFound
+
+    principal = await _comms_resolve_principal(request)
+    log = ChangeLog(config=load_config() or {})
+    try:
+        result = await log.redo(principal, change_ref=change_ref)
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    except ChangeNotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ChangeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    return {"ok": True, "change_ref": result.change_ref, "target_kind": result.target_kind}
+
+
+@app.get("/api/comms/memory")
+async def comms_list_memory(request: Request):
+    """List recent memories the principal may read (FG-05 store, C2-scoped).
+
+    A read-only projection over the FG-05 ``memories`` table via the C3 store +
+    ``scope_filter`` — no embeddings needed for a recency listing, so this does
+    not touch FG-05's write/query path.
+    """
+    from hermes_cli.access import scope_filter
+
+    try:
+        principal = await _comms_resolve_principal(request, allow_as=True)
+    except _CommsNotConfigured:
+        return _comms_unconfigured_payload("memories")
+    store = _comms_app_store()
+    # Read-only recency projection over FG-05's ``memories`` table (its content
+    # column is ``text``). Scoped by C2 ``scope_filter``; the embedding column
+    # is never selected, so no pgvector type codec is needed here.
+    predicate = scope_filter(principal, column="visibility", start_index=1)
+    sql = (
+        "SELECT id, kind, topic, text, visibility, created_at "
+        "FROM memories WHERE " + predicate.sql +
+        " ORDER BY created_at DESC LIMIT 100"
+    )
+    try:
+        conn = await store.connect()
+    except RuntimeError:
+        return _comms_unconfigured_payload("memories")
+    try:
+        # The memory plugin may never have initialised its table on this
+        # instance — treat "table absent" as an empty list, not an error.
+        exists = await conn.fetchval("SELECT to_regclass('memories')")
+        if exists is None:
+            return {"configured": True, "principal": principal.user_id, "memories": []}
+        rows = await conn.fetch(sql, *predicate.params)
+        memories = [
+            {
+                "id": str(r["id"]),
+                "kind": r["kind"],
+                "topic": r["topic"],
+                "content": r["text"],
+                "visibility": r["visibility"],
+                "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+            }
+            for r in rows
+        ]
+    finally:
+        await conn.close()
+    return {"configured": True, "principal": principal.user_id, "memories": memories}
+
+
 @app.post("/api/hermes/update")
 async def update_hermes():
     """Kick off ``hermes update`` in the background."""
@@ -3490,6 +4770,9 @@ async def get_sessions(
     exclude_sources: str = None,
     cwd_prefix: str = None,
     profile: Optional[str] = None,
+    tags: str = None,
+    exclude_tags: str = None,
+    tag_match: str = "any",
 ):
     """List sessions.
 
@@ -3527,6 +4810,19 @@ async def get_sessions(
             # uses these to split recents (exclude=cron) from the cron-jobs
             # section (source=cron) into two independent lists.
             exclude_list = [s for s in (exclude_sources or "").split(",") if s.strip()]
+            # Tag filtering: if tags/exclude_tags are provided, compute the
+            # matching session-id set and filter the list in Python (the tag
+            # tables are small; a SQL JOIN into list_sessions_rich's recursive
+            # CTE would be fragile).
+            tag_include = [t for t in (tags or "").split(",") if t.strip()] if tags else None
+            tag_exclude = [t for t in (exclude_tags or "").split(",") if t.strip()] if exclude_tags else None
+            filtered_ids = None
+            if tag_include or tag_exclude:
+                filtered_ids = db.filter_session_ids_by_tags(
+                    include_tags=tag_include,
+                    exclude_tags=tag_exclude,
+                    match=tag_match,
+                )
             sessions = db.list_sessions_rich(
                 source=source or None,
                 exclude_sources=exclude_list or None,
@@ -3538,6 +4834,9 @@ async def get_sessions(
                 archived_only=archived_only,
                 order_by_last_active=order == "recent",
             )
+            if filtered_ids is not None:
+                id_set = set(filtered_ids)
+                sessions = [s for s in sessions if s["id"] in id_set]
             total = db.session_count(
                 source=source or None,
                 cwd_prefix=(cwd_prefix or None),
@@ -4044,6 +5343,31 @@ async def get_defaults():
 @app.get("/api/config/schema")
 async def get_schema():
     return {"fields": CONFIG_SCHEMA, "category_order": _CATEGORY_ORDER}
+
+
+@app.get("/api/onboarding/readiness")
+async def get_onboarding_readiness(profile: Optional[str] = None):
+    """FG-15 onboarding readiness for the dashboard first-run wizard (FG-17).
+
+    Returns the same typed setup schema + readiness score the CLI computes
+    (``hermes status`` / ``hermes setup essentials``), including the
+    ``ready_for_prod`` gate. Reports secret *presence* only — never values.
+    """
+    from hermes_cli.onboarding_readiness import evaluate_async
+
+    # Config-only (contextvar) scope, NOT _profile_scope: this handler awaits
+    # the C1 owner probe, and _profile_scope swaps process-global state a
+    # concurrent request would cross-restore across that await. We snapshot the
+    # (env-expanded) config inside the scope, then pass it explicitly so the
+    # awaited probe never depends on process-global profile state.
+    requested = (profile or "").strip()
+    if requested and requested.lower() != "current":
+        with _config_profile_scope(requested):
+            config = load_config()
+    else:
+        config = load_config()
+    readiness = await evaluate_async(config, include_owner=True)
+    return readiness.as_dict()
 
 
 _EMPTY_MODEL_INFO: dict = {
@@ -8126,6 +9450,54 @@ def _open_session_db_for_profile(profile: Optional[str]):
     return SessionDB(db_path=Path(home) / "state.db")
 
 
+# ---------------------------------------------------------------------------
+# Session tag endpoints — literal paths registered *before* the
+# parameterized ``/api/sessions/{session_id}`` routes so ``tags`` is not
+# captured as a session id.
+# ---------------------------------------------------------------------------
+@app.get("/api/sessions/tags")
+async def list_session_tags(profile: Optional[str] = None):
+    """List all tags with session counts."""
+    db = _open_session_db_for_profile(profile)
+    try:
+        return {"tags": db.list_tags()}
+    finally:
+        db.close()
+
+
+@app.post("/api/sessions/tags")
+async def create_tag(profile: Optional[str] = None, request: Request = None):
+    """Create a standalone tag (not attached to any session).
+
+    Body: ``{"name": "bug", "color": "red"?}``
+    Case-insensitive dedup — if the tag already exists, return it.
+    """
+    body = await request.json() if request else {}
+    name = (body or {}).get("name", "").strip()
+    color = (body or {}).get("color", "blue")
+    if not name:
+        raise HTTPException(400, "name is required")
+    db = _open_session_db_for_profile(profile)
+    try:
+        tag = db.create_tag(name, color=color)
+        return {"tag": tag}
+    finally:
+        db.close()
+
+
+@app.delete("/api/sessions/tags/{tag_id}")
+async def delete_session_tag(tag_id: str, profile: Optional[str] = None):
+    """Delete a tag entirely (removes all session assignments)."""
+    db = _open_session_db_for_profile(profile)
+    try:
+        deleted = db.delete_tag(tag_id)
+        if not deleted:
+            raise HTTPException(404, "Tag not found")
+        return {"ok": True}
+    finally:
+        db.close()
+
+
 @app.get("/api/sessions/{session_id}")
 async def get_session_detail(session_id: str, profile: Optional[str] = None):
     db = _open_session_db_for_profile(profile)
@@ -8166,6 +9538,763 @@ async def get_session_messages(session_id: str, profile: Optional[str] = None):
         return {"session_id": sid, "messages": messages}
     finally:
         db.close()
+
+
+# ---------------------------------------------------------------------------
+# Per-session tag endpoints
+# ---------------------------------------------------------------------------
+@app.get("/api/sessions/{session_id}/tags")
+async def get_session_tags(session_id: str, profile: Optional[str] = None):
+    """Return tags attached to *session_id*."""
+    db = _open_session_db_for_profile(profile)
+    try:
+        sid = db.resolve_session_id(session_id) or session_id
+        return {"tags": db.get_session_tags(sid)}
+    finally:
+        db.close()
+
+
+@app.post("/api/sessions/{session_id}/tags")
+async def add_session_tag(
+    session_id: str,
+    request: Request,
+    profile: Optional[str] = None,
+):
+    """Attach an existing-or-new tag to *session_id*.
+
+    Body: ``{"name": "bug", "color": "red"?}``
+    """
+    body = await request.json()
+    name = (body or {}).get("name", "").strip()
+    color = (body or {}).get("color", "blue")
+    if not name:
+        raise HTTPException(400, "name is required")
+    db = _open_session_db_for_profile(profile)
+    try:
+        sid = db.resolve_session_id(session_id) or session_id
+        tag = db.add_tag_to_session(sid, name, color=color, source="manual")
+        return {"tag": tag}
+    finally:
+        db.close()
+
+
+@app.delete("/api/sessions/{session_id}/tags/{tag_id}")
+async def remove_session_tag(
+    session_id: str,
+    tag_id: str,
+    profile: Optional[str] = None,
+):
+    """Detach *tag_id* from *session_id*."""
+    db = _open_session_db_for_profile(profile)
+    try:
+        sid = db.resolve_session_id(session_id) or session_id
+        removed = db.remove_tag_from_session(sid, tag_id)
+        return {"ok": removed}
+    finally:
+        db.close()
+
+
+@app.post("/api/sessions/{session_id}/tags/suggest")
+async def suggest_session_tags(
+    session_id: str,
+    request: Request,
+    profile: Optional[str] = None,
+):
+    """Use an LLM to suggest tags for this session.
+
+    Returns a list of ``{"tag_name": "...", "is_new": true/false,
+    "reason": "...", "confidence": 0.8}``.
+    """
+    db = _open_session_db_for_profile(profile)
+    try:
+        sid = db.resolve_session_id(session_id) or session_id
+        messages = db.get_messages(sid, limit=20)
+        existing_tags = [t["name"] for t in db.list_tags()]
+    finally:
+        db.close()
+
+    # Build a condensed transcript for the LLM.
+    transcript_parts = []
+    for msg in messages[:20]:
+        role = msg.get("role", "?")
+        content = (msg.get("content") or "")[:500]
+        if content:
+            transcript_parts.append(f"{role}: {content}")
+    transcript = "\n".join(transcript_parts)
+    if not transcript:
+        return {"suggestions": []}
+
+    existing_str = ", ".join(existing_tags) if existing_tags else "(none)"
+
+    prompt = (
+        "You are a session tagger. Analyze the conversation transcript below "
+        "and suggest 0-5 concise tags (1-3 words each, lowercase, no # prefix). "
+        f"Existing tags in the workspace: {existing_str}.\n\n"
+        f"Transcript:\n{transcript}\n\n"
+        "Return ONLY a JSON object: {\"suggestions\": [{\"tag_name\": \"...\", "
+        "\"reason\": \"brief why\", \"confidence\": 0.0-1.0}]}. "
+        "If the session is too short to tag, return an empty array."
+    )
+
+    try:
+        suggestions = await _llm_tag_suggest(prompt)
+    except Exception:
+        return {"suggestions": []}
+
+    # Mark which suggestions are new vs existing.
+    existing_lower = {t.lower() for t in existing_tags}
+    for s in suggestions:
+        s["is_new"] = s["tag_name"].strip().lower() not in existing_lower
+
+    return {"suggestions": suggestions}
+
+
+async def _llm_tag_suggest(prompt: str) -> list:
+    """Call a lightweight LLM (DeepSeek if available) for tag suggestions."""
+    import os
+    from hermes_state import SessionDB
+
+    api_key = os.environ.get("DEEPSEEK_API_KEY") or os.environ.get("OPENAI_API_KEY", "")
+    base_url = "https://api.deepseek.com/v1" if os.environ.get("DEEPSEEK_API_KEY") else (
+        os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1")
+    )
+    model = "deepseek-chat" if os.environ.get("DEEPSEEK_API_KEY") else "gpt-4o-mini"
+    if not api_key:
+        return []
+
+    import json as _json
+    import httpx
+
+    async with httpx.AsyncClient(timeout=15) as client:
+        resp = await client.post(
+            f"{base_url}/chat/completions",
+            headers={"Authorization": f"Bearer {api_key}"},
+            json={
+                "model": model,
+                "messages": [{"role": "user", "content": prompt}],
+                "response_format": {"type": "json_object"},
+                "max_tokens": 512,
+                "temperature": 0.3,
+            },
+        )
+        resp.raise_for_status()
+        data = resp.json()
+
+    content = data["choices"][0]["message"]["content"]
+    parsed = _json.loads(content)
+    return parsed.get("suggestions", [])
+
+
+@app.post("/api/sessions/{session_id}/chat")
+async def session_chat(session_id: str, request: Request):
+    """Drive one one-brain turn for a persisted session as the C1 principal.
+
+    FG-20 C1: agent-home's mobile chat pane calls this through the bridged
+    dashboard session. Reuses the shared one-brain agent builder
+    (``gateway.session_chat``) and the same ``SessionDB`` the gateway/Telegram
+    read, so a mobile turn interleaves with every other surface.
+
+    Trust model matches the other write endpoints: the turn is attributed to
+    the enrolled **owner** principal (no ``?as=`` narrowing). Prompt caching
+    and strict alternation are preserved — history is loaded from the store and
+    passed verbatim, no synthetic user message is injected, and the system
+    prompt is not rebuilt mid-conversation (no ``ephemeral_system_prompt``).
+    """
+    principal = await _comms_resolve_principal(request)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    user_message = str((body or {}).get("message", "")).strip()
+    if not user_message:
+        raise HTTPException(status_code=400, detail="message is required")
+    profile = (body or {}).get("profile") or None
+
+    # Attachments live in a private Supabase bucket the brain can't reach;
+    # download them into the shared document cache and point the brain at the
+    # local paths so uploaded PDFs/DOCX/XLSX are actually readable (FG-20).
+    _attachments = (body or {}).get("attachments")
+    if isinstance(_attachments, list) and _attachments:
+        user_message = await _materialize_agent_home_attachments(
+            _attachments, user_message
+        )
+
+    db = _open_session_db_for_profile(profile)
+    try:
+        sid = db.resolve_session_id(session_id)
+        if not sid:
+            raise HTTPException(status_code=404, detail="Session not found")
+        sid = db.resolve_resume_session_id(sid)
+        history = db.get_messages_as_conversation(sid)
+    finally:
+        db.close()
+
+    from gateway.session_chat import run_session_turn_sync
+    from gateway.session_context import set_session_vars, clear_session_vars
+    from hermes_cli.interactions import bind_trace
+
+    loop = asyncio.get_running_loop()
+    trace, ledger = _agent_home_trace(principal, sid)
+    _trace_emit(trace, "inbound", sid, "agent-home chat message")
+
+    def _run():
+        # Bind the runtime session-context for the turn (C1 identity flows to
+        # the agent). A SQLite handle can't cross threads, so the agent opens
+        # its own SessionDB inside this executor thread.
+        tokens = set_session_vars(
+            platform="api_server",
+            source="agent_home",
+            user_id=principal.user_id,
+            user_name=getattr(principal, "display", "") or "",
+            session_id=sid,
+            session_key=sid,
+            async_delivery=False,
+        )
+        try:
+            run_db = _open_session_db_for_profile(profile)
+            try:
+                # The trace contextvar must be bound in *this* thread: the tool
+                # loop reads it from the thread it runs on, so binding it on the
+                # request coroutine would leave every tool span untraced.
+                with bind_trace(trace):
+                    return run_session_turn_sync(
+                        session_db=run_db,
+                        user_message=user_message,
+                        conversation_history=history,
+                        session_id=sid,
+                    )
+            finally:
+                run_db.close()
+        finally:
+            clear_session_vars(tokens)
+
+    try:
+        result, usage = await loop.run_in_executor(None, _run)
+        final_response = result.get("final_response", "") if isinstance(result, dict) else ""
+        effective_sid = result.get("session_id", sid) if isinstance(result, dict) else sid
+        _trace_emit(
+            trace,
+            "outbound",
+            effective_sid,
+            f"agent-home response ({len(final_response)} chars)",
+        )
+    except Exception as exc:
+        _trace_emit(
+            trace, "error", type(exc).__name__,
+            f"agent-home turn error: {type(exc).__name__}",
+        )
+        raise
+    finally:
+        await _flush_agent_home_trace(trace, ledger)
+    return {
+        "session_id": effective_sid,
+        "message": {"role": "assistant", "content": final_response},
+        "usage": usage,
+    }
+
+
+def _agent_home_trace(
+    principal: "Principal",
+    session_key: str,
+) -> tuple["InteractionTrace | None", "InteractionLedger | None"]:
+    """Mint the C8 interaction trace for one agent-home turn (fail-open).
+
+    agent-home is not a gateway channel, so the ``gateway/run.py`` inbound
+    chokepoint never mints a trace for it — without this the Activity ledger
+    only ever shows channel traffic. ``mode="prod"`` matches
+    :func:`_comms_app_store`, the schema the trace read APIs serve.
+    """
+    try:
+        from hermes_cli.interactions import create_trace
+
+        return create_trace(
+            config=load_config() or {},
+            actor_user_id=principal.user_id,
+            session_key=session_key,
+            platform="agent_home",
+            mode="prod",
+        )
+    except Exception as exc:
+        _log.warning("[agent-home] interaction trace setup failed: %s", exc)
+        return None, None
+
+
+def _trace_emit(
+    trace: "InteractionTrace | None",
+    kind: "InteractionKind",
+    ref: str,
+    summary: str,
+) -> None:
+    """Append one row to ``trace`` from outside the bound worker thread.
+
+    The endpoint coroutine has no bound trace contextvar (the agent thread owns
+    it), so this emits on the object directly and re-derives the parent the way
+    ``observe()`` would — otherwise the reply would hang off the trace root
+    instead of the turn it answers.
+    """
+    if trace is None:
+        return
+    try:
+        trace.emit(
+            kind,
+            ref=ref,
+            summary=summary,
+            parent_id=None if kind == "inbound" else trace.parent_for(),
+        )
+    except Exception:
+        _log.debug("[agent-home] interaction trace emit failed", exc_info=True)
+
+
+async def _flush_agent_home_trace(
+    trace: "InteractionTrace | None",
+    ledger: "InteractionLedger | None",
+) -> None:
+    """Write the buffered trace rows. Tracing never fails a delivered turn."""
+    if trace is None or ledger is None:
+        return
+    try:
+        await ledger.flush(trace)
+    except Exception as exc:
+        _log.warning("[agent-home] interaction trace flush failed: %s", exc)
+
+
+# Hard caps for agent-home chat attachments (config-free; these are safety
+# limits, not user-facing behaviour knobs).
+_AGENT_HOME_ATTACHMENT_MAX = 32
+_AGENT_HOME_INLINE_TEXT_MAX = 200_000
+_AGENT_HOME_TEXT_EXTS = {
+    ".txt", ".md", ".csv", ".log", ".json", ".xml",
+    ".yaml", ".yml", ".toml", ".ini", ".cfg", ".tsv",
+}
+
+
+def _agent_home_supabase_origin() -> tuple[str, str, "int | None"] | None:
+    """Resolve the ``(scheme, host, port)`` the box signs media URLs against.
+
+    Mirrors the dashboard-auth resolution order
+    (``HERMES_DASHBOARD_SUPABASE_URL`` → ``SUPABASE_URL`` →
+    ``dashboard.supabase_auth.url`` in config.yaml) so the guard recognises the
+    same Supabase endpoint the login flow already trusts — including a
+    self-hosted deployment that serves storage over ``http`` on loopback
+    (e.g. ``http://127.0.0.1:8000``). Returns ``None`` when unconfigured.
+    """
+    from urllib.parse import urlparse
+
+    url = (
+        os.environ.get("HERMES_DASHBOARD_SUPABASE_URL", "").strip()
+        or os.environ.get("SUPABASE_URL", "").strip()
+    )
+    if not url:
+        try:
+            section = cfg_get(load_config() or {}, "dashboard", "supabase_auth", default=None)
+            if isinstance(section, dict):
+                url = str(section.get("url", "") or "").strip()
+        except Exception:
+            url = ""
+    if not url:
+        return None
+    parsed = urlparse(url)
+    if not parsed.scheme or not parsed.hostname:
+        return None
+    return (parsed.scheme.lower(), parsed.hostname.lower(), parsed.port)
+
+
+def _agent_home_download_allowed(url: str) -> bool:
+    """SSRF guard for an agent-home attachment download URL.
+
+    agent-home stores chat uploads in a *private* Supabase Storage bucket and
+    hands the brain only a short-lived signed URL per attachment (never a local
+    path — the bucket is remote). We fetch each file server-side, so a crafted
+    ``attachments[].url`` in the request body must not be able to make the box
+    reach an internal/metadata address. Accept a URL only when it either:
+
+    1. exactly matches the configured Supabase origin (scheme + host + port) —
+       this is the endpoint the BFF minted the signed URL on, and it covers
+       self-hosted boxes that serve storage over ``http`` on loopback (the
+       match is exact, so no *other* localhost port is reachable); or
+    2. is an ``https`` URL to a first-party ``*.supabase.co`` /
+       ``*.supabase.in`` host (hosted Supabase, when the origin is unset).
+    """
+    from urllib.parse import urlparse
+
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return False
+    if not parsed.hostname:
+        return False
+    scheme = parsed.scheme.lower()
+    host = parsed.hostname.lower()
+
+    origin = _agent_home_supabase_origin()
+    if origin is not None and (scheme, host, parsed.port) == origin:
+        return True
+
+    return scheme == "https" and (
+        host.endswith(".supabase.co") or host.endswith(".supabase.in")
+    )
+
+
+async def _fetch_agent_home_attachment(url: str) -> bytes:
+    """Download one agent-home attachment. Split out so tests inject a fetcher."""
+    import httpx
+
+    async with httpx.AsyncClient(
+        timeout=httpx.Timeout(60.0), follow_redirects=False
+    ) as client:
+        resp = await client.get(url)
+        resp.raise_for_status()
+        return resp.content
+
+
+async def _materialize_agent_home_attachments(
+    attachments: list,
+    user_message: str,
+    *,
+    fetch=_fetch_agent_home_attachment,
+) -> str:
+    """Make agent-home chat attachments readable by the brain.
+
+    The agent-home upload pipeline (FG-20) writes files to a private Supabase
+    bucket and, in the transcript, references them by an ``/api/chat/media``
+    URL the brain cannot reach (SSRF-blocked + expiring). So a PDF/DOCX/XLSX
+    attached in agent-home looked "invisible" — the model searched the local
+    filesystem, found nothing, and refused to summarize it.
+
+    This fetches each attachment's bytes into the shared ``cache/documents``
+    dir — the *same* place gateway inbound documents land — and prepends the
+    gateway's document context-note (reusing
+    :func:`gateway.run._build_document_context_note` and
+    :func:`tools.credential_files.to_agent_visible_cache_path`) so a file
+    uploaded in agent-home is read exactly as one sent over Telegram: the brain
+    is pointed at a real local path and told to extract the text itself.
+    Returns the (possibly enriched) user message.
+    """
+    import mimetypes
+
+    from gateway.platforms.base import (
+        cache_document_from_bytes,
+        get_inbound_media_max_bytes,
+    )
+    from gateway.run import _build_document_context_note
+    from tools.credential_files import to_agent_visible_cache_path
+
+    notes: list[str] = []
+    max_bytes = get_inbound_media_max_bytes()
+    handled = 0
+    for item in attachments:
+        if handled >= _AGENT_HOME_ATTACHMENT_MAX:
+            break
+        if not isinstance(item, dict):
+            continue
+        url = str(item.get("url") or "").strip()
+        name = str(item.get("name") or "").strip() or "attachment"
+        ctype = str(item.get("content_type") or "").strip().lower()
+        if not url or not _agent_home_download_allowed(url):
+            _log.warning("[agent-home] attachment %r skipped: URL missing/not allowed", name)
+            notes.append(
+                f"[The user attached '{name}' but it could not be retrieved from "
+                f"storage. Tell them the upload could not be read and ask them to "
+                f"re-send it — do not invent its contents.]"
+            )
+            continue
+        try:
+            data = await fetch(url)
+        except Exception:
+            _log.exception("[agent-home] attachment download failed: %r", name)
+            notes.append(
+                f"[The user attached '{name}' but it could not be downloaded. Tell "
+                f"them the upload could not be read and ask them to re-send it — do "
+                f"not invent its contents.]"
+            )
+            continue
+        if max_bytes and len(data) > max_bytes:
+            notes.append(
+                f"[The user attached '{name}' but it is too large "
+                f"({len(data)} bytes > {max_bytes}) and was not loaded.]"
+            )
+            continue
+        try:
+            host_path = cache_document_from_bytes(data, name)
+        except Exception:
+            _log.exception("[agent-home] caching attachment failed: %r", name)
+            continue
+        agent_path = to_agent_visible_cache_path(host_path)
+        if not ctype:
+            guessed, _ = mimetypes.guess_type(name)
+            ctype = (guessed or "application/octet-stream").lower()
+        handled += 1
+
+        if ctype.startswith("image/"):
+            notes.append(
+                f"[The user sent an image: '{name}'. It is saved at: {agent_path}. "
+                f"If the request depends on what the image shows, inspect it yourself "
+                f"— e.g. with vision_analyze or the ocr-and-documents skill — instead "
+                f"of asking the user to describe it.]"
+            )
+            continue
+
+        ext = os.path.splitext(name)[1].lower()
+        if ctype.startswith("text/") or ext in _AGENT_HOME_TEXT_EXTS:
+            try:
+                text = data.decode("utf-8")
+            except UnicodeDecodeError:
+                text = None
+            if text is not None:
+                snippet = text[:_AGENT_HOME_INLINE_TEXT_MAX]
+                truncated = (
+                    "\n\n[...truncated — read the full file at the path above...]"
+                    if len(text) > _AGENT_HOME_INLINE_TEXT_MAX
+                    else ""
+                )
+                note = _build_document_context_note(name, agent_path, "text/plain")
+                notes.append(f"{note}\n\n--- {name} ---\n{snippet}{truncated}")
+            else:
+                notes.append(_build_document_context_note(name, agent_path, ctype))
+            continue
+
+        notes.append(_build_document_context_note(name, agent_path, ctype))
+
+    if not notes:
+        return user_message
+    return "\n\n".join(notes) + ("\n\n" + user_message if user_message else "")
+
+
+@app.post("/api/sessions/{session_id}/chat/stream")
+async def session_chat_stream(session_id: str, request: Request):
+    """POST /api/sessions/{session_id}/chat/stream — SSE one-brain turn with an
+    approval surface.
+
+    Same one-brain turn as ``/api/sessions/{id}/chat`` (shared
+    ``gateway.session_chat`` builder, same ``SessionDB``, owner-attributed C1
+    principal), but streamed as Server-Sent Events so agent-home can render live
+    assistant deltas AND — the reason this path exists — an inline approve/deny
+    card for a tool gated by ``approvals.tools`` (e.g. calendar).
+
+    A gated tool blocks the agent thread and calls the per-run notify callback
+    registered here; we forward it as an ``approval.request`` event and the
+    client resolves it via ``POST /v1/runs/{run_id}/approval``. The approval
+    session is keyed on a unique ``run_id`` so concurrent turns cannot
+    cross-resolve. Without this surface the gate fails closed with
+    ``no_surface`` — the agent-home calendar bug (the non-streaming ``/chat``
+    endpoint above binds ``platform="api_server"`` but registers no surface).
+    Prompt caching / strict alternation are preserved exactly as in ``/chat``.
+    """
+    principal = await _comms_resolve_principal(request)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    user_message = str((body or {}).get("message", "")).strip()
+    if not user_message:
+        raise HTTPException(status_code=400, detail="message is required")
+    profile = (body or {}).get("profile") or None
+
+    # Attachments live in a private Supabase bucket the brain can't reach;
+    # download them into the shared document cache and point the brain at the
+    # local paths so uploaded PDFs/DOCX/XLSX are actually readable (FG-20).
+    _attachments = (body or {}).get("attachments")
+    if isinstance(_attachments, list) and _attachments:
+        user_message = await _materialize_agent_home_attachments(
+            _attachments, user_message
+        )
+
+    db = _open_session_db_for_profile(profile)
+    try:
+        sid = db.resolve_session_id(session_id)
+        if not sid:
+            raise HTTPException(status_code=404, detail="Session not found")
+        sid = db.resolve_resume_session_id(sid)
+        history = db.get_messages_as_conversation(sid)
+    finally:
+        db.close()
+
+    run_id = f"run_{uuid.uuid4().hex}"
+    loop = asyncio.get_running_loop()
+    queue: "asyncio.Queue" = asyncio.Queue()
+    trace, ledger = _agent_home_trace(principal, sid)
+    _trace_emit(trace, "inbound", sid, "agent-home chat message")
+
+    def _enqueue(name: str, payload: dict) -> None:
+        loop.call_soon_threadsafe(queue.put_nowait, (name, payload))
+
+    def _delta(delta: str) -> None:
+        if delta:
+            _enqueue("assistant.delta", {"delta": delta, "run_id": run_id})
+
+    def _approval_notify(approval_data: dict) -> None:
+        # A gated tool blocked the agent thread. Redact the command (it can
+        # carry secrets) and forward the prompt to the browser; the user's
+        # choice comes back via POST /v1/runs/{run_id}/approval.
+        event = dict(approval_data or {})
+        if "command" in event:
+            from gateway.run import _redact_approval_command
+
+            event["command"] = _redact_approval_command(event.get("command"))
+        event["run_id"] = run_id
+        event.setdefault("choices", ["once", "session", "always", "deny"])
+        _enqueue("approval.request", event)
+
+    def _run():
+        # Mirrors the non-streaming session_chat worker, plus the per-run
+        # approval surface. set_current_session_key + register_gateway_notify
+        # MUST run in this executor thread: the tool executor inherits this
+        # thread's contextvars, and the gate resolves the notify_cb by the
+        # approval session key.
+        from gateway.session_chat import run_session_turn_sync
+        from gateway.session_context import set_session_vars, clear_session_vars
+        from hermes_cli.interactions import bind_trace
+        from tools.approval import (
+            register_gateway_notify,
+            reset_current_session_key,
+            set_current_session_key,
+            unregister_gateway_notify,
+        )
+
+        tokens = set_session_vars(
+            platform="api_server",
+            source="agent_home",
+            user_id=principal.user_id,
+            user_name=getattr(principal, "display", "") or "",
+            session_id=sid,
+            session_key=sid,
+            async_delivery=False,
+        )
+        approval_token = set_current_session_key(run_id)
+        register_gateway_notify(run_id, _approval_notify)
+        try:
+            run_db = _open_session_db_for_profile(profile)
+            try:
+                # Bound here, not on the request coroutine: the tool loop reads
+                # the trace contextvar from the thread it runs on.
+                with bind_trace(trace):
+                    return run_session_turn_sync(
+                        session_db=run_db,
+                        user_message=user_message,
+                        conversation_history=history,
+                        session_id=sid,
+                        stream_delta_callback=_delta,
+                    )
+            finally:
+                run_db.close()
+        finally:
+            unregister_gateway_notify(run_id)
+            reset_current_session_key(approval_token)
+            clear_session_vars(tokens)
+
+    async def _driver():
+        try:
+            result, usage = await loop.run_in_executor(None, _run)
+            final_response = result.get("final_response", "") if isinstance(result, dict) else ""
+            eff_sid = result.get("session_id", sid) if isinstance(result, dict) else sid
+            _enqueue("assistant.completed", {"content": final_response, "run_id": run_id})
+            _enqueue("run.completed", {"session_id": eff_sid, "usage": usage, "run_id": run_id})
+            _trace_emit(
+                trace,
+                "outbound",
+                eff_sid,
+                f"agent-home streamed response ({len(final_response)} chars)",
+            )
+        except Exception as exc:
+            _log.exception("[agent-home] session chat stream failed")
+            _enqueue("error", {"message": "The turn could not be completed.", "run_id": run_id})
+            _trace_emit(
+                trace, "error", type(exc).__name__,
+                f"agent-home turn error: {type(exc).__name__}",
+            )
+        finally:
+            _enqueue("done", {"run_id": run_id})
+            loop.call_soon_threadsafe(queue.put_nowait, None)
+            await _flush_agent_home_trace(trace, ledger)
+
+    task = asyncio.create_task(_driver())
+
+    async def _events():
+        try:
+            while True:
+                try:
+                    item = await asyncio.wait_for(queue.get(), timeout=15.0)
+                except asyncio.TimeoutError:
+                    yield b": keepalive\n\n"
+                    continue
+                if item is None:
+                    break
+                name, payload = item
+                data = json.dumps(payload, ensure_ascii=False)
+                yield f"event: {name}\ndata: {data}\n\n".encode("utf-8")
+        finally:
+            if not task.done():
+                task.cancel()
+
+    headers = {
+        "Cache-Control": "no-cache, no-transform",
+        "X-Accel-Buffering": "no",
+        "X-Hermes-Session-Id": sid,
+    }
+    return StreamingResponse(_events(), media_type="text/event-stream", headers=headers)
+
+
+@app.post("/v1/runs/{run_id}/approval")
+async def resolve_run_approval(run_id: str, request: Request):
+    """Resolve a tool-approval prompt raised during a chat/stream turn.
+
+    The streamed turn blocks the agent thread on a gated tool and emits an
+    ``approval.request`` keyed on ``run_id``; this unblocks it with the user's
+    explicit choice. Owner-attributed like the other write endpoints — the
+    endpoint forwards the user's decision, it does not itself decide consent.
+    """
+    await _comms_resolve_principal(request)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    choice = str((body or {}).get("choice", "")).strip().lower()
+    if choice == "approve":
+        choice = "once"
+    if choice not in {"once", "session", "always", "deny"}:
+        raise HTTPException(status_code=400, detail="invalid choice")
+    from tools.approval import resolve_gateway_approval
+
+    resolved = resolve_gateway_approval(run_id, choice)
+    return {
+        "object": "hermes.run.approval",
+        "run_id": run_id,
+        "choice": choice,
+        "resolved": resolved,
+    }
+
+
+@app.post("/api/sessions")
+async def create_session_endpoint(request: Request):
+    """Create an empty Hermes session row for a new agent-home conversation.
+
+    Idempotent (INSERT OR IGNORE). Owner-attributed like the other write
+    endpoints. The first ``/chat`` turn then populates it; the session is the
+    same row every other surface (gateway, Telegram, desktop) reads.
+    """
+    await _comms_resolve_principal(request)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    body = body or {}
+    profile = body.get("profile") or None
+    raw_id = body.get("id") or body.get("session_id")
+    session_id = str(raw_id).strip() if raw_id else f"home_{int(time.time())}_{uuid.uuid4().hex[:8]}"
+
+    from gateway.session import _is_path_unsafe
+
+    if not session_id or re.search(r"[\r\n\x00]", session_id) or _is_path_unsafe(session_id) or len(session_id) > 256:
+        raise HTTPException(status_code=400, detail="Invalid session ID")
+
+    db = _open_session_db_for_profile(profile)
+    try:
+        if db.get_session(session_id):
+            raise HTTPException(status_code=409, detail="Session already exists")
+        db.ensure_session(session_id, source="agent_home")
+    finally:
+        db.close()
+    return {"session_id": session_id, "source": "agent_home"}
 
 
 @app.delete("/api/sessions/{session_id}")
@@ -9124,6 +11253,255 @@ async def set_mcp_server_enabled(
         servers[name]["enabled"] = bool(body.enabled)
         save_config(cfg)
     return {"ok": True, "name": name, "enabled": bool(body.enabled)}
+
+
+# ── Admin: FG-07 tool registry + in-house tool dashboard ────────────────────
+#
+# These routes front the mode-aware, C2-scoped tool registry
+# (hermes_cli.tools_registry). Access is routed through the merged contracts —
+# C3 for datastore/mode routing, C1/C2 for the operating principal + scoping,
+# C5/C6 for provenance + approval-gated promotion — never re-implemented here.
+# When the Supabase application datastore isn't configured the routes degrade
+# to ``{"configured": false}`` so the dashboard renders a setup hint instead of
+# 500ing.
+
+
+class ToolEnabledToggle(BaseModel):
+    enabled: bool
+    mode: Optional[str] = None
+
+
+class ToolConfigUpdate(BaseModel):
+    config: Dict[str, Any] = {}
+    mode: Optional[str] = None
+
+
+class ToolPromoteRequest(BaseModel):
+    mode: Optional[str] = None
+
+
+async def _resolve_tool_operator(prod_store):
+    """Resolve the dashboard operator principal (the enrolled owner)."""
+    from hermes_cli.access import PrincipalStore
+
+    owner = await PrincipalStore(prod_store).get_owner()
+    if owner is None:
+        raise HTTPException(
+            status_code=409,
+            detail="No owner enrolled yet — run `hermes owner` to enrol one.",
+        )
+    return owner
+
+
+def _resolve_tool_mode(mode: Optional[str]):
+    from hermes_cli.datastore import resolve_mode
+
+    return resolve_mode(mode if mode in ("dev", "prod") else None)
+
+
+@app.get("/api/tools")
+async def list_tools(mode: Optional[str] = None):
+    """List tools visible to the operator (C2-scoped) for a datastore mode."""
+    from hermes_cli.datastore import get_store
+    from hermes_cli.tools_registry import ToolRegistry
+
+    resolved_mode = _resolve_tool_mode(mode)
+    try:
+        prod_store = get_store("supabase-app", "prod")
+        operator = await _resolve_tool_operator(prod_store)
+        registry = ToolRegistry(get_store("supabase-app", resolved_mode))
+        await registry.initialize()
+        tools = await registry.list_for_principal(operator)
+    except HTTPException:
+        raise
+    except RuntimeError as exc:
+        # No Supabase DSN configured — degrade gracefully.
+        return {"configured": False, "mode": resolved_mode, "tools": [], "detail": str(exc)}
+    return {
+        "configured": True,
+        "mode": resolved_mode,
+        "tools": [t.as_dict() for t in tools],
+    }
+
+
+@app.put("/api/tools/{name}/enabled")
+async def set_tool_enabled(name: str, body: ToolEnabledToggle):
+    """Enable/disable a tool (owner or owning principal); records C5 provenance."""
+    from hermes_cli.datastore import get_store
+    from hermes_cli.tool_cmd import _record_provenance
+    from hermes_cli.tools_registry import ToolRegistry
+
+    resolved_mode = _resolve_tool_mode(body.mode)
+    try:
+        prod_store = get_store("supabase-app", "prod")
+        operator = await _resolve_tool_operator(prod_store)
+        registry = ToolRegistry(get_store("supabase-app", resolved_mode))
+        await registry.initialize()
+        tool = await registry.set_enabled(operator, name, bool(body.enabled))
+        await _record_provenance(
+            prod_store,
+            actor_user_id=operator.user_id,
+            action=f"hermes tool {'enable' if body.enabled else 'disable'} {name}",
+            target_ref=name,
+            mode=tool.mode,
+            visibility=tool.visibility,
+            payload={"status": tool.status},
+        )
+    except HTTPException:
+        raise
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"Tool '{name}' not found")
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+    return tool.as_dict()
+
+
+@app.put("/api/tools/{name}/config")
+async def set_tool_config(name: str, body: ToolConfigUpdate):
+    """Replace a tool's config_json (validated: no HERMES_* non-secret keys)."""
+    from hermes_cli.datastore import get_store
+    from hermes_cli.tool_cmd import _record_provenance
+    from hermes_cli.tools_registry import ToolConfigError, ToolRegistry
+
+    resolved_mode = _resolve_tool_mode(body.mode)
+    try:
+        prod_store = get_store("supabase-app", "prod")
+        operator = await _resolve_tool_operator(prod_store)
+        registry = ToolRegistry(get_store("supabase-app", resolved_mode))
+        await registry.initialize()
+        tool = await registry.set_config(operator, name, body.config)
+        await _record_provenance(
+            prod_store,
+            actor_user_id=operator.user_id,
+            action=f"hermes tool config {name}",
+            target_ref=name,
+            mode=tool.mode,
+            visibility=tool.visibility,
+            payload={"config_json": tool.config_json},
+        )
+    except HTTPException:
+        raise
+    except ToolConfigError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"Tool '{name}' not found")
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+    return tool.as_dict()
+
+
+@app.post("/api/tools/{name}/promote")
+async def promote_tool_route(name: str, body: ToolPromoteRequest):
+    """Approval-gated (C6) dev→prod promotion. The explicit POST is the approval."""
+    from hermes_cli.datastore import get_store
+    from hermes_cli.tools_registry import promote_tool
+
+    try:
+        prod_store = get_store("supabase-app", "prod")
+        operator = await _resolve_tool_operator(prod_store)
+        result = await promote_tool(
+            get_store("supabase-app", "prod"),
+            name,
+            actor=operator.user_id,
+            approved=True,
+        )
+    except HTTPException:
+        raise
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"Dev tool '{name}' not found")
+    except (PermissionError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+    return {
+        "ok": True,
+        "tool_name": result.tool_name,
+        "approval_ref": result.approval_ref,
+        "change_ref": result.change_ref,
+        "promotion_ref": result.promotion_ref,
+    }
+
+
+@app.get("/api/tools/{name}/health")
+async def tool_health(name: str, mode: Optional[str] = None):
+    """Best-effort health probe for a tool's own web process."""
+    from hermes_cli.datastore import get_store
+    from hermes_cli.tools_registry import ToolRegistry
+
+    resolved_mode = _resolve_tool_mode(mode)
+    try:
+        prod_store = get_store("supabase-app", "prod")
+        operator = await _resolve_tool_operator(prod_store)
+        registry = ToolRegistry(get_store("supabase-app", resolved_mode))
+        await registry.initialize()
+        tools = {t.name: t for t in await registry.list_for_principal(operator)}
+    except HTTPException:
+        raise
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+    tool = tools.get(name)
+    if tool is None:
+        raise HTTPException(status_code=404, detail=f"Tool '{name}' not found")
+    web_url = tool.web_url
+    if not web_url:
+        return {"name": name, "reachable": False, "detail": "no web_url"}
+
+    def _probe() -> tuple[bool, str]:
+        import urllib.error
+        import urllib.request
+
+        try:
+            with urllib.request.urlopen(web_url, timeout=2) as resp:  # noqa: S310
+                return True, f"HTTP {resp.status}"
+        except urllib.error.HTTPError as exc:
+            # A response (even 4xx/5xx) means the process is up.
+            return True, f"HTTP {exc.code}"
+        except Exception as exc:  # noqa: BLE001
+            return False, str(exc)
+
+    reachable, detail = await asyncio.to_thread(_probe)
+    return {"name": name, "reachable": reachable, "detail": detail, "web_url": tool.web_url}
+
+
+@app.get("/api/tools/changes")
+async def list_tool_changes(mode: Optional[str] = None, limit: int = 50):
+    """Render the C5/FG-12 change log entries visible to the operator (C2)."""
+    from hermes_cli.changes import ChangeLog, initialize_changes
+    from hermes_cli.datastore import get_store
+
+    try:
+        prod_store = get_store("supabase-app", "prod")
+        operator = await _resolve_tool_operator(prod_store)
+        connection = await prod_store.connect()
+        try:
+            await initialize_changes(connection)
+        finally:
+            await connection.close()
+        changes = await ChangeLog(prod_store).list_changes(operator, limit=limit)
+    except HTTPException:
+        raise
+    except RuntimeError as exc:
+        return {"configured": False, "changes": [], "detail": str(exc)}
+    return {
+        "configured": True,
+        "changes": [
+            {
+                "id": c.id,
+                "actor_user_id": c.actor_user_id,
+                "mode": c.mode,
+                "target_kind": c.target_kind,
+                "reversible": c.reversible,
+                "visibility": c.visibility,
+                "undone": c.undone,
+                "payload": c.payload,
+            }
+            for c in changes
+        ],
+    }
 
 
 @app.get("/api/mcp/catalog")
@@ -12909,6 +15287,33 @@ def _normalise_prefix(raw: Optional[str]) -> str:
     return normalise_prefix(raw)
 
 
+# Absolute asset directories baked into the built SPA (index.html tags + CSS
+# ``url(...)`` refs) that must be re-based under an ``X-Forwarded-Prefix`` so a
+# prefixed deploy fetches them through the proxy instead of the proxy host's
+# root. Covers the Vite-era public dirs AND Next's ``/_next/*`` build output.
+_PREFIXED_CSS_ASSET_DIRS = (
+    "/fonts/", "/fonts-terminal/", "/ds-assets/", "/assets/", "/_next/",
+)
+
+
+def _rewrite_css_asset_prefix(css: str, prefix: str) -> str:
+    """Re-base absolute ``url(/...)`` asset refs in a stylesheet under ``prefix``.
+
+    Browsers resolve absolute ``url(/foo)`` against the document origin, so
+    behind a ``/hermes`` path prefix an un-rewritten ``url(/_next/static/media
+    /Font.woff2)`` (or a public ``url(/fonts-terminal/...)``) would hit the
+    proxy host's root and 404. Returns ``css`` unchanged when ``prefix`` is
+    empty (root-path serving is byte-identical).
+    """
+    if not prefix:
+        return css
+    for asset_dir in _PREFIXED_CSS_ASSET_DIRS:
+        css = css.replace(f"url({asset_dir}", f"url({prefix}{asset_dir}")
+        css = css.replace(f'url("{asset_dir}', f'url("{prefix}{asset_dir}')
+        css = css.replace(f"url('{asset_dir}", f"url('{prefix}{asset_dir}")
+    return css
+
+
 def mount_spa(application: FastAPI):
     """Mount the built SPA. Falls back to index.html for client-side routing.
 
@@ -12967,14 +15372,24 @@ def mount_spa(application: FastAPI):
                 f"</script>"
             )
         if prefix:
-            # Rewrite absolute asset URLs baked into the Vite build so the
-            # browser fetches them through the same proxy prefix.
+            # Rewrite absolute asset URLs baked into the build so the browser
+            # fetches them through the same proxy prefix.
+            #
+            # Legacy Vite-era public dirs (kept for back-compat):
             html = html.replace('href="/assets/', f'href="{prefix}/assets/')
             html = html.replace('src="/assets/', f'src="{prefix}/assets/')
             html = html.replace('href="/favicon.ico"', f'href="{prefix}/favicon.ico"')
             html = html.replace('href="/fonts/', f'href="{prefix}/fonts/')
             html = html.replace('href="/ds-assets/', f'href="{prefix}/ds-assets/')
             html = html.replace('src="/ds-assets/', f'src="{prefix}/ds-assets/')
+            # Next.js entry tags + RSC flight payload reference /_next/* with an
+            # absolute path (script/link tags AND the embedded ``self.__next_f``
+            # data). Re-base every occurrence so the initial chunks/CSS load
+            # through the prefix. The webpack runtime's ``publicPath: "auto"``
+            # (see web/next.config.mjs) then derives its base from the rewritten
+            # runtime-chunk URL, so lazily-loaded chunks resolve under the
+            # prefix too — no per-prefix rebuild needed.
+            html = html.replace("/_next/", f"{prefix}/_next/")
         html = html.replace("</head>", f"{bootstrap_script}</head>", 1)
         return HTMLResponse(
             html,
@@ -12982,27 +15397,32 @@ def mount_spa(application: FastAPI):
         )
 
     # When served behind a path-prefix proxy, the built CSS contains
-    # absolute ``url(/fonts/...)`` and ``url(/ds-assets/...)`` references.
-    # Browsers resolve those against the document origin, which means
-    # under ``/hermes`` they'd hit ``mission-control.tilos.com/fonts/...``
-    # (the MC Pages app), not the Hermes backend. Intercept CSS asset
-    # requests BEFORE the StaticFiles mount and rewrite the absolute paths
-    # when a prefix is in play.
-    @application.get("/assets/{filename}.css")
-    async def serve_css(filename: str, request: Request):
-        css_path = WEB_DIST / "assets" / f"{filename}.css"
+    # absolute ``url(/fonts/...)`` / ``url(/ds-assets/...)`` (Vite-era public
+    # dirs) and ``url(/_next/static/media/...)`` (Next-bundled fonts)
+    # references. Browsers resolve those against the document origin, which
+    # means under ``/hermes`` they'd hit ``mission-control.tilos.com/fonts/...``
+    # (the MC Pages app), not the Hermes backend. Intercept CSS asset requests
+    # BEFORE the catch-all/StaticFiles mount and rewrite the absolute paths
+    # when a prefix is in play. Both the legacy ``/assets/*.css`` bundle and
+    # Next's ``/_next/static/css/*.css`` go through the same rewrite helper.
+    def _serve_css_file(css_path: Path, request: Request):
         if not css_path.is_file() or not css_path.resolve().is_relative_to(
             WEB_DIST.resolve()
         ):
             return JSONResponse({"error": "not found"}, status_code=404)
         prefix = _normalise_prefix(request.headers.get("x-forwarded-prefix"))
-        css = css_path.read_text(encoding="utf-8")
-        if prefix:
-            for asset_dir in ("/fonts/", "/fonts-terminal/", "/ds-assets/", "/assets/"):
-                css = css.replace(f"url({asset_dir}", f"url({prefix}{asset_dir}")
-                css = css.replace(f"url(\"{asset_dir}", f"url(\"{prefix}{asset_dir}")
-                css = css.replace(f"url('{asset_dir}", f"url('{prefix}{asset_dir}")
+        css = _rewrite_css_asset_prefix(css_path.read_text(encoding="utf-8"), prefix)
         return Response(content=css, media_type="text/css")
+
+    @application.get("/assets/{filename}.css")
+    async def serve_css(filename: str, request: Request):
+        return _serve_css_file(WEB_DIST / "assets" / f"{filename}.css", request)
+
+    @application.get("/_next/static/css/{filename}.css")
+    async def serve_next_css(filename: str, request: Request):
+        return _serve_css_file(
+            WEB_DIST / "_next" / "static" / "css" / f"{filename}.css", request
+        )
 
     application.mount("/assets", StaticFiles(directory=WEB_DIST / "assets"), name="assets")
 

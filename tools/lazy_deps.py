@@ -93,6 +93,8 @@ logger = logging.getLogger(__name__)
 
 
 LAZY_DEPS: dict[str, tuple[str, ...]] = {
+    # C3 Supabase application datastore router and promotion pipeline.
+    "datastore.supabase": ("asyncpg==0.31.0",),
     # ─── Inference providers ───────────────────────────────────────────────
     # Native Anthropic SDK — needed when provider=anthropic (not via
     # OpenRouter / aggregators which use the openai SDK).
@@ -150,6 +152,15 @@ LAZY_DEPS: dict[str, tuple[str, ...]] = {
     # instance and the provider silently reports itself unavailable.
     "memory.supermemory": ("supermemory==3.50.0",),
     "memory.mem0": ("mem0ai==2.0.10",),
+
+    # ─── Memory projection (FG-22) ─────────────────────────────────────────
+    # Fitting the memory explorer's scatter map is an operator CLI job. PCA is
+    # the default and needs only numpy — which is *not* a base dependency (it
+    # ships in the voice extra), so the fit installs it here rather than dying
+    # on the import. UMAP produces a better non-linear map and pulls in
+    # numba/llvmlite, so it stays opt-in.
+    "memory.projection.pca": ("numpy==2.4.3",),
+    "memory.projection": ("umap-learn==0.5.7",),
 
     # ─── Messaging platforms (lazy-installable on demand) ──────────────────
     "platform.telegram": ("python-telegram-bot[webhooks]==22.6",),
@@ -238,6 +249,17 @@ LAZY_DEPS: dict[str, tuple[str, ...]] = {
         "mcp==1.26.0",
         "starlette==1.0.1",  # CVE-2026-48710 — keep in sync with pyproject [computer-use]
     ),
+
+    # ─── RAG document extraction ───────────────────────────────────────────
+    # PDF and DOCX text extraction for ``hermes memory rag remember-file``.
+    # Most files that arrive are PDFs, so the extraction is behind lazy_deps
+    # rather than a core dependency — a user who never remembers a file never
+    # pays the import. pypdf is pure-Python (no compiled deps); python-docx
+    # likewise. The ``read_document`` path (ingest-files) still reports these
+    # as "convert first" because it reads from disk; the bytes path
+    # (remember-file) handles them directly.
+    "rag.pypdf": ("pypdf==5.1.0",),
+    "rag.python_docx": ("python-docx==1.2.0",),
 }
 
 

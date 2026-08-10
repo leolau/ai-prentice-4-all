@@ -256,7 +256,8 @@ async function pollBridge(port, sourcePhone) {
         console.error(`[batcher] Error polling port ${port}: ${e.message}`);
       }
     }
-    // Small delay between polls if no messages (the bridge long-polls so this mostly just handles errors)
+    // The bridge answers immediately, empty queue included — this delay is what
+    // keeps the loop from spinning at the bridge's response rate.
     await new Promise(r => setTimeout(r, 500));
   }
 }

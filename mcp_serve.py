@@ -38,7 +38,10 @@ import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import TYPE_CHECKING, cast, Dict, List, Optional
+
+if TYPE_CHECKING:
+    from hermes_cli.datastore import StoreMode
 
 logger = logging.getLogger("hermes.mcp_serve")
 
@@ -76,6 +79,128 @@ def _get_session_db():
     except Exception as e:
         logger.debug("SessionDB unavailable: %s", e)
         return None
+
+
+# ---------------------------------------------------------------------------
+# FG-11 — principal-aware, C2-scoped agent-comms surface
+#
+# Each MCP connection resolves to a contract-C1 Principal. The peer presents an
+# identity credential in the ``HERMES_MCP_PRINCIPAL`` env var (a credential, not
+# behavioural config — so it is not a banned non-secret HERMES_* var); it is
+# resolved through the *same* C1 seam channel identities use
+# (``PrincipalStore.resolve_by_channel`` on the ``mcp`` platform). An absent or
+# unmapped credential yields an anonymous ``viewer`` — unauthenticated peers get
+# viewer at most. Reads are C2-scoped (owner sees all; a non-owner sees shared +
+# its own private) and mutations are gated by the C6 approval contract.
+#
+# The store accessors below are module-level so tests can inject a throwaway
+# Postgres schema, mirroring the ``_get_session_db`` seam used elsewhere here.
+# ---------------------------------------------------------------------------
+
+#: Credential the MCP peer presents to authenticate as a principal.
+MCP_PRINCIPAL_ENV = "HERMES_MCP_PRINCIPAL"
+#: Platform label under which MCP peer identities are linked in C1.
+MCP_PRINCIPAL_PLATFORM = "mcp"
+#: user_id assigned to an unauthenticated / unmapped MCP peer.
+ANON_MCP_USER_ID = "mcp:anonymous"
+
+
+def _anonymous_viewer():
+    """Return the least-privilege principal for an unauthenticated peer."""
+    from hermes_cli.access import Principal
+
+    return Principal(
+        user_id=ANON_MCP_USER_ID,
+        display="Unauthenticated MCP peer",
+        role="viewer",
+    )
+
+
+def _resolve_server_mode() -> "StoreMode":
+    """Resolve the datastore mode for the server (config; defaults to prod).
+
+    The MCP server is a local authoring surface, so it honours the configured
+    ``datastore.mode``. Channel-originated sessions remain prod-only (C3
+    forces them), so a dev-mode server never leaks into channel traffic.
+    """
+    try:
+        from hermes_cli.datastore import resolve_mode
+
+        return resolve_mode(None)
+    except Exception as e:
+        logger.debug("mode resolution failed, defaulting to prod: %s", e)
+        return "prod"
+
+
+def _get_principal_store():
+    """Return the C1 PrincipalStore bound to the prod app schema.
+
+    Principals/roles are authoritative in prod (channels are prod-forced), so
+    identity resolution always reads the prod schema regardless of server mode.
+    """
+    from hermes_cli.access import PrincipalStore
+    from hermes_cli.datastore import get_store
+
+    return PrincipalStore(get_store("supabase-app", "prod"))
+
+
+def _get_app_store(mode: "Optional[StoreMode]" = None):
+    """Return the C3-routed SupabaseAppStore for ``mode`` (default: server mode)."""
+    from hermes_cli.datastore import get_store
+
+    return get_store("supabase-app", mode or _resolve_server_mode())
+
+
+def _get_memory_store():
+    """Return the FG-05 pgvector memory store for the server's mode.
+
+    Imported lazily: the memory tier is an optional plugin, and this edge
+    surface must degrade gracefully (returning an error to the caller) when it
+    is not installed rather than breaking server import.
+    """
+    from plugins.memory.supabase_pgvector.store import PgvectorMemoryStore
+
+    return PgvectorMemoryStore(_get_app_store())
+
+
+def _get_goal_management_service():
+    """Return the shared FG-09 service for the configured MCP mode."""
+    from hermes_cli.goal_management import GoalManagementService
+
+    return GoalManagementService(
+        _get_app_store(),
+        audit_store=_get_app_store("prod"),
+        approval_callback=_get_write_approval_callback(),
+    )
+
+
+def _get_write_approval_callback():
+    """Return the C6 approval callback for MCP mutations (default: none).
+
+    With no callback registered, :func:`prompt_dangerous_approval` fails closed
+    in the server's non-interactive stdio context (stdin EOF -> ``deny``). Tests
+    inject a callback to exercise the approved path.
+    """
+    return None
+
+
+async def _resolve_mcp_principal():
+    """Resolve the calling peer to a contract-C1 Principal.
+
+    Unauthenticated (no credential) or unmapped peers resolve to an anonymous
+    ``viewer``. A mapped credential resolves to the enrolled principal with its
+    real role, reusing the C1 channel-identity seam.
+    """
+    token = os.environ.get(MCP_PRINCIPAL_ENV, "").strip()
+    if not token:
+        return _anonymous_viewer()
+    try:
+        store = _get_principal_store()
+        principal = await store.resolve_by_channel(MCP_PRINCIPAL_PLATFORM, token)
+    except Exception as e:
+        logger.debug("MCP principal resolution failed: %s", e)
+        principal = None
+    return principal or _anonymous_viewer()
 
 
 def _load_sessions_index() -> dict:
@@ -874,6 +999,256 @@ def create_mcp_server(event_bridge: Optional[EventBridge] = None) -> "FastMCP":
 
         result = bridge.respond_to_approval(id, decision)
         return json.dumps(result, indent=2)
+
+    # -- whoami (FG-11 principal resolution) -------------------------------
+
+    @mcp.tool()
+    async def whoami() -> str:
+        """Return the contract-C1 principal resolved for this MCP connection.
+
+        The identity is taken from the peer's credential (env
+        ``HERMES_MCP_PRINCIPAL``) and resolved through C1. An unauthenticated
+        or unmapped peer is reported as an anonymous ``viewer`` — the
+        least-privilege role. This is the stable identity contract other agents
+        (and FG-09 consumers) use to reason about what they may read or write.
+        """
+        principal = await _resolve_mcp_principal()
+        return json.dumps(
+            {
+                "user_id": principal.user_id,
+                "display": principal.display,
+                "role": principal.role,
+                "authenticated": principal.user_id != ANON_MCP_USER_ID,
+                "mode": _resolve_server_mode(),
+            },
+            indent=2,
+        )
+
+    # -- memory_search (FG-11 C2-scoped read) ------------------------------
+
+    @mcp.tool()
+    async def memory_search(
+        query: str,
+        top_k: int = 10,
+        kind: Optional[str] = None,
+        topic: Optional[str] = None,
+    ) -> str:
+        """Semantic search over the live memory tier, scoped to the caller.
+
+        Results honour contract C2: the owner sees everything; a non-owner (or
+        an unauthenticated ``viewer``) sees only ``shared`` rows plus its own
+        ``private`` rows — never another principal's private memory.
+
+        Args:
+            query: Natural-language text to rank memories against.
+            top_k: Maximum rows to return (1-100).
+            kind: Optional exact-match filter on the memory kind.
+            topic: Optional exact-match filter on the memory topic.
+        """
+        top_k = _coerce_int(top_k, default=10, minimum=1, maximum=100)
+        principal = await _resolve_mcp_principal()
+        try:
+            store = _get_memory_store()
+        except Exception as e:
+            return json.dumps({"error": f"memory tier unavailable: {e}"})
+        try:
+            records = await store.query(
+                principal, query or "", top_k=top_k, kind=kind, topic=topic
+            )
+        except Exception as e:
+            return json.dumps({"error": f"memory query failed: {e}"})
+        return json.dumps(
+            {
+                "principal": principal.user_id,
+                "count": len(records),
+                "results": [r.as_dict() for r in records],
+            },
+            indent=2,
+        )
+
+    # -- memory_add (FG-11 C6-gated mutation) ------------------------------
+
+    @mcp.tool()
+    async def memory_add(
+        text: str,
+        visibility: Optional[str] = None,
+        topic: Optional[str] = None,
+        kind: str = "fact",
+    ) -> str:
+        """Write a memory row on behalf of the caller (mutating; C6-gated).
+
+        A ``viewer`` (including any unauthenticated peer) may not write. The
+        write is gated by the C6 approval contract; without an approval it fails
+        closed. ``visibility`` defaults to the caller's own ``private:<user>``;
+        pass ``"shared"`` to write org-visible knowledge.
+        """
+        principal = await _resolve_mcp_principal()
+        if principal.role == "viewer":
+            return json.dumps(
+                {"error": "viewer principals may not write memory"}
+            )
+        from tools.approval import prompt_dangerous_approval
+
+        decision = prompt_dangerous_approval(
+            f"mcp memory_add {principal.user_id}",
+            f"write a {visibility or 'private'} memory as {principal.user_id}",
+            allow_permanent=False,
+            approval_callback=_get_write_approval_callback(),
+        )
+        if decision not in {"once", "session", "always"}:
+            return json.dumps(
+                {"error": "write not approved (C6)", "decision": decision}
+            )
+        try:
+            store = _get_memory_store()
+            record = await store.write(
+                principal, text, kind=kind, topic=topic, visibility=visibility
+            )
+        except Exception as e:
+            return json.dumps({"error": f"memory write failed: {e}"})
+        return json.dumps({"written": record.as_dict()}, indent=2)
+
+    # -- goals_manage / goal_context (FG-09) -------------------------------
+
+    @mcp.tool()
+    async def goals_manage(
+        action: str,
+        goal_id: Optional[str] = None,
+        title: Optional[str] = None,
+        description: str = "",
+        priority: str = "medium",
+        visibility: Optional[str] = None,
+        status: Optional[str] = None,
+        resource_kind: Optional[str] = None,
+        resource_ref: Optional[str] = None,
+        task_id: Optional[str] = None,
+        state: Optional[str] = None,
+        metric_name: Optional[str] = None,
+        value: Optional[float] = None,
+        note: str = "",
+    ) -> str:
+        """List, create, prioritise, link, advance, or close durable goals.
+
+        All actions use the same C2-scoped/C3-routed FG-09 service as channels,
+        Telegram, and the web app. Mutations require a non-viewer principal and
+        are attributed to the authenticated MCP principal.
+        """
+        from hermes_cli.goal_management import RESOURCE_KINDS, ResourceKind
+
+        principal = await _resolve_mcp_principal()
+        normalized = action.strip().lower()
+        try:
+            service = _get_goal_management_service()
+            await service.initialize()
+            if normalized == "list":
+                goals = await service.list_goals(principal, status=status)
+                return json.dumps(
+                    {
+                        "principal": principal.user_id,
+                        "goals": [goal.as_dict() for goal in goals],
+                    },
+                    indent=2,
+                )
+            if normalized == "create":
+                if not title:
+                    raise ValueError("create requires title")
+                goal = await service.create_goal(
+                    principal,
+                    title,
+                    description=description,
+                    priority=priority,
+                    visibility=visibility,
+                    surface="mcp",
+                )
+                return json.dumps({"goal": goal.as_dict()}, indent=2)
+            if normalized in {"priority", "prioritise", "prioritize"}:
+                if not goal_id:
+                    raise ValueError("prioritise requires goal_id")
+                goal = await service.prioritise(
+                    principal,
+                    goal_id,
+                    priority,
+                    surface="mcp",
+                )
+                return json.dumps({"goal": goal.as_dict()}, indent=2)
+            if normalized == "link":
+                if (
+                    not goal_id
+                    or not resource_kind
+                    or not resource_ref
+                    or resource_kind not in RESOURCE_KINDS
+                ):
+                    raise ValueError(
+                        "link requires goal_id, resource_kind "
+                        "(memory|task|tool), and resource_ref"
+                    )
+                link = await service.link(
+                    principal,
+                    goal_id,
+                    cast(ResourceKind, resource_kind),
+                    resource_ref,
+                    surface="mcp",
+                )
+                return json.dumps({"link": link.as_dict()}, indent=2)
+            if normalized == "advance":
+                if not goal_id:
+                    raise ValueError("advance requires goal_id")
+                if task_id and state:
+                    task = await service.advance_task(
+                        principal,
+                        goal_id,
+                        task_id,
+                        state,
+                        surface="mcp",
+                    )
+                    return json.dumps({"task": task.as_dict()}, indent=2)
+                if metric_name and value is not None:
+                    metric = await service.advance_metric(
+                        principal,
+                        goal_id,
+                        metric_name,
+                        value,
+                        note=note,
+                        surface="mcp",
+                    )
+                    return json.dumps({"metric": metric.to_dict()}, indent=2)
+                if note.strip():
+                    await service.record_progress(
+                        principal,
+                        goal_id,
+                        note,
+                        surface="mcp",
+                    )
+                    return json.dumps({"advanced": True, "goal_id": goal_id})
+                raise ValueError(
+                    "advance requires task_id+state, metric_name+value, or note"
+                )
+            if normalized in {"close", "done"}:
+                if not goal_id:
+                    raise ValueError("close requires goal_id")
+                goal = await service.close_goal(
+                    principal,
+                    goal_id,
+                    surface="mcp",
+                )
+                return json.dumps({"goal": goal.as_dict()}, indent=2)
+            raise ValueError(
+                "action must be list, create, prioritise, link, advance, or close"
+            )
+        except (KeyError, LookupError, PermissionError, RuntimeError, ValueError) as e:
+            return json.dumps({"error": str(e)})
+
+    @mcp.tool()
+    async def goal_context(goal_id: str) -> str:
+        """Return cache-safe goal context as an appended MCP tool result."""
+        principal = await _resolve_mcp_principal()
+        try:
+            service = _get_goal_management_service()
+            await service.initialize()
+            context = await service.assemble_context(principal, goal_id)
+        except (KeyError, LookupError, PermissionError, RuntimeError, ValueError) as e:
+            return json.dumps({"error": str(e)})
+        return context.as_tool_result()
 
     return mcp
 

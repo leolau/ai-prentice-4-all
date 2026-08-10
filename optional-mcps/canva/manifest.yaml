@@ -1,0 +1,44 @@
+# Nous-approved MCP catalog entry.
+# Presence in this directory = approval. Merged via PR review.
+manifest_version: 1
+
+name: canva
+description: Create, edit, export, and comment on Canva designs, docs, and presentations.
+source: https://www.canva.dev/docs/mcp-server/
+
+# Canva ships a remote MCP server with native OAuth 2.1 + Dynamic Client
+# Registration over Streamable HTTP, so Hermes's MCP client + mcp_oauth_manager
+# handle discovery, PKCE, token exchange, and refresh — nothing to install
+# locally. Unlike Figma's MCP, registration is open (no catalog-listed-client
+# gate), so Hermes connects directly instead of bridging through another agent.
+transport:
+  type: http
+  url: https://mcp.canva.com/mcp
+
+auth:
+  type: oauth
+  # No `provider:` — native MCP OAuth (case 1). The authorize step requests the
+  # full resource scope set advertised at
+  # /.well-known/oauth-protected-resource/mcp, which includes the write scopes
+  # (design:content:write, folder:write, asset:write, comment:write) that the
+  # editing-transaction tools need.
+
+# Tool selection at install time: the server exposes a large surface (search,
+# get, generate, editing transactions, export, folders, brand kits/templates,
+# comments). `default_enabled` is left unset so the install-time checklist
+# starts fully checked and users prune what they don't want.
+
+post_install: |
+  On first connection, Hermes opens a browser to authorize Canva. On a headless
+  host the redirect to http://127.0.0.1:<port>/callback cannot reach your
+  browser — paste the failing redirect URL back at the prompt, or set up an SSH
+  port forward. See docs/guides/oauth-over-ssh.md.
+
+  Writes go through a transaction: start-editing-transaction →
+  perform-editing-operations → commit-editing-transaction. Editing existing
+  designs needs the design ID or its canva.com link; `generate-design` +
+  `create-design-from-candidate` create new ones from a brief.
+
+  After auth, restart your Hermes session so the Canva tools are loaded, or
+  re-run the tool checklist with:
+    hermes mcp configure canva

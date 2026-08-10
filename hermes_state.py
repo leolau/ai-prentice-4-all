@@ -122,7 +122,7 @@ T = TypeVar("T")
 
 DEFAULT_DB_PATH = get_hermes_home() / "state.db"
 
-SCHEMA_VERSION = 17
+SCHEMA_VERSION = 18
 
 # Cap on user-controlled FTS5 query input before regex/sanitizer processing.
 # Search queries do not need to be arbitrarily large, and bounding them keeps
@@ -776,12 +776,30 @@ CREATE TABLE IF NOT EXISTS compression_locks (
     expires_at REAL NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS session_tags (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE,
+    color TEXT NOT NULL DEFAULT 'blue',
+    created_at REAL NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS session_tag_map (
+    session_id TEXT NOT NULL REFERENCES sessions(id),
+    tag_id TEXT NOT NULL REFERENCES session_tags(id),
+    assigned_at REAL NOT NULL,
+    source TEXT DEFAULT 'manual',
+    PRIMARY KEY (session_id, tag_id)
+);
+
 CREATE INDEX IF NOT EXISTS idx_sessions_source ON sessions(source);
 CREATE INDEX IF NOT EXISTS idx_sessions_source_id ON sessions(source, id);
 CREATE INDEX IF NOT EXISTS idx_sessions_parent ON sessions(parent_session_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_started ON sessions(started_at DESC);
 CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, timestamp);
 CREATE INDEX IF NOT EXISTS idx_compression_locks_expires ON compression_locks(expires_at);
+CREATE INDEX IF NOT EXISTS idx_session_tag_map_session ON session_tag_map(session_id);
+CREATE INDEX IF NOT EXISTS idx_session_tag_map_tag ON session_tag_map(tag_id);
+CREATE INDEX IF NOT EXISTS idx_session_tags_name ON session_tags(name);
 """
 
 # Indexes that reference columns added in later schema versions must be
@@ -1522,6 +1540,35 @@ class SessionDB:
                     )
                 except sqlite3.OperationalError:
                     pass
+            if current_version < 18:
+                # v18: session tagging tables (session_tags + session_tag_map).
+                # Tables are created unconditionally by SCHEMA_SQL above, but
+                # ensure they exist for older DBs that skipped version steps.
+                cursor.execute(
+                    "CREATE TABLE IF NOT EXISTS session_tags ("
+                    "id TEXT PRIMARY KEY, "
+                    "name TEXT NOT NULL UNIQUE, "
+                    "color TEXT NOT NULL DEFAULT 'blue', "
+                    "created_at REAL NOT NULL"
+                    ")"
+                )
+                cursor.execute(
+                    "CREATE TABLE IF NOT EXISTS session_tag_map ("
+                    "session_id TEXT NOT NULL REFERENCES sessions(id), "
+                    "tag_id TEXT NOT NULL REFERENCES session_tags(id), "
+                    "assigned_at REAL NOT NULL, "
+                    "source TEXT DEFAULT 'manual', "
+                    "PRIMARY KEY (session_id, tag_id)"
+                    ")"
+                )
+                cursor.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_session_tag_map_session "
+                    "ON session_tag_map(session_id)"
+                )
+                cursor.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_session_tag_map_tag "
+                    "ON session_tag_map(tag_id)"
+                )
             if current_version < SCHEMA_VERSION and fts_migrations_complete:
                 cursor.execute(
                     "UPDATE schema_version SET version = ?",
@@ -2944,6 +2991,176 @@ class SessionDB:
             sessions = projected
 
         return sessions
+
+    # -----------------------------------------------------------------------
+    # Session tags
+    # -----------------------------------------------------------------------
+    TAG_COLORS = {"blue", "red", "green", "amber", "purple", "gray"}
+
+    def list_tags(self) -> List[Dict[str, Any]]:
+        """Return all tags (ordered by name) with a session_count."""
+        with self._lock:
+            cursor = self._conn.execute(
+                "SELECT t.id, t.name, t.color, t.created_at, "
+                "(SELECT COUNT(*) FROM session_tag_map m WHERE m.tag_id = t.id) AS session_count "
+                "FROM session_tags t ORDER BY t.name"
+            )
+            return [dict(r) for r in cursor.fetchall()]
+
+    def create_tag(self, name: str, color: str = "blue") -> Dict[str, Any]:
+        """Create a standalone tag (not attached to any session).
+
+        Returns the tag dict (id, name, color).  Case-insensitive dedup —
+        if a tag with the same name already exists, return it.
+        """
+        import time, uuid
+        name = name.strip()
+        if not name:
+            raise ValueError("tag name cannot be empty")
+        if color not in self.TAG_COLORS:
+            color = "blue"
+        now = time.time()
+        tag_id = uuid.uuid4().hex
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT id, name, color FROM session_tags WHERE LOWER(name) = LOWER(?)",
+                (name,)
+            ).fetchone()
+            if row:
+                return dict(row)
+            self._conn.execute(
+                "INSERT INTO session_tags (id, name, color, created_at) VALUES (?, ?, ?, ?)",
+                (tag_id, name, color, now)
+            )
+            self._conn.commit()
+        return {"id": tag_id, "name": name, "color": color}
+
+    def get_session_tags(self, session_id: str) -> List[Dict[str, Any]]:
+        """Return tags attached to *session_id* (ordered by name)."""
+        with self._lock:
+            cursor = self._conn.execute(
+                "SELECT t.id, t.name, t.color, m.assigned_at, m.source "
+                "FROM session_tags t "
+                "JOIN session_tag_map m ON m.tag_id = t.id "
+                "WHERE m.session_id = ? ORDER BY t.name",
+                (session_id,)
+            )
+            return [dict(r) for r in cursor.fetchall()]
+
+    def add_tag_to_session(
+        self,
+        session_id: str,
+        tag_name: str,
+        color: str = "blue",
+        source: str = "manual",
+    ) -> Dict[str, Any]:
+        """Create-or-find *tag_name* and attach it to *session_id*.
+
+        Returns the tag dict (id, name, color).  Idempotent — if the tag
+        is already attached, returns the existing row.
+        """
+        import time, uuid
+        tag_name = tag_name.strip()
+        if not tag_name:
+            raise ValueError("tag name cannot be empty")
+        if color not in self.TAG_COLORS:
+            color = "blue"
+        now = time.time()
+        tag_id = uuid.uuid4().hex
+        with self._lock:
+            # Find existing tag by name (case-insensitive).
+            row = self._conn.execute(
+                "SELECT id, name, color FROM session_tags WHERE LOWER(name) = LOWER(?)",
+                (tag_name,)
+            ).fetchone()
+            if row:
+                tag = dict(row)
+                tag_id = tag["id"]
+            else:
+                self._conn.execute(
+                    "INSERT INTO session_tags (id, name, color, created_at) VALUES (?, ?, ?, ?)",
+                    (tag_id, tag_name, color, now)
+                )
+                tag = {"id": tag_id, "name": tag_name, "color": color}
+            # Attach to session (INSERT OR IGNORE for idempotency).
+            self._conn.execute(
+                "INSERT OR IGNORE INTO session_tag_map (session_id, tag_id, assigned_at, source) "
+                "VALUES (?, ?, ?, ?)",
+                (session_id, tag_id, now, source)
+            )
+            self._conn.commit()
+        return tag
+
+    def remove_tag_from_session(self, session_id: str, tag_id: str) -> bool:
+        """Detach *tag_id* from *session_id*.  Returns True if a row was deleted."""
+        with self._lock:
+            cursor = self._conn.execute(
+                "DELETE FROM session_tag_map WHERE session_id = ? AND tag_id = ?",
+                (session_id, tag_id)
+            )
+            self._conn.commit()
+            return cursor.rowcount > 0
+
+    def delete_tag(self, tag_id: str) -> bool:
+        """Delete a tag and all its session assignments."""
+        with self._lock:
+            self._conn.execute(
+                "DELETE FROM session_tag_map WHERE tag_id = ?", (tag_id,)
+            )
+            cursor = self._conn.execute(
+                "DELETE FROM session_tags WHERE id = ?", (tag_id,)
+            )
+            self._conn.commit()
+            return cursor.rowcount > 0
+
+    def filter_session_ids_by_tags(
+        self,
+        include_tags: List[str] | None = None,
+        exclude_tags: List[str] | None = None,
+        match: str = "any",
+    ) -> List[str] | None:
+        """Return session ids matching the tag filter, or ``None`` when no
+        filter is supplied (caller should not filter).
+
+        *match* is ``"any"`` (OR) or ``"all"`` (AND).  *exclude_tags*
+        removes sessions that have any of those tags (NOT).
+        """
+        if not include_tags and not exclude_tags:
+            return None
+        with self._lock:
+            base = "SELECT DISTINCT m.session_id FROM session_tag_map m "\
+                   "JOIN session_tags t ON t.id = m.tag_id "
+            if include_tags:
+                names = [n.strip().lower() for n in include_tags if n.strip()]
+                if match == "all":
+                    # AND: session must have every requested tag.
+                    placeholders = ", ".join("?" for _ in names)
+                    query = (
+                        f"SELECT session_id FROM session_tag_map m "
+                        f"JOIN session_tags t ON t.id = m.tag_id "
+                        f"WHERE LOWER(t.name) IN ({placeholders}) "
+                        f"GROUP BY session_id HAVING COUNT(DISTINCT t.name) = ?"
+                    )
+                    rows = self._conn.execute(query, [*names, len(names)]).fetchall()
+                else:
+                    placeholders = ", ".join("?" for _ in names)
+                    query = base + f"WHERE LOWER(t.name) IN ({placeholders})"
+                    rows = self._conn.execute(query, names).fetchall()
+                ids = {r["session_id"] for r in rows}
+            else:
+                # Only exclusion filter — start from all sessions.
+                ids = {r["id"] for r in self._conn.execute(
+                    "SELECT id FROM sessions WHERE archived = 0"
+                ).fetchall()}
+            if exclude_tags:
+                ex_names = [n.strip().lower() for n in exclude_tags if n.strip()]
+                placeholders = ", ".join("?" for _ in ex_names)
+                excluded = self._conn.execute(
+                    base + f"WHERE LOWER(t.name) IN ({placeholders})", ex_names
+                ).fetchall()
+                excluded_ids = {r["session_id"] for r in excluded}
+                ids = ids - excluded_ids
+            return list(ids)
 
     def list_cron_job_runs(
         self,

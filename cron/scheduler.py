@@ -2250,6 +2250,78 @@ def _guard_job_credential_exfil(job: dict) -> None:
         raise RuntimeError(f"Cron job '{job_id}' blocked for safety: {err}")
 
 
+def _start_cron_trace(job_id: str, job_name: str, session_key: str):
+    """Mint + bind the C8 interaction trace for one scheduled run (FG-16).
+
+    A cron run drives the same agent and tools as a chat turn but has no
+    inbound channel message, so nothing upstream mints a trace for it and
+    scheduled work is invisible in the Activity ledger. Attributed to the
+    enrolled owner (a job has no sender) at ``mode="prod"`` — the schema the
+    trace read APIs serve. Fail-open: tracing never blocks a job.
+
+    Returns ``(trace, ledger, context)``; the context must be closed by
+    :func:`_finish_cron_trace` so the bound contextvar does not outlive the job.
+    """
+    try:
+        from hermes_cli.access import PrincipalStore
+        from hermes_cli.datastore import get_store
+        from hermes_cli.interactions import bind_trace, create_trace, observe
+
+        config = load_config() or {}
+        store = get_store("supabase-app", "prod", config=config)
+        if not store.dsn:
+            return None, None, None
+        owner = asyncio.run(PrincipalStore(store).get_owner())
+        if owner is None:
+            return None, None, None
+        trace, ledger = create_trace(
+            config=config,
+            actor_user_id=owner.user_id,
+            session_key=session_key,
+            platform="cron",
+            mode="prod",
+        )
+        if trace is None:
+            return None, None, None
+        context = bind_trace(trace)
+        context.__enter__()
+        observe("inbound", ref=job_id, summary=f"Scheduled job: {job_name}")
+        return trace, ledger, context
+    except Exception as e:
+        logger.debug("Job '%s': interaction trace setup failed: %s", job_id, e)
+        return None, None, None
+
+
+def _cron_trace_event(kind: str, ref: str, summary: str) -> None:
+    """Emit one trace row for the running job (no-op when tracing is off)."""
+    try:
+        from hermes_cli.interactions import observe
+
+        observe(kind, ref=ref, summary=summary)  # type: ignore[arg-type]
+    except Exception:
+        logger.debug("cron interaction trace emit failed", exc_info=True)
+
+
+def _finish_cron_trace(trace, ledger, context, job_id: str) -> None:
+    """Flush the job's trace rows and unbind it. Fail-open.
+
+    The flush runs in a private loop: ``run_job`` executes on a scheduler
+    worker thread that has no running event loop of its own.
+    """
+    if context is None:
+        return
+    try:
+        if trace is not None and ledger is not None:
+            asyncio.run(ledger.flush(trace))
+    except Exception as e:
+        logger.debug("Job '%s': interaction trace flush failed: %s", job_id, e)
+    finally:
+        try:
+            context.__exit__(None, None, None)
+        except Exception:
+            logger.debug("Job '%s': interaction trace reset failed", job_id, exc_info=True)
+
+
 def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
     """
     Execute a single cron job.
@@ -2432,6 +2504,9 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
         return True, "", SILENT_MARKER, None
     origin = _resolve_origin(job)
     _cron_session_id = f"cron_{job_id}_{_hermes_now().strftime('%Y%m%d_%H%M%S')}"
+    _trace, _trace_ledger, _trace_context = _start_cron_trace(
+        job_id, job_name, _cron_session_id
+    )
 
     logger.info("Running job '%s' (ID: %s)", job_name, job_id)
     logger.info("Prompt: %s", prompt[:100])
@@ -2998,11 +3073,15 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
 """
         
         logger.info("Job '%s' completed successfully", job_name)
+        _cron_trace_event(
+            "outbound", job_id, f"Cron response ({len(final_response)} chars)"
+        )
         return True, output, final_response, None
         
     except Exception as e:
         error_msg = f"{type(e).__name__}: {str(e)}"
         logger.exception("Job '%s' failed: %s", job_name, error_msg)
+        _cron_trace_event("error", job_id, f"Cron job failed: {error_msg}")
         
         output = f"""# Cron Job: {job_name} (FAILED)
 
@@ -3023,6 +3102,7 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
         return False, output, "", error_msg
 
     finally:
+        _finish_cron_trace(_trace, _trace_ledger, _trace_context, job_id)
         # Restore TERMINAL_CWD to whatever it was before this job ran.  We
         # only ever mutate it when the job has a workdir; see the setup block
         # at the top of run_job for the serialization guarantee.

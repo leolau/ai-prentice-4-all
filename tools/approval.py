@@ -91,6 +91,23 @@ def _is_interactive_cli() -> bool:
     return env_var_enabled("HERMES_INTERACTIVE")
 
 
+def _stdin_is_a_tty() -> bool:
+    """True when a human could actually answer an ``input()`` prompt."""
+    try:
+        return bool(sys.stdin) and sys.stdin.isatty()
+    except Exception:
+        return False
+
+
+def _has_interactive_prompt_surface() -> bool:
+    """True when the terminal prompt path can reach a human.
+
+    Without this, ``input()`` on a daemonised process reads EOF and the prompt
+    resolves to a denial in microseconds — a refusal nobody made.
+    """
+    return _is_interactive_cli() or _stdin_is_a_tty()
+
+
 def _fire_approval_hook(hook_name: str, **kwargs) -> None:
     """Invoke a plugin lifecycle hook for the approval system.
 
@@ -101,6 +118,36 @@ def _fire_approval_hook(hook_name: str, **kwargs) -> None:
     Only fires for the two approval-specific hooks in VALID_HOOKS:
     pre_approval_request, post_approval_response.
     """
+    kwargs.setdefault("turn_id", _approval_turn_id.get())
+    kwargs.setdefault("tool_call_id", _approval_tool_call_id.get())
+    try:
+        from hermes_cli.interactions import current_trace_id, observe
+
+        trace_id = current_trace_id()
+        if trace_id:
+            kwargs.setdefault("trace_id", trace_id)
+        if hook_name == "pre_approval_request":
+            observe(
+                "approval",
+                ref=str(
+                    kwargs.get("tool_call_id")
+                    or kwargs.get("pattern_key")
+                    or "request"
+                ),
+                summary="Approval requested",
+            )
+        elif hook_name == "post_approval_response":
+            observe(
+                "approval",
+                ref=str(
+                    kwargs.get("tool_call_id")
+                    or kwargs.get("pattern_key")
+                    or "response"
+                ),
+                summary=f"Approval response: {kwargs.get('choice', 'unknown')}",
+            )
+    except Exception as exc:
+        logger.debug("Approval interaction trace failed: %s", exc)
     try:
         from hermes_cli.plugins import invoke_hook
     except Exception:
@@ -108,8 +155,6 @@ def _fire_approval_hook(hook_name: str, **kwargs) -> None:
         # (e.g. bare tool-only imports, minimal test environments).
         return
     try:
-        kwargs.setdefault("turn_id", _approval_turn_id.get())
-        kwargs.setdefault("tool_call_id", _approval_tool_call_id.get())
         invoke_hook(hook_name, **kwargs)
     except Exception as exc:
         # invoke_hook() already swallows per-callback errors, so reaching here
@@ -150,6 +195,11 @@ def reset_current_observability_context(
     _approval_turn_id.reset(turn_token)
 
 
+def get_current_observability_context() -> tuple[str, str]:
+    """Return the active turn and tool ids used by side-channel observers."""
+    return _approval_turn_id.get(), _approval_tool_call_id.get()
+
+
 def get_current_session_key(default: str = "default") -> str:
     """Return the active session key, preferring context-local state.
 
@@ -181,6 +231,9 @@ def _is_gateway_approval_context() -> bool:
     Legacy gateway integrations set HERMES_GATEWAY_SESSION in process env.
     Newer concurrent gateway paths bind HERMES_SESSION_PLATFORM via
     contextvars so approval mode does not depend on process-global flags.
+    A notify callback registered for the current session key also counts:
+    it is the surface itself, so its presence answers the question directly
+    rather than by proxy.
 
     Cron jobs are NEVER gateway-approval contexts even when they originate
     from a gateway platform (cron binds HERMES_SESSION_PLATFORM via
@@ -193,7 +246,32 @@ def _is_gateway_approval_context() -> bool:
         return False
     if env_var_enabled("HERMES_GATEWAY_SESSION"):
         return True
-    return bool(_get_session_platform())
+    if _get_session_platform():
+        return True
+    # A registered notify callback IS an approval surface, and a stronger
+    # signal than the platform flag: the gateway registers it for this exact
+    # session key, and it survives ContextVar/env resolution differences that
+    # HERMES_SESSION_PLATFORM does not.  Without this, a call whose platform
+    # flag is unset while the session's callback is live routes to the
+    # *terminal* prompt on a daemonised service, reads EOF, and denies itself
+    # — the user is never asked but is told they refused.
+    return _has_gateway_notify_surface()
+
+
+def _has_gateway_notify_surface() -> bool:
+    """True when something is registered to prompt *this* session's user.
+
+    Keyed on the exact session key, so one session's surface never answers
+    for another.
+    """
+    try:
+        session_key = get_current_session_key(default="")
+    except Exception:  # pragma: no cover -- defensive
+        return False
+    if not session_key:
+        return False
+    with _lock:
+        return session_key in _gateway_notify_cbs
 
 # Sensitive write targets that should trigger approval even when referenced
 # via shell expansions like $HOME or $HERMES_HOME, or by the resolved absolute
@@ -2092,7 +2170,8 @@ def _format_tirith_description(tirith_result: dict) -> str:
 
 
 def _await_gateway_decision(session_key: str, notify_cb, approval_data: dict,
-                            *, surface: str = "gateway") -> dict:
+                            *, surface: str = "gateway",
+                            timeout_seconds: int | None = None) -> dict:
     """Enqueue *approval_data*, notify the user, and block the calling agent
     thread until the request is resolved or the gateway approval timeout
     elapses — firing pre/post approval hooks and cleaning up the queue entry.
@@ -2100,6 +2179,9 @@ def _await_gateway_decision(session_key: str, notify_cb, approval_data: dict,
     Shared by the terminal command guard (``check_all_command_guards``) and
     the execute_code guard (``check_execute_code_guard``) so the fiddly
     heartbeat-polling wait loop lives in one place.
+
+    *timeout_seconds* overrides ``approvals.gateway_timeout`` for callers that
+    carry their own deadline (e.g. ``approvals.tools_timeout``).
 
     Returns ``{"resolved": bool, "choice": str|None}`` on completion, or
     ``{"resolved": False, "choice": None, "notify_failed": True}`` if the
@@ -2147,7 +2229,10 @@ def _await_gateway_decision(session_key: str, notify_cb, approval_data: dict,
     # slices so we can fire activity heartbeats every ~10s to the agent's
     # inactivity tracker — otherwise the gateway watchdog kills the agent
     # while the user is still responding. Mirrors _wait_for_process() cadence.
-    timeout = _get_approval_config().get("gateway_timeout", 300)
+    timeout = (
+        timeout_seconds if timeout_seconds is not None
+        else _get_approval_config().get("gateway_timeout", 300)
+    )
     try:
         timeout = int(timeout)
     except (ValueError, TypeError):
@@ -2827,13 +2912,46 @@ def request_elicitation_consent(
     and exceptions all map to ``"decline"`` so a server treats them as
     "user did not approve" rather than retrying or hanging.
 
-    Returns one of ``"accept" | "decline" | "cancel"``.
+    Returns one of ``"accept" | "decline" | "cancel"``.  Callers that need to
+    tell "the user said no" apart from "we could never ask" — which read
+    identically to a model, and send it apologising for a refusal that never
+    happened — should use :func:`request_elicitation_consent_detailed`.
+    """
+    return request_elicitation_consent_detailed(
+        message,
+        description,
+        timeout_seconds=timeout_seconds,
+        surface=surface,
+    )[0]
+
+
+def request_elicitation_consent_detailed(
+    message: str,
+    description: str,
+    *,
+    timeout_seconds: int | None = None,
+    surface: str = "mcp-elicitation",
+) -> tuple[str, str]:
+    """As :func:`request_elicitation_consent`, plus *why*.
+
+    Returns ``(decision, reason)`` where reason is one of:
+
+    ``approved``       the user allowed it
+    ``user_denied``    the user was asked and said no
+    ``timeout``        the user was asked and never answered
+    ``undeliverable``  we tried to ask and the prompt did not reach them
+    ``no_surface``     there was nobody to ask on this session at all
+    ``error``          the approval machinery itself failed
+
+    Only the first three describe a decision the user made.  The rest are our
+    failures, and reporting them as a refusal is how "the tool is declining"
+    becomes an hour of debugging the wrong thing.
     """
     try:
         session_key = get_current_session_key()
     except Exception as exc:  # pragma: no cover -- defensive
         logger.warning("Elicitation consent: session lookup failed: %s", exc)
-        return "decline"
+        return "decline", "error"
 
     if _is_gateway_approval_context():
         with _lock:
@@ -2844,7 +2962,7 @@ def request_elicitation_consent(
                 "notify_cb is registered — failing closed",
                 session_key,
             )
-            return "decline"
+            return "decline", "no_surface"
 
         approval_data = {
             "command": message,
@@ -2855,24 +2973,46 @@ def request_elicitation_consent(
         try:
             decision = _await_gateway_decision(
                 session_key, notify_cb, approval_data, surface=surface,
+                timeout_seconds=timeout_seconds,
             )
         except Exception as exc:
             logger.error(
                 "Elicitation gateway dispatch failed: %s", exc, exc_info=True,
             )
-            return "decline"
+            return "decline", "error"
 
         if decision.get("notify_failed"):
-            return "decline"
+            return "decline", "undeliverable"
         if not decision.get("resolved"):
-            return "cancel"
+            return "cancel", "timeout"
         choice = decision.get("choice")
         if choice in ("once", "session", "always"):
-            return "accept"
-        return "decline"
+            return "accept", "approved"
+        logger.info(
+            "Elicitation declined by the user on session %s (choice=%s)",
+            session_key, choice,
+        )
+        return "decline", "user_denied"
 
     # CLI / TUI path. allow_permanent=False because elicitation is a
     # per-call confirmation — there is no pattern to remember.
+    if not _has_interactive_prompt_surface():
+        # No gateway context and no interactive terminal: the prompt below
+        # would hit EOF on stdin and return "deny" instantly and silently,
+        # which is indistinguishable from a real refusal. Say so instead.
+        logger.error(
+            "Elicitation requested with no approval surface — failing closed. "
+            "session=%r platform=%r gateway_ctx=%s interactive_cli=%s "
+            "stdin_tty=%s surface=%s",
+            session_key,
+            _get_session_platform(),
+            _is_gateway_approval_context(),
+            _is_interactive_cli(),
+            _stdin_is_a_tty(),
+            surface,
+        )
+        return "decline", "no_surface"
+
     try:
         choice = prompt_dangerous_approval(
             message,
@@ -2884,11 +3024,11 @@ def request_elicitation_consent(
         logger.error(
             "Elicitation CLI prompt failed: %s", exc, exc_info=True,
         )
-        return "decline"
+        return "decline", "error"
 
     if choice in ("once", "session", "always"):
-        return "accept"
-    return "decline"
+        return "accept", "approved"
+    return "decline", "user_denied"
 
 
 # Load permanent allowlist from config on module import

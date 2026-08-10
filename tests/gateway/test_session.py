@@ -42,6 +42,37 @@ class TestSessionSourceRoundtrip:
         assert restored.user_name == "alice"
         assert restored.thread_id == "t1"
 
+    def test_internal_user_role_is_never_persisted(self):
+        """The resolved role must come from the database, not from a saved file.
+
+        ``internal_user_id`` is part of the session key and so must round-trip,
+        but the role decides what a session may READ of *other* users' data. If
+        it survived persistence, a stale or edited session file would replay a
+        role the principals table no longer grants — so it is stamped fresh on
+        every turn and absent here.
+        """
+        source = SessionSource(
+            platform=Platform.TELEGRAM,
+            chat_id="12345",
+            chat_type="dm",
+            user_id="8756039695",
+            internal_user_id="leo_owner",
+            internal_user_role="owner",
+        )
+        d = source.to_dict()
+
+        assert "internal_user_role" not in d
+        assert d["internal_user_id"] == "leo_owner"
+
+        restored = SessionSource.from_dict(d)
+        assert restored.internal_user_id == "leo_owner"
+        assert restored.internal_user_role is None
+
+        # Nor may it be injected by hand-editing the persisted dict.
+        forged = dict(d)
+        forged["internal_user_role"] = "owner"
+        assert SessionSource.from_dict(forged).internal_user_role is None
+
     def test_full_roundtrip_with_chat_topic(self):
         """chat_topic should survive to_dict/from_dict roundtrip."""
         source = SessionSource(
