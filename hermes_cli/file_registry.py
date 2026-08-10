@@ -93,7 +93,12 @@ CREATE TABLE IF NOT EXISTS {FILE_ASSETS_TABLE} (
     -- Set only once somebody decided this file is worth remembering.
     document_id UUID,
     remembered_at TIMESTAMPTZ,
-    remembered_by TEXT
+    remembered_by TEXT,
+    -- The message this file arrived in, when it arrived through a channel
+    -- rather than an upload. No foreign key: the two registrations are
+    -- independent best-effort writes, so the file must still record itself
+    -- when the item's write is the one that failed.
+    inbound_item_id UUID
     -- One row per *arrival*, deliberately not per distinct file. The same deck
     -- forwarded by two people in two chats is two events with two answers to
     -- "who sent me this, and when", and collapsing them on the hash would
@@ -113,6 +118,13 @@ CREATE INDEX IF NOT EXISTS {FILE_ASSETS_TABLE}_visibility_idx
 -- me?") and lets a backfill skip an object it has already recorded.
 CREATE INDEX IF NOT EXISTS {FILE_ASSETS_TABLE}_owner_sha_idx
     ON {FILE_ASSETS_TABLE} (owner_user_id, sha256);
+-- For a table created before the Incomings feature shipped. Idempotent, and
+-- mirrored in ``inbound_registry`` for the box where only that side is
+-- initialised.
+ALTER TABLE {FILE_ASSETS_TABLE}
+    ADD COLUMN IF NOT EXISTS inbound_item_id UUID;
+CREATE INDEX IF NOT EXISTS {FILE_ASSETS_TABLE}_inbound_item_idx
+    ON {FILE_ASSETS_TABLE} (inbound_item_id);
 """
 
 
@@ -248,6 +260,7 @@ async def store_and_register(
     sender_name: Optional[str] = None,
     message_id: Optional[str] = None,
     received_at: Optional[datetime] = None,
+    inbound_item_id: Optional[str] = None,
     registry: Optional["FileRegistry"] = None,
     storage: Optional[Any] = None,
 ) -> Optional[FileAsset]:
@@ -294,6 +307,7 @@ async def store_and_register(
             sender_name=sender_name,
             message_id=message_id,
             received_at=received_at,
+            inbound_item_id=inbound_item_id,
         )
     except Exception as exc:  # noqa: BLE001 - registration is never fatal
         log.warning("file registry: could not register %r (%s)", filename, exc)
@@ -373,6 +387,7 @@ class FileRegistry:
         sender_name: Optional[str] = None,
         message_id: Optional[str] = None,
         received_at: Optional[datetime] = None,
+        inbound_item_id: Optional[str] = None,
         visibility: Optional[str] = None,
         connection: Optional["asyncpg.Connection"] = None,
     ) -> FileAsset:
@@ -392,9 +407,10 @@ class FileRegistry:
                         owner_user_id, visibility, surface, account_id,
                         conversation, sender_id, sender_name, message_id,
                         received_at, filename, content_type, byte_size,
-                        sha256, storage_bucket, storage_path)
+                        sha256, storage_bucket, storage_path, inbound_item_id)
                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8,
-                            COALESCE($9, NOW()), $10, $11, $12, $13, $14, $15)
+                            COALESCE($9, NOW()), $10, $11, $12, $13, $14, $15,
+                            $16::uuid)
                     RETURNING *""",
                 principal.user_id,
                 vis,
@@ -411,6 +427,7 @@ class FileRegistry:
                 sha256,
                 storage_bucket,
                 storage_path,
+                inbound_item_id,
             )
         finally:
             if own:

@@ -19,7 +19,7 @@ export const PRIMARY_NAV: NavItem[] = [
   { href: "/", label: "Home", glyph: "◉" },
   { href: "/graph", label: "Graph", glyph: "◈", hint: "GTS Centre" },
   { href: "/chat", label: "Chat", glyph: "✦", hint: "One-brain chat" },
-  { href: "/inbox", label: "Inbox", glyph: "✉", hint: "Approvals + changes" },
+  { href: "/inbox", label: "Inbox", glyph: "✉", hint: "Everything that arrived" },
   { href: "/memory", label: "Memory", glyph: "◇", hint: "What it remembers" },
 ];
 

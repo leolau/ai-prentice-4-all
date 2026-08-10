@@ -4,10 +4,13 @@ import { useState } from "react";
 
 import { ApprovalsList } from "@/components/inbox/ApprovalsList";
 import { ChangesList } from "@/components/inbox/ChangesList";
+import { IncomingsList } from "@/components/inbox/IncomingsList";
 import { Pill } from "@/components/ui/Pill";
 import type {
   Change,
   ChangeOpResponse,
+  IncomingsFacets,
+  IncomingsResponse,
   Notification,
   NotificationAnswerResponse,
   NotificationsResponse,
@@ -18,9 +21,12 @@ export interface InboxViewProps {
   initialConfigured: boolean;
   initialNotifications: Notification[];
   initialChanges: Change[];
+  initialIncomings: IncomingsResponse;
+  incomingsFacets: IncomingsFacets;
+  initialTab?: Tab;
 }
 
-type Tab = "approvals" | "changes";
+export type Tab = "incomings" | "approvals" | "changes";
 
 /** An error carrying the upstream HTTP status so callers can branch on it. */
 class ForwardError extends Error {
@@ -50,20 +56,26 @@ async function postJson<T>(url: string, body?: unknown): Promise<T> {
 }
 
 /**
- * FG-20 Wave C3 — the mobile comms inbox. A segmented switch flips between the
- * FG-10 **Approvals** queue (grant/deny/acknowledge, deduped across surfaces)
- * and the FG-12 **Changes** log (undo/redo). Every mutation routes through the
- * `agent-home` BFF (`/api/comms/*`) under the C1 principal — this view never
- * decides settlement or reversibility, it forwards the user's intent and
- * re-reads the authoritative list afterwards.
+ * The mobile comms inbox. A segmented switch flips between **Incomings** —
+ * everything that arrived on any channel — the FG-10 **Approvals** queue
+ * (grant/deny/acknowledge, deduped across surfaces) and the FG-12 **Changes**
+ * log (undo/redo). Incomings leads because it is the tab with something in it
+ * every day; approvals are the exception, not the traffic.
+ *
+ * Every mutation routes through the `agent-home` BFF under the C1 principal —
+ * this view never decides settlement or reversibility, it forwards the user's
+ * intent and re-reads the authoritative list afterwards.
  */
 export function InboxView({
   initialConfigured,
   initialNotifications,
   initialChanges,
+  initialIncomings,
+  incomingsFacets,
+  initialTab = "incomings",
 }: InboxViewProps) {
   const [configured] = useState(initialConfigured);
-  const [tab, setTab] = useState<Tab>("approvals");
+  const [tab, setTab] = useState<Tab>(initialTab);
   const [notifications, setNotifications] = useState<Notification[]>(
     initialNotifications,
   );
@@ -164,8 +176,21 @@ export function InboxView({
       <div
         role="tablist"
         aria-label="Inbox sections"
-        className="grid grid-cols-2 gap-1 rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface)] p-1"
+        className="grid grid-cols-3 gap-1 rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface)] p-1"
       >
+        <button
+          type="button"
+          role="tab"
+          aria-selected={tab === "incomings"}
+          onClick={() => setTab("incomings")}
+          className={`flex items-center justify-center gap-2 rounded-xl px-3 py-2 text-sm ${
+            tab === "incomings"
+              ? "bg-[var(--color-accent)] text-[var(--color-accent-fg)]"
+              : "text-[var(--color-muted)]"
+          }`}
+        >
+          Incomings
+        </button>
         <button
           type="button"
           role="tab"
@@ -221,7 +246,9 @@ export function InboxView({
         </p>
       ) : null}
 
-      {tab === "approvals" ? (
+      {tab === "incomings" ? (
+        <IncomingsList initial={initialIncomings} facets={incomingsFacets} />
+      ) : tab === "approvals" ? (
         <ApprovalsList
           notifications={notifications}
           busyId={busy}
