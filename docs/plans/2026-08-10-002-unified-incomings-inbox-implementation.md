@@ -33,9 +33,10 @@ links: `file_assets.inbound_item_id` (item ⇄ its attachments) and
 
 **In scope:** WhatsApp, email, calendar, plus every gateway channel that
 already flows through `gateway/inbound.py` — the schema is surface-agnostic.
-Search (filters + Postgres FTS + a substring fallback), **user-assigned tags**,
-**keyset pagination**, an item detail view, both link directions, a backfill of
-existing history, and a `hermes incomings remember` CLI.
+Search (filters + Postgres FTS, CJK-segmented, + a substring fallback),
+**tags reusing the existing session-tag system**, **keyset pagination**, an item
+detail view, both link directions, a backfill of existing history, and a
+`hermes incomings remember` CLI.
 
 **Out of scope, deliberately:** replying or composing from the page; changing
 how triage classifies anything; copying HTML email bodies into the shared
@@ -76,7 +77,7 @@ a divergence from it should be deliberate and explained, not incidental.
 
 | # | question | why it blocks | proposal |
 |---|---|---|---|
-| P1 | CJK search (see the worked example below) | Postgres's default parser has no Chinese segmentation, so FTS silently returns nothing for words that are plainly present. Fixing it later means a schema change to the generated column. | Ship `'simple'` + the substring fallback, measure on real data, and treat `pg_bigm`/`zhparser` as a follow-up deployment decision. **Decide now that the column is `simple`**, so step 1 is not rewritten. |
+| P1 | CJK search (worked example + fix below) | Postgres's default parser has no Chinese segmentation, so FTS silently returns nothing for words that are plainly present. The fix changes the table, so it cannot be deferred past step 1. | **Recommended: application-side bigram segmentation into a `search_text` column** — no extension, no dependency, works on managed Supabase today. Needs sign-off because it adds a column and makes `search_tsv` derived rather than direct. |
 | P2 | one owner or per-member? | `custom/shared/file_registration.py` resolves *the* owner principal. If a member is ever to have their own mailbox, `account_id → principal` needs a mapping table, which changes the registration signature. | Keep the owner binding; add a `TODO` at the seam. Revisit when a second member gets a channel. |
 | P3 | ~~volume~~ **decided** | — | **Keyset pagination from the start** (user requirement, 2026-08-10). No `OFFSET` path is built, so the volume count is no longer a blocker; still worth running once to choose the default view. |
 | P4 | escalations: chip or tab? | Affects step 4's UI only, not the schema. | A chip. Defer. |
@@ -96,16 +97,70 @@ match?                            →  NO
 
 The user searches 會議 ("meeting"), the word is in the message, and the result
 list is empty. English escapes this only because spaces do the segmenting.
-`ILIKE '%會議%'` does find it — which is why the substring fallback is not
-optional cover but the only thing making CJK search work at all until an
-extension lands. It scans rather than using the index, so it is capped to short
-queries and is a stopgap, not the answer.
+
+### P1, recommended fix: segment at write time, in application code
+
+The two textbook fixes are Postgres extensions — `zhparser`/SCWS (dictionary
+segmentation) and `pg_bigm` (CJK-aware 2-grams). Both need superuser
+`CREATE EXTENSION` on the database server, **and neither is in Supabase's
+supported-extension list**, so on managed Supabase they are not available at
+all. Waiting for them means waiting for a self-hosted Postgres.
+
+**Recommendation: bigram the CJK runs ourselves before indexing.** No
+extension, no new dependency, no superuser, works on stock Postgres today:
+
+```python
+def searchable(text: str) -> str:
+    """Latin words unchanged; CJK runs expanded to overlapping bigrams."""
+    out = []
+    for run in _split_cjk_and_other(text):
+        if _is_cjk(run):
+            out.extend(run[i:i+2] for i in range(len(run) - 1)) or out.append(run)
+        else:
+            out.append(run)
+    return " ".join(out)
+```
+
+```
+'請問明天的會議改到下午三點嗎'
+  → '請問 問明 明天 天的 的會 會議 議改 改到 到下 下午 午三 三點 點嗎'
+query '會議' → searchable('會議') = '會議'   →  MATCH, on the GIN index
+```
+
+This is precisely what `pg_bigm` does, moved into our own code. Consequences:
+
+- **Schema:** `search_tsv` can no longer be `GENERATED` (a generated column may
+  only call immutable SQL). Add a plain `search_text TEXT` column written by
+  the registry, and keep `search_tsv tsvector GENERATED ALWAYS AS
+  (to_tsvector('simple', search_text)) STORED`. One extra column, same index.
+  **This must land in step 1** — retrofitting it later rewrites the table.
+- **Query side** runs the identical `searchable()` on the user's input, so
+  segmentation is symmetrical by construction. Put the function in one module
+  and let both sides import it; a divergence between write-time and query-time
+  tokenisation is the classic way this breaks.
+- **Single characters** (a 1-char query, or a 1-char run) have no bigram; keep
+  the `ILIKE` fallback for those. That is the fallback's real job — not
+  covering all of Chinese, just the sub-bigram edge and phone fragments.
+- **Cost:** roughly one lexeme per character, so the CJK index is ~2× an
+  English one of the same length. At inbox volumes that is irrelevant.
+- **False positives** across word boundaries are possible (searching 天的
+  matches). Acceptable: an inbox tolerates an extra result, never a missing
+  one, and `ts_rank_cd` pushes accidental matches down.
+
+Better precision later, if it is ever wanted: `jieba` for real word
+segmentation, writing into the *same* `search_text` column — a reindex, not a
+schema change. Ship bigrams first; they are dictionary-free and never miss.
+
+Also enable **`pg_trgm`** (this one *is* available on Supabase) with a GIN
+index on `search_text`, so the `ILIKE` fallback stops being a sequential scan.
 
 ### Two requirements added after the spec merged (2026-08-10)
 
-**Tags.** The list must support user-assigned tags, alongside the
-surface/sender/date filters. Not in the merged spec; specified in §1a below and
-built in steps 1, 3 and 4.
+**Tags.** The list must support tags alongside the surface/sender/date filters,
+and must **reuse the tagging system that already ships** for chat sessions
+rather than adding a second one — which means promoting that system's
+vocabulary from session SQLite to Postgres and generalising it to any entity.
+See §1a; this lands in step 1, not step 4.
 
 **Keyset pagination, not `OFFSET`.** `OFFSET 5000` makes Postgres fetch and
 discard 5000 rows to return 50, so page 100 costs 100× page 1, and an arrival
@@ -125,47 +180,98 @@ an opaque `next_cursor` (base64 of `occurred_at|id`) rather than an `offset`,
 and the ranked-search path uses `(rank, occurred_at, id)` as its cursor tuple
 so ordering stays total.
 
-### §1a. Tags
+### §1a. Tags — reuse the existing system, do not invent a second one
+
+**A tagging system already ships.** Session tagging (schema v18) is complete
+and in production use:
+
+| layer | where |
+|---|---|
+| store | `hermes_state.py` — `session_tags` (`id`, `name` UNIQUE, `color`, `created_at`) + `session_tag_map` (`session_id`, `tag_id`, `assigned_at`, `source`) |
+| logic | `list_tags`, `create_tag`, `get_session_tags`, `add_tag_to_session`, `remove_tag_from_session`, `delete_tag`, `filter_session_ids_by_tags(include, exclude, match="any"\|"all")` |
+| API | `GET/POST /api/sessions/tags`, `DELETE /api/sessions/tags/{tag_id}`, `GET/POST /api/sessions/{id}/tags`, `DELETE /api/sessions/{id}/tags/{tag_id}`, `POST /api/sessions/{id}/tags/suggest` (LLM suggestions) |
+| client | `listTags`, `createTag`, `getSessionTags`, `addSessionTag`, `removeSessionTag`, `deleteTag`, `suggestSessionTags` in `agent-home/src/lib/api/client.ts` |
+| types | `SessionTag`, `TagSuggestion` in `agent-home/src/types/index.ts` |
+| UI | `components/chat/TagFilterBar.tsx` (tri-state chips: tap = include, again = exclude, again = clear; AND/OR toggle), tag editing in `SessionModal.tsx`, vocabulary management in `settings/SettingsView.tsx` → `TagsSection` |
+
+It is better than the child table this plan originally proposed: a tag is a
+*named, coloured, first-class row* rather than a free string, `source` on the
+map already carries provenance (`manual` vs an LLM suggestion), and
+`filter_session_ids_by_tags` already implements include/exclude with AND/OR.
+Incomings must reuse all of it. **No `inbound_item_tags` table, no second tag
+vocabulary, no second chip component.**
+
+**The one real obstacle:** the tag vocabulary lives in the session SQLite DB,
+which is machine-local and has no `owner_user_id`/`visibility`. `inbound_items`
+is in Postgres under RLS. Tagging a Postgres row from a SQLite tag table across
+two stores is not possible without exactly the dual-write this repo forbids.
+
+**Therefore, step 1 promotes the tag vocabulary to Postgres and generalises the
+assignment to any entity** — which is also what "re-use it in the entire
+system" requires, since files, tasks and memories all want the same chips:
 
 ```sql
-CREATE TABLE IF NOT EXISTS inbound_item_tags (
-    item_id   UUID NOT NULL REFERENCES inbound_items(id) ON DELETE CASCADE,
-    tag       TEXT NOT NULL,          -- normalised: trimmed, casefolded, ≤48 chars
-    tagged_by TEXT NOT NULL,          -- 'user' | '<skill name>'
-    tagged_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    PRIMARY KEY (item_id, tag)
+CREATE TABLE IF NOT EXISTS tags (            -- the vocabulary, C2-scoped
+    id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    owner_user_id TEXT NOT NULL,
+    visibility    TEXT NOT NULL,
+    name          TEXT NOT NULL,
+    color         TEXT NOT NULL DEFAULT 'blue',
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (owner_user_id, lower(name))
 );
-CREATE INDEX ON inbound_item_tags (tag);
+
+CREATE TABLE IF NOT EXISTS tag_assignments (  -- polymorphic, one row per tagging
+    tag_id      UUID NOT NULL REFERENCES tags(id) ON DELETE CASCADE,
+    entity_kind TEXT NOT NULL,                -- 'session' | 'inbound' | 'file' | 'task'
+    entity_id   TEXT NOT NULL,
+    assigned_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    source      TEXT NOT NULL DEFAULT 'manual',   -- 'manual' | 'llm' | '<skill>'
+    PRIMARY KEY (tag_id, entity_kind, entity_id)
+);
+CREATE INDEX ON tag_assignments (entity_kind, entity_id);
 ```
 
-A child table, not a `text[]` column on `inbound_items`: tags carry their own
-provenance (a triage skill's tag is not the user's), a tag rename or a
-"everything tagged `invoice`" query wants an index on the tag itself, and the
-generated `search_tsv` column must not be invalidated every time somebody tags
-something.
+`entity_id` is `TEXT`, not `UUID`, because session ids are not UUIDs; the
+tradeoff is no FK, so deletion cleanup is the owning registry's job (one
+`DELETE FROM tag_assignments WHERE entity_kind=$1 AND entity_id=$2` in its
+delete path). RLS on `tags` via the standard `apply_scope_rls`; assignments are
+reached only through a scoped join to their tag, the FG-04 goal-metrics
+pattern.
 
-No separate RLS policy — the table is reached only through a scoped join to its
-parent item, the same pattern FG-04 uses for goal metrics. Filtering is
-`AND EXISTS (SELECT 1 FROM inbound_item_tags t WHERE t.item_id = inbound_items.id
-AND t.tag = ANY($n::text[]))`, with AND-semantics across multiple selected tags
-(narrowing, which is what a filter chip row implies).
+Endpoints generalise to `/api/tags` (vocabulary CRUD) and
+`/api/tags/{kind}/{id}` (assign/unassign), with `/api/sessions/tags*` kept as
+thin aliases so nothing in the chat UI breaks. `filter_session_ids_by_tags`
+becomes `filter_ids_by_tags(entity_kind, include, exclude, match)` with the
+same semantics. `TagFilterBar` is lifted from `components/chat/` to
+`components/tags/` unchanged — it already takes `SessionTag[]` and callbacks
+and knows nothing about sessions; only the type is renamed to `Tag`
+(`SessionTag` kept as an alias).
 
-Endpoints: `POST /api/registry/incomings/{id}/tags` `{tag}` and
-`DELETE /api/registry/incomings/{id}/tags/{tag}`; the existing `/facets`
-response gains a `tags: [{tag, count}]` list so the chip row only offers tags
-that exist. Triage skills may tag with `tagged_by='<skill>'`, which is how
-"important" or "invoice" can be applied automatically without pretending the
-user chose it.
+Migration is a `hermes doctor --fix` step: copy `session_tags` → `tags` (owned
+by the resolved principal), `session_tag_map` → `tag_assignments` with
+`entity_kind='session'`, preserving `source`. Runtime then reads Postgres only
+— no read-through fallback to the SQLite tables, per the store-migration rule.
+
+**This makes the tag work bigger than a filter chip** (it now touches sessions,
+settings and doctor) and it is a prerequisite for step 3 rather than a step-4
+UI detail. Recorded here as a scope change from the merged spec.
 
 P1 and P3 are the ones that cost rework; P2 and P4 do not block.
 
 ## Step 1 — the table and the registry
 
 **PR:** `feat(incomings): inbound_items registry with C2 scoping`
-**Files:** new `hermes_cli/inbound_registry.py`; new
-`tests/hermes_cli/test_inbound_registry_e2e.py`; add
-`"hermes_cli/inbound_registry.py"` to the core-boundary list in
+**Files:** new `hermes_cli/inbound_registry.py`; new `hermes_cli/tags.py`
+(the promoted vocabulary, §1a) + its doctor migration; new
+`hermes_cli/text_search.py` (the shared `searchable()` used by both the writer
+and the query builder, P1); new `tests/hermes_cli/test_inbound_registry_e2e.py`
+and `test_tags_e2e.py`; add the new modules to the core-boundary list in
 `agent/core_boundary.py`.
+
+Step 1 is therefore larger than the merged spec implied: it now carries the
+tag promotion and the search-text column, both of which are schema decisions
+that cannot be retrofitted cheaply.
 
 Model the module on `hermes_cli/file_registry.py` — same module layout, same
 helper imports from `hermes_cli.access`, same `default_registry()` factory
@@ -224,11 +330,13 @@ owner reads own; a member cannot read another member's; owner-role elevation is
 labelled; upsert on the same `external_id` updates one row rather than
 inserting a second; a rescheduled event moves `starts_at` in place; a re-poll
 after `mark_remembered` keeps `document_id`; an oversized body is truncated;
-FTS matches a body word and a filter narrows; a CJK body is *not* found by FTS
-but *is* found by the fallback (assert the known limitation so a future
-`zhparser` install flips a test rather than surprising someone); tags are
-normalised and deduped, a member cannot tag another member's item, and
-deleting an item cascades its tags; keyset paging over 200 synthetic rows
+FTS matches a body word and a filter narrows; **a two-character Chinese word is
+found by FTS via the bigram path, and a single character falls through to the
+substring path** (both asserted, since the write-side and query-side
+segmentation drifting apart is the failure mode); tags are
+reused from the existing vocabulary rather than duplicated, a member cannot tag
+another member's item, an existing session tag still resolves after the
+migration, and deleting an item removes its assignments; keyset paging over 200 synthetic rows
 returns every row exactly once and inserting a new arrival mid-walk does not
 duplicate or skip one.
 
@@ -330,7 +438,7 @@ than a 500 on a box that has never received anything, and `limit` capped at
 |---|---|
 | `GET ""` | `{items, next_cursor}` — params `q`, `surface` (csv), `kind`, `tag` (csv), `contact`, `from`, `to`, `importance`, `remembered`, `has_attachments`, `limit`, `cursor` |
 | `GET "/facets"` | `{surfaces, kinds, senders, tags}` with counts, so a chip is never offered for a value with no rows |
-| `POST "/{item_id}/tags"` · `DELETE "/{item_id}/tags/{tag}"` | add/remove a user tag (§1a) |
+| `POST "/api/tags/inbound/{item_id}"` · `DELETE …/{tag_id}` | assign/unassign, via the shared tag router (§1a) — **not** an incomings-specific endpoint |
 | `GET "/{item_id}"` | the item + `attachments[]` (from `file_assets`) + its `memory` link; 404 for both absent and invisible, so a 403 cannot confirm someone else's item exists |
 | `POST "/{item_id}/remember"` | ingest + stamp; returns the updated item |
 
@@ -376,9 +484,11 @@ the other two branches untouched. Every new component's root element carries
 - **Paging:** infinite scroll via an `IntersectionObserver` that requests the
   next cursor, with an explicit "Load more" fallback button (an observer that
   never fires must not be the only way to reach page 2).
-- **Tagging:** an inline tag editor on the detail view and a quick-tag control
-  on a row's overflow menu; a tag added anywhere updates the chip counts on the
-  next `/facets` read.
+- **Tagging:** reuse `TagFilterBar` (lifted to `components/tags/`) for the chip
+  row, and the same tag editor `SessionModal` uses for the detail view — same
+  colours, same tri-state include/exclude, same AND/OR toggle, same vocabulary
+  the user manages in Settings. If a control here looks or behaves differently
+  from tagging a session, it is wrong.
 - **Detail** at `/inbox/[id]` — a full route, not a sheet, so `/files`, a
   digest and a Telegram escalation can all link to it. Full body, full
   provenance, attachments as `/files` cards with View/Download via the existing
