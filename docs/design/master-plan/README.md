@@ -157,7 +157,7 @@ Every FG must obey these or it will not merge:
 | [22](./feature-groups/FG-22-memory-visualizer.md) | Read-only memory visualizer on the operator dashboard | **V1→V4** (Phase-5) | `hermes_cli/memory_explorer.py` over FG-21's store, `_comms_resolve_principal` C1, `memory_projection` under the same C2 RLS as `memories`, `web/` SPA + `@observablehq/plot` |
 | [23](./feature-groups/FG-23-memory-on-agent-home.md) | The memory visualizer on `agent-home` (the phone) | **A0→A5** (Phase-5) | FG-22's `/api/memory/explorer/*` endpoints (unchanged), FG-20 BFF (`HermesApiClient`, `requirePrincipal`, `MobileShell`), `deploy/hermes-deploy.sh` + `deploy_state.py` |
 
-### Phase 6 — FG-24–27 (scaling one profile to hundreds of principals)
+### Phase 6 — FG-24–28 (scaling one profile to hundreds of principals)
 
 Phase 1 built multi-user for a handful of principals in one profile. Phase 6 is
 what an organisation of 500 actually needs: personal curated memory, a way to
@@ -290,7 +290,7 @@ only the FG-20 doc, keeps baseline + web build green, preserves the one-brain
 chat path (cache-safe), and re-runs the negative-access RLS + C6 checks. The
 existing `web/` operator console is left intact.
 
-### Phase 6 (FG-24–26 scale-out) — waves (start after Phase-5 `develop` is merged + owner resolves the FG-26 "assign profile" decision)
+### Phase 6 (FG-24–28 scale-out) — waves (start after Phase-5 `develop` is merged; the FG-26 "assign profile" question is resolved by FG-28)
 
 ```
 WAVE P6-0 (prerequisite — small; Layers 1+2 must land before P6-A adds tables)
