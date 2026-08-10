@@ -67,13 +67,15 @@ describe("GET /api/chat/media", () => {
     expect(createSignedUrl).not.toHaveBeenCalled();
   });
 
-  it("signs the caller's own object with the short TTL", async () => {
+  it("returns the BFF streaming URL, never the signed storage URL", async () => {
     process.env.AGENT_HOME_MEDIA_URL_TTL = "30";
     const res = await get(OWN);
     expect(res.status).toBe(200);
+    // The signed URL addresses Supabase as the *server* reaches it (loopback on
+    // the box), so it must stay server-side.
     await expect(res.json()).resolves.toEqual({
       path: OWN,
-      url: `https://sb.test/object/sign/${OWN}?exp=30`,
+      url: `/api/chat/media/content?path=${encodeURIComponent(OWN)}`,
       expires_in: 30,
     });
     expect(createSignedUrl).toHaveBeenCalledWith(OWN, 30);

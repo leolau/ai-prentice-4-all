@@ -13,9 +13,21 @@
 /** Route the browser fetches a signed URL from. */
 export const MEDIA_ROUTE = "/api/chat/media";
 
+/**
+ * Route that streams the object's bytes. The browser never gets the signed URL
+ * itself: it names Supabase as the *server* reaches it (loopback on the box),
+ * so only this BFF-hosted URL is loadable from a phone or laptop.
+ */
+export const MEDIA_CONTENT_ROUTE = "/api/chat/media/content";
+
 /** The in-transcript reference for one object path. */
 export function mediaRef(path: string): string {
   return `${MEDIA_ROUTE}?path=${encodeURIComponent(path)}`;
+}
+
+/** The loadable URL for one object path. */
+export function mediaContentRef(path: string): string {
+  return `${MEDIA_CONTENT_ROUTE}?path=${encodeURIComponent(path)}`;
 }
 
 /**
