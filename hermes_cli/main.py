@@ -11926,10 +11926,12 @@ _BUILTIN_SUBCOMMANDS = frozenset(
         "acp", "auth", "backup", "bundles", "checkpoints", "claw", "completion",
         "computer-use",
         "changes", "config", "cron", "curator", "dashboard", "serve", "debug", "doctor",
+        "incomings",
         "dump", "fallback", "gateway", "hooks", "import", "insights",
         "gui", "desktop", "kanban", "login", "logout", "logs", "lsp", "mcp", "memory", "migrate", "moa",
         "journey", "memory-graph", "learning",
-        "model", "owner", "pairing", "pets", "plugins", "portal", "postinstall", "profile",
+        "member", "model", "oss", "owner", "pairing", "pets", "plugins", "portal",
+        "postinstall", "profile",
         "project", "promote", "proxy",
         "prompt-size",
         "send", "sessions", "setup",
@@ -12700,6 +12702,13 @@ def main():
     from hermes_cli.changes_cli import register_changes_subparser
 
     register_changes_subparser(subparsers)
+
+    # =========================================================================
+    # incomings command — the unified inbox registry (backfill)
+    # =========================================================================
+    from hermes_cli.incomings_backfill import register_incomings_subparser
+
+    register_incomings_subparser(subparsers)
 
     # =========================================================================
     # login command  (parser built in hermes_cli/subcommands/login.py)

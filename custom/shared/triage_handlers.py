@@ -247,6 +247,74 @@ def _handle_prep_notes(prep_notes, batch, db):
 
 
 # ---------------------------------------------------------------------------
+# Inbox projection
+# ---------------------------------------------------------------------------
+
+def _triage_importance(result):
+    """The one verdict the Inbox shows, out of three channels' vocabularies.
+
+    An escalation outranks anything else: the escalation pusher already
+    decided a human must look, and the Inbox filter should agree with the
+    Telegram alert rather than describe the same message as 'informational'.
+    """
+    if result.get('escalate'):
+        return result.get('escalation_priority') or 'urgent'
+    return result.get('importance') or result.get('classification') or ''
+
+
+def _triaged_arrivals(batch):
+    """`(surface, account_id, external_id)` for everything this verdict covers.
+
+    The ids are the channel's own — the same ones the pollers registered with
+    — because triage runs in a separate process that never saw the registry's
+    row ids.
+    """
+    channel = batch.get('_channel', 'whatsapp')
+    if channel == 'whatsapp':
+        account = batch.get('source_phone', '')
+        return [
+            ('whatsapp', account, m['msg_id'])
+            for m in batch.get('messages', [])
+            if m.get('msg_id')
+        ]
+    if channel == 'email':
+        account = batch.get('account_id', '')
+        return [
+            ('email', account, em['message_id'])
+            for em in batch.get('emails', [])
+            if em.get('message_id')
+        ]
+    if channel == 'calendar' and batch.get('google_event_id'):
+        return [
+            ('calendar', batch.get('account_id', ''), batch['google_event_id'])
+        ]
+    return []
+
+
+def stamp_inbox_importance(result, batch):
+    """Mirror the triage verdict onto the arrivals in the shared registry.
+
+    Best-effort and never fatal: the SQLite triage tables remain the pipeline's
+    source of truth, and an unstamped row still shows in the Inbox — just
+    without the urgency filter finding it.
+    """
+    importance = _triage_importance(result)
+    if not importance:
+        return
+    try:
+        from shared.inbound_registration import mark_importance
+    except ImportError:
+        return
+    for surface, account_id, external_id in _triaged_arrivals(batch):
+        mark_importance(
+            surface=surface,
+            external_id=external_id,
+            account_id=account_id,
+            importance=importance,
+        )
+
+
+# ---------------------------------------------------------------------------
 # Dispatcher
 # ---------------------------------------------------------------------------
 
@@ -277,3 +345,10 @@ def process_result(result, batch, db):
         else:
             # Silently ignore fields without handlers (e.g., classification, summary)
             pass
+
+    # After the SQLite writes, so a registry blip cannot cost the pipeline its
+    # own record of the verdict.
+    try:
+        stamp_inbox_importance(result, batch)
+    except Exception as e:
+        print(f"[triage] Could not stamp inbox importance: {e}")

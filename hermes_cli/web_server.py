@@ -273,10 +273,12 @@ app = FastAPI(title="Hermes Agent", version=__version__, lifespan=_lifespan)
 from hermes_cli.memory_oauth import router as _memory_oauth_router  # noqa: E402
 from hermes_cli.memory_explorer import router as _memory_explorer_router  # noqa: E402
 from hermes_cli.files_api import router as _files_router  # noqa: E402
+from hermes_cli.incomings_api import router as _incomings_router  # noqa: E402
 
 app.include_router(_memory_oauth_router)
 app.include_router(_memory_explorer_router)
 app.include_router(_files_router)
+app.include_router(_incomings_router)
 
 # ---------------------------------------------------------------------------
 # Session token for protecting sensitive endpoints (reveal).
@@ -9608,7 +9610,7 @@ async def suggest_session_tags(
     db = _open_session_db_for_profile(profile)
     try:
         sid = db.resolve_session_id(session_id) or session_id
-        messages = db.get_messages(sid, limit=20)
+        messages = db.get_messages(sid)
         existing_tags = [t["name"] for t in db.list_tags()]
     finally:
         db.close()

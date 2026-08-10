@@ -92,6 +92,7 @@ def register_file(
     sender_name: Optional[str] = None,
     message_id: Optional[str] = None,
     received_at: Optional[datetime] = None,
+    inbound_item_id: Optional[str] = None,
 ) -> bool:
     """Register a file in the file registry.  Best-effort, never raises.
 
@@ -119,6 +120,7 @@ def register_file(
                 sender_name=sender_name,
                 message_id=message_id,
                 received_at=received_at or datetime.now(timezone.utc),
+                inbound_item_id=inbound_item_id,
             )
             return asset is not None
 

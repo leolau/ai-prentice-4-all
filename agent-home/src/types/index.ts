@@ -783,6 +783,66 @@ export interface FileSurfacesResponse {
   surfaces: { surface: string; count: number }[];
 }
 
+/** One arrival in the unified inbox: a WhatsApp message, an email, a meeting. */
+export interface IncomingItem {
+  id: string;
+  owner_user_id: string;
+  visibility: string;
+  surface: string;                 // whatsapp | email | calendar | telegram | …
+  account_id: string | null;       // the receiving inbox/number/calendar
+  external_id: string;             // the channel's own id, stable across re-polls
+  kind: string;                    // message | event | …
+  conversation: string | null;
+  conversation_name: string | null;
+  sender_id: string | null;
+  sender_name: string | null;
+  subject: string | null;
+  body: string;
+  occurred_at: string | null;
+  ends_at: string | null;          // calendar arrivals only
+  registered_at: string | null;
+  importance: string | null;
+  has_attachments: boolean;
+  metadata: Record<string, unknown>;
+  document_id: string | null;
+  remembered_at: string | null;
+  remembered_by: string | null;
+  remembered: boolean;
+  tags?: SessionTag[];
+}
+
+/** A file that arrived with an item, as returned on the detail route. */
+export interface IncomingAttachment {
+  id: string;
+  filename: string;
+  content_type: string;
+  byte_size: number;
+  document_id: string | null;
+  remembered: boolean;
+}
+
+/** An item plus what it carried. */
+export interface IncomingDetail extends IncomingItem {
+  attachments: IncomingAttachment[];
+}
+
+/**
+ * A keyset page. `next_cursor` is null at the end, and there is deliberately
+ * no total: counting the filtered set per page is the scan keyset paging
+ * exists to avoid.
+ */
+export interface IncomingsResponse {
+  items: IncomingItem[];
+  next_cursor: string | null;
+}
+
+/** What the filter chips can offer without leading to an empty list. */
+export interface IncomingsFacets {
+  surfaces: { value: string; count: number }[];
+  importance: { value: string; count: number }[];
+  tags: SessionTag[];
+}
+
 /** A short-lived signed link to a registered file's bytes. */
 export interface FileLinkResponse {
   url: string;

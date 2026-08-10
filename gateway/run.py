@@ -3415,6 +3415,33 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         except Exception:
             logger.debug("file registry: could not schedule registration", exc_info=True)
 
+    def _spawn_inbound_item_registration(
+        self, event: Any, source: SessionSource
+    ) -> None:
+        """Record this event as an inbound item, off the turn.
+
+        Same fire-and-forget contract as the file registration beside it, and
+        for the same reason: writing to Postgres is network I/O that the reply
+        must not wait on, and a mirroring failure is recoverable by backfill
+        while a slow or failed reply is not.
+        """
+        try:
+            from gateway.inbound_items import register_event_item
+
+            task = asyncio.create_task(
+                register_event_item(
+                    event,
+                    source,
+                    principal_store=self._get_principal_store(),
+                )
+            )
+            self._file_registry_tasks.add(task)
+            task.add_done_callback(self._file_registry_tasks.discard)
+        except Exception:
+            logger.debug(
+                "inbound registry: could not schedule registration", exc_info=True
+            )
+
     def _session_key_for_source(self, source: SessionSource) -> str:
         """Resolve the current session key for a source, honoring gateway config when available."""
         if hasattr(self, "session_store") and self.session_store is not None:
@@ -10312,6 +10339,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # the background: the upload is network I/O and a file arriving must
         # never make the reply slower or fail it.
         self._spawn_inbound_file_registration(event, source)
+        self._spawn_inbound_item_registration(event, source)
 
         session_entry = self.session_store.get_or_create_session(source)
         session_key = session_entry.session_key
@@ -15088,7 +15116,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         "honcho.runtime_peer_prefix",
         "honcho.user_peer_aliases",
     )
-    _HONCHO_CACHE_BUSTING_MEMO: dict[tuple[str, int | None], dict[str, Any]] = {}
+    _HONCHO_CACHE_BUSTING_MEMO: dict[tuple[str, str | None], dict[str, Any]] = {}
 
     @classmethod
     def _empty_honcho_cache_busting_config(cls) -> dict[str, Any]:
@@ -15096,16 +15124,27 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
     @classmethod
     def _extract_honcho_cache_busting_config(cls) -> dict[str, Any]:
-        """Extract Honcho identity keys, memoized by honcho.json mtime."""
+        """Extract Honcho identity keys, memoized by honcho.json content.
+
+        The memo is keyed on a digest of the file rather than its mtime:
+        tmpfs and other coarse-granularity filesystems stamp writes that
+        land in the same clock tick with an identical ``st_mtime_ns``, so an
+        mtime key silently served a stale identity after a quick edit — the
+        agent would keep a cached peer mapping the config no longer
+        describes. Hashing a small JSON file is far cheaper than the parse
+        the memo exists to avoid.
+        """
         try:
+            import hashlib
+
             from plugins.memory.honcho.client import HonchoClientConfig, resolve_config_path
 
             path = resolve_config_path()
             try:
-                mtime_ns = path.stat().st_mtime_ns
+                digest = hashlib.sha256(path.read_bytes()).hexdigest()
             except OSError:
-                mtime_ns = None
-            memo_key = (str(path), mtime_ns)
+                digest = None
+            memo_key = (str(path), digest)
             cached = cls._HONCHO_CACHE_BUSTING_MEMO.get(memo_key)
             if cached is not None:
                 return dict(cached)

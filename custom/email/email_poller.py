@@ -161,7 +161,7 @@ def parse_address_list(raw):
 
 def _register_email_attachments(payloads, *, account_id, conversation,
                                  sender_id, sender_name, message_id,
-                                 received_dt):
+                                 received_dt, inbound_item_id=None):
     """Register email attachment bytes in the file registry.
 
     Best-effort: failures are logged but never raise into the poller path.
@@ -193,6 +193,7 @@ def _register_email_attachments(payloads, *, account_id, conversation,
             'sender_name': sender_name,
             'message_id': message_id,
             'received_at': received_dt,
+            'inbound_item_id': inbound_item_id,
         }
         for p in payloads
     ]
@@ -323,6 +324,38 @@ def poll_account(account, db):
                             )
                             total_new += 1
 
+                            # Mirror the message into the shared inbound
+                            # registry. Only the plain-text body: the shared
+                            # store is for reading and searching, and copying
+                            # marketing HTML into it would bloat the search
+                            # index without making anything more findable.
+                            inbound_item_id = None
+                            try:
+                                from shared.inbound_registration import register_item
+                                inbound_item_id = register_item(
+                                    surface='email',
+                                    external_id=message_id,
+                                    account_id=account_id,
+                                    kind='message',
+                                    conversation=thread_id or message_id,
+                                    sender_id=from_addr,
+                                    sender_name=from_name,
+                                    subject=subject,
+                                    body=text_body or '',
+                                    occurred_at=received_dt or received_at,
+                                    has_attachments=bool(attachments),
+                                    metadata={
+                                        'to': to_addrs,
+                                        'cc': cc_addrs,
+                                        'folder': folder,
+                                        'in_reply_to': in_reply_to,
+                                    },
+                                )
+                            except ImportError:
+                                pass
+                            except Exception as e:
+                                print(f"[poller] Inbound registration failed for {message_id}: {e}")
+
                             # Register attachment files in the file registry.
                             # Best-effort: failures are logged but never break
                             # email processing.
@@ -335,6 +368,7 @@ def poll_account(account, db):
                                     sender_name=from_name,
                                     message_id=message_id,
                                     received_dt=received_dt,
+                                    inbound_item_id=inbound_item_id,
                                 )
                         except sqlite3.IntegrityError:
                             pass  # Duplicate message_id — already stored

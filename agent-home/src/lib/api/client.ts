@@ -27,6 +27,10 @@ import type {
   FileLinkResponse,
   FileSurfacesResponse,
   GtsGraphResponse,
+  IncomingDetail,
+  IncomingItem,
+  IncomingsFacets,
+  IncomingsResponse,
   MemberCreateResponse,
   MemberOkResponse,
   MemberRoleResponse,
@@ -686,6 +690,79 @@ export class HermesApiClient {
       method: "POST",
       json: { surface: "agent_home", ...payload },
     });
+  }
+
+  /** A keyset page of the unified inbox. */
+  async incomings(
+    opts: {
+      q?: string;
+      surface?: string;
+      kind?: string;
+      sender?: string;
+      importance?: string;
+      tag?: string;
+      tag_match?: string;
+      exclude_tag?: string;
+      remembered?: boolean;
+      has_attachments?: boolean;
+      since?: string;
+      until?: string;
+      limit?: number;
+      cursor?: string;
+    } = {},
+  ): Promise<IncomingsResponse> {
+    const p = new URLSearchParams();
+    for (const key of [
+      "q", "surface", "kind", "sender", "importance", "tag", "tag_match",
+      "exclude_tag", "since", "until", "cursor",
+    ] as const) {
+      const value = opts[key];
+      if (value) p.set(key, String(value));
+    }
+    if (opts.remembered != null) p.set("remembered", String(opts.remembered));
+    if (opts.has_attachments != null) {
+      p.set("has_attachments", String(opts.has_attachments));
+    }
+    p.set("limit", String(opts.limit ?? 50));
+    return this.request(`/api/registry/incomings?${p.toString()}`);
+  }
+
+  /** Surfaces, importance levels and tags the caller actually has. */
+  async incomingsFacets(): Promise<IncomingsFacets> {
+    return this.request("/api/registry/incomings/facets");
+  }
+
+  /** One arrival with its attachments and tags. 404s when not visible. */
+  async incoming(id: string): Promise<IncomingDetail> {
+    return this.request(`/api/registry/incomings/${encodeURIComponent(id)}`);
+  }
+
+  /** Attach a tag from the shared vocabulary, creating it when new. */
+  async tagIncoming(
+    id: string,
+    name: string,
+    color?: string,
+  ): Promise<SessionTag> {
+    return this.request(
+      `/api/registry/incomings/${encodeURIComponent(id)}/tags`,
+      { method: "POST", json: { name, color } },
+    );
+  }
+
+  /** Detach a tag. The vocabulary keeps the tag itself. */
+  async untagIncoming(id: string, tagId: string): Promise<{ removed: boolean }> {
+    return this.request(
+      `/api/registry/incomings/${encodeURIComponent(id)}/tags/${encodeURIComponent(tagId)}`,
+      { method: "DELETE" },
+    );
+  }
+
+  /** Ingest an arrival into the memory tier and link it back. */
+  async rememberIncoming(id: string): Promise<IncomingItem> {
+    return this.request(
+      `/api/registry/incomings/${encodeURIComponent(id)}/remember`,
+      { method: "POST", json: {} },
+    );
   }
 }
 

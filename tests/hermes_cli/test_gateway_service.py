@@ -38,6 +38,18 @@ class TestUserSystemdPrivateSocketPreflight:
         assert calls == ["env"]
 
 
+@pytest.fixture
+def stub_user_systemd_preflight(monkeypatch):
+    """Neutralize the user-D-Bus preflight for unit-refresh/restart tests.
+
+    ``systemd_start`` / ``systemd_restart`` probe the real login session
+    before touching systemctl, so these tests otherwise only pass on a box
+    with a live user D-Bus (they fail in containers and CI images). The
+    preflight has its own coverage in ``TestPreflightUserSystemd``.
+    """
+    monkeypatch.setattr(gateway_cli, "_preflight_user_systemd", lambda *a, **k: None)
+
+
 class TestSystemdServiceRefresh:
     def test_systemd_install_repairs_outdated_unit_without_force(self, tmp_path, monkeypatch):
         unit_path = tmp_path / "hermes-gateway.service"
@@ -62,7 +74,9 @@ class TestSystemdServiceRefresh:
             ["systemctl", "--user", "enable", gateway_cli.get_service_name()],
         ]
 
-    def test_systemd_start_refreshes_outdated_unit(self, tmp_path, monkeypatch):
+    def test_systemd_start_refreshes_outdated_unit(
+        self, tmp_path, monkeypatch, stub_user_systemd_preflight
+    ):
         unit_path = tmp_path / "hermes-gateway.service"
         unit_path.write_text("old unit\n", encoding="utf-8")
 
@@ -85,7 +99,9 @@ class TestSystemdServiceRefresh:
             ["systemctl", "--user", "start", gateway_cli.get_service_name()],
         ]
 
-    def test_systemd_restart_refreshes_outdated_unit(self, tmp_path, monkeypatch):
+    def test_systemd_restart_refreshes_outdated_unit(
+        self, tmp_path, monkeypatch, stub_user_systemd_preflight
+    ):
         unit_path = tmp_path / "hermes-gateway.service"
         unit_path.write_text("old unit\n", encoding="utf-8")
 
@@ -1522,6 +1538,7 @@ class TestGatewayServiceDetection:
 
         assert gateway_cli._is_service_running() is False
 
+@pytest.mark.usefixtures("stub_user_systemd_preflight")
 class TestGatewaySystemServiceRouting:
     def test_systemd_restart_gracefully_restarts_running_service_and_waits(self, monkeypatch, capsys):
         calls = []
