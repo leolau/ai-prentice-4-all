@@ -26,16 +26,16 @@ datastore and no HTTP surface, so no web UI can list them.
 **The build.** One new RLS-scoped Postgres table (`inbound_items`), written
 best-effort from the two existing arrival chokepoints, read through a new
 FastAPI router that mirrors `hermes_cli/files_api.py`, surfaced as a third —
-and default — tab on `/inbox` with search, filters, and a linkable detail
-route. Two foreign keys give the requested links: `file_assets.inbound_item_id`
-(item ⇄ its attachments) and `inbound_items.document_id` (item → what was
-remembered from it).
+and default — tab on `/inbox` with search, filters, user tags, keyset
+pagination, and a linkable detail route. Two foreign keys give the requested
+links: `file_assets.inbound_item_id` (item ⇄ its attachments) and
+`inbound_items.document_id` (item → what was remembered from it).
 
 **In scope:** WhatsApp, email, calendar, plus every gateway channel that
 already flows through `gateway/inbound.py` — the schema is surface-agnostic.
-Search (filters + Postgres FTS + a substring fallback), an item detail view,
-both link directions, a backfill of existing history, and a
-`hermes incomings remember` CLI.
+Search (filters + Postgres FTS + a substring fallback), **user-assigned tags**,
+**keyset pagination**, an item detail view, both link directions, a backfill of
+existing history, and a `hermes incomings remember` CLI.
 
 **Out of scope, deliberately:** replying or composing from the page; changing
 how triage classifies anything; copying HTML email bodies into the shared
@@ -47,6 +47,20 @@ follow-up in the spec, §7); a to-do structure (see
 verification pass on the systest box. Steps 1–2 are backend-only and can land
 before any UI exists, so that by the time step 4 renders a list there is real
 data in it.
+
+**Which store, and why this is in Postgres at all.** The rule the codebase
+already follows: **SQLite is one box's working state; Supabase Postgres is
+shared user data.** SQLite holds session history (`hermes_state.py`), the
+Kanban board, cron state, the agent's todo scratchpad, and the triage
+pipeline's raw store, batching and digests — machine-local, single-user, no
+`visibility` column, safe to rebuild. Postgres holds `memories`,
+`rag_documents`, `file_assets`, `tasks`, `goals`, `notifications`, `changes` —
+everything carrying `owner_user_id` + `visibility`, scoped by RLS, readable by
+`agent-home`. The test: *if a browser or a second person should ever see it, it
+is Postgres.* The entire custom pipeline currently sits on the SQLite side of
+that line, which is exactly why none of it reaches the Inbox — and why this
+plan mirrors into Postgres rather than putting an API in front of
+`whatsapp_data.db`.
 
 **The pattern being copied.** Every piece of this has a working analogue in the
 inbound file registry that shipped in `a22686f49`. The table copies
@@ -62,10 +76,86 @@ a divergence from it should be deliberate and explained, not incidental.
 
 | # | question | why it blocks | proposal |
 |---|---|---|---|
-| P1 | CJK search | `to_tsvector('simple', …)` does not segment Chinese; a zh-Hant body becomes one lexeme per character run and FTS under-matches. Fixing it later means a schema change to the generated column. | Ship `'simple'` + the substring fallback, measure on real data, and treat `pg_bigm`/`zhparser` as a follow-up deployment decision. **Decide now that the column is `simple`**, so step 1 is not rewritten. |
+| P1 | CJK search (see the worked example below) | Postgres's default parser has no Chinese segmentation, so FTS silently returns nothing for words that are plainly present. Fixing it later means a schema change to the generated column. | Ship `'simple'` + the substring fallback, measure on real data, and treat `pg_bigm`/`zhparser` as a follow-up deployment decision. **Decide now that the column is `simple`**, so step 1 is not rewritten. |
 | P2 | one owner or per-member? | `custom/shared/file_registration.py` resolves *the* owner principal. If a member is ever to have their own mailbox, `account_id → principal` needs a mapping table, which changes the registration signature. | Keep the owner binding; add a `TODO` at the seam. Revisit when a second member gets a channel. |
-| P3 | volume | If email is thousands/day, `OFFSET` pagination degrades and "everything" is the wrong default view. | Count rows in the pipeline SQLite first (`SELECT surface, count(*) …`), one query, before step 3. If >50k, use keyset pagination on `(occurred_at, id)` from the start. |
+| P3 | ~~volume~~ **decided** | — | **Keyset pagination from the start** (user requirement, 2026-08-10). No `OFFSET` path is built, so the volume count is no longer a blocker; still worth running once to choose the default view. |
 | P4 | escalations: chip or tab? | Affects step 4's UI only, not the schema. | A chip. Defer. |
+
+### P1, worked: why Chinese search under-matches
+
+Postgres's default text-search parser splits on whitespace and punctuation. It
+has no Chinese dictionary and no segmentation, so an unspaced CJK run is one
+token:
+
+```
+body:  請問明天的會議改到下午三點嗎
+to_tsvector('simple', body)      →  '請問明天的會議改到下午三點嗎':1     -- ONE lexeme
+websearch_to_tsquery('simple','會議') → '會議'
+match?                            →  NO
+```
+
+The user searches 會議 ("meeting"), the word is in the message, and the result
+list is empty. English escapes this only because spaces do the segmenting.
+`ILIKE '%會議%'` does find it — which is why the substring fallback is not
+optional cover but the only thing making CJK search work at all until an
+extension lands. It scans rather than using the index, so it is capped to short
+queries and is a stopgap, not the answer.
+
+### Two requirements added after the spec merged (2026-08-10)
+
+**Tags.** The list must support user-assigned tags, alongside the
+surface/sender/date filters. Not in the merged spec; specified in §1a below and
+built in steps 1, 3 and 4.
+
+**Keyset pagination, not `OFFSET`.** `OFFSET 5000` makes Postgres fetch and
+discard 5000 rows to return 50, so page 100 costs 100× page 1, and an arrival
+mid-scroll shifts every later page by one (you see a duplicate row). Keyset
+instead remembers the last row and asks for what follows it:
+
+```sql
+WHERE (occurred_at, id) < ($cursor_ts, $cursor_id)
+ORDER BY occurred_at DESC, id DESC
+LIMIT $n
+```
+
+Index-only against `(owner_user_id, occurred_at DESC, id DESC)`, constant cost
+per page, stable under concurrent inserts. The tradeoff — next/previous rather
+than jump-to-page-7 — is the right one for an inbox. The API therefore returns
+an opaque `next_cursor` (base64 of `occurred_at|id`) rather than an `offset`,
+and the ranked-search path uses `(rank, occurred_at, id)` as its cursor tuple
+so ordering stays total.
+
+### §1a. Tags
+
+```sql
+CREATE TABLE IF NOT EXISTS inbound_item_tags (
+    item_id   UUID NOT NULL REFERENCES inbound_items(id) ON DELETE CASCADE,
+    tag       TEXT NOT NULL,          -- normalised: trimmed, casefolded, ≤48 chars
+    tagged_by TEXT NOT NULL,          -- 'user' | '<skill name>'
+    tagged_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (item_id, tag)
+);
+CREATE INDEX ON inbound_item_tags (tag);
+```
+
+A child table, not a `text[]` column on `inbound_items`: tags carry their own
+provenance (a triage skill's tag is not the user's), a tag rename or a
+"everything tagged `invoice`" query wants an index on the tag itself, and the
+generated `search_tsv` column must not be invalidated every time somebody tags
+something.
+
+No separate RLS policy — the table is reached only through a scoped join to its
+parent item, the same pattern FG-04 uses for goal metrics. Filtering is
+`AND EXISTS (SELECT 1 FROM inbound_item_tags t WHERE t.item_id = inbound_items.id
+AND t.tag = ANY($n::text[]))`, with AND-semantics across multiple selected tags
+(narrowing, which is what a filter chip row implies).
+
+Endpoints: `POST /api/registry/incomings/{id}/tags` `{tag}` and
+`DELETE /api/registry/incomings/{id}/tags/{tag}`; the existing `/facets`
+response gains a `tags: [{tag, count}]` list so the chip row only offers tags
+that exist. Triage skills may tag with `tagged_by='<skill>'`, which is how
+"important" or "invoice" can be applied automatically without pretending the
+user chose it.
 
 P1 and P3 are the ones that cost rework; P2 and P4 do not block.
 
@@ -96,16 +186,25 @@ class InboundRegistry:
     async def initialize(...)                     # SCHEMA_SQL + apply_scope_rls, idempotent
     async def upsert(principal, *, surface, external_id, kind, occurred_at, ...) -> InboundItem
     async def get(principal, item_id) -> InboundItem | None
-    async def list(principal, *, query="", surfaces=(), kinds=(), contact=None,
-                   since=None, until=None, importance=None, remembered=None,
-                   has_attachments=None, limit=50, offset=0) -> tuple[list[InboundItem], int]
-    async def facets(principal) -> dict           # surface/kind/sender counts
+    async def list(principal, *, query="", surfaces=(), kinds=(), tags=(),
+                   contact=None, since=None, until=None, importance=None,
+                   remembered=None, has_attachments=None, limit=50,
+                   cursor=None) -> tuple[list[InboundItem], str | None]
+    async def facets(principal) -> dict           # surface/kind/sender/tag counts
+    async def add_tag(principal, item_id, tag, *, by="user") -> None
+    async def remove_tag(principal, item_id, tag) -> None
     async def mark_remembered(principal, item_id, *, document_id, by) -> InboundItem
     async def attachments(principal, item_id) -> list[FileAsset]
 ```
 
-The DDL is in the spec (§1) and goes in verbatim as `SCHEMA_SQL`. Three points
-the implementation must not soften:
+`list()` returns the next cursor, not a total: a `COUNT(*)` over a filtered,
+RLS-scoped table is the same full scan keyset pagination exists to avoid.
+Where the UI wants a number it uses the `/facets` counts, which are grouped
+and cheap.
+
+The DDL is in the spec (§1), plus `inbound_item_tags` from §1a above and the
+`(owner_user_id, occurred_at DESC, id DESC)` index the cursor needs. Three
+points the implementation must not soften:
 
 - **`upsert`, not `register`.** `ON CONFLICT (owner_user_id, surface,
   account_id, external_id) DO UPDATE` — a re-polled IMAP UID or a re-synced
@@ -125,7 +224,13 @@ owner reads own; a member cannot read another member's; owner-role elevation is
 labelled; upsert on the same `external_id` updates one row rather than
 inserting a second; a rescheduled event moves `starts_at` in place; a re-poll
 after `mark_remembered` keeps `document_id`; an oversized body is truncated;
-FTS matches a body word and a filter narrows.
+FTS matches a body word and a filter narrows; a CJK body is *not* found by FTS
+but *is* found by the fallback (assert the known limitation so a future
+`zhparser` install flips a test rather than surprising someone); tags are
+normalised and deduped, a member cannot tag another member's item, and
+deleting an item cascades its tags; keyset paging over 200 synthetic rows
+returns every row exactly once and inserting a new arrival mid-walk does not
+duplicate or skip one.
 
 **Done when:** the tests pass and `initialize()` is idempotent against a schema
 that already has the table.
@@ -223,8 +328,9 @@ than a 500 on a box that has never received anything, and `limit` capped at
 
 | endpoint | returns |
 |---|---|
-| `GET ""` | `{items, total, limit, offset}` — params `q`, `surface` (csv), `kind`, `contact`, `from`, `to`, `importance`, `remembered`, `has_attachments`, `limit`, `offset` |
-| `GET "/facets"` | `{surfaces: [...], kinds: [...], senders: [...]}` with counts, so a chip is never offered for a surface with no rows |
+| `GET ""` | `{items, next_cursor}` — params `q`, `surface` (csv), `kind`, `tag` (csv), `contact`, `from`, `to`, `importance`, `remembered`, `has_attachments`, `limit`, `cursor` |
+| `GET "/facets"` | `{surfaces, kinds, senders, tags}` with counts, so a chip is never offered for a value with no rows |
+| `POST "/{item_id}/tags"` · `DELETE "/{item_id}/tags/{tag}"` | add/remove a user tag (§1a) |
 | `GET "/{item_id}"` | the item + `attachments[]` (from `file_assets`) + its `memory` link; 404 for both absent and invisible, so a 403 cannot confirm someone else's item exists |
 | `POST "/{item_id}/remember"` | ingest + stamp; returns the updated item |
 
@@ -262,9 +368,17 @@ the other two branches untouched. Every new component's root element carries
 - **Row:** glyph by surface · title-or-excerpt · right-aligned relative time;
   second line `surface · sender · 📎 n · importance · ◇ when remembered`.
   Calendar rows show the time range instead of a relative timestamp.
-- **Controls:** debounced search box, surface chips from `/facets`, date range.
-  **Filter state lives in the URL** (`/inbox?tab=incomings&q=invoice&surface=email`)
-  so a search is linkable and survives reload.
+- **Controls:** debounced search box, surface chips and tag chips from
+  `/facets`, date range. **Filter state lives in the URL**
+  (`/inbox?tab=incomings&q=invoice&surface=email&tag=finance`) so a search is
+  linkable and survives reload. The cursor is *not* in the URL — a shared link
+  should open the current top of that filtered list, not a stale page.
+- **Paging:** infinite scroll via an `IntersectionObserver` that requests the
+  next cursor, with an explicit "Load more" fallback button (an observer that
+  never fires must not be the only way to reach page 2).
+- **Tagging:** an inline tag editor on the detail view and a quick-tag control
+  on a row's overflow menu; a tag added anywhere updates the chip counts on the
+  next `/facets` read.
 - **Detail** at `/inbox/[id]` — a full route, not a sheet, so `/files`, a
   digest and a Telegram escalation can all link to it. Full body, full
   provenance, attachments as `/files` cards with View/Download via the existing
@@ -312,12 +426,17 @@ path is the alibaba-cloud MCP `OOS_RunCommand` tool). The live pass, after step 
 3. Move the calendar event; the row updates rather than duplicating.
 4. Open the email's PDF from the item; open the item from `/files`.
 5. Search a word from the email body, then a fragment of the sender's number
-   (exercises the FTS path and the fallback).
-6. Remember the email; it becomes findable on `/memory` and the item shows the
+   (exercises the FTS path and the fallback), then a Chinese word from a
+   WhatsApp message (documents the P1 limitation against real data).
+6. Tag two items, filter by that tag, remove one tag; the chip count follows.
+7. Scroll past the first page and confirm no duplicate or skipped row while
+   messages are still arriving.
+8. Remember the email; it becomes findable on `/memory` and the item shows the
    link.
-7. Log in as a synthetic member; none of the owner's items are visible.
+9. Log in as a synthetic member; none of the owner's items — or tags — are
+   visible.
 
-Step 7 is the one that must not be skipped. It is the same isolation check the
+Step 9 is the one that must not be skipped. It is the same isolation check the
 multi-user rollout ran for memories and files, and this table carries email
 bodies.
 
