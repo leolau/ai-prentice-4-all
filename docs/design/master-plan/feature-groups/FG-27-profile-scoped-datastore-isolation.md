@@ -333,7 +333,7 @@ system test passed.
 
 ## Cloud-agent prompt
 
-> **[Phase-6 prerequisite — land Layers 1+2 before FG-25/FG-26 add tables]** Repo
+> **[Phase-6 prerequisite — land Layers 1+3 before FG-25/FG-26 add tables; build order 1 → 3 → 2]** Repo
 > `leolau/ai-prentice-4-all`, branch off `develop`. Read
 > `docs/design/master-plan/README.md`, `AGENTS.md`, and this doc (FG-27). Close
 > the shared-schema footgun in `hermes_cli/datastore.py`, where `get_store()`
