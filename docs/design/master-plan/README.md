@@ -157,6 +157,20 @@ Every FG must obey these or it will not merge:
 | [22](./feature-groups/FG-22-memory-visualizer.md) | Read-only memory visualizer on the operator dashboard | **V1→V4** (Phase-5) | `hermes_cli/memory_explorer.py` over FG-21's store, `_comms_resolve_principal` C1, `memory_projection` under the same C2 RLS as `memories`, `web/` SPA + `@observablehq/plot` |
 | [23](./feature-groups/FG-23-memory-on-agent-home.md) | The memory visualizer on `agent-home` (the phone) | **A0→A5** (Phase-5) | FG-22's `/api/memory/explorer/*` endpoints (unchanged), FG-20 BFF (`HermesApiClient`, `requirePrincipal`, `MobileShell`), `deploy/hermes-deploy.sh` + `deploy_state.py` |
 
+### Phase 6 — FG-24–26 (scaling one profile to hundreds of principals)
+
+Phase 1 built multi-user for a handful of principals in one profile. Phase 6 is
+what an organisation of 500 actually needs: personal curated memory, a way to
+express *sets* of people, and an administration surface that does not require a
+CLI. FG-24 and FG-25 are independent and may run in parallel; FG-26 renders
+FG-25.
+
+| FG | Title | Wave | Primary reuse anchors |
+|----|-------|------|-----------------------|
+| [24](./feature-groups/FG-24-per-principal-curated-memory.md) | Per-principal curated memory (memory layers 1–2 become per-user) | **P6-A** (Phase-6) | `tools/memory_tool.py` (`get_memory_dir`, `MemoryStore`, frozen snapshot), `agent/agent_init.py` (principal already in scope), `agent/system_prompt.py` volatile tier |
+| [25](./feature-groups/FG-25-group-scopes-multi-dimensional.md) | Group scopes: multi-dimensional, hierarchical audiences + scoped admin (**publishes C10**) | **P6-A** (Phase-6) | `hermes_cli/access.py` C2 (`scope_filter`/`apply_scope_rls`/`bind_principal`), FG-19 `item_grants` clause pattern, FG-21 elevation GUC + `memory_access_audit` |
+| [26](./feature-groups/FG-26-users-groups-admin-console.md) | Users & Groups admin console + invitation activation | **P6-B** (after FG-25) | `hermes_cli/members.py` (`MemberService`, `GoTrueAdminClient`), `/api/comms/members*`, FG-20 BFF + `MembersView.tsx`, C5/C8 |
+
 ---
 
 ## 4. Cross-cutting shared contracts (Wave 0 — must merge FIRST)
@@ -180,6 +194,10 @@ Wave-0 agents publish these as typed interfaces + docstrings + baseline tests
 - **C7 — Core/Customizable boundary** (FG-14). A repo-committed `core_manifest.yaml` (globs) + a **hard runtime write-guard** at the agent's file/terminal write chokepoint: any agent write whose resolved path is Core is **refused** (fail-closed, escape-safe, no user/config override) and audited. Applies to the runtime LLM agent only; human dev/git/`hermes update` unaffected. Customizable writes emit C5.
 - **C8 — Interaction trace** (FG-16). Append-only `interactions(id, trace_id, parent_id, ts, actor_user_id, session_key, platform, kind∈{inbound,turn,tool_call,tool_result,outbound,approval,change,cost,error,core_denied}, ref, summary, payload_ref, mode)`; one `trace_id` per originating interaction joins messages+tools+changes(C5)+cost; **cache-safe** (never prompt-injected), **RLS-scoped** (owner sees all), retention/rollup-capped. Reuses logging/SessionDB/cost-tracker/`changes.py`/observability plugin.
 - **C9 — GTS graph** (FG-18; assignment extended by FG-19). Unified nodes + typed edges over FG-04 goals + FG-06 tasks + skills: hierarchical goals/tasks (`parent_*_id`, cycle-safe) with priorities, **M:N** `task_goals`/`task_skills`, user-owned `evaluation_methods` (agent-immutable), auto-computed `score` (0–100, priority-weighted rollup). FG-19 adds `assignee_user_id` (tasks + sub-goals only) + `item_grants` (single assignee + watchers) extending C2.
+
+### Phase-6 contract (published by FG-25; consumed by FG-26 and every scoped table)
+
+- **C10 — Group scope** (FG-25; extends C2). `visibility ∈ {shared, group:<group_id>, private:<user_id>}`. Groups are a **forest of typed dimensions** — `groups(id, key, dimension, parent_id, elevation_enabled)` with a same-dimension-parent + acyclicity invariant and a materialised `group_closure` — plus `group_members(group_id, user_id, group_role∈{admin,member})`. **Read inheritance goes up** (audience = my groups + ancestors); **admin scope goes down** (groups I admin + descendants). Both are expanded **once per transaction** by `bind_principal()` into the `hermes.principal_groups` / `hermes.principal_admin_scope` GUCs and tested by array membership in the policy — never a recursive CTE per row; an unbound GUC degrades to plain C2 (fail-closed). Reading a **team** row via admin scope is not audited; reading a **person's** `private:` row is per-group-opt-in elevation and is **always** audited with `via_group_id`. Group elevation compares **group** roles, not instance roles.
 
 ---
 
@@ -268,6 +286,29 @@ three (chat / webview / comms+polish). Every agent works on its own branch, edit
 only the FG-20 doc, keeps baseline + web build green, preserves the one-brain
 chat path (cache-safe), and re-runs the negative-access RLS + C6 checks. The
 existing `web/` operator console is left intact.
+
+### Phase 6 (FG-24–26 scale-out) — waves (start after Phase-5 `develop` is merged + owner resolves the FG-26 "assign profile" decision)
+
+```
+WAVE P6-A (parallel — two independent agents; FG-25 publishes C10 first)
+  ├─ FG-24  per-principal curated memory        (needs C1 only; touches tools/memory_tool.py,
+  │         agent/agent_init.py, agent/system_prompt.py — no DB change)
+  └─ FG-25  group scopes / C10                  (needs C1/C2, C3, C5, C8; extends scope_filter +
+            apply_scope_rls + bind_principal — SMALL CONTRACT PR FIRST, like Wave 0)
+
+WAVE P6-B (after FG-25 merges)
+  └─ FG-26  Users & Groups console + invitations (needs C10/FG-25, FG-20 BFF, C5, C8;
+            also carries the list_principals N+1 fix that the roster needs at N=500)
+```
+
+**Phase-6 parallelization:** FG-24 and FG-25 share no files and can run as two
+agents immediately; **FG-25 lands C10 as a small contract PR first** so FG-26
+builds against a frozen seam. FG-26 must not start before FG-25 merges — it
+renders groups it cannot otherwise query. Runtime scale-out (gateway workers
+sharded by session key, `SessionDB` off SQLite, per-principal rate/cost quotas,
+the D8 8/32 resize) is **separate work, not part of Phase 6**: Phase 6 makes the
+*access model* serve thousands of registered principals, while concurrent-session
+capacity remains an open runtime item (§8).
 
 > **FG-02 (blockchain) is ON HOLD** per Leo (2026-07-11). It is excluded from
 > the wave schedule and will not be launched until the owner explicitly
@@ -378,6 +419,46 @@ transient, and in-place-resize to 8/32 (same-family, ~5 min, no data migration
 
 ## 8. Risks / open items carried into implementation
 
+- **OPEN DECISION (blocks FG-26's create-user form): "assign profile" on user
+  creation.** A profile is an isolated brain (own `HERMES_HOME`, config,
+  gateway, database config), not an attribute of a user — principals are rows
+  *inside* one profile's database, so there is nowhere to record "Dana's
+  profile". Three readings (display profile / current-profile-only / true
+  cross-profile identity) are tabulated in FG-26; only the third is a real
+  architecture change and it would be its own FG. FG-26 assumes the first until
+  the owner says otherwise.
+- **Concurrent-session capacity is the real scale ceiling, and Phase 6 does not
+  address it.** FG-24/25/26 make the *access model* serve thousands of
+  registered principals (per-row scoping, two GUC-expansion queries per request
+  regardless of N). The runtime does not follow: one gateway process per profile
+  holding a live `AIAgent` per active session, `SessionDB` on single-writer
+  SQLite shared profile-wide, no per-principal rate or cost cap (only a global
+  `max_concurrent_sessions`), all on a 4 vCPU / 14 GB box that also runs
+  Supabase. Realistic shape today: **thousands registered, order tens
+  concurrent.** Hundreds *simultaneously active* needs sharded gateway workers,
+  `SessionDB` on Postgres, per-principal quotas, and the D8 resize — a separate
+  FG, larger than FG-24 and FG-25 combined.
+- **The invitation redeem endpoint is the highest-value new attack surface** —
+  it is unauthenticated and grants account control. Mitigations are specified in
+  FG-26 (hash-only storage, single use, 5-minute TTL, constant-time compare,
+  per-IP/per-token rate limiting, uniform failure responses, `no-referrer` on
+  the activate route) and every one of them is a required test, not an
+  implementation detail.
+- **5 minutes is short for an asynchronous handover.** It is what the owner
+  asked for and it is the right default for a link relayed over chat, but it
+  will expire during any store-and-forward delivery — so "Regenerate link" is
+  part of the feature, and email/IdP delivery is the eventual answer.
+- **Explicit group membership does not survive 4-figure headcount by itself** —
+  at that size membership should come from the IdP (SCIM/OIDC group sync writing
+  the same FG-25 tables). Deferred out of FG-25 v1 deliberately; revisit before
+  any deployment above a few hundred principals.
+- **FG-25 changes FG-21 P3 elevation semantics.** Group elevation compares
+  `group_members.group_role`, not instance roles, because in a correctly
+  configured deployment every team lead is instance-role `member` (instance
+  `admin` outranks every member *globally*, which would make group scoping
+  decorative). The instance-wide `role_reads` switch is retained but deprecated;
+  a deployment that assigns instance `admin` to team leads has silently
+  bypassed the group model, so `hermes member add --role admin` should warn.
 - **Supabase resource budget** on a 4/16 box with the full bundle + Node tools
   + concurrent cores — monitor; resize to 8/32 (D8) if RAM-bound.
 - **Multi-user vs upstream Hermes divergence** — keep the access layer as an
@@ -444,3 +525,4 @@ transient, and in-place-resize to 8/32 (same-family, ~5 min, no data migration
 | 2026-08-10 | 19 | devin (for Leo) | UI surface / D20 | **Locked D20: `agent-home` is the key and main UI; the `web/` dashboard is not.** All UI improvements — new screens, redesigns, UX/mobile/polish, new user-facing features — are done in `agent-home/` unless a request explicitly names another surface; `web/` stays the operator/admin console. Recorded as principle 0 in §2, as decision D20 in §1, in `README.md`, `AGENTS.md`, `agent-home/README.md`, `docs/design/architecture-design-number-one.md`, and in FG-20. Docs-only, no code change. | Leo: "the key and main UI is the agent-home, not dashboard. Unless explicitly specify, otherwise, all UI improvements are done in the agent-home." |
 | 2026-08-04 | 18 | devin (for Leo) | FG-21 / memory / C2 | **Added FG-21: local semantic memory (layer 4), RAG, and shared recall across users.** Survey of the live box found the pgvector tier is real (HNSW, `vector 0.8.2`) but its embeddings are a hashing bag-of-words (not semantic), `memory_query` has never been called (write-only tier), and `_resolve_principal` never consults the `principals` table — so Telegram runs as `member 8756039695` while the dashboard runs as `leo_owner`, one human with two disjoint private memories and `channel_identities` empty. Plan: on-box embedding service (no text leaves the deployment) + model/dim versioning, automatic recall through the cache-safe `prefetch()` seam, identity enrolment as the prerequisite for cross-user access, audited role/grant-based elevation over C2 (reusing FG-19 `item_grants`), and a `rag_documents`/`rag_chunks` corpus with hybrid retrieval and citations. Docs-only; implementation gated on the open decisions in FG-21 §10. | Leo: local embeddings, must be semantic, use as the 4th memory layer, support RAG, and share memory across users of one instance with higher-privilege access by right |
 | 2026-08-05 | 19 | devin (for Leo) | FG-23 / FG-22 / infra | **Added FG-23: move the memory visualizer onto `agent-home` (the phone).** No new data path — FG-22's `/api/memory/explorer/*` endpoints stay the single seam, consumed through the FG-20 BFF, so C1 principal scoping, C2 RLS on `memory_projection` and the C8 elevated-read audit are inherited rather than reimplemented (the plan explicitly forbids `agent-home`'s direct `pg` path for memory: correctly scoped by RLS but silently unaudited). The survey of the live box, not the repo, set the plan's shape: `agent-home` **is** already serving `home.leolau.ai-and-i.io` but from a **second checkout** (`/opt/data/agent-home-app`, at PR #62) that `deploy-hermes.sh` never updates, with a build dated 2026-07-27, as `root`, and with its unit outside `deploy_state.py`'s `hermes-*` capture glob — so a merged page would appear on the dashboard and never on the phone, undetected. Phase A0 (deployment path + state coverage) is therefore the feature, not preparation. Also decided: omit `mode` so the API resolves the memory tier's own schema (`AGENT_HOME_DATASTORE_MODE=prod` would render a healthy page reporting zero memories, since the live tier is `app_dev`), inline SVG instead of a charting dependency in a phone PWA, and a deterministic sampled `/projection` before Drive ingestion turns 37 dots into tens of thousands. Docs-only. | Leo: put the memory visualization in the agent home instead of the dashboard |
+| 2026-08-10 | 20 | devin (for Leo) | Phase-6 plan / FG-24 / FG-25 / FG-26 / C10 | **Added Phase 6 — scaling one profile to hundreds of principals**, with three new FG docs and one new contract. **FG-24** makes curated memory layers 1–2 per-principal (shared block + per-user block): investigation of `agent/prompt_caching.py` (a single `system_and_3` layout with one breakpoint at the end of the whole system prompt) and `agent/system_prompt.py` (a per-session `Session ID`/timestamp line already at the tail of the `volatile` tier) established that **the system prompt is already unique per session**, so the long-standing "per-user curated memory would fragment the prompt cache" constraint does not hold — the invariant that matters (byte-stable *within* a conversation) is preserved by the existing frozen-snapshot mechanism. Also unblocks the shared 2200-char ceiling, already at 2029 with writes being refused. **FG-25** publishes **C10**, a group tier for C2 — hierarchical, multi-dimensional audiences with group-scoped admins — designed to serve a school (`cohort` dimension) and a medium business (`org` × `project` dimensions) with the same primitives; one brain, groups partition visibility only (D1). Key design points recorded there: read inheritance runs **up** while admin scope runs **down**; both are pre-expanded into GUCs so RLS never runs a recursive CTE per row; audit fires for reading *people*, not *teams*; and group elevation must compare **group** roles because in a correct deployment every team lead is instance-role `member` (instance-role comparison would refuse every elevation). **FG-26** replaces the flat `/members` page with a Users + Groups console and swaps admin-relayed temporary passwords for **hashed, single-use, 5-minute invitation links** (accounts created banned until activation). Rejected alternatives are recorded in the FG docs: one profile per class/team (that is the multi-tenant model D1 rejects), bulk `item_grants` as a stand-in for groups, intersection scopes, and GoTrue `admin/generate_link` for invitations. **Open decision flagged for the owner:** the "assign profile on user creation" requirement — a profile is an isolated brain, not a user attribute, so as stated it implies cross-profile identity (a separate FG). Docs-only, no code. | Leo: items 3 (per-user memory) and 4 (groups) are the show-stoppers for running one profile with hundreds — and in the general case thousands — of login users, covering both a school ("Students") and a medium business ("Engineers"), with multi-layered/multi-dimensional org topologies, an audited both-sides ledger for any read into a member's private data, and an administration UI for users, groups and invitation-based activation. |
