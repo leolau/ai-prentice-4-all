@@ -96,9 +96,38 @@ reconstruction.
   widening it, which is why it needs no new contract and should be
   uncontroversial to merge.
 
+## The shared-Supabase decision changes this FG's centre of gravity
+
+**Decided 2026-08-10: all profiles share one Supabase instance.** That single
+fact rewrites two of the three layers.
+
+One Supabase means one Postgres, which means **every profile has the same DSN by
+design**. Consequences:
+
+- **The collision is no longer a footgun — it is the guaranteed outcome.** With
+  a shared DSN and a hard-coded `app_prod`, the *second* profile merges into the
+  first the moment it connects. There is no configuration that avoids it.
+- **Layer 3 is therefore not "the real fix", it is the enabling mechanism.**
+  Profile-derived schemas are the only thing that makes more than one profile
+  possible on this deployment at all. It moves from "do it eventually" to
+  "nothing multi-profile can ship before it".
+- **Layer 2 as originally written is now wrong.** Blanking the app DSN on
+  `--clone` would break the intended topology: profiles are *supposed* to share
+  the database. Layer 2 is re-scoped from **"don't share the database"** to
+  **"share the database, never the schema"** — the clone must ensure a distinct
+  resolved schema, and warn only when it cannot derive one.
+- **Layer 1 is unaffected.** The marker keys on the schema, not the DSN, so
+  claim-and-verify works identically when every profile shares a database.
+
+Revised build order: **Layer 3 → Layer 1 → Layer 2**. Layer 3 first because
+nothing works without it; Layer 1 second as the fail-closed backstop.
+
 ## Design / approach — three layers
 
-**Build order: Layer 1 → Layer 3 → Layer 2.**
+**Original build order (pre-shared-Supabase): Layer 1 → Layer 3 → Layer 2.**
+See above — with one shared Supabase this becomes **3 → 1 → 2**. The reasoning
+below for preferring outcome-checks over input-policing is unchanged and is what
+makes Layer 3 the right thing to lead with.
 
 The layers are numbered by the order they were discovered, not the order they
 should be built. Layers 1 and 3 are the safety controls; Layer 2 is UX.
@@ -117,7 +146,7 @@ So Layer 2 remains worth doing — inheriting a database silently is bad
 ergonomics even when it is safe — but it is **not** the thing standing between
 you and a data merge, and it should not be built as though it were.
 
-### Layer 1 (build first) — collision detection, fail-closed
+### Layer 1 (build second under shared Supabase) — collision detection, fail-closed
 
 Write an ownership marker into the schema at initialisation and verify it on
 every connect:
@@ -152,13 +181,23 @@ This converts a silent data merge into an error at first connection. It does
 `hermes profile create <name> --clone` must handle the inherited DSN explicitly.
 Options, in preference order:
 
+**Under the shared-Supabase decision the goal is not to stop the clone sharing a
+DSN** — it is supposed to. The clone must instead guarantee the new profile
+resolves to a **distinct schema**, which Layer 3 gives it automatically from the
+profile name; Layer 2's remaining job is to *verify* that, print the resolved
+`(database, schema)` pair so the operator can see it, and refuse when the clone
+would land on a schema that is already claimed. Same for `--clone-all` and
+`hermes profile import`.
+
+The original framing is kept below because it remains correct for deployments
+that give each profile its own database:
+
 1. **Blank the app DSN in the cloned profile** and print what to set;
 2. or keep it and **print a prominent warning** that the clone shares a database
    until changed.
 
-Recommend (1): a profile with no app DSN degrades to core-only (SQLite) rather
-than silently sharing, which is the fail-closed direction. Same treatment for
-`--clone-all` and for `hermes profile import`.
+In that topology (1) is right: a profile with no app DSN degrades to core-only
+(SQLite) rather than silently sharing, which is the fail-closed direction.
 
 **The live deployment shows the DSN is indirect, which makes this worse than it
 looks.** On `hermes-systest`, `config.yaml` contains:
@@ -196,7 +235,7 @@ This fragility is precisely why Layer 2 is sequenced last and classified as
 ergonomics: a control whose correctness depends on enumerating every way a
 value can reach the process is the weaker kind.
 
-### Layer 3 (build second — the fix that makes Layer 2 unnecessary) — namespace the schema by profile
+### Layer 3 (build FIRST under shared Supabase — the enabling mechanism) — namespace the schema by profile
 
 Schema becomes profile-derived rather than global:
 
@@ -298,8 +337,8 @@ run concurrently with fully disjoint `principals` and memories.
 ## Dependencies
 
 - **Blocked by:** none (C3/FG-13 already merged).
-- **Blocks:** FG-25 and FG-26 **should not add identity tables until Layers 1
-  and 3 land** — those layers are days of work, so this is a sequencing note,
+- **Blocks:** FG-25 and FG-26 **should not add identity tables until Layers 3
+  and 1 land** — those layers are days of work, so this is a sequencing note,
   not a schedule risk.
 - **Related:** FG-13 (C3 router), FG-20 (agent-home reads the same schema),
   gateway multiplexing.
@@ -316,9 +355,9 @@ system test passed.
 
 ## Progress checklist
 
-- [ ] Layer 1 (**first**) — `schema_owner` table, claim on init, verify on connect, fail-closed, `--force` re-claim (audited)
-- [ ] Layer 3 (**second**) — profile-derived schema in `get_store()`, default profile unchanged, name validation, explicit override
-- [ ] Layer 2 (**last, UX**) — `--clone` / `--clone-all` / `import` blank-or-warn the **resolved** app DSN (incl. the `.env` indirection)
+- [ ] Layer 3 (**first** — enabling mechanism on a shared Supabase) — profile-derived schema in `get_store()`, default profile unchanged, name validation, explicit override
+- [ ] Layer 1 (**second**) — `schema_owner` table, claim on init, verify on connect, fail-closed, `--force` re-claim (audited)
+- [ ] Layer 2 (**last, UX**) — `--clone` / `--clone-all` / `import` verify the new profile resolves to a **distinct schema** on the shared database, print the resolved `(database, schema)`, refuse an already-claimed schema
 - [ ] `hermes datastore split-profile` + `hermes doctor` reporting
 - [ ] Tests: collision, fail-closed, clone, derivation baseline, multiplex isolation on real Postgres, RLS-after-rename, migration
 - [ ] System test on `hermes-systest` passed
@@ -327,13 +366,14 @@ system test passed.
 
 | Date | Edition | Author | Change | Rationale |
 |------|---------|--------|--------|-----------|
+| 2026-08-10 | 4 | devin (for Leo) | Shared-Supabase decision — build order becomes 3 → 1 → 2, Layer 2 re-scoped | Leo confirmed **all profiles share one Supabase instance**. One Supabase is one Postgres, so every profile has the **same DSN by design** and the collision stops being a footgun: with a hard-coded `app_prod` the second profile merges into the first the moment it connects, and no configuration avoids it. Layer 3 is therefore promoted from "the real fix" to **the enabling mechanism** — profile-derived schemas are the only thing that makes more than one profile possible on this deployment — and it must be built first. Layer 1 is unaffected (its marker keys on the schema, not the DSN) and becomes the fail-closed backstop. Layer 2 as written is now **wrong**: blanking the cloned DSN would break the intended topology, so it is re-scoped from "don't share the database" to "share the database, never the schema" — verify the clone resolves to a distinct schema, print the resolved `(database, schema)`, refuse an already-claimed one. The original framing is retained for deployments that give each profile its own database. |
 | 2026-08-10 | 3 | devin (for Leo) | Reordered build sequence to 1 → 3 → 2 | The `${DATABASE_URL}` indirection found on the live box showed Layer 2 to be the weaker kind of control: it polices an *input path*, and a DSN can arrive as a config literal, an `.env` interpolation, a process env var, or a per-mode override — any path not enumerated is a hole. Layers 1 and 3 check the *resolved outcome* instead. Layer 3 in particular makes the enumeration unnecessary, because with `app_prod_<profile>` two profiles sharing a DSN is harmless rather than catastrophic. Layer 2 is retained as ergonomics (silently inheriting a database is still bad UX) but is no longer what stands between the operator and a data merge, and the FG-25/FG-26 sequencing gate now reads "Layers 1 and 3" rather than "Layers 1 and 2". Approved by Leo. |
 | 2026-08-10 | 2 | devin (for Leo) | Live-deployment check + DSN indirection | Ran the collision check on `hermes-systest`: one profile only, no `profiles/` directory, single `config.yaml` — **the footgun has not fired**, so this FG is purely preventative today. The check also surfaced that the DSN is *indirect* (`dsn: ${DATABASE_URL}` in `config.yaml`, real value in `$HERMES_HOME/.env`), which makes Layer 2 harder than written: `_CLONE_CONFIG_FILES` copies both files, so blanking `config.yaml` alone would not break the inheritance, and an operator opening the cloned `config.yaml` to repoint it sees `${DATABASE_URL}` rather than a connection string — the indirection hides the field that needs changing. Layer 2 must act on the resolved DSN. |
 | 2026-08-10 | 1 | devin (for Leo) | Created FG doc | Found while scoping multi-profile administration: `get_store()` hard-codes the app schema to `app_dev`/`app_prod`, so profile isolation at the app layer rests entirely on each profile's `config.yaml` carrying a distinct DSN — and `hermes profile create --clone`, the documented "start from my default" path, copies `config.yaml` verbatim (`_CLONE_CONFIG_FILES`) with no mention of `dsn`. Two profiles then share one `principals`/`memories`/`changes` set with no error, no log line, and no on-disk symptom (SQLite, memory files and config are genuinely separate). RLS does not help: it scopes rows correctly inside a database both profiles treat as their own. Chose prevention over cure because interleaved rows carry no provenance column and cannot be disentangled automatically. Sequenced ahead of FG-25/FG-26 because those add exactly the identity-bearing tables (`groups`, `invitations`) whose cross-profile leakage would be most damaging. |
 
 ## Cloud-agent prompt
 
-> **[Phase-6 prerequisite — land Layers 1+3 before FG-25/FG-26 add tables; build order 1 → 3 → 2]** Repo
+> **[Phase-6 prerequisite — land Layers 3+1 before FG-25/FG-26 add tables. NOTE: all profiles share one Supabase instance, so build order is 3 → 1 → 2 and Layer 3 is the enabling mechanism, not an optimisation]** Repo
 > `leolau/ai-prentice-4-all`, branch off `develop`. Read
 > `docs/design/master-plan/README.md`, `AGENTS.md`, and this doc (FG-27). Close
 > the shared-schema footgun in `hermes_cli/datastore.py`, where `get_store()`

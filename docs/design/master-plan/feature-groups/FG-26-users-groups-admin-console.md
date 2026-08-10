@@ -191,6 +191,43 @@ Notes:
 - **Self-protection:** an admin cannot demote or deactivate themselves out of
   the last admin seat, and cannot delete themselves. Refused server-side.
 
+#### 3.5 Enrolment-level vs account-level operations (shared-Supabase constraint)
+
+**Decided 2026-08-10: all profiles share one Supabase instance**, so they share
+one GoTrue and one `auth.users`. That makes an *account* a box-wide object while
+*authority* stays per profile — and the operations in §3.4 are not all the same
+kind of thing:
+
+| kind | operations | blast radius |
+|---|---|---|
+| **enrolment-level** | add / remove / re-role the `principals` row, group membership | the acting profile only |
+| **account-level** | GoTrue ban (deactivate), delete, set/reset password | **every profile the account is enrolled in** |
+
+`MemberService` currently performs the account-level ones through the GoTrue
+**admin** API with the service-role key, gated only by `require_member_admin`,
+which checks the actor's role *in the current profile*. So an admin of `hr`
+banning a user also enrolled in `engineers` revokes their access there too — a
+per-profile authority exercised through a globally-scoped credential.
+
+Requirements:
+
+- **Deactivate, in a profile context, means un-enrol** (remove/disable the
+  `principals` row), **not** ban the account. Login continues to work; the user
+  simply has no authority in that profile. This is the correct per-profile verb
+  and it is the default the UI offers.
+- **Account-level operations require either owner, or that the target is
+  enrolled solely in profiles the actor administers** — checked server-side
+  across profiles, not assumed. The dialog must say plainly which profiles are
+  affected before confirming.
+- **Password reset is account-level** and therefore subject to the same rule;
+  it cannot be a routine per-profile-admin action once accounts are shared.
+- **Every per-profile process holding the shared service-role key is the same
+  problem from the other side** — that key can mint an account valid in every
+  profile, so compromising one profile's process is a box-wide account-system
+  compromise. Preferred direction: account-level operations move behind a single
+  control-plane service (see FG-28) and stop being reachable from each profile's
+  process. Recorded here as the open decision it is.
+
 ### 4. What else is needed (answering "anything else?")
 
 Ordered by how soon each is required:

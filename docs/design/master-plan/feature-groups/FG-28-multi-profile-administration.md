@@ -49,9 +49,9 @@ Four pieces of the mechanism are already in the tree.
 
 **1. The entitlement model needs no new tables.** The Supabase dashboard-auth
 provider verifies GoTrue's access token and uses the `sub` claim as the
-identity; `hermes_cli/access.py` uses that same UUID as `principal.user_id`. So
-if all profiles share **one** GoTrue, one login produces one subject that is
-meaningful in every profile — and each profile's own `principals` table decides
+identity; `hermes_cli/access.py` uses that same UUID as `principal.user_id`.
+**All profiles share one Supabase instance (decided 2026-08-10)**, therefore one
+GoTrue, so one login produces one subject that is meaningful in every profile — and each profile's own `principals` table decides
 whether that subject is enrolled and with what role:
 
 ```
@@ -123,6 +123,31 @@ Two consequences:
    database* — wrong, detectable, and not a data merge. Without it, the same
    mistake is a silent merge. FG-27 turns this failure mode from catastrophic to
    merely broken.
+
+**Correction after the shared-Supabase decision \u2014 this is a strong
+recommendation, not a hard blocker.** Being honest about the weakened argument:
+if all profiles share one Supabase, then `DATABASE_URL` and
+`SUPABASE_SERVICE_ROLE_KEY` are **the same value for every profile**, so the
+process-global environment cannot make them wrong. The constraint above stops
+being a correctness blocker for the datastore.
+
+What survives:
+
+- **Per-profile secrets that genuinely differ** \u2014 model API keys are the live
+  example (a profile may use a different provider or a separately-billed key),
+  and any future per-profile credential. Those still collapse to whichever
+  `.env` loaded last.
+- **The coupling is invisible and unenforced.** Nothing declares "these secrets
+  must be identical across profiles"; the day one profile is given its own
+  Postgres or its own key, the multiplexed process silently uses the wrong one.
+  A design that is correct only while a coincidence holds is a latent bug with a
+  delayed trigger.
+
+So fan-out remains the recommendation \u2014 the process boundary makes the property
+structural instead of coincidental \u2014 but in-process multiplexing is *feasible*
+on this deployment, and if it is chosen it must come with an explicit,
+tested assertion that every served profile resolves identical values for the
+shared secrets, failing closed when they diverge.
 
 **Latent issue to verify first (not introduced by this FG).** The gateway
 already multiplexes profiles in one process, scoping each turn with
@@ -226,10 +251,12 @@ console with a dropdown.
 
 ## Prerequisites and open decisions
 
-1. **Do all profiles share one GoTrue?** The whole simplification depends on it.
-   If each profile has its own Supabase, a subject from one is meaningless in
-   another and FG-28 needs a real shared identity store — a much larger FG.
-   **Decide before implementation.**
+1. ~~Do all profiles share one GoTrue?~~ **Answered 2026-08-10: yes, one shared
+   Supabase instance.** The simplification in §"What already exists" holds. It
+   also brings the account-level authority problem below, and makes FG-27
+   Layer 3 an absolute prerequisite rather than a hardening measure (one
+   Supabase = one Postgres = every profile on the same DSN, so without
+   profile-derived schemas a second profile merges into the first on contact).
 2. **FG-27 Layers 1+3 must be merged** (see above).
 3. **Verify or refute the multiplexed-gateway environment issue** before
    building anything.
@@ -267,6 +294,42 @@ including with a hand-crafted request naming that profile directly.
 - **Related:** C1 (principal), C3 (datastore router), FG-20 (BFF), the kanban
   identity gap below.
 
+## The other side of a shared account system: global accounts, local authority
+
+Sharing one Supabase gives FG-28 its clean entitlement model, but it also means
+an **account** is a box-wide object while **authority** is per profile. The
+administrative verbs FG-26 treats as one thing are actually two:
+
+| kind | operations | blast radius |
+|---|---|---|
+| **enrolment-level** | add / remove / re-role the `principals` row, group membership | the acting profile only |
+| **account-level** | GoTrue ban (deactivate), delete, set/reset password | **every profile the account is enrolled in** |
+
+`MemberService` performs the account-level operations through the GoTrue admin
+API with the **service-role key**, gated by `require_member_admin`, which checks
+the actor's role *in the current profile*. So an admin of `hr` can ban an
+account that is also enrolled in `engineers` and revoke their access there —
+per-profile authority exercised through a globally-scoped credential. The
+profile boundary holds perfectly for data and does not hold at all for accounts.
+
+Symmetrically: **every profile's process holds a key that can mint an account
+valid in every profile**, so compromising one profile's process is a box-wide
+account-system compromise. Under fan-out this is N processes holding it instead
+of one.
+
+Requirements (mirrored in FG-26 §3.5):
+
+- **"Deactivate" in a profile context means un-enrol**, not ban — the correct
+  per-profile verb, and the default the UI offers.
+- **Account-level operations require owner, or that the target is enrolled
+  solely in profiles the actor administers** — checked server-side across
+  profiles, with the affected profiles named in the confirmation dialog.
+- **Preferred:** account-level operations move behind the control plane and stop
+  being reachable from each profile's process, so the service-role key lives in
+  exactly one place. This is the strongest argument for the registry service
+  being more than a lookup table, and it should be decided before FG-26 ships
+  its delete/deactivate UI — otherwise that UI has to be rebuilt.
+
 ## Related finding
 
 The shared kanban board carries `owner_user_id` and `visibility` while
@@ -298,12 +361,13 @@ secret-isolation tests green on real Postgres; `scripts/run_tests.sh`, `ruff`,
 
 | Date | Edition | Author | Change | Rationale |
 |------|---------|--------|--------|-----------|
+| 2026-08-10 | 2 | devin (for Leo) | Shared-Supabase decision resolved; account-vs-enrolment authority split added | Leo confirmed **all profiles share one Supabase instance**, closing prerequisite (1): one GoTrue, one subject namespace, so the no-new-tables entitlement model holds and the kanban identity ambiguity closes incidentally. Two corrections follow. **(a) The `os.environ` finding is weaker than written** — with one Supabase, `DATABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` are the *same value* in every profile, so the process-global environment cannot make them wrong and in-process multiplexing is feasible for the datastore. What survives is per-profile secrets that genuinely differ (model API keys) and the fact that the property holds only by coincidence — nothing declares or enforces that the values must match, so the day one profile gets its own key the multiplexed process silently uses the wrong one. Fan-out is therefore downgraded from hard blocker to strong recommendation, with an explicit fail-closed assertion required if multiplexing is chosen instead. **(b) A new hole, and the sharper one:** the account is now box-wide while authority stays per profile. `MemberService` performs ban/delete/reset through the GoTrue admin API with the shared service-role key, gated only by `require_member_admin` against the *current* profile — so an `hr` admin can ban an account enrolled in `engineers` and revoke access there. Split the verbs: "deactivate" in a profile means **un-enrol**, and account-level operations need owner or a target enrolled solely in profiles the actor administers. Symmetrically, every profile process holding that key means one compromised process is a box-wide account compromise, which argues for account operations living behind the control plane. Also promoted FG-27 Layer 3 to an absolute prerequisite: one Supabase means every profile shares a DSN, so without profile-derived schemas the second profile merges into the first on contact. |
 | 2026-08-10 | 1 | devin (for Leo) | Created FG doc | Leo asked for one admin to create users in several profiles (CTO → engineers+testers, CFO → hr) while users stay single-profile. Code reading found the entitlement model needs **no new tables** — the GoTrue `sub` is already `principal.user_id`, so a per-profile `principals` row *is* the per-profile grant, and `_comms_resolve_principal` already 409s for an authenticated-but-unenrolled subject. It also found the architectural constraint: `HERMES_HOME` is a contextvar but `os.environ` is not, and `dsn: ${DATABASE_URL}` resolves through `_expand_env_vars` reading `os.environ`, with ~2,250 env call sites and no context-local seam — so a single process cannot hold per-profile secrets, and the console must fan out to per-profile processes rather than multiplex in-process. Recorded the owner-fallback in `_comms_resolve_principal` as the most dangerous hole: correct today, an escalation to *the target profile's owner* the moment a sessionless service-to-service hop is introduced. Sequenced after FG-27 Layers 1+3 because per-profile schemas turn a wrong-DSN resolution from a silent merge into a detectable error. |
 
 ## Cloud-agent prompt
 
-> **[Phase-6 follow-on — do not start until FG-27 Layers 1+3 are merged and
-> prerequisite (1) below is answered]** Repo `leolau/ai-prentice-4-all`, branch
+> **[Phase-6 follow-on — do not start until FG-27 Layers 3+1 are merged.
+> Prerequisite (1) is answered: all profiles share ONE Supabase instance]** Repo `leolau/ai-prentice-4-all`, branch
 > off `develop`. Read `docs/design/master-plan/README.md`, `AGENTS.md`, FG-26,
 > FG-27 and this doc. Goal: one admin console at one URL where an administrator
 > manages users in **several** profiles, scoped to the profiles where they hold
