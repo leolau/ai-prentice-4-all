@@ -3,12 +3,18 @@
  * (FG-20 multi-user PR-5).
  *
  * The media bucket is private, so the browser can never read an object
- * directly. It asks this route for a **short-lived signed URL** by object path;
- * the route resolves the request's C1 principal, verifies server-side that the
- * path lives under that principal's own prefix (`canReadMediaPath`) and only
- * then signs. A crafted path (traversal, another member's prefix) is rejected
- * before anything is signed — the ownership check is the isolation, and it is
- * never delegated to the client.
+ * directly. It asks this route for a loadable URL by object path; the route
+ * resolves the request's C1 principal, verifies server-side that the path lives
+ * under that principal's own prefix (`canReadMediaPath`) and only then signs. A
+ * crafted path (traversal, another member's prefix) is rejected before anything
+ * is signed — the ownership check is the isolation, and it is never delegated to
+ * the client.
+ *
+ * The signed URL is used to confirm the object exists and then **stays on the
+ * server**: it addresses Supabase as the server reaches it (loopback on the
+ * box), so what the browser gets back is the BFF's own streaming route
+ * (`/api/chat/media/content?path=…`), which re-runs this gate and pipes the
+ * bytes.
  *
  * 401 unauthenticated · 400 missing path · 403 not the caller's object ·
  * 404 unsignable (missing object) · 501 Storage unconfigured.
@@ -21,6 +27,7 @@ import {
   createMediaSignedUrl,
   storageAvailable,
 } from "@/lib/supabase/storage";
+import { mediaContentRef } from "@/lib/chat/media-ref";
 import { mediaSignedUrlTtlSeconds } from "@/lib/env";
 
 export async function GET(request: Request): Promise<NextResponse> {
@@ -54,7 +61,7 @@ export async function GET(request: Request): Promise<NextResponse> {
       return NextResponse.json({ error: "not_found" }, { status: 404 });
     }
     return NextResponse.json(
-      { path, url: signed.url, expires_in: signed.expires_in },
+      { path, url: mediaContentRef(path), expires_in: signed.expires_in },
       { headers: { "cache-control": "no-store" } },
     );
   } catch (err) {

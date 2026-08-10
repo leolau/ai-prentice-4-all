@@ -1,10 +1,13 @@
 /**
  * GET /api/files/:id/content — open a registered file.
  *
- * Redirects to a short-lived signed URL that the Python layer mints only after
- * checking the caller may see the file. The stable URL is what the UI links to
- * — a signed URL rendered into a page would outlive the page and get shared by
- * accident, and the bucket itself stays private either way.
+ * The Python layer mints a short-lived signed URL only after checking the
+ * caller may see the file; this route then **streams the bytes through the
+ * BFF** rather than redirecting to that URL. The signed URL names Supabase as
+ * the server sees it (on the box, loopback `127.0.0.1:8000`, which is not
+ * exposed publicly), so a redirect hands the browser an address it cannot
+ * reach. Piping also keeps the storage host and the signed token server-side,
+ * so a stable, per-principal URL is the only thing that ever reaches a page.
  *
  * `?download=1` asks for a download disposition rather than inline viewing.
  */
@@ -12,11 +15,12 @@ import { NextResponse } from "next/server";
 
 import { HermesApiError } from "@/lib/api/client";
 import { apiClientForRequest, getPrincipal } from "@/lib/auth/principal";
+import { proxyBytes } from "@/lib/http/proxy-bytes";
 
 export async function GET(
   req: Request,
   { params }: { params: Promise<{ id: string }> },
-): Promise<NextResponse> {
+): Promise<Response> {
   const principal = await getPrincipal();
   if (!principal) {
     return NextResponse.json({ error: "unauthenticated" }, { status: 401 });
@@ -26,7 +30,10 @@ export async function GET(
   try {
     const client = await apiClientForRequest();
     const link = await client.fileLink(id, download);
-    return NextResponse.redirect(link.url, 307);
+    return await proxyBytes(req, link.url, {
+      filename: link.filename,
+      download,
+    });
   } catch (err) {
     if (err instanceof HermesApiError) {
       return NextResponse.json(
