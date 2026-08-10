@@ -5,6 +5,7 @@ heavy dependency chain.  It is safe to import at module level without triggering
 tool registration or provider resolution.
 """
 
+import hashlib
 import logging
 import os
 import re
@@ -307,7 +308,7 @@ def skill_matches_environment(frontmatter: Dict[str, Any]) -> bool:
 # ── Disabled skills ───────────────────────────────────────────────────────
 
 
-_RAW_CONFIG_CACHE: Dict[Tuple[str, int, int], Dict[str, Any]] = {}
+_RAW_CONFIG_CACHE: Dict[Tuple[str, str], Dict[str, Any]] = {}
 
 
 def _raw_config_cache_clear() -> None:
@@ -315,8 +316,23 @@ def _raw_config_cache_clear() -> None:
     _RAW_CONFIG_CACHE.clear()
 
 
+def _config_cache_key(config_path: Path) -> Optional[Tuple[str, str]]:
+    """Content-digest cache key for ``config.yaml``.
+
+    Keyed on the bytes rather than ``(mtime_ns, size)``: coarse-granularity
+    filesystems (tmpfs, many container overlays) stamp writes landing in the
+    same clock tick with an identical ``st_mtime_ns``, so a same-length edit
+    kept serving the previous parse for the rest of the run. Reading a few KB
+    is negligible against the ~85ms YAML parse the cache exists to skip.
+    """
+    try:
+        return (str(config_path), hashlib.sha256(config_path.read_bytes()).hexdigest())
+    except OSError:
+        return None
+
+
 def _load_raw_config() -> Dict[str, Any]:
-    """Read config.yaml with a shared mtime+size keyed cache.
+    """Read config.yaml with a shared content-keyed cache.
 
     This module intentionally avoids importing ``hermes_cli.config`` on the
     skill prompt/build path. A tiny local cache gives the same repeated-read
@@ -325,11 +341,7 @@ def _load_raw_config() -> Dict[str, Any]:
     config_path = get_config_path()
     if not config_path.exists():
         return {}
-    try:
-        stat = config_path.stat()
-        cache_key = (str(config_path), stat.st_mtime_ns, stat.st_size)
-    except OSError:
-        cache_key = None
+    cache_key = _config_cache_key(config_path)
 
     if cache_key is not None:
         cached = _RAW_CONFIG_CACHE.get(cache_key)
@@ -398,13 +410,13 @@ def _normalize_string_set(values) -> Set[str]:
 
 # ── External skills directories ──────────────────────────────────────────
 
-# (config_path_str, mtime_ns) -> resolved external dirs list.  Keyed by
-# mtime_ns so a config.yaml edit mid-run is picked up automatically;
+# (config_path_str, content_digest) -> resolved external dirs list.  Keyed by
+# content so a config.yaml edit mid-run is picked up automatically;
 # otherwise every call would re-read + re-YAML-parse the 15KB config,
 # which becomes the dominant cost of ``hermes`` startup when ~120 skills
 # each trigger a category lookup during banner construction (10+ seconds
 # of pure waste).
-_EXTERNAL_DIRS_CACHE: Dict[Tuple[str, int], List[Path]] = {}
+_EXTERNAL_DIRS_CACHE: Dict[Tuple[str, str], List[Path]] = {}
 
 
 def _external_dirs_cache_clear() -> None:
@@ -420,7 +432,7 @@ def get_external_skills_dirs() -> List[Path]:
     path.  Only directories that actually exist are returned.  Duplicates and
     paths that resolve to the local ``~/.hermes/skills/`` are silently skipped.
 
-    Cached in-process, keyed on ``config.yaml`` mtime — the function is
+    Cached in-process, keyed on ``config.yaml`` content — the function is
     called once per skill during banner / tool-registry scans, and YAML
     parsing a non-trivial config dominates ``hermes`` cold-start time
     when the cache is absent.
@@ -429,13 +441,9 @@ def get_external_skills_dirs() -> List[Path]:
     if not config_path.exists():
         return []
 
-    # Cache key: (absolute path, mtime_ns).  stat() is ~2us vs ~85ms for
-    # the full YAML parse, so the fast path is nearly free.
-    try:
-        stat = config_path.stat()
-        cache_key: Tuple[str, int] = (str(config_path), stat.st_mtime_ns)
-    except OSError:
-        cache_key = None  # type: ignore[assignment]
+    # Digesting the file is ~10us against the ~85ms full YAML parse, so the
+    # fast path stays nearly free while remaining edit-accurate.
+    cache_key = _config_cache_key(config_path)
 
     if cache_key is not None:
         cached = _EXTERNAL_DIRS_CACHE.get(cache_key)

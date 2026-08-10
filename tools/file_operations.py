@@ -380,6 +380,13 @@ def _split_tool_diagnostics(output: str) -> tuple[str, str]:
         if stripped.startswith("rg: ") or stripped.startswith("grep: "):
             diagnostics.append(line)
             continue
+        # Unreadable-file diagnostics are not always tool-prefixed: rg 13
+        # reports them as "<path>: Permission denied (os error 13)". Without
+        # this the shape regex accepts them whenever the path contains a
+        # "-<digit>" segment, and files_only mode lists the error as a file.
+        if _OS_ERROR_DIAGNOSTIC_RE.search(line):
+            diagnostics.append(line)
+            continue
         # Otherwise classify by output shape. rg's regex-parse-error block
         # also emits an indented caret line and a trailing "error: ..." line
         # with no tool prefix; neither matches a search-output shape, so they
@@ -400,6 +407,9 @@ def _split_tool_diagnostics(output: str) -> tuple[str, str]:
 # match because the path token forbids whitespace and a leading tool prefix
 # like "rg" is followed by ": " (space) which the negated class rejects.
 _SEARCH_OUTPUT_RE = re.compile(r'^([A-Za-z]:)?[^\s:][^\n]*?[:\-]\d|^[^\s:][^\s]*$')
+
+# rg's untagged per-file failures, e.g. "<path>: Permission denied (os error 13)".
+_OS_ERROR_DIAGNOSTIC_RE = re.compile(r'\(os error \d+\)\s*$')
 
 
 def _parse_search_context_line(line: str) -> tuple[str, int, str] | None:
@@ -743,7 +753,9 @@ def _is_line_oriented_newline_error(error: Optional[str]) -> bool:
     """Return True for rg's hard error when multiline mode is required."""
     if not error:
         return False
-    return "literal \"\\n\" is not allowed" in error and "--multiline" in error
+    # rg quotes the offending literal differently across versions (13 emits
+    # `the literal '"\n"' is not allowed`), so match on the stable words only.
+    return "is not allowed in a regex" in error and "--multiline" in error
 
 
 def _maybe_warn_line_oriented_newline_pattern(result: SearchResult, pattern: str) -> SearchResult:

@@ -29,6 +29,7 @@ MCP client config (e.g. claude_desktop_config.json):
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -333,6 +334,29 @@ class QueueEvent:
     data: dict = field(default_factory=dict)
 
 
+def _file_change_stamp(path: Path) -> tuple[float, int]:
+    """Return ``(mtime, size)`` for change detection, ``(0.0, 0)`` if absent."""
+    try:
+        st = path.stat()
+    except OSError:
+        return (0.0, 0)
+    return (st.st_mtime, st.st_size)
+
+
+def _file_content_stamp(path: Path) -> str:
+    """Return a content digest, ``""`` if the file is absent/unreadable.
+
+    Used for small files where a same-size rewrite is normal (sessions.json
+    only bumps an ISO ``updated_at``): coarse-granularity filesystems reuse
+    the previous tick's mtime, so a stat-based stamp misses the change and
+    the poll that carries the new message is skipped.
+    """
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError:
+        return ""
+
+
 class EventBridge:
     """Background poller that watches SessionDB for new messages and
     maintains an in-memory event queue with waiter support.
@@ -351,9 +375,9 @@ class EventBridge:
         self._last_poll_timestamps: Dict[str, float] = {}  # session_key -> unix timestamp
         # In-memory approval tracking (populated from events)
         self._pending_approvals: Dict[str, dict] = {}
-        # mtime cache — skip expensive work when files haven't changed
-        self._sessions_json_mtime: float = 0.0
-        self._state_db_mtime: float = 0.0
+        # change stamps — skip expensive work when files haven't changed
+        self._sessions_json_mtime: str = ""
+        self._state_db_mtime: tuple[float, int] = (0.0, 0)
         self._cached_sessions_index: dict = {}
 
     def start(self):
@@ -478,18 +502,18 @@ class EventBridge:
     def _poll_once(self, db):
         """Check for new messages across all sessions.
 
-        Uses mtime checks on sessions.json and state.db to skip work
-        when nothing has changed — makes 200ms polling essentially free.
+        Uses (mtime, size) checks on sessions.json and state.db to skip work
+        when nothing has changed — makes 200ms polling essentially free. Size
+        participates because coarse-granularity filesystems (tmpfs, many
+        container overlays) stamp a write with the same mtime as the previous
+        tick's, which would drop the poll that carries a just-appended message.
         """
-        # Check if sessions.json has changed (mtime check is ~1μs).
-        # Capture the previously-seen mtime *before* refreshing the cache so the
+        # Check if sessions.json has changed (stat is ~1μs).
+        # Capture the previously-seen stamp *before* refreshing the cache so the
         # skip guard below can still tell whether sessions.json changed this tick.
         prev_sessions_json_mtime = self._sessions_json_mtime
         sessions_file = _get_sessions_dir() / "sessions.json"
-        try:
-            sj_mtime = sessions_file.stat().st_mtime if sessions_file.exists() else 0.0
-        except OSError:
-            sj_mtime = 0.0
+        sj_mtime = _file_content_stamp(sessions_file)
 
         if sj_mtime != self._sessions_json_mtime:
             self._sessions_json_mtime = sj_mtime
@@ -502,10 +526,7 @@ class EventBridge:
         except ImportError:
             db_file = Path(os.environ.get("HERMES_HOME", Path.home() / ".hermes")) / "state.db"
 
-        try:
-            db_mtime = db_file.stat().st_mtime if db_file.exists() else 0.0
-        except OSError:
-            db_mtime = 0.0
+        db_mtime = _file_change_stamp(db_file)
 
         # Skip only when NEITHER file changed since the last poll. Comparing
         # against ``prev_sessions_json_mtime`` (not the freshly-stored
