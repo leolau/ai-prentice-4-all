@@ -458,7 +458,12 @@ class InboundRegistry:
                         body = EXCLUDED.body,
                         occurred_at = EXCLUDED.occurred_at,
                         ends_at = EXCLUDED.ends_at,
-                        importance = EXCLUDED.importance,
+                        -- A re-poll carries no triage verdict, so it must not
+                        -- erase the one the triage agent already wrote.
+                        importance = COALESCE(
+                            EXCLUDED.importance,
+                            {INBOUND_ITEMS_TABLE}.importance
+                        ),
                         has_attachments = EXCLUDED.has_attachments,
                         metadata = EXCLUDED.metadata,
                         search_text = EXCLUDED.search_text,
@@ -738,6 +743,43 @@ class InboundRegistry:
             if own:
                 await conn.close()
         return _row_to_item(row) if row else None
+
+    async def set_importance(
+        self,
+        principal: Principal,
+        *,
+        surface: str,
+        external_id: str,
+        account_id: str = "",
+        importance: str,
+        connection: Optional["asyncpg.Connection"] = None,
+    ) -> bool:
+        """Record a triage verdict against an arrival already registered.
+
+        Addressed by the channel's own identity rather than by row id: triage
+        runs later, in a different process, and knows the message id it
+        classified — not the uuid the registry happened to mint for it.
+        """
+        own = connection is None
+        conn = connection or await self._connect()
+        try:
+            async with conn.transaction():
+                await bind_principal(conn, principal)
+                status = await conn.execute(
+                    f"""UPDATE {INBOUND_ITEMS_TABLE}
+                           SET importance = $5, updated_at = NOW()
+                         WHERE owner_user_id = $1 AND surface = $2
+                           AND account_id = $3 AND external_id = $4""",
+                    principal.user_id,
+                    surface,
+                    account_id or "",
+                    external_id,
+                    importance,
+                )
+        finally:
+            if own:
+                await conn.close()
+        return status.rsplit(" ", 1)[-1] != "0"
 
     async def link_attachment(
         self,

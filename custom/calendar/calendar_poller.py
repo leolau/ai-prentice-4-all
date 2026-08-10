@@ -300,6 +300,37 @@ def sync_events(db, account_id, refresh_token, calendar_id='primary'):
             )
             created += 1
 
+        # Mirror into the shared inbound registry, on both the create and the
+        # update branch: the upsert keys on the Google event id, so a
+        # rescheduled meeting moves in the Inbox instead of appearing twice.
+        try:
+            from shared.inbound_registration import register_item
+            register_item(
+                surface='calendar',
+                external_id=google_event_id,
+                account_id=account_id,
+                kind='event',
+                conversation=event.get('recurringEventId') or google_event_id,
+                conversation_name=calendar_id,
+                sender_id=organizer.get('email', ''),
+                sender_name=organizer.get('displayName', ''),
+                subject=event.get('summary', ''),
+                body=event.get('description', '') or '',
+                occurred_at=start_time,
+                ends_at=end_time,
+                metadata={
+                    'location': event.get('location', ''),
+                    'html_link': event.get('htmlLink', ''),
+                    'conference_link': conference_link,
+                    'status': status,
+                    'all_day': bool(all_day),
+                },
+            )
+        except ImportError:
+            pass
+        except Exception as e:
+            print(f"[calendar] Inbound registration failed for {google_event_id}: {e}")
+
         # Sync attendees
         sync_attendees(db, event_id, event.get('attendees', []))
 

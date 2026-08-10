@@ -182,7 +182,8 @@ def download_media(bridge_port, msg_id):
 
 def _save_and_register_media(media_data, filename, content_type, msg_id,
                              media_path, db, source_phone, chat_id,
-                             sender_phone, sender_name, timestamp):
+                             sender_phone, sender_name, timestamp,
+                             inbound_item_id=None):
     """Save media bytes to MEDIA_DIR, update DB, and register in file registry."""
     try:
         with open(media_path, 'wb') as f:
@@ -210,6 +211,7 @@ def _save_and_register_media(media_data, filename, content_type, msg_id,
             sender_name=sender_name or '',
             message_id=msg_id,
             received_at=datetime.fromisoformat(timestamp) if timestamp else None,
+            inbound_item_id=inbound_item_id,
         )
         if registered:
             print(f"[batcher] Registered media file: {filename}")
@@ -259,6 +261,30 @@ def process_message(msg, source_phone, bridge_port=None):
         print(f"[batcher] DB insert error: {e}")
         return
 
+    # Mirror the message into the shared inbound registry so it reaches the
+    # Inbox. After the duplicate early-return above, so a re-delivered message
+    # does not re-register; best-effort, so a Postgres blip never costs us the
+    # message that SQLite has already accepted.
+    inbound_item_id = None
+    try:
+        from shared.inbound_registration import register_item
+        inbound_item_id = register_item(
+            surface='whatsapp',
+            external_id=msg_id,
+            account_id=source_phone,
+            conversation=chat_id,
+            sender_id=sender_phone,
+            sender_name=sender_name or '',
+            body=text or '',
+            occurred_at=timestamp,
+            has_attachments=bool(media_type),
+            metadata={'is_group': bool(is_group), 'media_type': media_type},
+        )
+    except ImportError:
+        pass  # shared.inbound_registration not available
+    except Exception as e:
+        print(f"[batcher] Inbound registration failed for {msg_id}: {e}")
+
     # Download media from the bridge and register in the file registry.
     # Best-effort: a failed download or registration never blocks
     # message processing.
@@ -288,7 +314,7 @@ def process_message(msg, source_phone, bridge_port=None):
                     media_data, filename,
                     media_mimetype or media_ct or 'application/octet-stream',
                     msg_id, media_path, db, source_phone, chat_id,
-                    sender_phone, sender_name, timestamp,
+                    sender_phone, sender_name, timestamp, inbound_item_id,
                 )
         else:
             # Fallback: try the bridge's /media/{id} endpoint.
@@ -300,7 +326,7 @@ def process_message(msg, source_phone, bridge_port=None):
                     media_data, filename,
                     media_mimetype or media_ct or 'application/octet-stream',
                     msg_id, media_path, db, source_phone, chat_id,
-                    sender_phone, sender_name, timestamp,
+                    sender_phone, sender_name, timestamp, inbound_item_id,
                 )
             else:
                 print(f"[batcher] Could not download media for {msg_id} (bridge has no mediaUrls and /media endpoint unavailable)")

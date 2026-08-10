@@ -4,7 +4,13 @@ import { describe, expect, it } from "vitest";
 import { ApprovalsList } from "@/components/inbox/ApprovalsList";
 import { ChangesList } from "@/components/inbox/ChangesList";
 import { InboxView } from "@/components/inbox/InboxView";
-import type { Change, Notification } from "@/types";
+import type {
+  Change,
+  IncomingItem,
+  IncomingsFacets,
+  IncomingsResponse,
+  Notification,
+} from "@/types";
 
 const APPROVAL: Notification = {
   id: "ntf_1",
@@ -53,20 +59,78 @@ const IRREVERSIBLE: Change = {
   target_kind: "tool",
 };
 
+const ARRIVAL: IncomingItem = {
+  id: "inb_1",
+  owner_user_id: "leo_owner",
+  visibility: "private:leo_owner",
+  surface: "whatsapp",
+  account_id: "+85211112222",
+  external_id: "wamid.1",
+  kind: "message",
+  conversation: "group:tender",
+  conversation_name: null,
+  sender_id: "+85233334444",
+  sender_name: "Ada",
+  subject: null,
+  body: "請問明天的會議改到下午三點嗎",
+  occurred_at: "2026-08-10T09:30:00+00:00",
+  ends_at: null,
+  registered_at: "2026-08-10T09:30:01+00:00",
+  importance: "urgent",
+  has_attachments: false,
+  metadata: {},
+  document_id: null,
+  remembered_at: null,
+  remembered_by: null,
+  remembered: false,
+};
+
+const INCOMINGS: IncomingsResponse = {
+  items: [ARRIVAL],
+  next_cursor: null,
+};
+
+const FACETS: IncomingsFacets = {
+  surfaces: [{ value: "whatsapp", count: 1 }],
+  importance: [{ value: "urgent", count: 1 }],
+  tags: [],
+};
+
 describe("InboxView", () => {
-  it("renders the C2 pills and the Approvals tab by default", () => {
+  it("leads with Incomings — the tab that has traffic every day", () => {
     const html = renderToStaticMarkup(
       <InboxView
         initialConfigured
         initialNotifications={[APPROVAL]}
         initialChanges={[REVERSIBLE]}
+        initialIncomings={INCOMINGS}
+        incomingsFacets={FACETS}
       />,
     );
     expect(html).toContain('data-component="InboxView"');
-    expect(html).toContain('data-component="ApprovalsList"');
+    expect(html).toContain('data-component="IncomingsList"');
     expect(html).toContain("principal-scoped (C2)");
+    expect(html).toContain("Incomings");
     expect(html).toContain("Approvals");
     expect(html).toContain("Changes");
+    // The arrival itself, in Chinese, unsegmented.
+    expect(html).toContain("請問明天的會議改到下午三點嗎");
+    // The other tabs are not rendered until selected.
+    expect(html).not.toContain('data-component="ApprovalsList"');
+  });
+
+  it("honours a deep link to another tab", () => {
+    const html = renderToStaticMarkup(
+      <InboxView
+        initialConfigured
+        initialNotifications={[APPROVAL]}
+        initialChanges={[REVERSIBLE]}
+        initialIncomings={INCOMINGS}
+        incomingsFacets={FACETS}
+        initialTab="approvals"
+      />,
+    );
+    expect(html).toContain('data-component="ApprovalsList"');
     expect(html).toContain("Run rm -rf build/");
   });
 
@@ -76,6 +140,8 @@ describe("InboxView", () => {
         initialConfigured={false}
         initialNotifications={[]}
         initialChanges={[]}
+        initialIncomings={{ items: [], next_cursor: null }}
+        incomingsFacets={{ surfaces: [], importance: [], tags: [] }}
       />,
     );
     expect(html).toContain("multi-user datastore configured");

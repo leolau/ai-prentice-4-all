@@ -713,3 +713,141 @@ async def test_attachments_link_both_ways(postgres_dsn: str) -> None:
     assert refreshed is not None and refreshed.has_attachments is True
     # Another member sees neither the link nor the file.
     assert await registry.attachments(_principal("bob"), item.id) == []
+
+
+@pytest.mark.asyncio
+async def test_backfill_is_idempotent_and_adopts_legacy_files(
+    postgres_dsn: str, tmp_path, monkeypatch
+) -> None:
+    """Replaying the pipeline twice is one inbox, not two.
+
+    The live hooks only mirror what arrives from now on, so everything older
+    exists solely in the pipeline's SQLite. The backfill has to use the same
+    external ids the hooks use, or a repair would double every arrival.
+    """
+    import sqlite3
+
+    from hermes_cli import incomings_backfill
+
+    await _registry(postgres_dsn, with_files=True)
+    store = get_store("supabase-app", "prod", config=_config(postgres_dsn))
+
+    db_path = tmp_path / "pipeline.db"
+    pipeline = sqlite3.connect(db_path)
+    pipeline.executescript(
+        """
+        CREATE TABLE email_messages (
+            id TEXT PRIMARY KEY, account_id TEXT, from_addr TEXT,
+            from_name TEXT, to_addrs TEXT, cc_addrs TEXT, subject TEXT,
+            body_text TEXT, body_html TEXT, has_attachments INTEGER,
+            attachment_info TEXT, message_id TEXT, in_reply_to TEXT,
+            thread_id TEXT, folder TEXT, received_at TEXT, batch_id TEXT,
+            raw_headers TEXT
+        );
+        INSERT INTO email_messages
+            (id, account_id, from_addr, subject, body_text, has_attachments,
+             message_id, thread_id, folder, received_at)
+        VALUES ('1', 'leo@example.com', 'ada@example.com', 'Quote',
+                'the quote is attached', 1, 'rfc-1', 't-1', 'INBOX',
+                '2026-08-10T09:30:00+00:00');
+        """
+    )
+    pipeline.commit()
+    pipeline.close()
+
+    # A file registered before the feature existed: same surface, account and
+    # message id as the arrival, but no link yet.
+    conn = await asyncpg.connect(postgres_dsn, ssl=False)
+    try:
+        await conn.execute("SET search_path TO app_prod")
+        await conn.execute(
+            """INSERT INTO file_assets
+                   (owner_user_id, visibility, surface, account_id, message_id,
+                    filename, content_type, byte_size, sha256,
+                    storage_bucket, storage_path)
+               VALUES ('leo', 'private:leo', 'email', 'leo@example.com',
+                       'rfc-1', 'quote.pdf', 'application/pdf', 12,
+                       'deadbeef', 'b', 'p')"""
+        )
+    finally:
+        await conn.close()
+
+    monkeypatch.setattr(incomings_backfill, "get_store", lambda *a, **k: store)
+    for _ in range(2):
+        code = await incomings_backfill._run(
+            db_path=str(db_path),
+            surfaces=("email",),
+            since=None,
+            dry_run=False,
+            actor=None,
+        )
+        assert code == 0
+
+    leo = _principal("leo", role="owner")
+    registry = InboundRegistry(store)
+    page = await registry.list(leo, surfaces=["email"])
+    assert [i.external_id for i in page.items] == ["rfc-1"]
+    assert page.items[0].subject == "Quote"
+
+    # The pre-existing attachment now points at the message it arrived in.
+    files = await registry.attachments(leo, page.items[0].id)
+    assert [f["filename"] for f in files] == ["quote.pdf"]
+
+
+@pytest.mark.asyncio
+async def test_triage_stamps_importance_and_a_re_poll_keeps_it(
+    postgres_dsn: str,
+) -> None:
+    """The triage verdict outlives the next poll of the same mailbox.
+
+    Triage runs minutes after the message landed and holds only the
+    classification. The poller, re-reading the same page, holds everything
+    *except* the classification — so an unguarded upsert would quietly clear
+    the urgency the user filters by.
+    """
+    registry = await _registry(postgres_dsn)
+    leo = _principal("leo", role="owner")
+    item = await _arrive(registry, leo, external_id="rfc-9", body="the quote")
+    assert item.importance is None
+
+    assert (
+        await registry.set_importance(
+            leo,
+            surface="email",
+            external_id="rfc-9",
+            account_id="leo@example.com",
+            importance="high",
+        )
+        is True
+    )
+    stamped = await registry.get(leo, item.id)
+    assert stamped is not None and stamped.importance == "high"
+
+    # The poller sees the same message again and re-registers it verbatim.
+    await _arrive(registry, leo, external_id="rfc-9", body="the quote")
+    kept = await registry.get(leo, item.id)
+    assert kept is not None and kept.importance == "high"
+
+    # And the filter finds it by that verdict.
+    page = await registry.list(leo, importance=["high"])
+    assert [i.external_id for i in page.items] == ["rfc-9"]
+
+
+@pytest.mark.asyncio
+async def test_importance_cannot_be_stamped_across_principals(
+    postgres_dsn: str,
+) -> None:
+    """A triage run for one owner cannot reach another's inbox."""
+    registry = await _registry(postgres_dsn)
+    ada = _principal("ada")
+    await _arrive(registry, ada, external_id="rfc-10", account_id="ada@example.com")
+    assert (
+        await registry.set_importance(
+            _principal("bob"),
+            surface="email",
+            external_id="rfc-10",
+            account_id="ada@example.com",
+            importance="high",
+        )
+        is False
+    )
