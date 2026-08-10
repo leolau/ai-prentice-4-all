@@ -1,5 +1,11 @@
 # agent-home
 
+> **★ This is THE key and main UI of ai-prentice-4-all — not the `web/`
+> dashboard.** Unless a request explicitly names another surface, **all UI
+> improvements** (new screens, redesigns, UX/mobile/polish, new user-facing
+> features) are done here. `web/` is the secondary operator/admin console.
+> Decision **D20** in the [master plan](../docs/design/master-plan/README.md).
+
 The **mobile-first face** for a Hermes agent (FG-20). It coexists with `web/`
 (the desktop operator/admin console stays untouched — FG-20 Decision 3): this
 app is what a user opens on their phone.
