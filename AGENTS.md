@@ -4,6 +4,21 @@ Instructions for AI coding assistants and developers working on the hermes-agent
 
 **Never give up on the right solution.**
 
+## ★ Primary UI = `agent-home` (not the dashboard) ★
+
+**`agent-home/` is THE key, main, user-facing UI of ai-prentice-4-all.** The
+`web/` dashboard is a secondary operator/admin console; the Electron app in
+`apps/desktop/` and the TUI are separate developer/power-user surfaces.
+
+**Unless a request explicitly names another surface, every UI change — new
+screens, redesigns, UX/mobile/polish work, new user-facing features — is done
+in `agent-home/`.** If you find yourself improving the dashboard's user-facing
+UI without being told to, stop: it belongs in `agent-home`.
+
+See [`agent-home/README.md`](agent-home/README.md) and
+[FG-20](docs/design/master-plan/feature-groups/FG-20-agent-home-nextjs-supabase.md)
+(decision **D16** and **D20** in the [master plan](docs/design/master-plan/README.md)).
+
 ## What Hermes Is
 
 Hermes is a personal AI agent that runs the same agent core across a CLI, a
