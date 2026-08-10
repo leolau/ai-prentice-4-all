@@ -96,9 +96,28 @@ reconstruction.
   widening it, which is why it needs no new contract and should be
   uncontroversial to merge.
 
-## Design / approach — three layers, cheapest first
+## Design / approach — three layers
 
-### Layer 1 (mandatory, small) — collision detection, fail-closed
+**Build order: Layer 1 → Layer 3 → Layer 2.**
+
+The layers are numbered by the order they were discovered, not the order they
+should be built. Layers 1 and 3 are the safety controls; Layer 2 is UX.
+
+The reason is a general one. **Layer 2 polices an input path; Layers 1 and 3
+check the resolved outcome.** A DSN can arrive as a literal in `config.yaml`,
+as `${DATABASE_URL}` from `.env` (what the live box actually does), from the
+process environment, or from a per-mode `datastore.overrides.<mode>` entry —
+and any path not enumerated is a hole. Layer 3 makes the enumeration
+unnecessary: with `app_prod_<profile>`, two profiles sharing a DSN is simply
+**harmless** — same database, different schemas, isolated by construction.
+Layer 1 then catches whatever Layer 3 misses, at connect time, where the truth
+is unambiguous.
+
+So Layer 2 remains worth doing — inheriting a database silently is bad
+ergonomics even when it is safe — but it is **not** the thing standing between
+you and a data merge, and it should not be built as though it were.
+
+### Layer 1 (build first) — collision detection, fail-closed
 
 Write an ownership marker into the schema at initialisation and verify it on
 every connect:
@@ -128,7 +147,7 @@ CREATE TABLE IF NOT EXISTS <schema>.schema_owner (
 This converts a silent data merge into an error at first connection. It does
 **not** make sharing safe — it makes it impossible to do by accident.
 
-### Layer 2 (mandatory, small) — stop `--clone` from arming it
+### Layer 2 (build last — UX, not a safety control) — stop `--clone` from arming it
 
 `hermes profile create <name> --clone` must handle the inherited DSN explicitly.
 Options, in preference order:
@@ -161,10 +180,23 @@ with the real connection string in `$HERMES_HOME/.env`. Two consequences:
   hides the very field that needs changing.
 
 Layer 2 must therefore treat the **resolved** DSN, not the literal config value:
-detect that `dsn` interpolates an env var, and blank-or-warn on the underlying
-`DATABASE_URL` in the cloned `.env` as well.
+ask the config layer what `dsn` evaluates to (the same resolution `get_store()`
+performs), act on wherever the value actually came from — blanking
+`DATABASE_URL` in the cloned `.env` while leaving the `${DATABASE_URL}`
+reference in `config.yaml` intact, so the operator sees the shape they are meant
+to fill in — and print the resolved target (`host:port/db`, credentials
+redacted) so the inheritance is visible.
 
-### Layer 3 (the real fix) — namespace the schema by profile
+Comparisons must also be on **resolved** DSNs, not strings: two profiles can
+share a database while their config text differs. On the live box
+`127.0.0.1:5432/postgres` and `172.18.0.4:5432/postgres` are the same Postgres
+reached by two routes — a string comparison would call them distinct.
+
+This fragility is precisely why Layer 2 is sequenced last and classified as
+ergonomics: a control whose correctness depends on enumerating every way a
+value can reach the process is the weaker kind.
+
+### Layer 3 (build second — the fix that makes Layer 2 unnecessary) — namespace the schema by profile
 
 Schema becomes profile-derived rather than global:
 
@@ -182,7 +214,8 @@ app_dev_<profile>  /  app_prod_<profile>      (default profile keeps app_dev / a
 - The default profile **keeps the current names**, so existing single-profile
   deployments need no migration and the baseline is byte-identical.
 - Removes the entire class of error: two profiles on one DSN can no longer
-  collide, because their addresses differ by construction.
+  collide, because their addresses differ by construction — **regardless of how
+  the DSN was resolved**, which is why this outranks Layer 2.
 
 **Explicit config override.** `datastore.supabase_app.schema` may pin a schema
 when an operator genuinely wants two profiles to share (a legitimate case: a
@@ -194,8 +227,8 @@ writing it down, which is the difference between a decision and an accident.
 that belong to it, and verify counts — but the honest answer is that once rows
 are interleaved with no provenance column, **the split cannot be automated**;
 the tool can only move a whole schema, not disentangle two profiles' rows. This
-is precisely why Layer 1 matters more than Layer 3: prevention is the only
-reliable cure.
+is precisely why prevention (Layers 1 and 3) matters more than migration: there
+is no reliable cure after the fact.
 
 ## Data model
 
@@ -265,8 +298,8 @@ run concurrently with fully disjoint `principals` and memories.
 ## Dependencies
 
 - **Blocked by:** none (C3/FG-13 already merged).
-- **Blocks:** FG-25 and FG-26 **should not add identity tables until Layer 1 +
-  Layer 2 land** — those layers are days of work, so this is a sequencing note,
+- **Blocks:** FG-25 and FG-26 **should not add identity tables until Layers 1
+  and 3 land** — those layers are days of work, so this is a sequencing note,
   not a schedule risk.
 - **Related:** FG-13 (C3 router), FG-20 (agent-home reads the same schema),
   gateway multiplexing.
@@ -283,9 +316,9 @@ system test passed.
 
 ## Progress checklist
 
-- [ ] Layer 1 — `schema_owner` table, claim on init, verify on connect, fail-closed, `--force` re-claim (audited)
-- [ ] Layer 2 — `--clone` / `--clone-all` / `import` blank-or-warn the inherited app DSN
-- [ ] Layer 3 — profile-derived schema in `get_store()`, default profile unchanged, name validation, explicit override
+- [ ] Layer 1 (**first**) — `schema_owner` table, claim on init, verify on connect, fail-closed, `--force` re-claim (audited)
+- [ ] Layer 3 (**second**) — profile-derived schema in `get_store()`, default profile unchanged, name validation, explicit override
+- [ ] Layer 2 (**last, UX**) — `--clone` / `--clone-all` / `import` blank-or-warn the **resolved** app DSN (incl. the `.env` indirection)
 - [ ] `hermes datastore split-profile` + `hermes doctor` reporting
 - [ ] Tests: collision, fail-closed, clone, derivation baseline, multiplex isolation on real Postgres, RLS-after-rename, migration
 - [ ] System test on `hermes-systest` passed
@@ -294,6 +327,7 @@ system test passed.
 
 | Date | Edition | Author | Change | Rationale |
 |------|---------|--------|--------|-----------|
+| 2026-08-10 | 3 | devin (for Leo) | Reordered build sequence to 1 → 3 → 2 | The `${DATABASE_URL}` indirection found on the live box showed Layer 2 to be the weaker kind of control: it polices an *input path*, and a DSN can arrive as a config literal, an `.env` interpolation, a process env var, or a per-mode override — any path not enumerated is a hole. Layers 1 and 3 check the *resolved outcome* instead. Layer 3 in particular makes the enumeration unnecessary, because with `app_prod_<profile>` two profiles sharing a DSN is harmless rather than catastrophic. Layer 2 is retained as ergonomics (silently inheriting a database is still bad UX) but is no longer what stands between the operator and a data merge, and the FG-25/FG-26 sequencing gate now reads "Layers 1 and 3" rather than "Layers 1 and 2". Approved by Leo. |
 | 2026-08-10 | 2 | devin (for Leo) | Live-deployment check + DSN indirection | Ran the collision check on `hermes-systest`: one profile only, no `profiles/` directory, single `config.yaml` — **the footgun has not fired**, so this FG is purely preventative today. The check also surfaced that the DSN is *indirect* (`dsn: ${DATABASE_URL}` in `config.yaml`, real value in `$HERMES_HOME/.env`), which makes Layer 2 harder than written: `_CLONE_CONFIG_FILES` copies both files, so blanking `config.yaml` alone would not break the inheritance, and an operator opening the cloned `config.yaml` to repoint it sees `${DATABASE_URL}` rather than a connection string — the indirection hides the field that needs changing. Layer 2 must act on the resolved DSN. |
 | 2026-08-10 | 1 | devin (for Leo) | Created FG doc | Found while scoping multi-profile administration: `get_store()` hard-codes the app schema to `app_dev`/`app_prod`, so profile isolation at the app layer rests entirely on each profile's `config.yaml` carrying a distinct DSN — and `hermes profile create --clone`, the documented "start from my default" path, copies `config.yaml` verbatim (`_CLONE_CONFIG_FILES`) with no mention of `dsn`. Two profiles then share one `principals`/`memories`/`changes` set with no error, no log line, and no on-disk symptom (SQLite, memory files and config are genuinely separate). RLS does not help: it scopes rows correctly inside a database both profiles treat as their own. Chose prevention over cure because interleaved rows carry no provenance column and cannot be disentangled automatically. Sequenced ahead of FG-25/FG-26 because those add exactly the identity-bearing tables (`groups`, `invitations`) whose cross-profile leakage would be most damaging. |
 

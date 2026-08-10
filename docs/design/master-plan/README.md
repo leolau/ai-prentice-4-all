@@ -472,7 +472,7 @@ transient, and in-place-resize to 8/32 (same-family, ~5 min, no data migration
   my default" path, copies `config.yaml` verbatim. Two profiles then share one
   `principals`/`memories`/`changes` set with no error, no log line and no
   on-disk symptom. RLS does not help: it scopes rows correctly inside a database
-  both profiles treat as their own. FG-27 Layers 1+2 are sequenced **before**
+  both profiles treat as their own. FG-27 Layers 1+3 are sequenced **before**
   FG-25/FG-26 add `groups`/`invitations`, because an invitation redeemable in
   the wrong profile is a much worse failure than a merged memory row.
 - **The shared kanban board has no identity namespace.** `tasks` carries
