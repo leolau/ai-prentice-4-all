@@ -133,13 +133,36 @@ This converts a silent data merge into an error at first connection. It does
 `hermes profile create <name> --clone` must handle the inherited DSN explicitly.
 Options, in preference order:
 
-1. **Blank the app DSN in the cloned `config.yaml`** and print what to set;
+1. **Blank the app DSN in the cloned profile** and print what to set;
 2. or keep it and **print a prominent warning** that the clone shares a database
    until changed.
 
 Recommend (1): a profile with no app DSN degrades to core-only (SQLite) rather
 than silently sharing, which is the fail-closed direction. Same treatment for
 `--clone-all` and for `hermes profile import`.
+
+**The live deployment shows the DSN is indirect, which makes this worse than it
+looks.** On `hermes-systest`, `config.yaml` contains:
+
+```yaml
+datastore:
+  supabase_app:
+    dsn: ${DATABASE_URL}          # interpolated from .env
+```
+
+with the real connection string in `$HERMES_HOME/.env`. Two consequences:
+
+- `_CLONE_CONFIG_FILES` copies **both** `config.yaml` *and* `.env`, so the clone
+  inherits the interpolation **and** the value — blanking only `config.yaml`
+  would not be enough.
+- An operator inspecting the cloned `config.yaml` to "point it at its own
+  database" sees `${DATABASE_URL}`, not a DSN. There is nothing there to edit,
+  so the natural reaction is to assume it is already correct. The indirection
+  hides the very field that needs changing.
+
+Layer 2 must therefore treat the **resolved** DSN, not the literal config value:
+detect that `dsn` interpolates an env var, and blank-or-warn on the underlying
+`DATABASE_URL` in the cloned `.env` as well.
 
 ### Layer 3 (the real fix) — namespace the schema by profile
 
@@ -200,6 +223,13 @@ people in different profiles, and nothing reconciles them. Harmless today
 multi-user profiles share a board. Fixing it needs a box-level identity
 namespace, which belongs with the multi-profile administration FG, not here.
 
+## Current deployment status (checked 2026-08-10)
+
+`hermes-systest` has **one** profile (`HERMES_HOME=/opt/data/hermes-home-staging`,
+no `profiles/` directory, a single `config.yaml`). **The footgun has not fired**
+— there is nothing to disentangle, and this FG is purely preventative today.
+That is the good case and the reason to land it before a second profile exists.
+
 ## Testing requirements
 
 - **Collision detection:** profile B connecting to a schema claimed by profile A
@@ -208,7 +238,9 @@ namespace, which belongs with the multi-profile administration FG, not here.
 - **Fail-closed:** a marker read failure refuses the connection rather than
   proceeding unverified.
 - **Clone:** `--clone` / `--clone-all` / `import` do not produce a profile that
-  silently shares a DSN+schema; asserted on the resulting `config.yaml`.
+  silently shares a DSN+schema; asserted on the **resolved** DSN of the new
+  profile, including the `dsn: ${DATABASE_URL}` indirection case where the value
+  lives in the copied `.env` rather than in `config.yaml`.
 - **Schema derivation:** `default` ⇒ `app_prod` / `app_dev` (**baseline,
   byte-identical**); a named profile ⇒ `app_prod_<name>`; invalid names
   rejected before reaching SQL; the explicit `schema` override wins.
@@ -262,6 +294,7 @@ system test passed.
 
 | Date | Edition | Author | Change | Rationale |
 |------|---------|--------|--------|-----------|
+| 2026-08-10 | 2 | devin (for Leo) | Live-deployment check + DSN indirection | Ran the collision check on `hermes-systest`: one profile only, no `profiles/` directory, single `config.yaml` — **the footgun has not fired**, so this FG is purely preventative today. The check also surfaced that the DSN is *indirect* (`dsn: ${DATABASE_URL}` in `config.yaml`, real value in `$HERMES_HOME/.env`), which makes Layer 2 harder than written: `_CLONE_CONFIG_FILES` copies both files, so blanking `config.yaml` alone would not break the inheritance, and an operator opening the cloned `config.yaml` to repoint it sees `${DATABASE_URL}` rather than a connection string — the indirection hides the field that needs changing. Layer 2 must act on the resolved DSN. |
 | 2026-08-10 | 1 | devin (for Leo) | Created FG doc | Found while scoping multi-profile administration: `get_store()` hard-codes the app schema to `app_dev`/`app_prod`, so profile isolation at the app layer rests entirely on each profile's `config.yaml` carrying a distinct DSN — and `hermes profile create --clone`, the documented "start from my default" path, copies `config.yaml` verbatim (`_CLONE_CONFIG_FILES`) with no mention of `dsn`. Two profiles then share one `principals`/`memories`/`changes` set with no error, no log line, and no on-disk symptom (SQLite, memory files and config are genuinely separate). RLS does not help: it scopes rows correctly inside a database both profiles treat as their own. Chose prevention over cure because interleaved rows carry no provenance column and cannot be disentangled automatically. Sequenced ahead of FG-25/FG-26 because those add exactly the identity-bearing tables (`groups`, `invitations`) whose cross-profile leakage would be most damaging. |
 
 ## Cloud-agent prompt
@@ -279,8 +312,10 @@ system test passed.
 > unaffected; a marker read failure refuses the connection (fail-closed);
 > `hermes datastore claim --force` re-claims and emits C5. **Layer 2:** make
 > `hermes profile create --clone` / `--clone-all` / `import` stop copying the
-> app DSN blindly — prefer blanking it in the cloned `config.yaml` (core-only is
-> the fail-closed degradation) over merely warning. **Layer 3:** derive the
+> app DSN blindly — prefer blanking it (core-only is the fail-closed
+> degradation) over merely warning, and note that on the live box `config.yaml`
+> holds `dsn: ${DATABASE_URL}` with the real value in the copied `.env`, so you
+> must act on the **resolved** DSN, not the literal config value. **Layer 3:** derive the
 > schema from the active profile (`app_prod_<profile>`), resolving it through
 > `get_active_profile_name()` so a multiplexed gateway turn scoped with
 > `set_hermes_home_override()` picks the right schema **with no caller changes**;
