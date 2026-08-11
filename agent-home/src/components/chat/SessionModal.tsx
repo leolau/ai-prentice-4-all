@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 
+import { Spinner } from "@/components/ui/Spinner";
 import type { SessionSummary, SessionTag, TagSuggestion } from "@/types";
 
 function absolute(ts: number | null): string {
@@ -95,6 +96,10 @@ export function SessionModal({
   const [error, setError] = useState<string | null>(null);
   const [ctxCollapsed, setCtxCollapsed] = useState(false);
   const [tagBusy, setTagBusy] = useState(false);
+  // Every write here mutates the same conversation, so any one of them in flight
+  // disables all of them: renaming a session while its archive request is still
+  // applying would race two decisions about the same row.
+  const busy = saving || archiving || tagBusy;
 
   const inputTokens = session.input_tokens ?? 0;
   const outputTokens = session.output_tokens ?? 0;
@@ -329,8 +334,18 @@ export function SessionModal({
         {/* ── Tags ── */}
         {tags && (
           <div className="mt-4">
-            <h3 className="mb-1 text-xs uppercase tracking-wide text-[var(--color-muted)]">
+            <h3 className="mb-1 flex items-center gap-2 text-xs uppercase tracking-wide text-[var(--color-muted)]">
               Tags
+              {tagBusy ? (
+                <span
+                  role="status"
+                  aria-live="polite"
+                  className="inline-flex items-center gap-1 text-[var(--color-accent)] normal-case"
+                >
+                  <Spinner />
+                  Saving…
+                </span>
+              ) : null}
             </h3>
             <div className="flex flex-wrap gap-1.5">
               {tags.map((tag) => (
@@ -464,10 +479,17 @@ export function SessionModal({
           <button
             type="button"
             onClick={archive}
-            disabled={archiving}
-            className="rounded-xl border border-[var(--color-border)] px-4 py-2 text-sm text-[var(--color-muted)] disabled:opacity-60"
+            disabled={busy}
+            className="inline-flex items-center gap-2 rounded-xl border border-[var(--color-border)] px-4 py-2 text-sm text-[var(--color-muted)] disabled:opacity-60"
           >
-            {archiving ? "Archiving…" : "Archive"}
+            {archiving ? (
+              <>
+                <Spinner />
+                Archiving…
+              </>
+            ) : (
+              "Archive"
+            )}
           </button>
           <div className="flex gap-2">
             <button
@@ -480,10 +502,17 @@ export function SessionModal({
             <button
               type="button"
               onClick={save}
-              disabled={saving}
-              className="rounded-xl bg-[var(--color-accent)] px-4 py-2 text-sm font-semibold text-[var(--color-accent-fg)] disabled:opacity-60"
+              disabled={busy}
+              className="inline-flex items-center gap-2 rounded-xl bg-[var(--color-accent)] px-4 py-2 text-sm font-semibold text-[var(--color-accent-fg)] disabled:opacity-60"
             >
-              {saving ? "Saving…" : "Save"}
+              {saving ? (
+                <>
+                  <Spinner />
+                  Saving…
+                </>
+              ) : (
+                "Save"
+              )}
             </button>
           </div>
         </div>

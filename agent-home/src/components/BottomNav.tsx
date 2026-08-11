@@ -6,6 +6,7 @@ import { usePathname } from "next/navigation";
 
 import { isActive, PRIMARY_NAV, SECONDARY_NAV } from "@/components/nav-items";
 import { MoreSheet } from "@/components/MoreSheet";
+import { NavGlyph } from "@/components/NavGlyph";
 
 /**
  * Fixed bottom tab navigation — the primary mobile-first nav (FG-20 Wave A1).
@@ -39,8 +40,8 @@ export function BottomNav() {
                     active ? "text-[var(--color-accent)]" : "text-[var(--color-muted)]"
                   }`}
                 >
-                  <span aria-hidden className="text-xl leading-none">
-                    {tab.glyph}
+                  <span className="flex h-5 items-center text-xl leading-none">
+                    <NavGlyph glyph={tab.glyph} />
                   </span>
                   {tab.label}
                 </Link>

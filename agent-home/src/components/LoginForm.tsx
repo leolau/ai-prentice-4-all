@@ -3,6 +3,8 @@
 import { useRouter } from "next/navigation";
 import { useState } from "react";
 
+import { Spinner } from "@/components/ui/Spinner";
+
 export interface ProviderOption {
   name: string;
   display_name: string;
@@ -48,7 +50,15 @@ export function LoginForm({ providers }: { providers: ProviderOption[] }) {
   }
 
   return (
-    <form data-component="LoginForm" onSubmit={submit} className="space-y-4">
+    // The form stays interactive while the credentials are checked — `busy`
+    // disables submit, and a user who mistyped their password should be able to
+    // fix the field rather than wait behind an overlay.
+    <form
+      data-component="LoginForm"
+      onSubmit={submit}
+      aria-busy={busy}
+      className="space-y-4"
+    >
       {passwordProviders.length > 1 ? (
         <label className="block text-sm">
           <span className="mb-1 block text-[var(--color-muted)]">Provider</span>
@@ -95,9 +105,16 @@ export function LoginForm({ providers }: { providers: ProviderOption[] }) {
       <button
         type="submit"
         disabled={busy || !provider}
-        className="w-full rounded-xl bg-[var(--color-accent)] px-4 py-3 font-semibold text-[var(--color-accent-fg)] disabled:opacity-60"
+        className="flex w-full items-center justify-center gap-2 rounded-xl bg-[var(--color-accent)] px-4 py-3 font-semibold text-[var(--color-accent-fg)] disabled:opacity-60"
       >
-        {busy ? "Signing in…" : "Sign in"}
+        {busy ? (
+          <>
+            <Spinner size="md" />
+            Signing in…
+          </>
+        ) : (
+          "Sign in"
+        )}
       </button>
       {passwordProviders.length === 0 ? (
         <p className="text-sm text-[var(--color-muted)]">

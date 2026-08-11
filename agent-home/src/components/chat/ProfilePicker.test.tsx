@@ -48,4 +48,21 @@ describe("ProfilePicker", () => {
     );
     expect(html).toContain("disabled");
   });
+
+  it("reports the wait and holds itself while the profile loads", () => {
+    const html = renderToStaticMarkup(
+      <ProfilePicker
+        profiles={PROFILES}
+        selected="maintenance"
+        onSelect={() => {}}
+        switching
+      />,
+    );
+
+    expect(html).toContain('role="status"');
+    expect(html).toContain("animate-spin");
+    expect(html).toContain("disabled");
+    // The description gives way to the wait rather than sitting beside it.
+    expect(html).not.toContain("Support &amp; upkeep");
+  });
 });

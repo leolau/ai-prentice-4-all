@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 
+import { BusyRegion } from "@/components/ui/BusyRegion";
 import type {
   FileAsset,
   FileAssetsResponse,
@@ -152,80 +153,86 @@ export function FilesView({
         </div>
       </div>
 
-      {error ? (
-        <p
-          data-component="FilesError"
-          className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface)] p-4 text-sm text-[var(--color-muted)]"
-        >
-          {error}
-        </p>
-      ) : files.length === 0 ? (
-        <p
-          data-component="FilesEmpty"
-          className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface)] p-4 text-sm text-[var(--color-muted)]"
-        >
-          {q || surface || remembered != null
-            ? "No files match those filters."
-            : "Nothing has arrived yet. Files sent in chat, Telegram, WhatsApp, email or a calendar invite land here automatically."}
-        </p>
-      ) : (
-        <ul data-component="FilesList" className="flex flex-col gap-2">
-          {files.map((file) => (
-            <li key={file.id}>
+      {/* Only the results are covered while a query runs: search and the filter
+       * chips stay live so the user can keep typing, but rows and the pager —
+       * which would act on the list being replaced — don't take stray taps. */}
+      <BusyRegion busy={loading} label="Loading your files…">
+        <div className="flex flex-col gap-4">
+          {error ? (
+            <p
+              data-component="FilesError"
+              className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface)] p-4 text-sm text-[var(--color-muted)]"
+            >
+              {error}
+            </p>
+          ) : files.length === 0 ? (
+            <p
+              data-component="FilesEmpty"
+              className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface)] p-4 text-sm text-[var(--color-muted)]"
+            >
+              {q || surface || remembered != null
+                ? "No files match those filters."
+                : "Nothing has arrived yet. Files sent in chat, Telegram, WhatsApp, email or a calendar invite land here automatically."}
+            </p>
+          ) : (
+            <ul data-component="FilesList" className="flex flex-col gap-2">
+              {files.map((file) => (
+                <li key={file.id}>
+                  <button
+                    type="button"
+                    onClick={() => setSelected(file)}
+                    className="w-full rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface)] p-3 text-left transition hover:border-[var(--color-accent)]"
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <span className="truncate text-sm font-medium">
+                        {file.filename}
+                      </span>
+                      {file.remembered ? (
+                        <span
+                          data-component="RememberedBadge"
+                          className="shrink-0 rounded-full border border-[var(--color-accent)] px-2 py-0.5 text-[10px] uppercase tracking-wide text-[var(--color-accent)]"
+                        >
+                          Remembered
+                        </span>
+                      ) : null}
+                    </div>
+                    <p className="mt-1 text-xs text-[var(--color-muted)]">
+                      {provenanceLine(file)}
+                    </p>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+
+          <div className="flex items-center justify-between text-xs text-[var(--color-muted)]">
+            <span>
+              {total} file{total === 1 ? "" : "s"}
+            </span>
+            <span className="flex items-center gap-2">
               <button
                 type="button"
-                onClick={() => setSelected(file)}
-                className="w-full rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface)] p-3 text-left transition hover:border-[var(--color-accent)]"
+                disabled={offset === 0 || loading}
+                onClick={() => void load({ offset: Math.max(0, offset - limit) })}
+                className="rounded-lg border border-[var(--color-border)] px-2 py-1 disabled:opacity-40"
               >
-                <div className="flex items-start justify-between gap-3">
-                  <span className="truncate text-sm font-medium">
-                    {file.filename}
-                  </span>
-                  {file.remembered ? (
-                    <span
-                      data-component="RememberedBadge"
-                      className="shrink-0 rounded-full border border-[var(--color-accent)] px-2 py-0.5 text-[10px] uppercase tracking-wide text-[var(--color-accent)]"
-                    >
-                      Remembered
-                    </span>
-                  ) : null}
-                </div>
-                <p className="mt-1 text-xs text-[var(--color-muted)]">
-                  {provenanceLine(file)}
-                </p>
+                Newer
               </button>
-            </li>
-          ))}
-        </ul>
-      )}
-
-      <div className="flex items-center justify-between text-xs text-[var(--color-muted)]">
-        <span>
-          {total} file{total === 1 ? "" : "s"}
-          {loading ? " · loading…" : ""}
-        </span>
-        <span className="flex items-center gap-2">
-          <button
-            type="button"
-            disabled={offset === 0 || loading}
-            onClick={() => void load({ offset: Math.max(0, offset - limit) })}
-            className="rounded-lg border border-[var(--color-border)] px-2 py-1 disabled:opacity-40"
-          >
-            Newer
-          </button>
-          <span>
-            {page} / {pages}
-          </span>
-          <button
-            type="button"
-            disabled={offset + limit >= total || loading}
-            onClick={() => void load({ offset: offset + limit })}
-            className="rounded-lg border border-[var(--color-border)] px-2 py-1 disabled:opacity-40"
-          >
-            Older
-          </button>
-        </span>
-      </div>
+              <span>
+                {page} / {pages}
+              </span>
+              <button
+                type="button"
+                disabled={offset + limit >= total || loading}
+                onClick={() => void load({ offset: offset + limit })}
+                className="rounded-lg border border-[var(--color-border)] px-2 py-1 disabled:opacity-40"
+              >
+                Older
+              </button>
+            </span>
+          </div>
+        </div>
+      </BusyRegion>
 
       {selected ? (
         <FileDetail file={selected} onClose={() => setSelected(null)} />
