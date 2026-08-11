@@ -45,12 +45,14 @@ import type {
   OnboardingReadinessResponse,
   Principal,
   ProfilesResponse,
+  ProposedAction,
   Role,
   SessionCreateResponse,
   SessionTag,
   SessionsResponse,
   TagSuggestion,
   Todo,
+  TodoCompletion,
   TodoDetail,
   TodosFacets,
   TodosResponse,
@@ -896,6 +898,22 @@ export class HermesApiClient {
       method: "POST",
       json: { stage, outcome },
     });
+  }
+
+  /**
+   * Finish a to-do, optionally proposing what should leave because of it.
+   *
+   * The proposal is never a send: it becomes an irreversible approval the user
+   * answers themselves.
+   */
+  async completeTodo(
+    id: string,
+    payload: { outcome?: string; proposed_action?: ProposedAction } = {},
+  ): Promise<TodoCompletion> {
+    return this.request(
+      `/api/registry/todos/${encodeURIComponent(id)}/complete`,
+      { method: "POST", json: payload },
+    );
   }
 
   /** Hide a to-do until `until`, re-arming its notification for then. */
