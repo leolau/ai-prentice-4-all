@@ -133,6 +133,58 @@ def _log(dsn: str, *, policy: ConsentPolicy | None = None) -> ChangeLog:
     return ChangeLog(store, policy=policy or ConsentPolicy())
 
 
+def test_changes_list_on_a_profile_that_never_wrote(
+    postgres_dsn: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """An empty log must read as empty, not as a missing relation.
+
+    The C5 tables are created by the *write* paths, so on a freshly created
+    profile ``hermes changes list`` used to abort with ``relation
+    "….changes" does not exist`` (seen on hermes-systest, on the first named
+    profile installed there). This drives the real CLI entry point.
+    """
+    import argparse
+    import yaml
+
+    from hermes_cli.access import PrincipalStore, initialize_access
+    from hermes_cli.changes_cli import changes_list_command
+
+    home = tmp_path / "fresh-profile"
+    home.mkdir()
+    (home / "config.yaml").write_text(
+        yaml.safe_dump({"datastore": {"supabase_app": {"dsn": postgres_dsn}}})
+    )
+    monkeypatch.setenv("HERMES_HOME", str(home))
+
+    async def drop_and_enroll() -> None:
+        conn = await asyncpg.connect(postgres_dsn, ssl=False)
+        try:
+            await conn.execute(
+                "DROP SCHEMA IF EXISTS app_dev CASCADE;"
+                "DROP SCHEMA IF EXISTS app_prod CASCADE;"
+            )
+        finally:
+            await conn.close()
+        store = get_store("supabase-app", "prod")
+        conn = await store.connect()
+        try:
+            await initialize_access(conn)
+            await PrincipalStore(store).enroll(
+                "root", display="Root", role="owner", connection=conn
+            )
+        finally:
+            await conn.close()
+
+    asyncio.run(drop_and_enroll())
+
+    args = argparse.Namespace(actor="root", active_only=False, limit=10)
+    assert changes_list_command(args) == 0
+    assert "No changes visible" in capsys.readouterr().out
+
+
 @pytest.mark.asyncio
 async def test_data_change_records_and_undo_redo(postgres_dsn: str) -> None:
     await _reset(postgres_dsn)
