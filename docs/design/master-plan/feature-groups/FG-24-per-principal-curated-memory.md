@@ -106,13 +106,24 @@ Rationale is recorded in FG-29's audit log (edition 2).
 ### 1. Directory layout
 
 ```
-$HERMES_HOME/memories/
-    MEMORY.md                       # shared org/class knowledge  (existing file, unchanged path)
-    USER.md                         # DEPRECATED at instance scope — see migration
+<root>/persons/<user_id>/USER.md         # person level — shared across their participations
+$HERMES_HOME/memories/                  # $HERMES_HOME is the PROFILE's home
+    MEMORY.md                           # shared org/class knowledge (existing file, unchanged path)
+    USER.md                             # DEPRECATED at instance scope — see migration
     users/
-        <user_id>/MEMORY.md         # this principal's curated facts
-        <user_id>/USER.md           # this principal's profile
+        <user_id>/MEMORY.md             # this participation's working memory
 ```
+
+**Deviation from the layout first sketched above (`users/<user_id>/USER.md`),
+as required by the 2026-08-10 amendment.** `USER.md` is *person* level, and
+`$HERMES_HOME` is *profile* level, so a per-user file under the profile home
+would reintroduce exactly the N-drifting-copies problem the amendment removes.
+Identity therefore lives one level up, outside any profile home, at
+`<root>/persons/<user_id>/USER.md`, where `<root>` is derived from the
+*effective* home (`<root>/profiles/<name>` → `<root>`), so a multiplexed
+gateway turn scoped with `set_hermes_home_override()` resolves it too.
+Consequence: there is no shared `USER.md` tier and therefore **three** snapshot
+blocks, not four (see §2).
 
 `users/<user_id>/` is safe as a path because `_validate_user_id` already
 restricts `user_id` to `^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$` on every write
@@ -125,19 +136,32 @@ assert containment under `memories/users/` (defence in depth, fail-closed).
 shared directory (today's behaviour, so every existing caller and test is
 unaffected); a `user_id` returns the per-principal directory.
 
-`MemoryStore(..., user_id: str | None = None)` resolves both:
-`load_from_disk()` reads the shared pair **and** the per-user pair and captures
-**four** snapshot blocks (`shared_memory`, `shared_user`, `memory`, `user`).
+`MemoryStore(..., user_id: str | None = None, role: str | None = None)`
+resolves all tiers: `load_from_disk()` reads the shared `MEMORY.md`, the
+participation `MEMORY.md` and the person `USER.md`, and captures **three**
+snapshot blocks — `shared`, `memory`, `user`.
+
+**Deviation:** the four-block shape (`shared_memory`, `shared_user`, `memory`,
+`user`) assumed a shared *identity* file. The amendment makes identity
+per-person, so `shared_user` has no referent and is not created — an empty
+fourth block would be speculative surface.
+
+`role` is the C2 role `agent_init` already resolved for the principal; it is
+what §4's authority check consults. With `user_id is None` the store is the
+pre-FG-24 single-principal store: the two original files, and no shared block.
 
 ### 3. Prompt assembly
 
 `volatile_parts` gains the shared block first, then the per-principal block:
 
 ```
-[MEMORY — shared]        …org/class knowledge…
-[MEMORY]                 …this user's curated facts…
-[USER]                   …this user's profile…
+SHARED MEMORY (known by everyone in this profile)   …org/class knowledge…
+MEMORY (your personal notes)                        …this participation's facts…
+USER PROFILE (who the user is)                      …this person's identity…
 ```
+
+(The existing block headers are kept verbatim for the two original tiers —
+changing them would break the byte-identity guarantee below.)
 
 Ordering is fixed and deterministic. When `user_id is None` (local CLI, no
 identity) the per-principal blocks are absent and the output is
@@ -149,11 +173,29 @@ identity) the per-principal blocks are absent and the output is
 |---|---|---|
 | `memory(action=add\|update\|remove, target=user)` | per-principal `USER.md` | the principal themself |
 | `memory(... target=memory)` | per-principal `MEMORY.md` | the principal themself |
-| `memory(... target=shared)` | shared `MEMORY.md` | **owner / instance-admin only** |
+| `memory(... target=shared)` | shared `MEMORY.md` | **owner / admin only** |
+
+Authority is checked in `MemoryStore.authorize_write()` and again at the tool
+entry point *before* the write-approval gate, so a refused shared write is
+refused and audited immediately rather than staged and rejected at approve
+time. A staged write records the scope it was authored in (`user_id`, `role`),
+because approval frequently happens from a context with no principal bound
+(Desktop GUI, gateway `/memory approve`) — without it an approved
+participation write would land in the profile-wide files.
+
+With no principal bound, `target=shared` is **refused** rather than aliased to
+`target=memory`: in a single-principal session `memory` already *is* the
+profile's shared file, and two live entry lists pointing at one file is how
+lost-update bugs start. The refusal message says exactly that.
 
 `target=shared` is a new value. A non-owner/admin attempt is **refused with a
 clear message** (not silently redirected), and the refusal is audited via C5 —
-same shape as the existing Core write-guard refusal (C7). The agent must not be
+same shape *and the same emitter* as the existing Core write-guard refusal
+(C7): `agent/core_boundary.emit_audit_event()` was extracted from
+`record_core_denied()` so both write a durable JSONL row
+(`$HERMES_HOME/audit/memory_authority.jsonl`) and forward to the FG-12 change
+log / FG-16 trace sinks when registered. No DB is required for the audit, so
+the refusal path cannot fail because Postgres is down. The agent must not be
 able to talk its way into writing the shared block on a member's behalf.
 
 ### 5. Budgets
@@ -204,9 +246,12 @@ only ever opens its own directory).
    shared block. Zero data movement, and a single-user deployment behaves
    identically.
 2. The existing instance-scoped `memories/USER.md` describes **the owner**. On
-   first run after upgrade, if `memories/users/` does not exist, copy
-   `USER.md` → `users/<owner_id>/USER.md` and leave the original in place as a
-   backup (`USER.md.pre-fg24`). One-shot, idempotent, logged.
+   the first owner-scoped session, its entries are written to
+   `<root>/persons/<owner_id>/USER.md` verbatim and the original is renamed to
+   `USER.md.pre-fg24` (kept as the backup). One-shot, idempotent (the rename
+   removes the source; an existing person file is never overwritten), logged,
+   and skipped entirely for non-owner principals so a member's session can
+   never adopt the owner's identity as its own.
 3. Per-principal files are created lazily on first write. A user with no file
    contributes no block.
 
@@ -236,6 +281,14 @@ the profile's `HERMES_HOME` and are covered by the existing backup path.
 - Migration: idempotent; running twice does not duplicate the owner's profile;
   original preserved.
 - Concurrency: parallel writes by two principals do not block or interleave.
+- **Real resolution path (real Postgres, not mocks):** principals enrolled in
+  two profiles' derived schemas, resolved through `bind_channel_principal`
+  (C1), then the store built from the resolved identity — person A's working
+  memory in profile X is unreachable from profile Y and from person B, and the
+  authority matrix follows the role the `principals` table actually holds.
+- **Load-bearing injection:** a real `AIAgent` turn with the provider call
+  intercepted, asserting on the `system` message of the outgoing payload — so
+  the tests fail if the blocks are rendered but never reach the model.
 
 ## System testing (system-test box)
 
@@ -260,18 +313,19 @@ Baseline + cache-invariant tests green; per-principal isolation proven;
 
 ## Progress checklist
 
-- [ ] `get_memory_dir(user_id)` + `MemoryStore(user_id=…)` + four-block snapshot
-- [ ] `agent_init` passes the resolved principal; `system_prompt` renders shared + per-user
-- [ ] `target=shared` write path + owner/admin authority + C5 refusal audit
-- [ ] Independent budgets + `memory.shared_memory_char_limit` config
-- [ ] Migration (owner `USER.md` → `users/<owner>/`, idempotent)
-- [ ] Tests: baseline byte-identity, cache invariant, isolation, containment, authority, threat-scan, budgets, concurrency, migration
+- [x] `get_memory_dir(user_id)` + `get_person_memory_dir(user_id)` + `MemoryStore(user_id=…, role=…)` + three-block snapshot
+- [x] `agent_init` passes the resolved principal; `system_prompt` renders shared + participation + person
+- [x] `target=shared` write path + owner/admin authority + C5 refusal audit
+- [x] Independent budgets + `memory.shared_memory_char_limit` config
+- [x] Migration (owner `USER.md` → `persons/<owner>/`, idempotent)
+- [x] Tests: baseline byte-identity, cache invariant, isolation, containment, authority, threat-scan, budgets, concurrency, migration, real-Postgres resolution path, load-bearing injection
 - [ ] System test on `hermes-systest` passed
 
 ## Audit log
 
 | Date | Edition | Author | Change | Rationale |
 |------|---------|--------|--------|-----------|
+| 2026-08-11 | 3 | devin (for Leo) | Implemented. Recorded three deviations: person identity lives at `<root>/persons/<user_id>/USER.md` (not under the profile home), three snapshot blocks instead of four (no `shared_user` tier exists after the amendment), and `target=shared` is refused rather than aliased in an unscoped session. | The amendment makes identity person-level while `$HERMES_HOME` is profile-level; storing `USER.md` under the profile home would recreate the drifting-copies problem the amendment exists to remove, and a `shared_user` block would have no referent. |
 | 2026-08-10 | 1 | devin (for Leo) | Created FG doc | Scale-out to hundreds of principals in one profile makes an instance-wide `USER.md` incoherent and its shared 2200-char budget a hard blocker (already at 2029, writes refused). Investigation of `prompt_caching.py` (single `system_and_3` layout, one system breakpoint) and `system_prompt.py` (per-session `Session ID` line already in the volatile tier) shows the "per-user memory breaks the prompt cache" constraint does not hold — the prompt is already unique per session, and the real invariant (byte-stable within a conversation) is preserved by the existing frozen-snapshot mechanism. |
 
 ## Cloud-agent prompt

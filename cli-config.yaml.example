@@ -519,6 +519,10 @@ memory:
   # Character limits (~2.75 chars per token, model-independent)
   memory_char_limit: 2200   # ~800 tokens
   user_char_limit: 1375     # ~500 tokens
+  # Multi-principal deployments only (FG-24): budget for the profile-wide
+  # SHARED block, independent of the per-participation and per-person budgets
+  # above. Ignored in a single-principal session, which has no shared block.
+  shared_memory_char_limit: 2200
 
   # Periodic memory nudge: remind the agent to consider saving memories
   # every N user turns. Set to 0 to disable. Only active when memory is enabled.

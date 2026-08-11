@@ -2088,6 +2088,12 @@ DEFAULT_CONFIG = {
         "write_approval": False,
         "memory_char_limit": 2200,   # ~800 tokens at 2.75 chars/token
         "user_char_limit": 1375,     # ~500 tokens at 2.75 chars/token
+        # FG-24: budget for the profile-wide shared block, independent of the
+        # per-participation and per-person budgets above — one principal
+        # filling their own memory can never squeeze another's or the shared
+        # one. Only used once a principal is resolved (multi-principal
+        # deployments); a single-principal session has no separate shared block.
+        "shared_memory_char_limit": 2200,
         # External memory provider plugin (empty = built-in only).
         # Set to a provider name to activate: "openviking", "mem0",
         # "hindsight", "holographic", "retaindb", "byterover".

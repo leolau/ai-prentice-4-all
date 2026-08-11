@@ -1242,9 +1242,16 @@ def init_agent(
             agent._memory_nudge_interval = int(mem_config.get("nudge_interval", 10))
             if agent._memory_enabled or agent._user_profile_enabled:
                 from tools.memory_tool import MemoryStore
+                # FG-24: bind the resolved C1 principal (and the role the
+                # ``principals`` table holds for it) so working memory is
+                # scoped to this participation and identity to the person.
+                # No principal (local CLI) => pre-FG-24 profile-wide files.
                 agent._memory_store = MemoryStore(
                     memory_char_limit=mem_config.get("memory_char_limit", 2200),
                     user_char_limit=mem_config.get("user_char_limit", 1375),
+                    shared_memory_char_limit=mem_config.get("shared_memory_char_limit", 2200),
+                    user_id=agent._internal_user_id,
+                    role=agent._internal_user_role,
                 )
                 agent._memory_store.load_from_disk()
         except Exception:

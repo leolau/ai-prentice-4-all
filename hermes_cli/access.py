@@ -950,11 +950,21 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def _validate_user_id(user_id: str) -> str:
+def validate_user_id(user_id: str) -> str:
+    """Return ``user_id`` stripped, or raise ``ValueError`` if it is not a C1 id.
+
+    The charset (``^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$``) excludes path
+    separators and ``..``, which is what makes a ``user_id`` usable as a
+    single filesystem path component (FG-24 per-participation memory).
+    """
     user_id = (user_id or "").strip()
     if not _VALID_USER_ID.fullmatch(user_id):
         raise ValueError(f"Invalid user_id: {user_id!r}")
     return user_id
+
+
+#: Historical private alias — callers inside this module predate the public name.
+_validate_user_id = validate_user_id
 
 
 def _row_to_principal(
