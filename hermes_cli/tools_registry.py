@@ -587,6 +587,7 @@ async def promote_tool(
     ``disabled`` so an operator explicitly enables it in prod.
     """
     from hermes_cli.changes import initialize_changes
+    from hermes_cli.datastore import app_schema
 
     if not _VALID_NAME.fullmatch(name or ""):
         raise ValueError(f"Invalid tool name: {name!r}")
@@ -598,17 +599,18 @@ async def promote_tool(
         # initialize_changes runs initialize_supabase_app (C3 base tables) then
         # idempotently adds the FG-12 change columns (actor_user_id/visibility).
         await initialize_changes(connection)
-        # Materialize both the source (app_dev) and target (app_prod) registry
-        # tables regardless of the connection's search_path, so promotion works
-        # even if dev authoring hasn't run against this exact connection.
-        await connection.execute("CREATE SCHEMA IF NOT EXISTS app_dev")
-        await connection.execute("CREATE SCHEMA IF NOT EXISTS app_prod")
-        await connection.execute(_tools_schema_sql("app_dev." + TOOLS_TABLE))
-        await connection.execute(_tools_schema_sql("app_prod." + TOOLS_TABLE))
+        # Materialize both the source (dev) and target (prod) registry tables
+        # regardless of the connection's search_path, so promotion works even
+        # if dev authoring hasn't run against this exact connection.
+        dev, prod = app_schema("dev"), app_schema("prod")
+        await connection.execute(f"CREATE SCHEMA IF NOT EXISTS {dev}")
+        await connection.execute(f"CREATE SCHEMA IF NOT EXISTS {prod}")
+        await connection.execute(_tools_schema_sql(f"{dev}.{TOOLS_TABLE}"))
+        await connection.execute(_tools_schema_sql(f"{prod}.{TOOLS_TABLE}"))
 
         source = await connection.fetchrow(
             f"""
-            SELECT {_COLUMNS} FROM app_dev.{TOOLS_TABLE} WHERE name = $1
+            SELECT {_COLUMNS} FROM {dev}.{TOOLS_TABLE} WHERE name = $1
             """,
             name,
         )
@@ -629,7 +631,7 @@ async def promote_tool(
         async with connection.transaction():
             existing = await connection.fetchrow(
                 f"""
-                SELECT {_COLUMNS} FROM app_prod.{TOOLS_TABLE} WHERE name = $1
+                SELECT {_COLUMNS} FROM {prod}.{TOOLS_TABLE} WHERE name = $1
                 """,
                 name,
             )
@@ -653,8 +655,8 @@ async def promote_tool(
                 }
             ]
             await connection.execute(
-                """
-                INSERT INTO app_prod.approvals
+                f"""
+                INSERT INTO {prod}.approvals
                     (id, action, target_ref, actor, decision)
                 VALUES ($1, 'tool.promote', $2, $3, 'approved')
                 """,
@@ -664,7 +666,7 @@ async def promote_tool(
             )
             await connection.execute(
                 f"""
-                INSERT INTO app_prod.{TOOLS_TABLE}
+                INSERT INTO {prod}.{TOOLS_TABLE}
                     (id, name, kind, stack, owner_user_id, visibility, mode,
                      status, mcp_endpoint_ref, web_url, config_json)
                 VALUES ($1, $2, $3, $4, $5, $6, 'prod', 'disabled', $7, $8,
@@ -689,8 +691,8 @@ async def promote_tool(
                 config_text,
             )
             await connection.execute(
-                """
-                INSERT INTO app_prod.changes
+                f"""
+                INSERT INTO {prod}.changes
                     (id, actor, actor_user_id, mode, target_kind, op,
                      inverse_op, reversible, approval_ref, backup_ref,
                      visibility)
@@ -706,8 +708,8 @@ async def promote_tool(
                 tool.visibility,
             )
             await connection.execute(
-                """
-                INSERT INTO app_prod.promotions
+                f"""
+                INSERT INTO {prod}.promotions
                     (id, artifact_kind, artifact_ref, from_mode, to_mode,
                      approval_ref, change_ref, actor)
                 VALUES ($1, 'tool', $2, 'dev', 'prod', $3, $4, $5)

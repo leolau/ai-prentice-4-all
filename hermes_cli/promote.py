@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from typing import Callable, Literal
 
 from hermes_cli.datastore import (
+    app_schema,
     ArtifactKind,
     SupabaseAppStore,
     get_store,
@@ -91,13 +92,14 @@ async def promote_artifact(
     if store.mode != "prod":
         raise ValueError("Promotion requires a prod Supabase app store")
 
+    dev, prod = app_schema("dev"), app_schema("prod")
     connection = await store.connect()
     try:
         await initialize_supabase_app(connection)
         source = await connection.fetchrow(
-            """
+            f"""
             SELECT definition
-            FROM app_dev.artifact_definitions
+            FROM {dev}.artifact_definitions
             WHERE kind = $1 AND ref = $2
             """,
             kind,
@@ -129,9 +131,9 @@ async def promote_artifact(
                 await connection.execute(schema_sql)
 
             existing = await connection.fetchval(
-                """
+                f"""
                 SELECT definition
-                FROM app_prod.artifact_definitions
+                FROM {prod}.artifact_definitions
                 WHERE kind = $1 AND ref = $2
                 """,
                 kind,
@@ -167,15 +169,15 @@ async def promote_artifact(
                     0,
                     {
                         "op": "execute",
-                        "path": "/schemas/app_prod",
+                        "path": f"/schemas/{prod}",
                         "value": {"sql": schema_sql},
                     },
                 )
                 inverse_operations = None
                 reversible = False
             await connection.execute(
-                """
-                INSERT INTO app_prod.approvals
+                f"""
+                INSERT INTO {prod}.approvals
                     (id, action, target_ref, actor, decision)
                 VALUES ($1, 'artifact.promote', $2, $3, 'approved')
                 """,
@@ -184,8 +186,8 @@ async def promote_artifact(
                 actor,
             )
             await connection.execute(
-                """
-                INSERT INTO app_prod.artifact_definitions
+                f"""
+                INSERT INTO {prod}.artifact_definitions
                     (kind, ref, definition, updated_at)
                 VALUES ($1, $2, $3::jsonb, NOW())
                 ON CONFLICT (kind, ref) DO UPDATE SET
@@ -197,8 +199,8 @@ async def promote_artifact(
                 canonical_definition,
             )
             await connection.execute(
-                """
-                INSERT INTO app_prod.changes
+                f"""
+                INSERT INTO {prod}.changes
                     (id, actor, mode, target_kind, op, inverse_op, reversible,
                      approval_ref, backup_ref)
                 VALUES
@@ -213,8 +215,8 @@ async def promote_artifact(
                 approval_ref,
             )
             await connection.execute(
-                """
-                INSERT INTO app_prod.promotions
+                f"""
+                INSERT INTO {prod}.promotions
                     (id, artifact_kind, artifact_ref, from_mode, to_mode,
                      approval_ref, change_ref, actor)
                 VALUES ($1, $2, $3, 'dev', 'prod', $4, $5, $6)

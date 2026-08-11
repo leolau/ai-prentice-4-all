@@ -55,7 +55,7 @@ from hermes_cli.consent import (
     evaluate_approval,
     load_consent_policy,
 )
-from hermes_cli.datastore import SupabaseAppStore, get_store
+from hermes_cli.datastore import SupabaseAppStore, app_schema, get_store
 
 TARGET_KINDS = ("data", "config", "code")
 
@@ -156,9 +156,10 @@ async def initialize_changes(connection: asyncpg.Connection) -> None:
     from hermes_cli.datastore import initialize_supabase_app
 
     await initialize_supabase_app(connection)
+    prod = app_schema("prod")
     await connection.execute(
-        """
-        ALTER TABLE app_prod.changes
+        f"""
+        ALTER TABLE {prod}.changes
             ADD COLUMN IF NOT EXISTS actor_user_id TEXT,
             ADD COLUMN IF NOT EXISTS trace_id TEXT,
             ADD COLUMN IF NOT EXISTS visibility TEXT NOT NULL DEFAULT 'shared',
@@ -166,7 +167,7 @@ async def initialize_changes(connection: asyncpg.Connection) -> None:
             ADD COLUMN IF NOT EXISTS undone BOOLEAN NOT NULL DEFAULT FALSE,
             ADD COLUMN IF NOT EXISTS undone_at TIMESTAMPTZ;
         CREATE INDEX IF NOT EXISTS changes_trace_id_idx
-            ON app_prod.changes (trace_id);
+            ON {prod}.changes (trace_id);
         """
     )
 
@@ -253,8 +254,8 @@ class ChangeLog:
         async def _write(conn: asyncpg.Connection) -> None:
             async with conn.transaction():
                 await conn.execute(
-                    """
-                    INSERT INTO app_prod.approvals
+                    f"""
+                    INSERT INTO {app_schema("prod")}.approvals
                         (id, action, target_ref, actor, decision)
                     VALUES ($1, $2, $3, $4, $5)
                     """,
@@ -265,8 +266,8 @@ class ChangeLog:
                     approval_decision,
                 )
                 await conn.execute(
-                    """
-                    INSERT INTO app_prod.changes
+                    f"""
+                    INSERT INTO {app_schema("prod")}.changes
                         (id, trace_id, actor, actor_user_id, mode, target_kind, op,
                          inverse_op, reversible, approval_ref, backup_ref,
                          payload, visibility)
@@ -324,7 +325,7 @@ class ChangeLog:
         limit_placeholder = f"${len(params) + 1}"
         params.append(limit)
         sql = (
-            f"SELECT {_SELECT_COLUMNS} FROM app_prod.changes "
+            f"SELECT {_SELECT_COLUMNS} FROM {app_schema('prod')}.changes "
             f"WHERE {' AND '.join(where)} "
             f"ORDER BY ts DESC LIMIT {limit_placeholder}"
         )
@@ -376,8 +377,8 @@ class ChangeLog:
                 raise NotUndoable(f"{change_ref} has no inverse operation")
             detail = await _apply(event.inverse_op, conn=conn)
             await conn.execute(
-                "UPDATE app_prod.changes SET undone = TRUE, undone_at = NOW() "
-                "WHERE id = $1",
+                f"UPDATE {app_schema('prod')}.changes "
+                "SET undone = TRUE, undone_at = NOW() WHERE id = $1",
                 change_ref,
             )
             return UndoResult(change_ref, event.target_kind, detail)
@@ -407,7 +408,8 @@ class ChangeLog:
                     raise NotUndoable(f"{target.id} is not undone; nothing to redo")
             detail = await _apply(target.op, conn=conn)
             await conn.execute(
-                "UPDATE app_prod.changes SET undone = FALSE, undone_at = NULL "
+                f"UPDATE {app_schema('prod')}.changes "
+                "SET undone = FALSE, undone_at = NULL "
                 "WHERE id = $1",
                 target.id,
             )
@@ -424,7 +426,7 @@ class ChangeLog:
         principal: Principal,
     ) -> ChangeEvent:
         row = await conn.fetchrow(
-            f"SELECT {_SELECT_COLUMNS} FROM app_prod.changes WHERE id = $1",
+            f"SELECT {_SELECT_COLUMNS} FROM {app_schema('prod')}.changes WHERE id = $1",
             change_ref,
         )
         if row is None:
@@ -443,7 +445,7 @@ class ChangeLog:
     ) -> ChangeEvent | None:
         predicate = scope_filter(principal, column="visibility", start_index=1)
         sql = (
-            f"SELECT {_SELECT_COLUMNS} FROM app_prod.changes "
+            f"SELECT {_SELECT_COLUMNS} FROM {app_schema('prod')}.changes "
             f"WHERE undone = TRUE AND ({predicate.sql}) "
             f"ORDER BY undone_at DESC NULLS LAST LIMIT 1"
         )
@@ -457,8 +459,8 @@ class ChangeLog:
 
         async def _count(conn: asyncpg.Connection) -> int:
             value = await conn.fetchval(
-                """
-                SELECT COUNT(*) FROM app_prod.approvals
+                f"""
+                SELECT COUNT(*) FROM {app_schema("prod")}.approvals
                 WHERE decision = 'auto'
                   AND created_at >= NOW() - ($1::text || ' seconds')::interval
                 """,
