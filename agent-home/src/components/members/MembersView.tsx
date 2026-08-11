@@ -2,6 +2,7 @@
 
 import { type FormEvent, useState } from "react";
 
+import { BusyRegion } from "@/components/ui/BusyRegion";
 import { Pill } from "@/components/ui/Pill";
 import type {
   Member,
@@ -231,83 +232,93 @@ export function MembersView({
         </div>
       ) : null}
 
-      <form
-        data-component="AddMemberForm"
-        onSubmit={createMember}
-        className="flex flex-col gap-3 rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface)] p-4"
+      {/* Member writes go to Supabase GoTrue and can take a moment. Both the
+       * form and the roster are covered while one is in flight: a second tap on
+       * "Create member" or a role select would enrol a duplicate or race the
+       * update that is already applying. */}
+      <BusyRegion
+        busy={busy !== null}
+        label={busy === "create" ? "Creating the member…" : "Updating the member…"}
+        className="flex flex-col gap-4"
       >
-        <p className="text-sm font-medium">Add a member</p>
-        <input
-          type="email"
-          required
-          placeholder="email@example.com"
-          value={email}
-          onChange={(e) => setEmail(e.target.value)}
-          className="rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-2 text-sm"
-        />
-        <input
-          type="text"
-          placeholder="Display name (optional)"
-          value={display}
-          onChange={(e) => setDisplay(e.target.value)}
-          className="rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-2 text-sm"
-        />
-        <label className="flex items-center justify-between gap-2 text-sm">
-          <span className="text-[var(--color-muted)]">Role</span>
-          <select
-            value={role}
-            onChange={(e) => setRole(e.target.value as Role)}
+        <form
+          data-component="AddMemberForm"
+          onSubmit={createMember}
+          className="flex flex-col gap-3 rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface)] p-4"
+        >
+          <p className="text-sm font-medium">Add a member</p>
+          <input
+            type="email"
+            required
+            placeholder="email@example.com"
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
             className="rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-2 text-sm"
-          >
-            {ASSIGNABLE_ROLES.map((r) => (
-              <option key={r} value={r}>
-                {r}
-              </option>
-            ))}
-          </select>
-        </label>
-        <div className="flex gap-2">
+          />
           <input
             type="text"
-            placeholder="Temporary password (blank = generate)"
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-            className="min-w-0 flex-1 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-2 font-mono text-sm"
+            placeholder="Display name (optional)"
+            value={display}
+            onChange={(e) => setDisplay(e.target.value)}
+            className="rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-2 text-sm"
           />
+          <label className="flex items-center justify-between gap-2 text-sm">
+            <span className="text-[var(--color-muted)]">Role</span>
+            <select
+              value={role}
+              onChange={(e) => setRole(e.target.value as Role)}
+              className="rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-2 text-sm"
+            >
+              {ASSIGNABLE_ROLES.map((r) => (
+                <option key={r} value={r}>
+                  {r}
+                </option>
+              ))}
+            </select>
+          </label>
+          <div className="flex gap-2">
+            <input
+              type="text"
+              placeholder="Temporary password (blank = generate)"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              className="min-w-0 flex-1 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-2 font-mono text-sm"
+            />
+            <button
+              type="button"
+              onClick={() => setPassword(generatePassword())}
+              className="shrink-0 rounded-lg bg-[var(--color-surface-2)] px-3 py-2 text-xs"
+            >
+              Generate
+            </button>
+          </div>
           <button
-            type="button"
-            onClick={() => setPassword(generatePassword())}
-            className="shrink-0 rounded-lg bg-[var(--color-surface-2)] px-3 py-2 text-xs"
+            type="submit"
+            disabled={busy === "create" || !configured}
+            className="rounded-lg bg-[var(--color-accent)] px-3 py-2 text-sm font-medium text-[var(--color-accent-fg)] disabled:opacity-50"
           >
-            Generate
+            {busy === "create" ? "Creating…" : "Create member"}
           </button>
-        </div>
-        <button
-          type="submit"
-          disabled={busy === "create" || !configured}
-          className="rounded-lg bg-[var(--color-accent)] px-3 py-2 text-sm font-medium text-[var(--color-accent-fg)] disabled:opacity-50"
-        >
-          {busy === "create" ? "Creating…" : "Create member"}
-        </button>
-      </form>
+        </form>
 
-      <ul data-component="MembersList" className="flex flex-col gap-2">
-        {members.map((member) => (
-          <MemberRow
-            key={member.user_id}
-            member={member}
-            busy={busy === member.user_id}
-            onChangeRole={changeRole}
-            onResetPassword={resetPassword}
-            onSetActive={setActive}
-          />
-        ))}
-        {members.length === 0 ? (
-          <li className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface)] p-4 text-sm text-[var(--color-muted)]">
-            No members enrolled yet.
-          </li>
-        ) : null}
-      </ul>
+        <ul data-component="MembersList" className="flex flex-col gap-2">
+          {members.map((member) => (
+            <MemberRow
+              key={member.user_id}
+              member={member}
+              busy={busy === member.user_id}
+              onChangeRole={changeRole}
+              onResetPassword={resetPassword}
+              onSetActive={setActive}
+            />
+          ))}
+          {members.length === 0 ? (
+            <li className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface)] p-4 text-sm text-[var(--color-muted)]">
+              No members enrolled yet.
+            </li>
+          ) : null}
+        </ul>
+      </BusyRegion>
     </div>
   );
 }

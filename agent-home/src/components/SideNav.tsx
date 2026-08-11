@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 
+import { NavGlyph } from "@/components/NavGlyph";
 import { isActive, PRIMARY_NAV, SECONDARY_NAV, type NavItem } from "@/components/nav-items";
 import { usePersistentState } from "@/lib/use-persistent-state";
 
@@ -38,8 +39,8 @@ function SideLink({
             : "text-[var(--color-muted)] hover:bg-[var(--color-surface-2)] hover:text-[var(--color-text)]"
         }`}
       >
-        <span aria-hidden className="text-lg leading-none">
-          {item.glyph}
+        <span className="flex items-center text-lg leading-none">
+          <NavGlyph glyph={item.glyph} />
         </span>
         {collapsed ? (
           <span className="sr-only">{item.label}</span>

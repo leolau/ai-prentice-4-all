@@ -2,6 +2,8 @@
 
 import { useState, useCallback } from "react";
 
+import { Spinner } from "@/components/ui/Spinner";
+
 import { SearchNav } from "./SearchNav";
 
 interface SearchResult {
@@ -57,7 +59,11 @@ export function SessionSearchBar({
   );
 
   return (
-    <div className="border-b border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2">
+    <div
+      data-component="SessionSearchBar"
+      aria-busy={loading}
+      className="border-b border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2"
+    >
       <div className="flex items-center gap-2">
         <input
           type="text"
@@ -89,9 +95,16 @@ export function SessionSearchBar({
             type="button"
             onClick={() => void search()}
             disabled={loading || !query.trim()}
-            className="shrink-0 rounded-lg border border-[var(--color-border)] px-3 py-1.5 text-sm text-[var(--color-muted)] disabled:opacity-60"
+            className="inline-flex shrink-0 items-center gap-2 rounded-lg border border-[var(--color-border)] px-3 py-1.5 text-sm text-[var(--color-muted)] disabled:opacity-60"
           >
-            {loading ? "…" : "Go"}
+            {loading ? (
+              <>
+                <Spinner />
+                <span className="sr-only">Searching…</span>
+              </>
+            ) : (
+              "Go"
+            )}
           </button>
         )}
       </div>
@@ -126,6 +139,18 @@ export function SessionSearchBar({
             </button>
           ))}
         </div>
+      )}
+      {/* A cross-session keyword search reads every conversation, so it is one
+       * of the slowest things in Chat — it says so rather than looking idle. */}
+      {showResults && loading && (
+        <p
+          role="status"
+          aria-live="polite"
+          className="mt-2 inline-flex items-center gap-2 text-xs text-[var(--color-accent)]"
+        >
+          <Spinner />
+          Searching every conversation…
+        </p>
       )}
       {showResults && results.length === 0 && !loading && (
         <p className="mt-2 text-xs text-[var(--color-muted)]">No matches found.</p>

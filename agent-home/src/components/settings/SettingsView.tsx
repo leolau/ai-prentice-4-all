@@ -2,6 +2,8 @@
 
 import { useEffect, useState } from "react";
 
+import { BusyRegion } from "@/components/ui/BusyRegion";
+import { Spinner } from "@/components/ui/Spinner";
 import type { SessionTag } from "@/types";
 import {
   applyTheme,
@@ -111,6 +113,10 @@ function TagsSection() {
   const [color, setColor] = useState("blue");
   const [loading, setLoading] = useState(true);
   const [creating, setCreating] = useState(false);
+  // A delete is a write plus a local prune; the tag it names disappears, so the
+  // list is covered while it runs rather than letting a second × land on a row
+  // that is about to shift.
+  const [deleting, setDeleting] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -166,6 +172,7 @@ function TagsSection() {
     if (!confirm(`Delete tag "${tagName}"? This removes it from all sessions.`))
       return;
     setError(null);
+    setDeleting(tagId);
     try {
       const res = await fetch(`/api/chat/sessions/tags/${encodeURIComponent(tagId)}`, {
         method: "DELETE",
@@ -174,6 +181,8 @@ function TagsSection() {
       setTags((prev) => prev.filter((t) => t.id !== tagId));
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to delete tag.");
+    } finally {
+      setDeleting(null);
     }
   }
 
@@ -217,7 +226,14 @@ function TagsSection() {
           disabled={creating || !name.trim()}
           className="shrink-0 rounded-lg bg-[var(--color-accent)] px-4 py-2 text-sm font-medium text-[var(--color-accent-fg)] disabled:opacity-60"
         >
-          {creating ? "Creating…" : "Create"}
+          {creating ? (
+            <span className="inline-flex items-center gap-2">
+              <Spinner />
+              Creating…
+            </span>
+          ) : (
+            "Create"
+          )}
         </button>
       </div>
 
@@ -228,42 +244,45 @@ function TagsSection() {
       )}
 
       {/* Tag list */}
-      {loading ? (
-        <p className="text-xs text-[var(--color-muted)]">Loading tags…</p>
-      ) : tags.length === 0 ? (
-        <p className="text-xs text-[var(--color-muted)]">
-          No tags defined yet. Create one above.
-        </p>
-      ) : (
-        <div className="flex flex-wrap gap-2">
-          {tags.map((tag) => (
-            <span
-              key={tag.id}
-              className="flex items-center gap-1.5 rounded-full border border-[var(--color-border)] bg-[var(--color-surface)] px-2.5 py-1 text-xs"
-            >
+      <BusyRegion
+        busy={loading || deleting !== null}
+        label={deleting ? "Deleting the tag…" : "Loading your tags…"}
+      >
+        {tags.length === 0 && !loading ? (
+          <p className="text-xs text-[var(--color-muted)]">
+            No tags defined yet. Create one above.
+          </p>
+        ) : (
+          <div className="flex min-h-6 flex-wrap gap-2">
+            {tags.map((tag) => (
               <span
-                aria-hidden
-                className="inline-block h-2.5 w-2.5 rounded-full"
-                style={{ background: TAG_DOT[tag.color] ?? TAG_DOT.blue }}
-              />
-              <span className="text-[var(--color-fg)]">{tag.name}</span>
-              {tag.session_count !== undefined && (
-                <span className="text-[var(--color-muted)]">
-                  ({String(tag.session_count)})
-                </span>
-              )}
-              <button
-                type="button"
-                onClick={() => void deleteTag(tag.id, tag.name)}
-                className="ml-0.5 text-xs opacity-60 hover:opacity-100"
-                aria-label={`Delete tag ${tag.name}`}
+                key={tag.id}
+                className="flex items-center gap-1.5 rounded-full border border-[var(--color-border)] bg-[var(--color-surface)] px-2.5 py-1 text-xs"
               >
-                ×
-              </button>
-            </span>
-          ))}
-        </div>
-      )}
+                <span
+                  aria-hidden
+                  className="inline-block h-2.5 w-2.5 rounded-full"
+                  style={{ background: TAG_DOT[tag.color] ?? TAG_DOT.blue }}
+                />
+                <span className="text-[var(--color-fg)]">{tag.name}</span>
+                {tag.session_count !== undefined && (
+                  <span className="text-[var(--color-muted)]">
+                    ({String(tag.session_count)})
+                  </span>
+                )}
+                <button
+                  type="button"
+                  onClick={() => void deleteTag(tag.id, tag.name)}
+                  className="ml-0.5 text-xs opacity-60 hover:opacity-100"
+                  aria-label={`Delete tag ${tag.name}`}
+                >
+                  ×
+                </button>
+              </span>
+            ))}
+          </div>
+        )}
+      </BusyRegion>
     </section>
   );
 }

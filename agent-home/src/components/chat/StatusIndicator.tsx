@@ -1,3 +1,5 @@
+import { Spinner } from "@/components/ui/Spinner";
+
 /**
  * Animated agent-activity indicator for the chat pane.
  *
@@ -19,18 +21,6 @@ const LABELS: Record<Exclude<ChatActivity, "idle">, string> = {
   streaming: "a4all agent is working…",
   waiting_approval: "Waiting for your approval…",
 };
-
-/** A rotating ring — an unmistakable "still working" signal that reads even
- * when the reply already shows a complete-looking sentence (e.g. while the
- * agent runs tools between messages). */
-function Spinner() {
-  return (
-    <span
-      aria-hidden="true"
-      className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-current border-t-transparent"
-    />
-  );
-}
 
 function Dots() {
   return (

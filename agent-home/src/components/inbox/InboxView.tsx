@@ -5,6 +5,7 @@ import { useState } from "react";
 import { ApprovalsList } from "@/components/inbox/ApprovalsList";
 import { ChangesList } from "@/components/inbox/ChangesList";
 import { IncomingsList } from "@/components/inbox/IncomingsList";
+import { BusyRegion } from "@/components/ui/BusyRegion";
 import { Pill } from "@/components/ui/Pill";
 import type {
   Change,
@@ -248,19 +249,30 @@ export function InboxView({
 
       {tab === "incomings" ? (
         <IncomingsList initial={initialIncomings} facets={incomingsFacets} />
-      ) : tab === "approvals" ? (
-        <ApprovalsList
-          notifications={notifications}
-          busyId={busy}
-          onAnswer={answer}
-        />
       ) : (
-        <ChangesList
-          changes={changes}
-          busyId={busy}
-          onOp={changeOp}
-          blockedIds={blocked}
-        />
+        // Answering an approval or replaying a change is a write followed by a
+        // re-read of the authoritative list, so the whole list is covered: the
+        // rows the user can see are about to be replaced, and a second tap
+        // would act against state that is already half-applied.
+        <BusyRegion
+          busy={busy !== null}
+          label={tab === "approvals" ? "Sending your answer…" : "Applying the change…"}
+        >
+          {tab === "approvals" ? (
+            <ApprovalsList
+              notifications={notifications}
+              busyId={busy}
+              onAnswer={answer}
+            />
+          ) : (
+            <ChangesList
+              changes={changes}
+              busyId={busy}
+              onOp={changeOp}
+              blockedIds={blocked}
+            />
+          )}
+        </BusyRegion>
       )}
     </div>
   );

@@ -10,6 +10,8 @@ import {
   filtersToParams,
   type IncomingsFilterState,
 } from "@/components/inbox/IncomingsFilters";
+import { BusyRegion } from "@/components/ui/BusyRegion";
+import { Spinner } from "@/components/ui/Spinner";
 import type { IncomingItem, IncomingsFacets, IncomingsResponse } from "@/types";
 
 const PAGE_SIZE = 50;
@@ -42,11 +44,17 @@ export function IncomingsList({
       : filtersFromParams(new URLSearchParams(window.location.search)),
   );
   const [loading, setLoading] = useState(false);
+  // A filter change *replaces* the list, so the rows on screen are about to
+  // become wrong and are covered while the query runs. Paging with a cursor
+  // only *appends*, and the rows above stay valid — that one gets a spinner at
+  // the end of the list instead of an overlay over rows the user is reading.
+  const [replacing, setReplacing] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const fetchPage = useCallback(
     async (value: IncomingsFilterState, after: string | null) => {
       setLoading(true);
+      setReplacing(after == null);
       setError(null);
       try {
         const params = filtersToParams(value, after);
@@ -69,6 +77,7 @@ export function IncomingsList({
         setError("Couldn't reach the AI layer.");
       } finally {
         setLoading(false);
+        setReplacing(false);
       }
     },
     [],
@@ -122,47 +131,54 @@ export function IncomingsList({
     <div data-component="IncomingsList" className="flex flex-col gap-3">
       <IncomingsFilters facets={facets} value={filters} onChange={setFilters} />
 
-      {error ? (
-        <p
-          data-component="IncomingsError"
-          className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface)] p-4 text-sm text-[var(--color-muted)]"
-        >
-          {error}
-        </p>
-      ) : items.length === 0 && !loading ? (
-        <p
-          data-component="IncomingsEmpty"
-          className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface)] p-4 text-sm text-[var(--color-muted)]"
-        >
-          {filtered
-            ? "Nothing matches those filters."
-            : "Nothing has arrived yet. WhatsApp messages, emails and calendar events land here as they come in."}
-        </p>
-      ) : (
-        <ul className="flex flex-col gap-2">
-          {items.map((item) => (
-            <IncomingRow key={item.id} item={item} />
-          ))}
-        </ul>
-      )}
+      <BusyRegion busy={replacing} label="Filtering your inbox…">
+        <div className="flex flex-col gap-3">
+          {error ? (
+            <p
+              data-component="IncomingsError"
+              className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface)] p-4 text-sm text-[var(--color-muted)]"
+            >
+              {error}
+            </p>
+          ) : items.length === 0 && !loading ? (
+            <p
+              data-component="IncomingsEmpty"
+              className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface)] p-4 text-sm text-[var(--color-muted)]"
+            >
+              {filtered
+                ? "Nothing matches those filters."
+                : "Nothing has arrived yet. WhatsApp messages, emails and calendar events land here as they come in."}
+            </p>
+          ) : (
+            <ul className="flex flex-col gap-2">
+              {items.map((item) => (
+                <IncomingRow key={item.id} item={item} />
+              ))}
+            </ul>
+          )}
 
-      <div ref={sentinel} aria-hidden className="h-px" />
+          <div ref={sentinel} aria-hidden className="h-px" />
 
-      <div className="flex items-center justify-center py-2 text-xs text-[var(--color-muted)]">
-        {loading ? (
-          <span>Loading…</span>
-        ) : cursor ? (
-          <button
-            type="button"
-            onClick={() => void fetchPage(filters, cursor)}
-            className="rounded-lg border border-[var(--color-border)] px-3 py-1.5"
-          >
-            Load more
-          </button>
-        ) : items.length > 0 ? (
-          <span>That&apos;s everything.</span>
-        ) : null}
-      </div>
+          <div className="flex items-center justify-center py-2 text-xs text-[var(--color-muted)]">
+            {loading ? (
+              <span className="inline-flex items-center gap-2 text-[var(--color-accent)]">
+                <Spinner />
+                Loading…
+              </span>
+            ) : cursor ? (
+              <button
+                type="button"
+                onClick={() => void fetchPage(filters, cursor)}
+                className="rounded-lg border border-[var(--color-border)] px-3 py-1.5"
+              >
+                Load more
+              </button>
+            ) : items.length > 0 ? (
+              <span>That&apos;s everything.</span>
+            ) : null}
+          </div>
+        </div>
+      </BusyRegion>
     </div>
   );
 }

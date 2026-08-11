@@ -6,6 +6,7 @@ import { useState } from "react";
 import { surfaceGlyph } from "@/components/inbox/IncomingRow";
 import { surfaceLabel } from "@/components/inbox/IncomingsFilters";
 import { formatSize, formatWhen } from "@/components/files/FilesView";
+import { Spinner } from "@/components/ui/Spinner";
 import type { IncomingDetail } from "@/types";
 
 /**
@@ -142,9 +143,19 @@ export function IncomingDetailView({ item }: { item: IncomingDetail }) {
             type="button"
             disabled={busy || !current.body}
             onClick={() => void remember()}
-            className="rounded-lg border border-[var(--color-accent)] px-3 py-1.5 text-[var(--color-accent)] disabled:opacity-40"
+            className="inline-flex items-center gap-2 rounded-lg border border-[var(--color-accent)] px-3 py-1.5 text-[var(--color-accent)] disabled:opacity-40"
           >
-            {busy ? "Remembering…" : "Remember this"}
+            {/* A single button owns its own wait: `disabled` already stops a
+             * second press, so it shows the spinner in place rather than
+             * pulling an overlay over one control. */}
+            {busy ? (
+              <>
+                <Spinner />
+                Remembering…
+              </>
+            ) : (
+              "Remember this"
+            )}
           </button>
         )}
       </div>
