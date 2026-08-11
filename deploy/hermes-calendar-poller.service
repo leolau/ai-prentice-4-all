@@ -8,6 +8,11 @@ Wants=network-online.target
 
 [Service]
 Type=simple
+# Every other hermes-* unit was de-privileged in 2026-07 (the
+# 10-unprivileged.conf drop-ins); a new unit must not reintroduce a root
+# process that reads the Google credential store.
+User=hermes
+Group=hermes
 WorkingDirectory=/opt/data/hermes-agent/custom/calendar
 # Supplies HERMES_HOME, which is where the Workspace MCP OAuth credentials
 # the poller reuses live (google-workspace/credentials/<email>.json).

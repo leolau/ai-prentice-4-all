@@ -5,7 +5,7 @@ It states what exists, what is verified, what is *not*, and where the detail
 lives. The per-topic documents are authoritative for procedure; this file is
 authoritative for **what is currently true of the live box**.
 
-Last verified: 2026-08-07, application at `cbc8f5526`.
+Last verified: 2026-08-11, application at `4d67f892e`.
 
 That line is **checked**, not a promise: `deploy_state.py handover` reports this
 document as stale once anything it describes — `deploy/`, `deploy_state.py`,
@@ -73,14 +73,21 @@ cannot be scoped to a subdirectory.
 
 ## What runs
 
-12 long-running services, all as `hermes`:
+14 long-running services, all as `hermes`:
 
 ```
 hermes-gateway        hermes-dashboard      hermes-digest        hermes-escalation
 hermes-wa-bridge-personal    hermes-wa-bridge-connectar   hermes-wa-batcher    hermes-wa-triage
 hermes-email-poller   hermes-email-batcher  hermes-email-triage  hermes-embed
+hermes-calendar-poller       hermes-calendar-triage
 agent-home            (the phone PWA — note the name, see below)
 ```
+
+`hermes-calendar-poller` was installed on 2026-08-11. Before that only the
+triage half of the calendar pipeline had a unit, so nothing fetched events:
+`calendar_events` sat empty for weeks and the Inbox showed no meetings. Its
+OAuth comes from the Workspace MCP credential store rather than `GCAL_*`
+environment variables — see `CALENDAR_IMPLEMENTATION.md`.
 
 `hermes-embed` is the loopback embedding service the layer-4 memory tier calls;
 see `local-embeddings.md`.
