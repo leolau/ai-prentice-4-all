@@ -14,10 +14,15 @@ export interface NavItem {
  * Primary destinations — the phone bottom-tab bar and the top of the sidebar.
  * FG-23: Memory replaces Activity in the primary bar (memory is the user's
  * concern; traces are the operator's). Five is the bottom-bar budget on a phone.
+ *
+ * To-dos takes the fifth slot from Graph: the to-do list is where the user is
+ * *asked for something*, so it has to be one tap away or the staging layer
+ * stops working. Graph moves to the sidebar and the More sheet, where it is
+ * still one tap away on desktop and two on a phone.
  */
 export const PRIMARY_NAV: NavItem[] = [
   { href: "/", label: "Home", glyph: "◉" },
-  { href: "/graph", label: "Graph", glyph: "◈", hint: "GTS Centre" },
+  { href: "/todos", label: "To-dos", glyph: "◎", hint: "What needs you" },
   { href: "/chat", label: "Chat", glyph: "✦", hint: "One-brain chat" },
   { href: "/inbox", label: "Inbox", glyph: "✉", hint: "Everything that arrived" },
   { href: "/memory", label: "Memory", glyph: "◇", hint: "What it remembers" },
@@ -28,6 +33,7 @@ export const PRIMARY_NAV: NavItem[] = [
  * "More" section in the desktop sidebar where there is room for them.
  */
 export const SECONDARY_NAV: NavItem[] = [
+  { href: "/graph", label: "Graph", glyph: "◈", hint: "GTS Centre" },
   { href: "/files", label: "Files", glyph: "▤", hint: "Everything that arrived" },
   { href: "/activity", label: "Activity", glyph: "≋", hint: "Interaction traces" },
   { href: "/onboarding", label: "Getting started", glyph: "◐", hint: "FG-15 readiness" },
