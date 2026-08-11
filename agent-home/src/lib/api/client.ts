@@ -50,6 +50,10 @@ import type {
   SessionTag,
   SessionsResponse,
   TagSuggestion,
+  Todo,
+  TodoDetail,
+  TodosFacets,
+  TodosResponse,
   StoreMode,
   ToolsResponse,
   TraceDetailResponse,
@@ -814,6 +818,92 @@ export class HermesApiClient {
       `/api/registry/incomings/${encodeURIComponent(id)}/remember`,
       { method: "POST", json: {} },
     );
+  }
+
+  /** A keyset page of to-dos. Snoozed ones are hidden unless asked for. */
+  async todos(
+    opts: {
+      q?: string;
+      stage?: string;
+      priority?: string;
+      source_kind?: string;
+      source_ref?: string;
+      due_before?: string;
+      include_snoozed?: boolean;
+      limit?: number;
+      cursor?: string;
+    } = {},
+  ): Promise<TodosResponse> {
+    const p = new URLSearchParams();
+    for (const key of [
+      "q", "stage", "priority", "source_kind", "source_ref", "due_before",
+      "cursor",
+    ] as const) {
+      const value = opts[key];
+      if (value) p.set(key, String(value));
+    }
+    if (opts.include_snoozed) p.set("include_snoozed", "true");
+    p.set("limit", String(opts.limit ?? 50));
+    return this.request(`/api/registry/todos?${p.toString()}`);
+  }
+
+  /** Stages, priorities and sources the caller actually has. */
+  async todosFacets(): Promise<TodosFacets> {
+    return this.request("/api/registry/todos/facets");
+  }
+
+  /** One to-do with its history and the arrival behind it. */
+  async todo(id: string): Promise<TodoDetail> {
+    return this.request(`/api/registry/todos/${encodeURIComponent(id)}`);
+  }
+
+  /** A to-do the user wrote themselves. Lands `open`, never deduped. */
+  async createTodo(payload: {
+    title: string;
+    description?: string;
+    priority?: string;
+    due_at?: string | null;
+  }): Promise<Todo> {
+    return this.request("/api/registry/todos", {
+      method: "POST",
+      json: payload,
+    });
+  }
+
+  /** Edit the descriptive fields. Lifecycle moves go through `setTodoStage`. */
+  async updateTodo(
+    id: string,
+    payload: {
+      title?: string;
+      description?: string;
+      priority?: string;
+      due_at?: string | null;
+    },
+  ): Promise<Todo> {
+    return this.request(`/api/registry/todos/${encodeURIComponent(id)}`, {
+      method: "PATCH",
+      json: payload,
+    });
+  }
+
+  /** Promote, start, finish or dismiss — audited with the acting principal. */
+  async setTodoStage(
+    id: string,
+    stage: string,
+    outcome?: string,
+  ): Promise<Todo> {
+    return this.request(`/api/registry/todos/${encodeURIComponent(id)}/stage`, {
+      method: "POST",
+      json: { stage, outcome },
+    });
+  }
+
+  /** Hide a to-do until `until`, re-arming its notification for then. */
+  async snoozeTodo(id: string, until: string): Promise<Todo> {
+    return this.request(`/api/registry/todos/${encodeURIComponent(id)}/snooze`, {
+      method: "POST",
+      json: { until },
+    });
   }
 }
 

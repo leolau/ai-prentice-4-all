@@ -858,6 +858,76 @@ export interface IncomingsFacets {
   tags: SessionTag[];
 }
 
+/**
+ * The user-facing lifecycle of a to-do. `staged` is the tier that does *not*
+ * notify — captured, visible, silent — which is the whole reason it exists;
+ * `open` is what the agent decided is worth an interruption.
+ */
+export type TodoStage = "staged" | "open" | "working" | "done" | "dismissed";
+
+export type TodoPriority = "critical" | "high" | "normal" | "low";
+
+/**
+ * A to-do. Stored as an FG-06 `tasks` row, which is why `status`, `origin`
+ * and the three state columns come along: the to-do IS the task, extended,
+ * not a copy of it in a second table.
+ */
+export interface Todo {
+  id: string;
+  owner_user_id: string;
+  visibility: string;
+  title: string;
+  description: string;
+  stage: TodoStage;
+  status: string;                  // FG-06 status, kept in lockstep with stage
+  priority: TodoPriority;
+  origin: string;                  // explicit | discovered | triage
+  current_state: string;
+  trigger_state: string;
+  completion_state: string;
+  due_at: string | null;
+  source_kind: string | null;      // inbound | analysis | user | agent | cron
+  source_ref: string | null;       // the inbound_items row, when it has one
+  source_note: string | null;      // provenance when the arrival is unlinked
+  notified_at: string | null;
+  snoozed_until: string | null;
+  closed_at: string | null;
+  outcome: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+}
+
+/** One recorded move along the lifecycle, from `task_transitions`. */
+export interface TodoTransition {
+  from: string;                    // e.g. "stage:staged"
+  to: string;                      // e.g. "stage:open"
+  at: string | null;
+  actor: string;                   // "user:leo", "skill:email-triage", …
+}
+
+/**
+ * A to-do plus why it exists. `source` is the arrival that caused it, when it
+ * is still resolvable — "why is this here?" is the first question a user asks
+ * of anything an agent put in front of them.
+ */
+export interface TodoDetail extends Todo {
+  history: TodoTransition[];
+  source: IncomingItem | null;
+}
+
+/** A keyset page of to-dos. `next_cursor` is null at the end. */
+export interface TodosResponse {
+  items: Todo[];
+  next_cursor: string | null;
+}
+
+/** What the to-do filter chips can offer without leading to an empty list. */
+export interface TodosFacets {
+  stages: { value: string; count: number }[];
+  priorities: { value: string; count: number }[];
+  source_kinds: { value: string; count: number }[];
+}
+
 /** A short-lived signed link to a registered file's bytes. */
 export interface FileLinkResponse {
   url: string;
