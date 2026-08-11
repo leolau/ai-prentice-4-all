@@ -49,8 +49,12 @@ _PRIORITY_MAP = {
 _PRIORITY_RANK = {"critical": 0, "high": 1, "normal": 2, "low": 3}
 
 
-async def _resolve_owner():
-    """Resolve the owner principal, retrying periodically after a failure."""
+async def resolve_owner():
+    """Resolve the owner principal, retrying periodically after a failure.
+
+    ``None`` when Supabase is unconfigured or unreachable — the caller skips
+    its write rather than failing.
+    """
     import time as _time
 
     global _owner_principal, _owner_resolved, _owner_last_attempt
@@ -163,10 +167,10 @@ def register_todo(
     if not clean_title:
         return None
     try:
-        from hermes_cli.todo_store import default_store
+        from hermes_cli.todo_notifier import announce, default_stores
 
         async def _do() -> Optional[dict]:
-            principal = await _resolve_owner()
+            principal = await resolve_owner()
             if principal is None:
                 return None
             source_ref = None
@@ -180,7 +184,8 @@ def register_todo(
             note = source_note
             if source_ref is None and surface and external_id and not note:
                 note = f"{surface}:{external_id}"
-            todo = await default_store("prod").create(
+            store, notifications = default_stores()
+            todo = await store.create(
                 principal,
                 title=clean_title,
                 description=description or "",
@@ -193,10 +198,18 @@ def register_todo(
                 origin=origin,
                 actor=actor,
             )
+            pushed = False
+            if todo.stage == "open" and todo.notified_at is None:
+                # Announcing inline is the fast path: the sweep in the digest
+                # would find this row anyway, but an hour later, and "reply by
+                # noon" is not useful at one.
+                result = await announce(store, notifications, principal, todo)
+                pushed = result.should_push and push_todo(todo.title, result)
             return {
                 "id": todo.id,
                 "stage": todo.stage,
                 "created": todo.created,
+                "push": pushed,
             }
 
         return asyncio.run(_do())
@@ -205,6 +218,26 @@ def register_todo(
             "todo registration: could not record %r (%s)", clean_title, exc
         )
         return None
+
+
+def push_todo(title: str, announcement) -> bool:
+    """Push a high-priority to-do to Telegram now. Never raises.
+
+    Reuses the escalation pusher's sender rather than adding a second Telegram
+    client: same bot, same chat, same failure handling. Whether a push is
+    warranted was already decided under C6 (priority bar, quiet hours) — this
+    only carries it out.
+    """
+    try:
+        from shared.escalation_pusher_v2 import send_telegram
+
+        text = f"\u2705 <b>New to-do</b>\n{title}"
+        if announcement.body:
+            text += f"\n<i>{announcement.body}</i>"
+        return bool(send_telegram(text, parse_mode="HTML"))
+    except Exception as exc:
+        logger.warning("todo registration: could not push %r (%s)", title, exc)
+        return False
 
 
 async def _lookup_arrival(
@@ -239,7 +272,7 @@ def expire_staged(older_than_days: int = 14) -> int:
         from hermes_cli.todo_store import default_store
 
         async def _do() -> int:
-            principal = await _resolve_owner()
+            principal = await resolve_owner()
             if principal is None:
                 return 0
             return await default_store("prod").expire_staged(
