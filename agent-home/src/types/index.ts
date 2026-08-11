@@ -378,6 +378,21 @@ export interface SessionsResponse {
   offset: number;
 }
 
+/**
+ * One profile this box serves, from `GET /api/profiles` (FG-28). A profile is
+ * an independent `HERMES_HOME` — its own SOUL, goal, skills, memory, sessions
+ * and credentials — so selecting one changes which brain answers a turn.
+ */
+export interface ProfileSummary {
+  name: string;
+  is_default: boolean;
+  description: string;
+}
+
+export interface ProfilesResponse {
+  profiles: ProfileSummary[];
+}
+
 /** One conversation's persisted transcript from `GET /api/sessions/{id}/messages`. */
 export interface ChatMessagesResponse {
   session_id: string;

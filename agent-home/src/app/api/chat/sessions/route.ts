@@ -7,6 +7,7 @@ import { NextResponse } from "next/server";
 
 import { HermesApiError } from "@/lib/api/client";
 import { apiClientForRequest, getPrincipal } from "@/lib/auth/principal";
+import { profileFromUrl } from "@/lib/chat/profile";
 
 export async function GET(request: Request): Promise<NextResponse> {
   const principal = await getPrincipal();
@@ -18,7 +19,7 @@ export async function GET(request: Request): Promise<NextResponse> {
   const archived =
     raw === "only" || raw === "include" || raw === "exclude" ? raw : undefined;
   try {
-    const client = await apiClientForRequest();
+    const client = await apiClientForRequest({ profile: profileFromUrl(request.url) });
     const data = await client.sessions({
       source: "agent_home",
       order: "recent",

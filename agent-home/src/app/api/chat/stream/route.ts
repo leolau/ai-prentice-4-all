@@ -1,7 +1,7 @@
 /**
  * POST /api/chat/stream — BFF streaming send-one-turn with approval surface.
  *
- * Body: `{ sessionId?, message, attachments? }`. When `sessionId` is absent a
+ * Body: `{ sessionId?, message, attachments?, profile? }`. When `sessionId` is absent a
  * conversation is created first. Proxies the SSE stream from the Python API
  * `POST /api/sessions/{id}/chat/stream` under the bridged C1 principal so the
  * browser gets live assistant deltas AND `approval.request` events for
@@ -12,6 +12,7 @@
  */
 import { HermesApiError } from "@/lib/api/client";
 import { apiClientForRequest, getPrincipal } from "@/lib/auth/principal";
+import { profileFromBody } from "@/lib/chat/profile";
 import { mediaRef } from "@/lib/chat/media-ref";
 import { canReadMediaPath, createMediaSignedUrl } from "@/lib/supabase/storage";
 import type { AgentAttachmentPayload, ChatAttachment, Principal } from "@/types";
@@ -20,6 +21,8 @@ interface SendBody {
   sessionId?: unknown;
   message?: unknown;
   attachments?: unknown;
+  /** Which profile's brain answers this turn (FG-28); default when absent. */
+  profile?: unknown;
 }
 
 function withAttachments(message: string, attachments: ChatAttachment[]): string {
@@ -113,7 +116,7 @@ export async function POST(request: Request): Promise<Response> {
   const message = withAttachments(rawMessage, attachments);
 
   try {
-    const client = await apiClientForRequest();
+    const client = await apiClientForRequest({ profile: profileFromBody(body) });
     let sessionId =
       typeof body.sessionId === "string" && body.sessionId ? body.sessionId : "";
     if (!sessionId) {
