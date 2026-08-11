@@ -11927,7 +11927,8 @@ _BUILTIN_SUBCOMMANDS = frozenset(
         "computer-use",
         "changes", "config", "cron", "curator", "dashboard", "serve", "debug", "doctor",
         "incomings",
-        "dump", "fallback", "gateway", "hooks", "import", "insights",
+        "dump", "fallback", "gateway", "goal", "hooks", "import", "insights",
+        "promotion",
         "gui", "desktop", "kanban", "login", "logout", "logs", "lsp", "mcp", "memory", "migrate", "moa",
         "journey", "memory-graph", "learning",
         "member", "model", "oss", "owner", "pairing", "pets", "plugins", "portal",
@@ -12709,6 +12710,18 @@ def main():
     from hermes_cli.incomings_backfill import register_incomings_subparser
 
     register_incomings_subparser(subparsers)
+
+    # =========================================================================
+    # goal / promotion commands — the entity goal tree and the audited skill
+    # promotion path (FG-29)
+    # =========================================================================
+    from hermes_cli.goal_tree_cmd import (
+        register_goal_tree_subparser,
+        register_promotion_subparser,
+    )
+
+    register_goal_tree_subparser(subparsers)
+    register_promotion_subparser(subparsers)
 
     # =========================================================================
     # login command  (parser built in hermes_cli/subcommands/login.py)

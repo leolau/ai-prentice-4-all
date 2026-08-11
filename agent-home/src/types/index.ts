@@ -973,3 +973,41 @@ export interface FileLinkResponse {
   filename: string;
   content_type: string;
 }
+
+/**
+ * A goal in the entity's tree (FG-29).
+ *
+ * `tier` is a *lifetime*, and lifetime decides where the goal is allowed to
+ * appear: `entity` and `profile` goals live for quarters and years so they may
+ * sit in the cached system prompt, `participant` goals go beside the user
+ * profile, and an `operational` goal — which can change mid-session — never
+ * reaches a prompt at all.
+ */
+export interface EntityGoal {
+  id: string;
+  title: string;
+  description: string;
+  tier: "entity" | "profile" | "participant" | "operational";
+  parent_goal_id: string | null;
+  primary_metric: string | null;
+  priority: string;
+  status: string;
+  /** Set on a copy published from another profile; read-only where it landed. */
+  published_from_profile: string | null;
+  /** True when the source goal changed after this copy was made. */
+  stale: boolean;
+}
+
+/**
+ * The entity goal as settings sees it.
+ *
+ * `effective` is always `"next_session"`: the goal's text is part of the cached
+ * system prompt, so an edit cannot reach a conversation already in flight — the
+ * UI says that rather than implying the change is live.
+ */
+export interface EntityGoalResponse {
+  goal: EntityGoal | null;
+  created: boolean;
+  prompt_tier?: "stable" | "volatile" | "never";
+  effective: "next_session";
+}

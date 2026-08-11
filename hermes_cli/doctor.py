@@ -279,6 +279,50 @@ def _check_version_consistency(issues: list[str]) -> None:
         )
 
 
+def _check_stale_published_goals(issues: list[str]) -> None:
+    """Report published entity-goal copies that are behind their source (FG-29).
+
+    A stale copy is silent by construction: the profile keeps working against
+    the goal it was given, which is exactly why it needs surfacing somewhere the
+    operator already looks. Detection is a read of local rows — the source
+    profile is never contacted — so this stays cheap and cannot fail because
+    another profile is down. No datastore configured means nothing to check.
+    """
+    import asyncio
+
+    async def _stale() -> list[str]:
+        from hermes_cli.access import PrincipalStore
+        from hermes_cli.goal_purpose import default_tree_store
+
+        tree = default_tree_store()
+        if not tree.registry._store.dsn:
+            return []
+        principals = PrincipalStore(tree.registry._store)
+        principal = await principals.get_owner()
+        if principal is None:
+            return []
+        copies = await tree.stale_published_copies(principal)
+        return [
+            f"{goal.title} (from {goal.published_from_profile}, "
+            f"rev {goal.published_rev})"
+            for goal in copies
+        ]
+
+    try:
+        stale = asyncio.run(_stale())
+    except Exception:
+        # An unconfigured or unreachable datastore is not a goal problem.
+        return
+    if not stale:
+        return
+    _fail_and_issue(
+        "Published entity-goal copies are behind their source",
+        f"({len(stale)}: {'; '.join(stale[:3])})",
+        "Re-run 'hermes goal publish' in the profile that owns the entity goal",
+        issues,
+    )
+
+
 def _check_s6_supervision(issues: list[str]) -> None:
     """Inside a container under our s6 /init, surface what s6 sees.
 
@@ -1346,6 +1390,7 @@ def run_doctor(args):
 
     _check_gateway_service_linger(issues)
     _check_s6_supervision(issues)
+    _check_stale_published_goals(issues)
 
     if sys.platform != "win32":
         _section("Command Installation")

@@ -2176,6 +2176,48 @@ DEFAULT_CONFIG = {
         # negatives (goal actually done but judge says continue) and
         # unbounded model spend on fuzzy / unachievable goals.
         "max_turns": 20,
+
+        # FG-29 — the [PURPOSE] prompt block. Only entity/profile goals
+        # (years/quarters) reach the stable tier and only participant goals
+        # reach the volatile one; operational goals never enter a prompt.
+        # Both caps are paid for on EVERY api call of every session, which is
+        # why an over-budget block is refused rather than truncated.
+        # Both numbers are UNCALIBRATED GUESSES — a pilot should retune them.
+        "prompt": {
+            # Whole-block budget, characters.
+            "max_chars": 1200,
+            # Per-goal budget, characters. A goal longer than this is a
+            # document and belongs in SOUL.md or a skill.
+            "max_goal_chars": 400,
+        },
+        "measure": {
+            # A long-lived goal with no designated primary metric is REPORTED
+            # after this many days rather than scored as 0% — an unmeasured
+            # goal has not failed, and a fake zero would roll into its parent
+            # and lie. UNCALIBRATED GUESS.
+            "unmeasured_after_days": 14,
+        },
+        # FG-29 — promoting a distilled skill out of one profile into the
+        # shared library that every profile reads. Scored, capped and
+        # competitive: shared skills are listed in the stable prompt of every
+        # profile, so unbounded growth would tax every turn everywhere.
+        "promotion": {
+            # Minimum score (0..1) for a candidate to appear in the weekly
+            # digest at all. Below this the proposal is stored but never
+            # shown. UNCALIBRATED GUESS — see hermes_cli.skill_promotion for
+            # what the score is made of.
+            "threshold": 0.55,
+            # Hard cap on the shared library. At the cap a new skill is
+            # promoted ONLY by displacing a strictly weaker resident.
+            # UNCALIBRATED GUESS.
+            "max_shared_skills": 24,
+            # A promoted skill with no recorded use for this long is a
+            # demotion candidate in the next digest (it keeps costing every
+            # profile prompt space). UNCALIBRATED GUESS.
+            "demote_unused_after_days": 90,
+            # Activity count that saturates the usage component of the score.
+            "usage_target": 10,
+        },
     },
 
     # Mixture of Agents — named presets used by /moa. A preset is an execution
