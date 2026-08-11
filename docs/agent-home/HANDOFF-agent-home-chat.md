@@ -273,7 +273,7 @@ part of this chat line.)
 | Chat pane / all session+approval state | `agent-home/src/components/chat/ChatPane.tsx` |
 | Composer (input, upload, Send/Stop) | `agent-home/src/components/chat/Composer.tsx` |
 | Top session strip (tabs, drag, new chip) | `agent-home/src/components/chat/SessionTabs.tsx` |
-| Approve/deny card | `agent-home/src/components/chat/ApprovalCard.tsx` |
+| Approve/deny modal (bottom sheet on phones) | `agent-home/src/components/chat/ApprovalModal.tsx` |
 | Archived list modal | `agent-home/src/components/chat/ArchivedModal.tsx` |
 | Rename/stats popup | `agent-home/src/components/chat/SessionModal.tsx` |
 | Status/working indicator | `agent-home/src/components/chat/StatusIndicator.tsx` |

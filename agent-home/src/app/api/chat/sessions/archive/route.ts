@@ -8,6 +8,7 @@ import { NextResponse } from "next/server";
 
 import { HermesApiError } from "@/lib/api/client";
 import { apiClientForRequest, getPrincipal } from "@/lib/auth/principal";
+import { profileFromBody } from "@/lib/chat/profile";
 
 export async function PATCH(req: Request): Promise<NextResponse> {
   const principal = await getPrincipal();
@@ -29,7 +30,7 @@ export async function PATCH(req: Request): Promise<NextResponse> {
     return NextResponse.json({ error: "missing_archived" }, { status: 400 });
   }
   try {
-    const client = await apiClientForRequest();
+    const client = await apiClientForRequest({ profile: profileFromBody(body) });
     const data = await client.setSessionArchived(sessionId, archived);
     return NextResponse.json(data);
   } catch (err) {

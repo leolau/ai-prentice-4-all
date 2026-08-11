@@ -555,10 +555,15 @@ CREATE INDEX IF NOT EXISTS principal_aliases_user
 async def initialize_access(connection: asyncpg.Connection) -> None:
     """Create the C1 principal/identity tables in the connection's schema.
 
-    Idempotent. The connection's ``search_path`` selects the ``app_dev`` or
-    ``app_prod`` schema (contract C3), so the same DDL yields schema parity
-    across dev and prod as FG-01 requires.
+    Idempotent. The connection's ``search_path`` selects the profile's dev or
+    prod schema (contract C3), so the same DDL yields schema parity across dev
+    and prod as FG-01 requires. That schema is created here if it does not
+    exist yet: a profile's derived schema (FG-27) comes into being on first
+    contact, and this is the first thing most entry paths execute.
     """
+    from hermes_cli.datastore import ensure_app_schema
+
+    await ensure_app_schema(connection)
     await connection.execute(ACCESS_SCHEMA_SQL)
 
 
@@ -1341,7 +1346,7 @@ class PrincipalStore:
         if self._store.mode != "prod":
             raise ValueError("Ownership transfer requires a prod app store")
 
-        from hermes_cli.datastore import initialize_supabase_app
+        from hermes_cli.datastore import app_schema, initialize_supabase_app
 
         connection = await self._store.connect()
         try:
@@ -1408,8 +1413,8 @@ class PrincipalStore:
                     new_owner_user_id,
                 )
                 await connection.execute(
-                    """
-                    INSERT INTO app_prod.approvals
+                    f"""
+                    INSERT INTO {app_schema("prod")}.approvals
                         (id, action, target_ref, actor, decision)
                     VALUES ($1, 'owner.transfer', $2, $3, 'approved')
                     """,
@@ -1418,8 +1423,8 @@ class PrincipalStore:
                     actor,
                 )
                 await connection.execute(
-                    """
-                    INSERT INTO app_prod.changes
+                    f"""
+                    INSERT INTO {app_schema("prod")}.changes
                         (id, actor, mode, target_kind, op, inverse_op,
                          reversible, approval_ref, backup_ref)
                     VALUES ($1, $2, 'prod', 'data', $3::jsonb, $4::jsonb,

@@ -3,7 +3,10 @@ import { ChatPane } from "@/components/chat/ChatPane";
 import { MobileShell } from "@/components/MobileShell";
 import { apiClientForRequest, requirePrincipal } from "@/lib/auth/principal";
 import { storageConfigured } from "@/lib/env";
-import type { ChatMessage, SessionSummary } from "@/types";
+import type { ChatMessage, ProfileSummary, SessionSummary } from "@/types";
+
+/** The profile the chat addresses when the URL names none. */
+const DEFAULT_PROFILE = "default";
 
 // Reads the live principal (cookie) + the C2-scoped conversation list per
 // request — never at build time.
@@ -19,18 +22,25 @@ export const dynamic = "force-dynamic";
 export default async function Page({
   searchParams,
 }: {
-  searchParams: Promise<{ session?: string }>;
+  searchParams: Promise<{ session?: string; profile?: string }>;
 }) {
   await requirePrincipal();
-  // `?session=<id>` is where a memory's citation link lands.
-  const { session: requested } = await searchParams;
+  // `?session=<id>` is where a memory's citation link lands. `?profile=<name>`
+  // is which profile the chat addresses (FG-28) — a whole HERMES_HOME, so it
+  // selects the brain that answers *and* the conversations shown.
+  const { session: requested, profile: requestedProfile } = await searchParams;
+  const profile = (requestedProfile ?? "").trim() || DEFAULT_PROFILE;
 
   let sessions: SessionSummary[] = [];
   let sessionId: string | null = null;
   let messages: ChatMessage[] = [];
+  let profiles: ProfileSummary[] = [];
   let error: string | null = null;
   try {
-    const client = await apiClientForRequest();
+    const client = await apiClientForRequest({ profile });
+    // A profile that no longer exists must not silently answer as the default:
+    // the list is what the picker offers, and an unknown name 404s upstream.
+    profiles = (await client.profiles().catch(() => ({ profiles: [] }))).profiles;
     const list = await client.sessions({ source: "agent_home", order: "recent" });
     sessions = list.sessions;
     if (requested && !sessions.some((s) => s.id === requested)) {
@@ -69,6 +79,8 @@ export default async function Page({
           initialSessionId={sessionId}
           initialMessages={messages}
           storageEnabled={storageConfigured()}
+          profiles={profiles}
+          profile={profile}
         />
       )}
     </MobileShell>

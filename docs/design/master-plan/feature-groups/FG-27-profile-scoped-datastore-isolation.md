@@ -355,17 +355,44 @@ system test passed.
 
 ## Progress checklist
 
-- [ ] Layer 3 (**first** — enabling mechanism on a shared Supabase) — profile-derived schema in `get_store()`, default profile unchanged, name validation, explicit override
-- [ ] Layer 1 (**second**) — `schema_owner` table, claim on init, verify on connect, fail-closed, `--force` re-claim (audited)
+- [x] Layer 3 (**first** — enabling mechanism on a shared Supabase) — profile-derived schema in `get_store()`, default profile unchanged, name validation *(explicit `datastore.supabase_app.schema` override deferred — see deviations)*
+- [x] Layer 1 (**second**) — `schema_owner` table, claim on init, verify on connect, fail-closed *(`claim_schema_owner(force=True)` exists; the `hermes datastore claim --force` CLI is deferred)*
 - [ ] Layer 2 (**last, UX**) — `--clone` / `--clone-all` / `import` verify the new profile resolves to a **distinct schema** on the shared database, print the resolved `(database, schema)`, refuse an already-claimed schema
 - [ ] `hermes datastore split-profile` + `hermes doctor` reporting
-- [ ] Tests: collision, fail-closed, clone, derivation baseline, multiplex isolation on real Postgres, RLS-after-rename, migration
+- [x] Tests: derivation baseline, collision, fail-closed, two-profile isolation on real Postgres (`tests/hermes_cli/test_fg27_profile_schema_isolation.py`, `tests/hermes_cli/test_fg27_schema_isolation_e2e.py`)
+- [ ] Tests: clone, RLS-after-rename, migration
 - [ ] System test on `hermes-systest` passed
+
+## Deviations from this spec, as built (Layers 3 + 1)
+
+Three, all recorded rather than silently absorbed:
+
+1. **The marker column is `profile_slug`, not `profile_name`.** The slug is what
+   actually determines the schema (it is identifier-safe and collision-hashed),
+   so storing the raw name would let the marker and the schema disagree.
+2. **A `hermes_home` mismatch warns; only a `profile_slug` mismatch fails
+   closed.** The spec had the check compare both. Same profile name from a
+   *different* home is far more often a relocated deployment than a second box
+   sharing one DSN, and hard-failing that would brick a working install for the
+   rarer case — so it is a loud warning naming both homes, while the slug
+   remains the fail-closed rule.
+3. **The explicit `datastore.supabase_app.schema` override is deferred.** A
+   pinned schema and `initialize_supabase_app()` disagree about what to create
+   (initialisation resolves both modes' schemas from the profile and has no
+   store to consult), so a half-wired pin would point a store at tables nobody
+   created. It is an escape hatch, not part of the isolation guarantee.
+
+Also still open after this slice: **`agent-home` resolves the schema in
+TypeScript** (`schemaForMode()` in `agent-home/src/lib/env.ts` returns the
+literal `app_dev`/`app_prod`), so the console reads the *default* profile's
+schema whatever profile it is looking at. Harmless while the console is
+single-profile; it must be fixed by FG-26/FG-28, which own the console.
 
 ## Audit log
 
 | Date | Edition | Author | Change | Rationale |
 |------|---------|--------|--------|-----------|
+| 2026-08-11 | 5 | devin (for Leo) | Layers 3 + 1 implemented | Schema resolution moved behind `app_schema(mode)`, which derives `app_prod_<profile>` from `get_active_profile_name()` (default profile byte-identical). The surprise was scale: the schema was hard-coded not only in `get_store()` but in **61 SQL literals** across `promote.py`, `tools_registry.py`, `changes.py`, `access.py`, `interactions.py` and a `SupabaseAppStore("prod", "app_prod", dsn)` in `gateway/run.py` — schema-qualified SQL that bypasses the connection's `search_path`, so changing the router alone would have left every one of those writing into the default profile's schema. All now resolve through `app_schema()`. Layer 1 lands as `schema_owner` claimed during `initialize_supabase_app()` and verified inside `SupabaseAppStore.connect()`, with success cached per `(dsn, schema, slug)` and failure never cached. Deviations recorded above. |
 | 2026-08-10 | 4 | devin (for Leo) | Shared-Supabase decision — build order becomes 3 → 1 → 2, Layer 2 re-scoped | Leo confirmed **all profiles share one Supabase instance**. One Supabase is one Postgres, so every profile has the **same DSN by design** and the collision stops being a footgun: with a hard-coded `app_prod` the second profile merges into the first the moment it connects, and no configuration avoids it. Layer 3 is therefore promoted from "the real fix" to **the enabling mechanism** — profile-derived schemas are the only thing that makes more than one profile possible on this deployment — and it must be built first. Layer 1 is unaffected (its marker keys on the schema, not the DSN) and becomes the fail-closed backstop. Layer 2 as written is now **wrong**: blanking the cloned DSN would break the intended topology, so it is re-scoped from "don't share the database" to "share the database, never the schema" — verify the clone resolves to a distinct schema, print the resolved `(database, schema)`, refuse an already-claimed one. The original framing is retained for deployments that give each profile its own database. |
 | 2026-08-10 | 3 | devin (for Leo) | Reordered build sequence to 1 → 3 → 2 | The `${DATABASE_URL}` indirection found on the live box showed Layer 2 to be the weaker kind of control: it polices an *input path*, and a DSN can arrive as a config literal, an `.env` interpolation, a process env var, or a per-mode override — any path not enumerated is a hole. Layers 1 and 3 check the *resolved outcome* instead. Layer 3 in particular makes the enumeration unnecessary, because with `app_prod_<profile>` two profiles sharing a DSN is harmless rather than catastrophic. Layer 2 is retained as ergonomics (silently inheriting a database is still bad UX) but is no longer what stands between the operator and a data merge, and the FG-25/FG-26 sequencing gate now reads "Layers 1 and 3" rather than "Layers 1 and 2". Approved by Leo. |
 | 2026-08-10 | 2 | devin (for Leo) | Live-deployment check + DSN indirection | Ran the collision check on `hermes-systest`: one profile only, no `profiles/` directory, single `config.yaml` — **the footgun has not fired**, so this FG is purely preventative today. The check also surfaced that the DSN is *indirect* (`dsn: ${DATABASE_URL}` in `config.yaml`, real value in `$HERMES_HOME/.env`), which makes Layer 2 harder than written: `_CLONE_CONFIG_FILES` copies both files, so blanking `config.yaml` alone would not break the inheritance, and an operator opening the cloned `config.yaml` to repoint it sees `${DATABASE_URL}` rather than a connection string — the indirection hides the field that needs changing. Layer 2 must act on the resolved DSN. |

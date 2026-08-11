@@ -32,10 +32,19 @@ export async function requirePrincipal(): Promise<Principal> {
   return principal;
 }
 
-/** A Python-API client bound to the current request's bridged token. */
-export async function apiClientForRequest(): Promise<HermesApiClient> {
+/**
+ * A Python-API client bound to the current request's bridged token, and
+ * optionally to a named profile (FG-28) so every call in that request — the
+ * turn and the reads around it — addresses the same `HERMES_HOME`.
+ */
+export async function apiClientForRequest(
+  opts: { profile?: string } = {},
+): Promise<HermesApiClient> {
   const session = await readSession();
-  return new HermesApiClient({ hermesToken: session?.hermesToken });
+  return new HermesApiClient({
+    hermesToken: session?.hermesToken,
+    profile: opts.profile,
+  });
 }
 
 /**

@@ -26,6 +26,13 @@ export interface ChatStreamParams {
   message: string;
   attachments: ChatAttachment[];
   signal?: AbortSignal;
+  /**
+   * Which profile answers this turn (FG-28). The whole turn runs under that
+   * profile's `HERMES_HOME` — its SOUL, config, skills, memory and
+   * credentials — so omitting it here would run the default brain and file the
+   * reply in the selected profile's history.
+   */
+  profile?: string;
 }
 
 interface StreamFrame {
@@ -70,6 +77,7 @@ export async function streamChatTurn(
       sessionId: params.sessionId,
       message: params.message,
       attachments: params.attachments,
+      profile: params.profile,
     }),
     signal: params.signal,
   });

@@ -14,7 +14,7 @@ import asyncio
 import sys
 
 from hermes_cli.access import Principal, PrincipalStore
-from hermes_cli.changes import ChangeError, ChangeLog
+from hermes_cli.changes import ChangeError, ChangeLog, initialize_changes
 from hermes_cli.datastore import get_store
 
 
@@ -23,8 +23,21 @@ def _log() -> ChangeLog:
 
 
 async def _resolve_principal(actor: str) -> Principal:
-    store = PrincipalStore(get_store("supabase-app", "prod"))
-    principal = await store.get(actor)
+    """Resolve ``actor``, creating the C5 tables if this profile has none yet.
+
+    Every command in this module starts here, which makes it the one place that
+    can guarantee the log exists before it is read. Without it a profile that
+    has never *written* a change reports ``relation "….changes" does not
+    exist`` instead of an empty log — the read paths, unlike the write paths,
+    never run :func:`initialize_changes`.
+    """
+    store = get_store("supabase-app", "prod")
+    connection = await store.connect()
+    try:
+        await initialize_changes(connection)
+        principal = await PrincipalStore(store).get(actor, connection=connection)
+    finally:
+        await connection.close()
     if principal is None:
         raise ChangeError(f"Unknown principal: {actor!r} (enroll it first)")
     return principal

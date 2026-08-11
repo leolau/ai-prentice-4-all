@@ -7,6 +7,7 @@ import { NextResponse } from "next/server";
 
 import { HermesApiError } from "@/lib/api/client";
 import { apiClientForRequest, getPrincipal } from "@/lib/auth/principal";
+import { profileFromUrl } from "@/lib/chat/profile";
 
 export async function GET(request: Request): Promise<NextResponse> {
   const principal = await getPrincipal();
@@ -19,7 +20,7 @@ export async function GET(request: Request): Promise<NextResponse> {
     return NextResponse.json({ results: [] });
   }
   try {
-    const client = await apiClientForRequest();
+    const client = await apiClientForRequest({ profile: profileFromUrl(request.url) });
     const data = await client.searchSessions(q, limit);
     return NextResponse.json(data);
   } catch (err) {

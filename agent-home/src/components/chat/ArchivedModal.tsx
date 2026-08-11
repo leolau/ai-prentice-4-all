@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 
+import { withProfileQuery } from "@/lib/chat/profile";
 import type { SessionSummary } from "@/types";
 
 function titleOf(s: SessionSummary): string {
@@ -17,9 +18,12 @@ function titleOf(s: SessionSummary): string {
 export function ArchivedModal({
   onClose,
   onUnarchive,
+  profile,
 }: {
   onClose: () => void;
   onUnarchive: (id: string) => Promise<void>;
+  /** Archived conversations belong to a profile, like every other session. */
+  profile?: string;
 }) {
   const [sessions, setSessions] = useState<SessionSummary[] | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -29,9 +33,10 @@ export function ArchivedModal({
     let active = true;
     (async () => {
       try {
-        const res = await fetch("/api/chat/sessions?archived=only", {
-          cache: "no-store",
-        });
+        const res = await fetch(
+          withProfileQuery("/api/chat/sessions?archived=only", profile),
+          { cache: "no-store" },
+        );
         const body = (await res.json()) as {
           sessions?: SessionSummary[];
           detail?: string;
@@ -50,7 +55,7 @@ export function ArchivedModal({
     return () => {
       active = false;
     };
-  }, []);
+  }, [profile]);
 
   async function unarchive(id: string) {
     if (busyId) return;

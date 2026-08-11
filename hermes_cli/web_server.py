@@ -9452,6 +9452,42 @@ def _open_session_db_for_profile(profile: Optional[str]):
     return SessionDB(db_path=Path(home) / "state.db")
 
 
+@contextmanager
+def _chat_turn_profile_scope(profile: Optional[str]):
+    """Scope one agent-home chat turn to ``profile``'s brain, or pass through.
+
+    ``_open_session_db_for_profile`` already files the *transcript* under the
+    requested profile, but the turn itself was built from the dashboard
+    process's own ``HERMES_HOME`` — so a request naming another profile ran the
+    dashboard's config/SOUL/memory and wrote the result into that profile's
+    session store. This closes the gap with the same seams the multiplexing
+    gateway uses (``agent.profile_runtime``): config, SOUL, memory, sessions
+    and ``get_secret`` credentials all resolve to the requested profile.
+
+    Must be entered **inside** the executor thread that runs the turn: an
+    ``asyncio`` executor does not copy the request coroutine's context, so a
+    scope installed on the coroutine would not reach the agent.
+
+    No profile, or a profile that resolves to this process's own home, is a
+    transparent pass-through — the single-profile deployment is unchanged.
+    """
+    if not profile:
+        yield None
+        return
+
+    from hermes_constants import get_hermes_home
+
+    _name, home = _cron_profile_home(profile)
+    if Path(home).resolve() == Path(get_hermes_home()).resolve():
+        yield None
+        return
+
+    from agent.profile_runtime import profile_runtime_scope
+
+    with profile_runtime_scope(home) as scoped:
+        yield scoped
+
+
 # ---------------------------------------------------------------------------
 # Session tag endpoints — literal paths registered *before* the
 # parameterized ``/api/sessions/{session_id}`` routes so ``tags`` is not
@@ -9757,8 +9793,9 @@ async def session_chat(session_id: str, request: Request):
             try:
                 # The trace contextvar must be bound in *this* thread: the tool
                 # loop reads it from the thread it runs on, so binding it on the
-                # request coroutine would leave every tool span untraced.
-                with bind_trace(trace):
+                # request coroutine would leave every tool span untraced. The
+                # profile scope is entered here for the same reason.
+                with _chat_turn_profile_scope(profile), bind_trace(trace):
                     return run_session_turn_sync(
                         session_db=run_db,
                         user_message=user_message,
@@ -10168,8 +10205,9 @@ async def session_chat_stream(session_id: str, request: Request):
             run_db = _open_session_db_for_profile(profile)
             try:
                 # Bound here, not on the request coroutine: the tool loop reads
-                # the trace contextvar from the thread it runs on.
-                with bind_trace(trace):
+                # the trace contextvar from the thread it runs on. Same for the
+                # profile scope, which an executor does not inherit.
+                with _chat_turn_profile_scope(profile), bind_trace(trace):
                     return run_session_turn_sync(
                         session_db=run_db,
                         user_message=user_message,

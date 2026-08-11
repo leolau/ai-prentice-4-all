@@ -33,12 +33,12 @@ describe("GET /api/chat/sessions/tags", () => {
 
   it("returns 401 when unauthenticated", async () => {
     getPrincipal.mockResolvedValue(null);
-    const res = await GET();
+    const res = await GET(new Request("http://x/api/chat/sessions/tags"));
     expect(res.status).toBe(401);
   });
 
   it("forwards to client.listTags and returns tags", async () => {
-    const res = await GET();
+    const res = await GET(new Request("http://x/api/chat/sessions/tags"));
     expect(res.status).toBe(200);
     const data = await res.json();
     expect(data.tags).toHaveLength(1);
@@ -49,7 +49,7 @@ describe("GET /api/chat/sessions/tags", () => {
   it("returns 502 when the AI layer is unreachable", async () => {
     const { HermesApiError } = await import("@/lib/api/client");
     listTags.mockRejectedValueOnce(new HermesApiError(502, "down"));
-    const res = await GET();
+    const res = await GET(new Request("http://x/api/chat/sessions/tags"));
     expect(res.status).toBe(502);
   });
 });

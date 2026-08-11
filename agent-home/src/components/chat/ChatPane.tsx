@@ -2,9 +2,12 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 
-import { ApprovalCard } from "@/components/chat/ApprovalCard";
+import { useRouter } from "next/navigation";
+
+import { ApprovalModal } from "@/components/chat/ApprovalModal";
 import { ArchivedModal } from "@/components/chat/ArchivedModal";
 import { InSessionSearch } from "@/components/chat/InSessionSearch";
+import { DEFAULT_PROFILE, ProfilePicker } from "@/components/chat/ProfilePicker";
 import { MessageBubble } from "@/components/chat/MessageBubble";
 import { Composer } from "@/components/chat/Composer";
 import { SessionModal } from "@/components/chat/SessionModal";
@@ -24,12 +27,14 @@ import {
   parseOrder,
   SESSION_ORDER_STORAGE_KEY,
 } from "@/lib/chat/session-order";
+import { withProfileBody, withProfileQuery } from "@/lib/chat/profile";
 import { streamChatTurn } from "@/lib/chat/stream";
 import { usePersistentState } from "@/lib/use-persistent-state";
 import type {
   ChatApprovalRequest,
   ChatAttachment,
   ChatMessage,
+  ProfileSummary,
   SessionSummary,
   SessionTag,
   TagSuggestion,
@@ -60,6 +65,10 @@ export interface ChatPaneProps {
   initialSessionId: string | null;
   initialMessages: ChatMessage[];
   storageEnabled: boolean;
+  /** Every profile this box serves (FG-28); one entry means no picker. */
+  profiles: ProfileSummary[];
+  /** The profile this pane is showing — its sessions, and its brain. */
+  profile: string;
 }
 
 /** Only user/assistant turns are shown in the visible thread. */
@@ -84,7 +93,15 @@ export function ChatPane({
   initialSessionId,
   initialMessages,
   storageEnabled,
+  profiles,
+  profile,
 }: ChatPaneProps) {
+  const router = useRouter();
+  // Every client read below carries the selected profile, because a profile is
+  // a whole HERMES_HOME: reading the default profile's sessions while the turn
+  // runs in another is what files one profile's reply in another's history.
+  const path = (p: string) => withProfileQuery(p, profile);
+  const payload = <T extends object>(b: T) => withProfileBody(b, profile);
   const [sessions, setSessions] = useState<SessionSummary[]>(initialSessions);
   // The user's manual left-to-right ordering of the tabs, persisted per-device
   // as a JSON string (a stable snapshot for useSyncExternalStore). The array is
@@ -113,7 +130,6 @@ export function ChatPane({
   const [decisions, setDecisions] = useState<Record<string, string>>({});
   const [resolvingApproval, setResolvingApproval] = useState(false);
   const threadRef = useRef<HTMLDivElement | null>(null);
-  const approvalRef = useRef<HTMLDivElement | null>(null);
   // Mirrors the selected session for use inside async stream callbacks, and
   // buffers turns whose session is not currently on screen.
   const selectedRef = useRef<string | null>(sessionId);
@@ -191,17 +207,6 @@ export function ChatPane({
     };
   }, [messages, sendingKeys, selApproval, selDecision, loadingThread]);
 
-  // The approval card renders below the scroll box, so pin it into view when a
-  // new request arrives (keyed on runId so re-renders don't keep yanking).
-  const approvalRunId = selApproval?.runId ?? null;
-  useEffect(() => {
-    if (!approvalRunId) return;
-    const raf = requestAnimationFrame(() => {
-      approvalRef.current?.scrollIntoView({ block: "nearest" });
-    });
-    return () => cancelAnimationFrame(raf);
-  }, [approvalRunId]);
-
   const removeSending = (k: string) =>
     setSendingKeys((prev) => prev.filter((x) => x !== k));
   function dropKey<T>(rec: Record<string, T>, k: string): Record<string, T> {
@@ -223,7 +228,7 @@ export function ChatPane({
     setMessages(withLiveTurn([], liveRef.current.get(keyOf(id))));
     try {
       const res = await fetch(
-        `/api/chat/messages?sessionId=${encodeURIComponent(id)}`,
+        path(`/api/chat/messages?sessionId=${encodeURIComponent(id)}`),
         { cache: "no-store" },
       );
       const body = (await res.json()) as {
@@ -287,7 +292,13 @@ export function ChatPane({
 
     try {
       const { sessionId: landed } = await streamChatTurn(
-        { sessionId: turnSessionId, message: text, attachments, signal: controller.signal },
+        {
+          sessionId: turnSessionId,
+          message: text,
+          attachments,
+          signal: controller.signal,
+          profile,
+        },
         {
           onDelta: (delta) => {
             const buf = liveRef.current.get(turnKey);
@@ -371,6 +382,22 @@ export function ChatPane({
     abortRef.current.get(selKey)?.abort();
   }
 
+  /**
+   * Switch which profile this chat addresses. This changes the brain AND the
+   * conversation list, so it navigates rather than refetching in place: the
+   * server then loads that profile's sessions and transcript exactly as it does
+   * on first paint, and the URL carries the choice (shareable, reload-safe).
+   * Refused while a turn is streaming — navigating would abandon it.
+   */
+  function switchProfile(next: string) {
+    if (next === profile || sendingKeys.length > 0) return;
+    router.push(
+      next === DEFAULT_PROFILE
+        ? "/chat"
+        : `/chat?profile=${encodeURIComponent(next)}`,
+    );
+  }
+
   function reorderSessions(orderedIds: string[]) {
     setOrderRaw(JSON.stringify(orderedIds));
   }
@@ -381,7 +408,7 @@ export function ChatPane({
       if (includeTags.length > 0) params.set("tags", includeTags.join(","));
       if (excludeTags.length > 0) params.set("exclude_tags", excludeTags.join(","));
       params.set("tag_match", matchMode);
-      const res = await fetch(`/api/chat/sessions?${params.toString()}`, {
+      const res = await fetch(path(`/api/chat/sessions?${params.toString()}`), {
         cache: "no-store",
       });
       if (!res.ok) return;
@@ -398,7 +425,7 @@ export function ChatPane({
     const res = await fetch("/api/chat/sessions/rename", {
       method: "PATCH",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ sessionId: s.id, title }),
+      body: JSON.stringify(payload({ sessionId: s.id, title })),
     });
     if (!res.ok) {
       const body = (await res.json().catch(() => ({}))) as { detail?: string };
@@ -416,7 +443,7 @@ export function ChatPane({
     const res = await fetch("/api/chat/sessions/archive", {
       method: "PATCH",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ sessionId: id, archived }),
+      body: JSON.stringify(payload({ sessionId: id, archived })),
     });
     if (!res.ok) {
       const body = (await res.json().catch(() => ({}))) as { detail?: string };
@@ -458,7 +485,7 @@ export function ChatPane({
 
   async function loadAllTags() {
     try {
-      const res = await fetch("/api/chat/sessions/tags", { cache: "no-store" });
+      const res = await fetch(path("/api/chat/sessions/tags"), { cache: "no-store" });
       if (res.ok) {
         const body = (await res.json()) as { tags?: SessionTag[] };
         if (body.tags) setAllTags(body.tags);
@@ -474,7 +501,7 @@ export function ChatPane({
     if (s.id) {
       try {
         const res = await fetch(
-          `/api/chat/sessions/tags/get?sessionId=${encodeURIComponent(s.id)}`,
+          path(`/api/chat/sessions/tags/get?sessionId=${encodeURIComponent(s.id)}`),
           { cache: "no-store" },
         );
         if (res.ok) {
@@ -491,7 +518,7 @@ export function ChatPane({
     const res = await fetch("/api/chat/sessions/tags/add", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ sessionId: s.id, name }),
+      body: JSON.stringify(payload({ sessionId: s.id, name })),
     });
     if (!res.ok) throw new Error("Failed to add tag.");
     const body = (await res.json()) as { tag?: SessionTag };
@@ -511,7 +538,7 @@ export function ChatPane({
     const res = await fetch("/api/chat/sessions/tags/remove", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ sessionId: s.id, tagId }),
+      body: JSON.stringify(payload({ sessionId: s.id, tagId })),
     });
     if (!res.ok) throw new Error("Failed to remove tag.");
     setSessionTags((prev) => prev.filter((t) => t.id !== tagId));
@@ -524,7 +551,7 @@ export function ChatPane({
     const res = await fetch("/api/chat/sessions/tags/suggest", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ sessionId: s.id }),
+      body: JSON.stringify(payload({ sessionId: s.id })),
     });
     if (!res.ok) throw new Error("Failed to suggest tags.");
     const body = (await res.json()) as { suggestions?: TagSuggestion[] };
@@ -537,7 +564,7 @@ export function ChatPane({
     const res = await fetch("/api/chat/sessions/tags/add", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ sessionId: s.id, name: suggestion.tag_name }),
+      body: JSON.stringify(payload({ sessionId: s.id, name: suggestion.tag_name })),
     });
     if (!res.ok) throw new Error("Failed to add tag.");
     const body = (await res.json()) as { tag?: SessionTag };
@@ -593,7 +620,7 @@ export function ChatPane({
 
   async function crossSessionSearch(q: string) {
     const res = await fetch(
-      `/api/chat/sessions/search?q=${encodeURIComponent(q)}`,
+      path(`/api/chat/sessions/search?q=${encodeURIComponent(q)}`),
       { cache: "no-store" },
     );
     if (!res.ok) return [];
@@ -624,6 +651,14 @@ export function ChatPane({
 
   return (
     <div data-component="ChatPane" className="flex min-h-0 flex-1 flex-col">
+      {/* Which profile answers — switching reloads that profile's chats. */}
+      <ProfilePicker
+        profiles={profiles}
+        selected={profile}
+        onSelect={switchProfile}
+        disabled={sendingKeys.length > 0}
+      />
+
       {/* Tag filter bar */}
       <TagFilterBar
         tags={allTags}
@@ -749,16 +784,6 @@ export function ChatPane({
         />
       </div>
 
-      {selApproval ? (
-        <div ref={approvalRef}>
-          <ApprovalCard
-            request={selApproval}
-            busy={resolvingApproval}
-            onResolve={resolveApproval}
-          />
-        </div>
-      ) : null}
-
       {error ? (
         <p className="mt-2 rounded-lg bg-[var(--color-surface-2)] px-3 py-2 text-sm text-red-300">
           {error}
@@ -797,6 +822,15 @@ export function ChatPane({
         <ArchivedModal
           onClose={() => setArchivedOpen(false)}
           onUnarchive={unarchiveSession}
+          profile={profile}
+        />
+      ) : null}
+
+      {selApproval ? (
+        <ApprovalModal
+          request={selApproval}
+          busy={resolvingApproval}
+          onResolve={resolveApproval}
         />
       ) : null}
     </div>

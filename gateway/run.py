@@ -1386,21 +1386,15 @@ def _profile_runtime_scope(profile_home: "Path"):
     ``.env`` here does NOT mutate ``os.environ`` — ``build_profile_secret_scope``
     returns an isolated dict — which is what keeps subprocesses (MCP, kanban)
     from inheriting cross-profile secrets.
-    """
-    from hermes_constants import set_hermes_home_override, reset_hermes_home_override
-    from agent.secret_scope import (
-        build_profile_secret_scope,
-        set_secret_scope,
-        reset_secret_scope,
-    )
 
-    home_token = set_hermes_home_override(str(profile_home))
-    secret_token = set_secret_scope(build_profile_secret_scope(Path(profile_home)))
-    try:
+    The two seams live in :func:`agent.profile_runtime.profile_runtime_scope`
+    so the dashboard's per-turn profile scope (agent-home chat) is the same
+    mechanism rather than a second implementation of it.
+    """
+    from agent.profile_runtime import profile_runtime_scope
+
+    with profile_runtime_scope(profile_home):
         yield
-    finally:
-        reset_secret_scope(secret_token)
-        reset_hermes_home_override(home_token)
 
 
 _DOCKER_VOLUME_SPEC_RE = re.compile(r"^(?P<host>.+):(?P<container>/[^:]+?)(?::(?P<options>[^:]+))?$")
@@ -3308,7 +3302,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         store = None
         try:
             from hermes_cli.config import load_config_readonly
-            from hermes_cli.datastore import SupabaseAppStore, _config_get
+            from hermes_cli.datastore import (
+                SupabaseAppStore,
+                _config_get,
+                app_schema,
+            )
 
             cfg = load_config_readonly()
             raw_dsn = _config_get(
@@ -3320,8 +3318,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             if dsn and "${" not in dsn:
                 from hermes_cli.access import PrincipalStore
 
-                # Channels are prod-only (D5/C3), so bind to the prod schema.
-                app_store = SupabaseAppStore("prod", "app_prod", dsn)
+                # Channels are prod-only (D5/C3), so bind to the prod schema
+                # *of the profile this turn is scoped to* — a multiplexed
+                # gateway serves several, and a literal "app_prod" here would
+                # read every profile's principals out of one schema.
+                app_store = SupabaseAppStore("prod", app_schema("prod"), dsn)
                 store = PrincipalStore(app_store)
         except Exception:
             logger.debug(

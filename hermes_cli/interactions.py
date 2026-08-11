@@ -21,7 +21,12 @@ from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Iterator, Literal, Mapping, Sequence, cast
 
 from hermes_cli.access import Principal
-from hermes_cli.datastore import SessionOrigin, SupabaseAppStore, get_store
+from hermes_cli.datastore import (
+    SessionOrigin,
+    SupabaseAppStore,
+    app_schema,
+    get_store,
+)
 
 if TYPE_CHECKING:
     import asyncpg
@@ -490,7 +495,8 @@ def _actor_predicate(principal: Principal, *, start_index: int = 1) -> tuple[str
 
 async def initialize_interactions(connection: "asyncpg.Connection") -> None:
     kinds = ", ".join(f"'{kind}'" for kind in INTERACTION_KINDS)
-    for schema, mode in (("app_dev", "dev"), ("app_prod", "prod")):
+    for mode in ("dev", "prod"):
+        schema = app_schema(mode)
         table = f"{schema}.interactions"
         rollups = f"{schema}.interaction_rollups"
         await connection.execute(

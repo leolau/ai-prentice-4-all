@@ -44,6 +44,7 @@ import type {
   NotificationsResponse,
   OnboardingReadinessResponse,
   Principal,
+  ProfilesResponse,
   Role,
   SessionCreateResponse,
   SessionTag,
@@ -76,6 +77,15 @@ export interface HermesApiClientOptions {
   hermesToken?: string;
   /** Override the base URL (tests / non-default topology). */
   baseUrl?: string;
+  /**
+   * Bind every call to a named Hermes profile (FG-28). A profile *is* a
+   * `HERMES_HOME`: its own SOUL, config, memory, skills, credentials and
+   * `state.db`. Binding it on the client rather than per call is what keeps a
+   * turn and the reads around it (session list, transcript, tags) on the same
+   * profile — a per-method flag drifts the moment one call site forgets it.
+   * Omitted or `"default"` means the box's own home, unchanged.
+   */
+  profile?: string;
 }
 
 /**
@@ -86,10 +96,36 @@ export interface HermesApiClientOptions {
 export class HermesApiClient {
   private readonly baseUrl: string;
   private readonly hermesToken?: string;
+  private readonly profile?: string;
 
   constructor(opts: HermesApiClientOptions = {}) {
     this.baseUrl = (opts.baseUrl ?? hermesApiBaseUrl()).replace(/\/+$/, "");
     this.hermesToken = opts.hermesToken;
+    const profile = (opts.profile ?? "").trim();
+    this.profile = profile && profile !== "default" ? profile : undefined;
+  }
+
+  /** The profile this client is bound to, or undefined for the box's own home. */
+  boundProfile(): string | undefined {
+    return this.profile;
+  }
+
+  /**
+   * Add the bound profile to a path's query string. The Python API reads
+   * `?profile=` on its read endpoints; an endpoint that doesn't declare it
+   * ignores the parameter, so this is safe to apply uniformly.
+   */
+  private scopedPath(path: string): string {
+    if (!this.profile) return path;
+    const sep = path.includes("?") ? "&" : "?";
+    return `${path}${sep}profile=${encodeURIComponent(this.profile)}`;
+  }
+
+  /** Add the bound profile to a JSON body (write endpoints read it there). */
+  private scopedJson(json: unknown): unknown {
+    if (!this.profile || json === undefined) return json;
+    if (json === null || typeof json !== "object" || Array.isArray(json)) return json;
+    return { profile: this.profile, ...(json as Record<string, unknown>) };
   }
 
   /** Low-level request. Prefer the typed methods below where they exist. */
@@ -97,7 +133,9 @@ export class HermesApiClient {
     path: string,
     init: RequestInit & { json?: unknown } = {},
   ): Promise<T> {
-    const { json, headers, ...rest } = init;
+    const { json: rawJson, headers, ...rest } = init;
+    const json = this.scopedJson(rawJson);
+    path = this.scopedPath(path);
     const finalHeaders = new Headers(headers);
     if (this.hermesToken) {
       // Replay the bridged session both as the dashboard cookie the gate reads
@@ -125,6 +163,15 @@ export class HermesApiClient {
       );
     }
     return parsed as T;
+  }
+
+  /**
+   * List the profiles this box serves (FG-28). Each is an independent
+   * `HERMES_HOME` — its own SOUL, goal, skills, memory and credentials — so the
+   * chat surface can address one deliberately instead of always the default.
+   */
+  async profiles(): Promise<ProfilesResponse> {
+    return this.request("/api/profiles");
   }
 
   /** Resolve the C1 principal + role for the current bridged session. */
@@ -395,10 +442,14 @@ export class HermesApiClient {
       headers.set("cookie", `hermes_session_at=${this.hermesToken}`);
       headers.set("authorization", `Bearer ${this.hermesToken}`);
     }
-    const body =
+    // Streams bypass `request()` (the body is piped, not consumed), so the
+    // bound profile is applied here explicitly — a streamed turn must run under
+    // the same profile's brain as a non-streamed one.
+    const body = this.scopedJson(
       attachments && attachments.length > 0
         ? { message, attachments }
-        : { message };
+        : { message },
+    );
     const res = await fetch(
       `${this.baseUrl}/api/sessions/${encodeURIComponent(sessionId)}/chat/stream`,
       {
