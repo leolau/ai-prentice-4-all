@@ -30,6 +30,8 @@ def load_config():
 
 config = load_config()
 DIGEST_INTERVAL_MIN = config.get('digest', {}).get('frequency_minutes', 60)
+# How long an untouched staged to-do survives before the sweep dismisses it.
+STAGED_TODO_EXPIRY_DAYS = config.get('todos', {}).get('staged_expiry_days', 14)
 
 
 def get_db():
@@ -273,6 +275,19 @@ def main():
             print(f"[digest] Error: {e}")
             import traceback
             traceback.print_exc()
+
+        # The other half of capturing generously: staged to-dos nobody touched
+        # are dismissed, so the list the user opens is still worth reading.
+        # Cheap and idempotent, so it rides the digest's timer rather than
+        # earning a cron entry of its own.
+        try:
+            from shared.todo_registration import expire_staged
+
+            swept = expire_staged(STAGED_TODO_EXPIRY_DAYS)
+            if swept:
+                print(f"[digest] Expired {swept} staged to-do(s)")
+        except Exception as e:
+            print(f"[digest] Staged to-do sweep failed: {e}")
 
         time.sleep(DIGEST_INTERVAL_MIN * 60)
 

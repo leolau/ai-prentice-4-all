@@ -99,6 +99,56 @@ def _handle_tasks(tasks, batch, db):
                 print(f"[triage] Error inserting task: {e}")
 
 
+@register('todos')
+def _handle_todos(todos, batch, db):
+    """Stage what this batch implies the user may want to do about it.
+
+    Distinct from `tasks` above, and deliberately so: `tasks` is the pipeline's
+    own extraction, it stays in SQLite, and it fires for almost every batch.
+    A to-do is a judgement — this is worth the user's attention — and it lands
+    in the shared store behind the /todos page. Most arrive `staged` and say
+    nothing; only `notify` promotes one to `open`, where step 3 announces it.
+
+    Best-effort by construction. The SQLite writes above already happened, so
+    a registry outage costs a nudge, never the pipeline's record.
+    """
+    if not todos or not isinstance(todos, list):
+        return
+    try:
+        from shared.todo_registration import register_todo, select_candidates
+    except ImportError:
+        return
+
+    channel = batch.get('_channel', 'whatsapp')
+    arrivals = _triaged_arrivals(batch)
+    surface, account_id, external_id = (
+        arrivals[0] if arrivals else (channel, '', '')
+    )
+    summary = batch.get('summary', '')
+
+    for candidate in select_candidates(
+        [t for t in todos if isinstance(t, dict)]
+    ):
+        title = (candidate.get('title') or candidate.get('description')
+                 or '').strip()
+        if not title:
+            continue
+        detail = candidate.get('detail') or candidate.get('reason') or summary
+        recorded = register_todo(
+            title=title,
+            description=detail or '',
+            priority=candidate.get('priority', 'medium'),
+            due_date=candidate.get('due_date'),
+            notify=bool(candidate.get('notify')),
+            surface=surface,
+            account_id=account_id,
+            external_id=external_id,
+            actor=f'skill:{channel}-triage',
+        )
+        if recorded and recorded.get('created'):
+            print(f"[triage] Staged to-do ({recorded['stage']}): {title}")
+
+
 @register('notes')
 def _handle_notes(notes, batch, db):
     """Write notes to the appropriate SQLite table based on channel."""

@@ -21,6 +21,9 @@ Use empty arrays or null values when there is nothing to extract for a field.
   "tasks": [
     {"description": "...", "due_date": "YYYY-MM-DD or null", "priority": "high|medium|low"}
   ],
+  "todos": [
+    {"title": "imperative, specific action", "detail": "one or two sentences of context", "priority": "high|medium|low", "due_date": "YYYY-MM-DD or null", "notify": false}
+  ],
   "notes": [
     {"content": "..."}
   ],
@@ -36,6 +39,9 @@ Use empty arrays or null values when there is nothing to extract for a field.
 - `escalate` — boolean; true means push to user immediately
 - `escalation_reason` — null when escalate is false
 - `tasks` — action items; each needs at minimum description and priority
+- `todos` — the subset worth showing the user on the To-dos page, with
+  `notify` deciding whether it interrupts them. Most batches produce none.
+  See todo-decisions.md; at most three per batch are recorded.
 - `notes` — info worth saving in the local DB (not long-term memory)
 - `memory_facts` — facts to persist to agent long-term memory. See
   remember-decisions.md for criteria. Each fact must be self-contained.

@@ -781,6 +781,41 @@ class InboundRegistry:
                 await conn.close()
         return status.rsplit(" ", 1)[-1] != "0"
 
+    async def id_for(
+        self,
+        principal: Principal,
+        *,
+        surface: str,
+        external_id: str,
+        account_id: str = "",
+        connection: Optional["asyncpg.Connection"] = None,
+    ) -> Optional[str]:
+        """The registry id of an arrival, addressed by the channel's identity.
+
+        The counterpart of :meth:`set_importance`'s addressing, for callers
+        that need the row id rather than a write: a to-do created by triage
+        links back to the message with ``source_ref``, and triage knows the
+        message id it read, not the uuid the registry minted.
+        """
+        predicate = scope_filter(principal, start_index=4)
+        own = connection is None
+        conn = connection or await self._connect()
+        try:
+            row = await conn.fetchrow(
+                f"""SELECT id FROM {INBOUND_ITEMS_TABLE}
+                     WHERE surface = $1 AND account_id = $2
+                       AND external_id = $3 AND {predicate.sql}
+                     LIMIT 1""",
+                surface,
+                account_id or "",
+                external_id,
+                *predicate.params,
+            )
+            return str(row["id"]) if row else None
+        finally:
+            if own:
+                await conn.close()
+
     async def link_attachment(
         self,
         principal: Principal,

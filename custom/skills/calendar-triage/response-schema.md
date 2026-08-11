@@ -20,6 +20,9 @@ You MUST respond in this exact JSON format for each event:
     {"type": "hard|soft|location|cross_account", "event_a": "...", "event_b": "...", "overlap_minutes": 30}
   ],
   "prep_notes": "what to prepare before this meeting",
+  "todos": [
+    {"title": "imperative, specific action", "detail": "one or two sentences of context", "priority": "high|medium|low", "due_date": "YYYY-MM-DD or null", "notify": false}
+  ],
   "memory_facts": [
     {"fact": "self-contained factual statement", "category": "contact|preference|decision|project|financial"}
   ]
@@ -31,6 +34,9 @@ You MUST respond in this exact JSON format for each event:
 - `importance` — see classify-importance.md for criteria
 - `conflicts` — only include if conflicts were detected (see detect-conflicts.md)
 - `prep_notes` — relevant preparation context (see extract-prep-context.md)
+- `todos` — preparation or follow-through the user must do personally,
+  shown on the To-dos page; `notify` decides whether it interrupts them.
+  See todo-decisions.md; at most three per event are recorded.
 - `memory_facts` — meeting patterns or contact relationships worth remembering
   (see remember-decisions.md)
 - `escalate` — true for hard conflicts or critical events starting soon
