@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useState } from "react";
 
 import { surfaceGlyph } from "@/components/inbox/IncomingRow";
+import { TodoCompleteForm } from "@/components/todos/TodoCompleteForm";
 import { STAGE_LABEL, sourceGlyph } from "@/components/todos/TodoRow";
 import { formatWhen } from "@/components/files/FilesView";
 import type { Todo, TodoDetail, TodoStage } from "@/types";
@@ -110,18 +111,31 @@ export function TodoDetailView({ todo }: { todo: TodoDetail }) {
         ) : null}
 
         <div className="mt-4 flex flex-wrap gap-1.5 text-[11px]">
-          {NEXT_STAGES[current.stage].map((stage) => (
-            <button
-              key={stage}
-              type="button"
-              disabled={busy}
-              onClick={() => void post("/stage", { stage })}
-              className="rounded-lg border border-[var(--color-border)] px-2 py-1 text-[var(--color-muted)] transition hover:border-[var(--color-accent)] hover:text-[var(--color-accent)] disabled:opacity-50"
-            >
-              {STAGE_VERB[stage]}
-            </button>
-          ))}
+          {/* Finishing goes through the form below instead: it is the one
+              transition that may also propose something outgoing. */}
+          {NEXT_STAGES[current.stage]
+            .filter((stage) => stage !== "done")
+            .map((stage) => (
+              <button
+                key={stage}
+                type="button"
+                disabled={busy}
+                onClick={() => void post("/stage", { stage })}
+                className="rounded-lg border border-[var(--color-border)] px-2 py-1 text-[var(--color-muted)] transition hover:border-[var(--color-accent)] hover:text-[var(--color-accent)] disabled:opacity-50"
+              >
+                {STAGE_VERB[stage]}
+              </button>
+            ))}
         </div>
+
+        {current.stage !== "done" && current.stage !== "dismissed" ? (
+          <div className="mt-2 flex">
+            <TodoCompleteForm
+              todo={current}
+              onDone={(completed) => setCurrent({ ...current, ...completed })}
+            />
+          </div>
+        ) : null}
 
         {current.stage === "staged" || current.stage === "open" ? (
           <div className="mt-2 flex flex-wrap items-center gap-1.5 text-[11px] text-[var(--color-muted)]">

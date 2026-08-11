@@ -284,6 +284,63 @@ async def set_todo_stage(request: Request, todo_id: str) -> dict[str, Any]:
     return todo.as_dict()
 
 
+@router.post("/{todo_id}/complete")
+async def complete_todo(request: Request, todo_id: str) -> dict[str, Any]:
+    """Finish a to-do, optionally proposing what should leave because of it.
+
+    The proposal is *not* a send. It becomes an irreversible FG-10 approval, so
+    the user answers it themselves and C6's standing consent can never answer
+    it for them — the design position is that the system may propose and only
+    the user may send.
+
+    A failed proposal does not un-finish the work: the to-do is closed either
+    way and the error is reported alongside it, because losing a completion
+    because a draft was malformed would be the wrong trade.
+    """
+    principal = await _resolve_principal(request)
+    body = await request.json()
+    store = _store()
+    if not await _table_ready(store) or await store.get(principal, todo_id) is None:
+        raise HTTPException(status_code=404, detail="No such to-do")
+
+    try:
+        todo = await store.set_stage(
+            principal,
+            todo_id,
+            "done",
+            outcome=str(body.get("outcome") or "") or None,
+            actor=f"user:{principal.user_id}",
+        )
+    except TodoError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    payload = todo.as_dict()
+    action = body.get("proposed_action")
+    if isinstance(action, dict) and action:
+        payload["proposal"] = await _propose(principal, todo, action)
+    return payload
+
+
+async def _propose(principal, todo, action: dict[str, Any]) -> dict[str, Any]:
+    """Raise the approval for a proposed outgoing action, or say why not."""
+    from hermes_cli.todo_outbound import OutboundError, parse_action, propose
+
+    try:
+        arrival = await _source_item(principal, todo)
+        parsed = parse_action(action, arrival=arrival)
+    except OutboundError as exc:
+        return {"error": str(exc)}
+    try:
+        from hermes_cli.todo_notifier import default_stores
+
+        store, notifications = default_stores()
+        proposal = await propose(store, notifications, principal, todo, parsed)
+    except Exception as exc:  # noqa: BLE001 - the work is done regardless
+        logger.warning("todos: could not propose an action (%s)", exc)
+        return {"error": "the outgoing action could not be proposed"}
+    return proposal.as_dict()
+
+
 @router.post("/{todo_id}/snooze")
 async def snooze_todo(request: Request, todo_id: str) -> dict[str, Any]:
     """Hide a to-do until a moment the user chooses.

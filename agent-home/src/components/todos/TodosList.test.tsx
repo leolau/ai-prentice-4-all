@@ -216,6 +216,23 @@ describe("TodoDetailView", () => {
     expect(html).toContain("stage:staged");
   });
 
+  // The outgoing seam's only user surface. It must read as "propose", never
+  // as "send": what it produces is an approval the user still has to answer.
+  it("offers to finish, and only proposes a reply when there is an arrival", () => {
+    const withSource = renderToStaticMarkup(<TodoDetailView todo={DETAIL} />);
+    expect(withSource).toContain('data-component="TodoCompleteForm"');
+    expect(withSource).toContain("Mark done…");
+    // The stage buttons must not offer a second, silent way to finish.
+    expect(withSource).not.toContain(">Mark done<");
+  });
+
+  it("does not offer to finish a to-do that is already closed", () => {
+    const html = renderToStaticMarkup(
+      <TodoDetailView todo={{ ...DETAIL, stage: "dismissed" }} />,
+    );
+    expect(html).not.toContain('data-component="TodoCompleteForm"');
+  });
+
   it("offers a snooze while the to-do is still waiting, not after", () => {
     expect(renderToStaticMarkup(<TodoDetailView todo={DETAIL} />)).toContain(
       "Snooze",

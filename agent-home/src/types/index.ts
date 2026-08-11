@@ -928,6 +928,44 @@ export interface TodosFacets {
   source_kinds: { value: string; count: number }[];
 }
 
+/**
+ * An outgoing action a finished to-do proposes.
+ *
+ * `channel`, `target` and `account_id` default server-side to the arrival the
+ * to-do came from (contract C4: the reply leaves by the account it arrived
+ * on), so a client can propose a reply while only drafting the words.
+ */
+export interface ProposedAction {
+  channel?: string;
+  target?: string;
+  account_id?: string | null;
+  thread_id?: string | null;
+  subject?: string;
+  body: string;
+}
+
+/** What the server raised for a proposed action, or why it could not. */
+export interface TodoProposal {
+  todo_id?: string;
+  action?: ProposedAction;
+  notification_id?: string;
+  /** The command the approval authorises — shown before the user approves. */
+  command?: string;
+  auto_approved?: boolean;
+  error?: string;
+}
+
+/**
+ * The finished to-do, plus the approval its completion proposed.
+ *
+ * `proposal` is absent when nothing was proposed, and carries `error` when the
+ * work was closed but the draft could not be raised — completing is never lost
+ * to a malformed draft.
+ */
+export interface TodoCompletion extends Todo {
+  proposal?: TodoProposal;
+}
+
 /** A short-lived signed link to a registered file's bytes. */
 export interface FileLinkResponse {
   url: string;
