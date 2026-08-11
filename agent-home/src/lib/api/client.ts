@@ -22,6 +22,7 @@ import type {
   ChatMessagesResponse,
   ChatSendResponse,
   CoreManifestResponse,
+  EntityGoalResponse,
   FileAsset,
   FileAssetsResponse,
   FileLinkResponse,
@@ -921,6 +922,27 @@ export class HermesApiClient {
     return this.request(`/api/registry/todos/${encodeURIComponent(id)}/snooze`, {
       method: "POST",
       json: { until },
+    });
+  }
+
+  /**
+   * The entity goal — what every sub-goal ladders into.
+   *
+   * Creates the default first goal for an owner who has none, so settings is
+   * never an empty box with no explanation of what belongs in it.
+   */
+  async entityGoal(): Promise<EntityGoalResponse> {
+    return this.request("/api/registry/goals/entity");
+  }
+
+  /** Edit the entity goal. Owner only, and effective in the next session. */
+  async updateEntityGoal(payload: {
+    title?: string;
+    description?: string;
+  }): Promise<EntityGoalResponse> {
+    return this.request("/api/registry/goals/entity", {
+      method: "PATCH",
+      json: payload,
     });
   }
 }

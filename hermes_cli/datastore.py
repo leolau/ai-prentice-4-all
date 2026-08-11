@@ -399,6 +399,66 @@ async def claim_schema_owner(
     _verified_schemas.clear()
 
 
+async def connect_for_publish(
+    store: SupabaseAppStore,
+    *,
+    profile: str,
+) -> asyncpg.Connection:
+    """Open a connection into *another* profile's schema, for publishing only.
+
+    Every other datastore path is deliberately unable to do this: profiles are
+    isolated, and :func:`verify_schema_owner` fails closed precisely so one
+    profile cannot end up writing into another's tables. FG-29's downward
+    publish is the one sanctioned crossing — the owner copying the entity goal
+    into each profile so a sub-goal can ladder into it — so it gets one
+    narrow, explicitly named door rather than a general escape hatch.
+
+    The ownership check is not skipped here, it is *inverted*: instead of
+    "this schema must belong to me", the requirement is "this schema must
+    belong to the profile I was asked to publish into". A typo in a profile
+    name therefore fails with a mismatch instead of silently seeding a fresh
+    schema that no profile will ever read.
+    """
+    target = app_schema(store.mode, profile=profile)
+    if not _VALID_SCHEMA.fullmatch(target):
+        raise ValueError(f"Invalid Supabase schema name: {target!r}")
+    if not store.dsn:
+        raise RuntimeError(
+            "Supabase app datastore is not configured; set "
+            "datastore.supabase_app.dsn in config.yaml."
+        )
+
+    from tools.lazy_deps import ensure
+
+    ensure("datastore.supabase")
+
+    import asyncpg as _asyncpg
+
+    connection = await _asyncpg.connect(
+        store.dsn, server_settings={"search_path": target}
+    )
+    try:
+        marker = await connection.fetchval(
+            "SELECT to_regclass($1)", f"{target}.schema_owner"
+        )
+        if marker is not None:
+            row = await connection.fetchrow(
+                f"SELECT profile_slug FROM {target}.schema_owner LIMIT 1"
+            )
+            expected = _profile_slug(profile) if profile != _DEFAULT_PROFILE else profile
+            if row is not None and str(row["profile_slug"]) != expected:
+                raise SchemaOwnershipError(
+                    f"Schema {target!r} is claimed by profile "
+                    f"{row['profile_slug']!r}, not by {profile!r}. Refusing to "
+                    f"publish into it: the copy would land where no profile "
+                    f"reads it, or on top of another profile's rows."
+                )
+    except BaseException:
+        await connection.close()
+        raise
+    return connection
+
+
 async def verify_schema_owner(
     connection: asyncpg.Connection,
     *,

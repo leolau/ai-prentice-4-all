@@ -463,23 +463,57 @@ and promotion queue; full matrix on real Postgres; `scripts/run_tests.sh`,
 
 ## Progress checklist
 
-- [ ] `goals.parent_goal_id` + `tier`, cycle/depth validation, `operational` default
-- [ ] Lifetime enforcement: only long-lived tiers reach a prompt; tier changes apply next session
-- [ ] Parent declaration on short-lived goals; orphan defaults to the profile goal
-- [ ] `hermes goal publish` — rev, staleness, read-only copies, C5 audit
-- [ ] Stable-tier Purpose block (capped, scanned, byte-stable per session)
-- [ ] Volatile participant goal block on FG-24's snapshot freeze
-- [ ] Person-level `USER.md` vs participation-level memory split (FG-24 amendment)
-- [ ] `skills-shared/` wired as an external dir in every profile
-- [ ] `skill_promotions` + two-stage approval (profile reviewer → owner) on a weekly digest + provenance
-- [ ] `goals.primary_metric` + direction-aware normalisation + parent roll-up
-- [ ] Stale-metric reporting for unmeasured long-lived goals
-- [ ] Promotion score (usage/breadth/outcome/quality/age) + `config.yaml` threshold
-- [ ] Capped, competitive shared library with demotion (local copy retained)
-- [ ] Sibling-conflict detection + immediate owner alert; no auto-resolution
-- [ ] Console: goal tree, promotion queue (weekly digest view), conflict alerts
-- [ ] Tests: lifetime matrix, ladder, publish, memory split, budget, injection, promotion negatives
+- [x] `goals.parent_goal_id` + `tier`, cycle/depth validation, `operational` default
+- [x] Lifetime enforcement: only long-lived tiers reach a prompt; tier changes apply next session
+- [x] Parent declaration on short-lived goals; orphan defaults to the profile goal
+- [x] `hermes goal publish` — rev, staleness, read-only copies, C5 audit
+- [x] Stable-tier Purpose block (capped, scanned, byte-stable per session)
+- [x] Volatile participant goal block, frozen in the same session snapshot
+- [ ] Person-level `USER.md` vs participation-level memory split (FG-24 amendment) — **left to FG-24**
+- [x] `skills-shared/` wired as an external dir in every profile
+- [x] `skill_promotions` + two-stage approval (profile reviewer → owner) on a weekly digest + provenance
+- [x] `goals.primary_metric` + direction-aware normalisation + parent roll-up
+- [x] Stale-metric reporting for unmeasured long-lived goals
+- [x] Promotion score (usage/outcome/age) + `config.yaml` threshold
+- [x] Capped, competitive shared library with demotion (local copy retained)
+- [x] Sibling-conflict detection + immediate owner alert; no auto-resolution
+- [x] Owner surface: entity goal in agent-home settings; goal tree, digest and conflicts on the CLI
+- [x] Tests: lifetime matrix, ladder, publish, budget, injection, promotion negatives (real Postgres)
 - [ ] System test on `hermes-systest` passed
+
+## Implementation notes (edition 2 → shipped)
+
+Where the implementation departs from the text above, and why:
+
+1. **The memory split is not in this change.** FG-24 is being implemented in
+   parallel from the same base; touching per-principal memory here would have
+   collided with it. The FG-24 amendment stands — it is simply FG-24's to land.
+2. **Placement is enforced twice, not once.** The spec asks for enforcement at
+   prompt-build time. The snapshot *writer* refuses a goal whose tier does not
+   match the block it is being written into, and the *reader* filters again, so
+   a hand-edited `.purpose_snapshot.json` cannot put an operational goal into a
+   prompt either.
+3. **The prompt reads a per-session snapshot file, not the database.** That is
+   what makes the block byte-stable for the life of a conversation, keeps a
+   goal edit from mutating a live prompt, and keeps prompt assembly free of
+   per-turn work proportional to goals or profiles. `hermes goal sync` (and
+   every write path that changes prompt-visible text) rewrites it for the
+   *next* session.
+4. **Provenance lives in a dedicated `goal_publish_audit` table**, not only in
+   progress notes, and staleness propagation walks the profiles that actually
+   received a copy (from that audit) rather than every profile on the box.
+5. **`skills-shared/` is registered in `config.yaml` on first promotion**
+   rather than seeded into every profile at install time — an empty external
+   dir in every profile's config was surface with no consumer.
+6. **Console:** the entity goal is editable in agent-home settings, as the spec
+   requires. The goal tree, the weekly digest, the promotion queue and the
+   conflict decisions are CLI-only for now; FG-26 owns those console views and
+   this change deliberately does not pre-empt it.
+7. **Every threshold is an uncalibrated guess**, labelled as such in
+   `config.yaml` and at each definition: the promotion threshold, the shared
+   cap, the unused-demotion age, the usage saturation point, the
+   unmeasured-goal age, and the number of opposed observations that make a
+   conflict. A ~30-user pilot is expected to calibrate them.
 
 ## Open questions — all three resolved (2026-08-10)
 
@@ -500,6 +534,7 @@ and promotion queue; full matrix on real Postgres; `scripts/run_tests.sh`,
 | 2026-08-10 | 1 | devin (for Leo) | Created FG doc | Leo reframed the domain model: ai4all serves **one entity pursuing one ultimate goal**; a **profile is an instrument for a sub-goal**; **people participate in as many profiles as their work spans**. That resolved the groups-vs-profiles question (a person can already hold a `principals` row in several profiles under one shared GoTrue subject, so FG-25 is not needed for v1) and exposed what was missing. Corrected an error: I had asserted Hermes has no goal object, when FG-04/FG-09 shipped a full registry; what it lacks is `parent_goal_id`, cross-profile reach, prompt presence (verified absent) and an upward path. Chose publish-with-revision over live inheritance per the closed-PR precedent in `AGENTS.md`. | Leo: "a profile is an infrastructure defined to help to improve on sub-goal with similar behavioural characteristics … to further provide know-hows, insights and innovations on how to achieve the goal." |
 | 2026-08-10 | 2 | devin (for Leo) | Goal **lifetime** made load-bearing; up-flow rebuilt on the **existing skills loop**; participation + memory split added | Three corrections from Leo. **(1) Goals differ by lifetime** — some last years, some come and go inside a single session — and the system must not conflate them. Lifetime is now a *commitment about mutability* that decides placement: only `entity`/`profile`/`participant` may enter a prompt, `operational` stays tool-appended exactly as FG-09 has it, and a tier change takes effect **at the next session** because the live prompt is frozen for the session's life. That preserves FG-09's rule where it is right instead of overriding it, and it is what makes the stable-tier Purpose block defensible. The ladder deliberately spans both lifetimes — a short-lived goal declares its parent — so the agent can always resolve *which long-term goal does this serve*, and can notice when the answer is "none". **(2) The up-flow already exists**: edition 1 proposed a free-text `insight_candidates` table, which reinvented the self-improvement loop that is Leo's reason for building on Hermes at all. Rebuilt on it — `agent/background_review.py` already distils skills, so the missing piece is only *crossing the profile boundary*. The shared library needs no new mechanism either: `skills.external_dirs` already exists and is **read-only to autonomous curation** (`is_external_skill_path`), which is precisely the property promotion requires — a profile's curator cannot write into the org tier by accident, so the audited promotion path is the only way in. Promoting *skills* rather than prose also means the shared tier accumulates executable, tested artefacts. **(3) Both organisational shapes are one mechanism** — participation = (person × profile) covers many-people-one-sub-goal (SME/school/family) and one-person-many-sub-goals (OPC) without branching. But the OPC case exposed a flaw in FG-24: putting *all* per-user memory inside the profile would duplicate the founder's identity facts across four profiles and let them drift, so memory now splits by what the fact is *about* — person-level `USER.md` shared across a person's participations, participation-level memory isolated per profile. | Leo: "some goals are very long term and don't change very often but some goals are very short-lived and will come and go in every session or even in the middle of a session. The system must be careful with this distinction." · "The existing Hermes infrastructure already support self-improving … this should be the 'Insight flows up'." · "in a One-Person-Company (OPC) the CEO is also the CTO is also the CMO is also the CFO. The same person will provide the real-world connections and insights and knowhows for different sub-goals." |
 | 2026-08-10 | 3 | devin (for Leo) | Promotion becomes a **weekly digest with two-stage approval**; auto-approve dropped; open questions closed; profile lifecycle split out to FG-30 | Leo answered all three open questions. **(1)** Promotion cadence is weekly, so human approval is affordable — which removes the reason for the single-principal auto-approve path I had recommended, and one always-audited code path is worth more than a saved minute. Batching also fits the loop's shape: `background_review` already runs asynchronously and writes locally, so only the *crossing* needs a human, and it can wait for a review moment. **(2)** The teacher must review before promotion, which is stronger than the owner-only gate I had and splits the judgement correctly: the origin profile's reviewer is the only person who can tell whether a skill carries traces of the people it was learned from, while the owner is the only person who can tell whether it belongs to the whole entity. Both stages are recorded separately in `skill_promotions`, and because `body_hash` pins the approved bytes, an edit after approval is a new proposal rather than a silent substitution. **(3)** The routing answer — per-profile channels, but starting from one or two profiles with the system suggesting more over time — turned out to be a new capability rather than a UX preference, since every doc so far assumed static profile structure; it is written up as **FG-30 (profile lifecycle: suggest, adopt, retire)** and depends on this FG's digest and promotion path. | Leo: "How often does the skill promotion happen, if once a day or once a week, it is ok to let the human to approve the system suggested promotion" · "Yes, teacher needs to review before promotion" · "Each profile should have its own bot/channel … However, at the beginning, the human may not know what kind of profile does he/she needs." |
+| 2026-08-11 | 5 | devin (for Leo) | Implemented (see *Implementation notes*) | Deviations recorded there: the FG-24 memory split stays with FG-24; placement is enforced in both the snapshot writer and reader; the prompt reads a per-session snapshot rather than the registry; publish provenance gets its own audit table; `skills-shared/` is registered on first promotion; tree/digest/conflict views stay on the CLI until FG-26. |
 | 2026-08-10 | 4 | devin (for Leo) | Goals get **one comparable measure**; promotion gets a **score + threshold + capped competitive library**; **sibling conflict** alerts immediately | Leo's answers to three holes I raised. **(1) Quantify skills and only surface above-threshold candidates.** Approval was deciding whether a skill *may* cross, not whether it is any good — and since skills are listed in the **stable** prompt tier, an unbounded shared library is a growing tax on every turn in every profile, with a human as the bottleneck for a queue that should never have been that long. Scoring uses only signals already recorded (`tools/skill_usage.py`, curator/provenance, metric movement, dwell time), so this adds arithmetic rather than instrumentation. The cap plus **competitive** promotion is the part that matters most: without it the tier grows monotonically, and with it the tier *improves* — a new skill must outscore the weakest resident, which is demoted but kept locally, and promotion becomes a lease rather than a freehold. **(2) Notify immediately on sub-goal conflict.** The tree as drawn assumed alignment; tension between siblings (CFO's cashflow vs CTO's spend on quality) is exactly what the owner needs and nothing represented it. Deliberately *detect and notify only* — a system that silently reprioritised one sub-goal would be setting the entity's strategy on its own. Immediate rather than digest, because a conflict found a week late has already cost a week of work pulling in two directions. **(3) One shared quantitative measure per goal** turned out to be the enabler for both: `goal_metrics` shipped with FG-04 but no metric is canonical, so nothing could compare two goals, roll a child's progress into its parent, score whether a skill helped, or notice antagonism. A designated `primary_metric` with direction-aware normalisation supplies all four, and `source_query` is the existing automation seam — with unmeasured long-lived goals reported **stale** rather than sitting silently at 0%, since a goal nobody measures becomes decoration within a month and the whole structure rests on the owner believing the goals are live. | Leo: "we need a way to quantify the skills and only show up for approval if it exceed the threshold" · "If there is a sub-goal conflicts, need to notify the user immediately" · "Share the same quantitative measure for each goal" |
 
 ## Cloud-agent prompt
