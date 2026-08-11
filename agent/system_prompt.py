@@ -425,9 +425,13 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
 
     if agent._memory_store:
         if agent._memory_enabled:
-            mem_block = agent._memory_store.format_for_system_prompt("memory")
-            if mem_block:
-                volatile_parts.append(mem_block)
+            # FG-24 order: what everyone in the profile knows, then what this
+            # participation knows.  ``shared`` is empty unless a principal is
+            # bound, so an unscoped session renders exactly as before.
+            for key in ("shared", "memory"):
+                mem_block = agent._memory_store.format_for_system_prompt(key)
+                if mem_block:
+                    volatile_parts.append(mem_block)
         # USER.md is always included when enabled.
         if agent._user_profile_enabled:
             user_block = agent._memory_store.format_for_system_prompt("user")
