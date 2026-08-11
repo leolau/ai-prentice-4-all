@@ -1,6 +1,6 @@
 import { MobileShell } from "@/components/MobileShell";
 import { TodosList } from "@/components/todos/TodosList";
-import { DEFAULT_STAGES } from "@/components/todos/TodosFilters";
+import { DEFAULT_STAGES } from "@/components/todos/filters";
 import { apiClientForRequest, requirePrincipal } from "@/lib/auth/principal";
 import type { TodosFacets, TodosResponse } from "@/types";
 

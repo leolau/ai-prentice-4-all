@@ -9,7 +9,7 @@ import {
   EMPTY_FILTERS,
   filtersFromParams,
   filtersToParams,
-} from "@/components/todos/TodosFilters";
+} from "@/components/todos/filters";
 import type { Todo, TodoDetail, TodosFacets } from "@/types";
 
 const BASE: Todo = {
