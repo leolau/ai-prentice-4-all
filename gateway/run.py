@@ -3308,7 +3308,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         store = None
         try:
             from hermes_cli.config import load_config_readonly
-            from hermes_cli.datastore import SupabaseAppStore, _config_get
+            from hermes_cli.datastore import (
+                SupabaseAppStore,
+                _config_get,
+                app_schema,
+            )
 
             cfg = load_config_readonly()
             raw_dsn = _config_get(
@@ -3320,8 +3324,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             if dsn and "${" not in dsn:
                 from hermes_cli.access import PrincipalStore
 
-                # Channels are prod-only (D5/C3), so bind to the prod schema.
-                app_store = SupabaseAppStore("prod", "app_prod", dsn)
+                # Channels are prod-only (D5/C3), so bind to the prod schema
+                # *of the profile this turn is scoped to* — a multiplexed
+                # gateway serves several, and a literal "app_prod" here would
+                # read every profile's principals out of one schema.
+                app_store = SupabaseAppStore("prod", app_schema("prod"), dsn)
                 store = PrincipalStore(app_store)
         except Exception:
             logger.debug(
