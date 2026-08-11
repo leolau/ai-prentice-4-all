@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 
-import { ApprovalCard } from "@/components/chat/ApprovalCard";
+import { ApprovalModal } from "@/components/chat/ApprovalModal";
 import { ArchivedModal } from "@/components/chat/ArchivedModal";
 import { MessageBubble } from "@/components/chat/MessageBubble";
 import { Composer } from "@/components/chat/Composer";
@@ -107,7 +107,6 @@ export function ChatPane({
   const [decisions, setDecisions] = useState<Record<string, string>>({});
   const [resolvingApproval, setResolvingApproval] = useState(false);
   const threadRef = useRef<HTMLDivElement | null>(null);
-  const approvalRef = useRef<HTMLDivElement | null>(null);
   // Mirrors the selected session for use inside async stream callbacks, and
   // buffers turns whose session is not currently on screen.
   const selectedRef = useRef<string | null>(sessionId);
@@ -145,17 +144,6 @@ export function ChatPane({
       cancelAnimationFrame(raf2);
     };
   }, [messages, sendingKeys, selApproval, selDecision, loadingThread]);
-
-  // The approval card renders below the scroll box, so pin it into view when a
-  // new request arrives (keyed on runId so re-renders don't keep yanking).
-  const approvalRunId = selApproval?.runId ?? null;
-  useEffect(() => {
-    if (!approvalRunId) return;
-    const raf = requestAnimationFrame(() => {
-      approvalRef.current?.scrollIntoView({ block: "nearest" });
-    });
-    return () => cancelAnimationFrame(raf);
-  }, [approvalRunId]);
 
   const removeSending = (k: string) =>
     setSendingKeys((prev) => prev.filter((x) => x !== k));
@@ -458,16 +446,6 @@ export function ChatPane({
         />
       </div>
 
-      {selApproval ? (
-        <div ref={approvalRef}>
-          <ApprovalCard
-            request={selApproval}
-            busy={resolvingApproval}
-            onResolve={resolveApproval}
-          />
-        </div>
-      ) : null}
-
       {error ? (
         <p className="mt-2 rounded-lg bg-[var(--color-surface-2)] px-3 py-2 text-sm text-red-300">
           {error}
@@ -495,6 +473,14 @@ export function ChatPane({
         <ArchivedModal
           onClose={() => setArchivedOpen(false)}
           onUnarchive={unarchiveSession}
+        />
+      ) : null}
+
+      {selApproval ? (
+        <ApprovalModal
+          request={selApproval}
+          busy={resolvingApproval}
+          onResolve={resolveApproval}
         />
       ) : null}
     </div>
