@@ -1,0 +1,22 @@
+[Unit]
+# The Google Calendar arm of the pipeline. Without this unit the calendar
+# tables stay empty and the Inbox shows no meetings: the triage agent has a
+# unit, but nothing was fetching the events for it to triage.
+Description=Hermes Google Calendar poller
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/data/hermes-agent/custom/calendar
+# Supplies HERMES_HOME, which is where the Workspace MCP OAuth credentials
+# the poller reuses live (google-workspace/credentials/<email>.json).
+EnvironmentFile=/opt/data/hermes-messaging.env
+ExecStart=/opt/data/hermes-agent/.venv/bin/python /opt/data/hermes-agent/custom/calendar/calendar_poller.py
+Restart=always
+RestartSec=5
+StandardOutput=append:/var/log/hermes-calendar-poller.log
+StandardError=append:/var/log/hermes-calendar-poller.log
+
+[Install]
+WantedBy=multi-user.target

@@ -3,9 +3,12 @@
 Phase 1 Tests: Calendar DB schema + OAuth2 token refresh.
 """
 
+import json
 import os
+import shutil
 import sqlite3
 import sys
+import tempfile
 import unittest
 from unittest.mock import patch, MagicMock
 from datetime import datetime, timezone
@@ -166,7 +169,96 @@ class TestOAuthTokenRefresh(unittest.TestCase):
         self.assertEqual(mock_urlopen.call_count, 1)  # Only one API call
 
 
-import json
+class TestWorkspaceCredentials(unittest.TestCase):
+    """Reusing the Workspace MCP OAuth store instead of GCAL_* env vars."""
+
+    def setUp(self):
+        import calendar_poller
+        self.poller = calendar_poller
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self._dir = calendar_poller.WORKSPACE_CREDENTIALS_DIR
+        self._id = calendar_poller.GCAL_CLIENT_ID
+        self._secret = calendar_poller.GCAL_CLIENT_SECRET
+        calendar_poller.WORKSPACE_CREDENTIALS_DIR = self.tmp
+        calendar_poller.GCAL_CLIENT_ID = ''
+        calendar_poller.GCAL_CLIENT_SECRET = ''
+        calendar_poller._token_cache = {}
+
+    def tearDown(self):
+        self.poller.WORKSPACE_CREDENTIALS_DIR = self._dir
+        self.poller.GCAL_CLIENT_ID = self._id
+        self.poller.GCAL_CLIENT_SECRET = self._secret
+
+    def _write(self, email, **overrides):
+        payload = {
+            'client_id': f'client-for-{email}',
+            'client_secret': f'secret-for-{email}',
+            'refresh_token': f'refresh-for-{email}',
+            'scopes': ['https://www.googleapis.com/auth/calendar'],
+        }
+        payload.update(overrides)
+        with open(os.path.join(self.tmp, f'{email}.json'), 'w', encoding='utf-8') as handle:
+            json.dump(payload, handle)
+
+    def test_reads_the_workspace_credential_file(self):
+        """Each account's own OAuth client travels with its refresh token."""
+        self._write('leo11lau@gmail.com')
+        creds = self.poller.workspace_credentials('leo11lau@gmail.com')
+        self.assertEqual(creds.client_id, 'client-for-leo11lau@gmail.com')
+        self.assertEqual(creds.client_secret, 'secret-for-leo11lau@gmail.com')
+        self.assertEqual(creds.refresh_token, 'refresh-for-leo11lau@gmail.com')
+
+    def test_missing_or_unscoped_credential_is_none(self):
+        """No file, or consent without the calendar scope, yields nothing."""
+        self.assertIsNone(self.poller.workspace_credentials('absent@example.com'))
+        self._write('docs@example.com', scopes=[
+            'https://www.googleapis.com/auth/documents'
+        ])
+        self.assertIsNone(self.poller.workspace_credentials('docs@example.com'))
+
+    def test_account_falls_back_to_the_workspace_store(self):
+        """With no GCAL_* provisioning the account still resolves."""
+        self._write('leolau@joyaether.com')
+        account = {'id': 'gcal2', 'email': 'leolau@joyaether.com'}
+        creds = self.poller.credentials_for_account(account, {})
+        self.assertEqual(creds.refresh_token, 'refresh-for-leolau@joyaether.com')
+
+    def test_explicit_env_token_wins(self):
+        """An operator pointing one account elsewhere is not overridden."""
+        self._write('leolau@joyaether.com')
+        self.poller.GCAL_CLIENT_ID = 'env-client'
+        self.poller.GCAL_CLIENT_SECRET = 'env-secret'
+        account = {'id': 'gcal2', 'email': 'leolau@joyaether.com'}
+        with patch.dict(os.environ, {'GCAL_REFRESH_TOKEN_2': 'env-refresh'}):
+            creds = self.poller.credentials_for_account(account, {})
+        self.assertEqual(creds.refresh_token, 'env-refresh')
+        self.assertEqual(creds.client_id, 'env-client')
+
+    def test_account_without_any_credential_is_skipped(self):
+        account = {'id': 'gcal9', 'email': 'nobody@example.com'}
+        self.assertIsNone(self.poller.credentials_for_account(account, {}))
+
+    @patch('calendar_poller.urlopen')
+    def test_refresh_uses_the_accounts_own_client(self, mock_urlopen):
+        """Refreshing with another account's client id would 401."""
+        mock_response = MagicMock()
+        mock_response.read.return_value = json.dumps({
+            'access_token': 'ya29.per-account',
+            'expires_in': 3600,
+        }).encode()
+        mock_response.__enter__ = lambda s: s
+        mock_response.__exit__ = MagicMock(return_value=False)
+        mock_urlopen.return_value = mock_response
+
+        creds = self.poller.GoogleCredentials('cid', 'csecret', 'rtoken')
+        token = self.poller.get_access_token('gcal3', creds)
+
+        self.assertEqual(token, 'ya29.per-account')
+        body = mock_urlopen.call_args[0][0].data.decode()
+        self.assertIn('client_id=cid', body)
+        self.assertIn('refresh_token=rtoken', body)
+
 
 if __name__ == '__main__':
     unittest.main()
