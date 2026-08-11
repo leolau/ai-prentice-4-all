@@ -122,3 +122,7 @@ this to-do" is one foreign key once both records exist in the same schema.
 
 Not specced here; this document only records what is already built so the next
 plan extends it rather than adding a seventh task store.
+
+**Specced since:** `docs/plans/2026-08-11-001-todos-staging-layer-plan.md`
+takes all three pieces, extends `tasks` rather than adding a store, and adds
+the staging + notification layer between triage and the user.
