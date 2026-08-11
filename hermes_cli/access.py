@@ -555,10 +555,15 @@ CREATE INDEX IF NOT EXISTS principal_aliases_user
 async def initialize_access(connection: asyncpg.Connection) -> None:
     """Create the C1 principal/identity tables in the connection's schema.
 
-    Idempotent. The connection's ``search_path`` selects the ``app_dev`` or
-    ``app_prod`` schema (contract C3), so the same DDL yields schema parity
-    across dev and prod as FG-01 requires.
+    Idempotent. The connection's ``search_path`` selects the profile's dev or
+    prod schema (contract C3), so the same DDL yields schema parity across dev
+    and prod as FG-01 requires. That schema is created here if it does not
+    exist yet: a profile's derived schema (FG-27) comes into being on first
+    contact, and this is the first thing most entry paths execute.
     """
+    from hermes_cli.datastore import ensure_app_schema
+
+    await ensure_app_schema(connection)
     await connection.execute(ACCESS_SCHEMA_SQL)
 
 

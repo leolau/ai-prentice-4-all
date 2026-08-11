@@ -230,6 +230,52 @@ async def test_another_profile_pointed_at_a_claimed_schema_fails_closed(
 
 
 @pytest.mark.asyncio
+async def test_access_bootstrap_creates_the_profiles_schema_on_first_contact(
+    postgres_dsn: str, hermes_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A new profile's first Supabase call is usually the C1 access layer.
+
+    Its DDL is unqualified, so it lands in the connection's pinned
+    ``search_path`` — which does not exist until something creates the derived
+    schema. Found on the real box: every access-backed command (``hermes
+    changes``, member/owner commands, the file and inbound registries) failed
+    with ``no schema has been selected to create in`` on a fresh named profile.
+    """
+    from hermes_cli.access import initialize_access
+
+    config = {"datastore": {"supabase_app": {"dsn": postgres_dsn}}}
+    home = _use_profile(hermes_root, "newcomer", monkeypatch)
+    store = get_store("supabase-app", "prod", config=config)
+
+    connection = await store.connect()
+    try:
+        assert await connection.fetchval(
+            "SELECT to_regclass($1)", f"{store.schema}.principals"
+        ) is None
+
+        await initialize_access(connection)
+
+        assert await connection.fetchval(
+            "SELECT to_regclass($1)", f"{store.schema}.principals"
+        ) is not None
+        owner = await connection.fetchrow(
+            f"SELECT profile_slug, hermes_home FROM {store.schema}.schema_owner"
+        )
+    finally:
+        await connection.close()
+
+    # Bootstrapping also claims the schema, so a second profile aimed here is
+    # refused rather than silently sharing the principals table.
+    assert owner["profile_slug"] == "newcomer"
+    assert owner["hermes_home"] == str(home.resolve())
+
+    _use_profile(hermes_root, "outsider", monkeypatch)
+    datastore._verified_schemas.clear()
+    with pytest.raises(SchemaOwnershipError):
+        await SupabaseAppStore("prod", store.schema, postgres_dsn).connect()
+
+
+@pytest.mark.asyncio
 async def test_unclaimed_schema_is_accepted_for_pre_fg27_deployments(
     postgres_dsn: str, hermes_root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

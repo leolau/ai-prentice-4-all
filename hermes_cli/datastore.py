@@ -319,6 +319,41 @@ def get_store(
     raise ValueError(f"Unknown datastore kind: {kind!r}")
 
 
+async def connection_schema(connection: asyncpg.Connection) -> str:
+    """Return the schema a connection's unqualified DDL/DML lands in.
+
+    :meth:`SupabaseAppStore.connect` pins ``search_path`` to exactly one
+    schema, so this is that schema.
+    """
+    raw = await connection.fetchval("SELECT current_setting('search_path', true)")
+    first = str(raw or "").split(",")[0].strip().strip('"')
+    if not _VALID_SCHEMA.fullmatch(first):
+        raise ValueError(f"Connection has no single app schema on its search_path: {raw!r}")
+    return first
+
+
+async def ensure_app_schema(
+    connection: asyncpg.Connection,
+    *,
+    schema: str | None = None,
+) -> str:
+    """Create the app schema this connection writes into, and claim it.
+
+    Unqualified DDL lands in the connection's pinned ``search_path``. For a
+    profile whose derived schema does not exist yet, Postgres rejects that DDL
+    with "no schema has been selected to create in" — a message that names
+    neither the schema nor the profile. Creating the schema at the point of use
+    keeps every entry path working, instead of only the ones that happen to run
+    :func:`initialize_supabase_app` first.
+    """
+    target = schema or await connection_schema(connection)
+    if not _VALID_SCHEMA.fullmatch(target):
+        raise ValueError(f"Invalid Supabase schema name: {target!r}")
+    await connection.execute(f"CREATE SCHEMA IF NOT EXISTS {target};")
+    await claim_schema_owner(connection, schema=target)
+    return target
+
+
 async def claim_schema_owner(
     connection: asyncpg.Connection,
     *,
