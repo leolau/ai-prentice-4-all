@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 
+import { Spinner } from "@/components/ui/Spinner";
 import { withProfileQuery } from "@/lib/chat/profile";
 import type { SessionSummary } from "@/types";
 
@@ -100,8 +101,13 @@ export function ArchivedModal({
 
         <div className="min-h-0 flex-1 space-y-2 overflow-y-auto">
           {sessions === null ? (
-            <p className="py-8 text-center text-sm text-[var(--color-muted)]">
-              Loading…
+            <p
+              role="status"
+              aria-live="polite"
+              className="flex items-center justify-center gap-2 py-8 text-center text-sm text-[var(--color-accent)]"
+            >
+              <Spinner size="md" />
+              Loading your archive…
             </p>
           ) : sessions.length === 0 ? (
             <p className="py-8 text-center text-sm text-[var(--color-muted)]">
@@ -116,13 +122,23 @@ export function ArchivedModal({
                 <span className="min-w-0 flex-1 truncate text-sm text-[var(--color-fg)]">
                   {titleOf(s)}
                 </span>
+                {/* `unarchive` already refuses while another row is in flight;
+                  * disabling every row makes that visible instead of silently
+                  * swallowing the tap. */}
                 <button
                   type="button"
                   onClick={() => unarchive(s.id)}
-                  disabled={busyId === s.id}
-                  className="shrink-0 rounded-lg border border-[var(--color-border)] px-3 py-1.5 text-xs disabled:opacity-60"
+                  disabled={busyId !== null}
+                  className="inline-flex shrink-0 items-center gap-2 rounded-lg border border-[var(--color-border)] px-3 py-1.5 text-xs disabled:opacity-60"
                 >
-                  {busyId === s.id ? "…" : "Unarchive"}
+                  {busyId === s.id ? (
+                    <>
+                      <Spinner />
+                      <span className="sr-only">Restoring this conversation…</span>
+                    </>
+                  ) : (
+                    "Unarchive"
+                  )}
                 </button>
               </div>
             ))

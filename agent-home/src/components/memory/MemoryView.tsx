@@ -4,6 +4,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import { MemoryMap } from "@/components/memory/MemoryMap";
 import { describeSource, sourceLink } from "@/components/memory/citation";
+import { BusyRegion } from "@/components/ui/BusyRegion";
+import { Spinner } from "@/components/ui/Spinner";
 import type {
   MemoryProjection,
   MemoryQueryPlacement,
@@ -46,6 +48,10 @@ export function MemoryView({
   // passages until the reader clears it.
   const [docFilter, setDocFilter] = useState<string | null>(documentId);
   const [loading, setLoading] = useState(false);
+  // A search or a corpus switch *replaces* the rows, so the list is covered
+  // while it runs. "Load more" only appends and the rows above stay valid, so
+  // that one keeps its inline button spinner instead.
+  const [replacing, setReplacing] = useState(false);
   const [searching, setSearching] = useState(false);
   const [rowsError, setRowsError] = useState<string | null>(null);
 
@@ -62,6 +68,7 @@ export function MemoryView({
       doc: string | null = docFilter,
     ) => {
       setLoading(true);
+      setReplacing(true);
       setSearching(!!query.trim());
       setRowsError(null);
       try {
@@ -87,6 +94,7 @@ export function MemoryView({
         setRowsError("Couldn't reach the AI layer.");
       } finally {
         setLoading(false);
+        setReplacing(false);
       }
     },
     [limit, browse, docFilter],
@@ -255,9 +263,16 @@ export function MemoryView({
             type="button"
             onClick={placeQuery}
             disabled={queryLoading || !queryText.trim()}
-            className="rounded-lg bg-[var(--color-accent)] px-3 py-2 text-sm font-medium text-white disabled:opacity-40"
+            className="inline-flex items-center gap-2 rounded-lg bg-[var(--color-accent)] px-3 py-2 text-sm font-medium text-white disabled:opacity-40"
           >
-            {queryLoading ? "…" : "Place"}
+            {queryLoading ? (
+              <>
+                <Spinner />
+                <span className="sr-only">Placing your query…</span>
+              </>
+            ) : (
+              "Place"
+            )}
           </button>
         </div>
         {queryText.trim() && (
@@ -336,17 +351,19 @@ export function MemoryView({
             {rowsError}
           </p>
         )}
-        <div className="space-y-2">
-          {rows.length === 0 && !loading ? (
-            <div className="py-8 text-center text-sm text-[var(--color-muted)]">
-              {searching
-                ? "No memories matched your search."
-                : "No memories visible in your scope yet."}
-            </div>
-          ) : (
-            rows.map((row) => <MemoryCard key={row.id} row={row} />)
-          )}
-        </div>
+        <BusyRegion busy={replacing} label="Searching your memory…">
+          <div className="space-y-2">
+            {rows.length === 0 && !loading ? (
+              <div className="py-8 text-center text-sm text-[var(--color-muted)]">
+                {searching
+                  ? "No memories matched your search."
+                  : "No memories visible in your scope yet."}
+              </div>
+            ) : (
+              rows.map((row) => <MemoryCard key={row.id} row={row} />)
+            )}
+          </div>
+        </BusyRegion>
 
         {/* Load more */}
         {offset + limit < total && (
@@ -354,9 +371,16 @@ export function MemoryView({
             type="button"
             onClick={loadMore}
             disabled={loading}
-            className="w-full rounded-lg border border-[var(--color-border)] py-2 text-sm text-[var(--color-muted)] disabled:opacity-40"
+            className="flex w-full items-center justify-center gap-2 rounded-lg border border-[var(--color-border)] py-2 text-sm text-[var(--color-muted)] disabled:opacity-40"
           >
-            {loading ? "Loading…" : "Load more"}
+            {loading ? (
+              <>
+                <Spinner />
+                Loading…
+              </>
+            ) : (
+              "Load more"
+            )}
           </button>
         )}
       </aside>

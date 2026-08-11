@@ -60,6 +60,7 @@ describe("SettingsView", () => {
       new Response(JSON.stringify({ tags: [] })),
     );
     const html = renderToStaticMarkup(<SettingsView />);
-    expect(html).toContain("Loading tags");
+    expect(html).toContain("Loading your tags");
+    expect(html).toContain('aria-busy="true"');
   });
 });

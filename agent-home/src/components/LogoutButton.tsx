@@ -3,6 +3,8 @@
 import { useRouter } from "next/navigation";
 import { useState } from "react";
 
+import { Spinner } from "@/components/ui/Spinner";
+
 /** Clears the `agent-home` session then returns to the login page. */
 export function LogoutButton() {
   const router = useRouter();
@@ -21,9 +23,16 @@ export function LogoutButton() {
           router.refresh();
         }
       }}
-      className="mt-6 block w-full rounded-xl border border-[var(--color-border)] px-4 py-3 text-center text-sm text-[var(--color-muted)] disabled:opacity-60"
+      className="mt-6 flex w-full items-center justify-center gap-2 rounded-xl border border-[var(--color-border)] px-4 py-3 text-center text-sm text-[var(--color-muted)] disabled:opacity-60"
     >
-      {busy ? "Signing out…" : "Sign out"}
+      {busy ? (
+        <>
+          <Spinner />
+          Signing out…
+        </>
+      ) : (
+        "Sign out"
+      )}
     </button>
   );
 }

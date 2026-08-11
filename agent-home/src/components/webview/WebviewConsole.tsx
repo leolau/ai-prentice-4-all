@@ -5,6 +5,7 @@ import { useState } from "react";
 import { ActionConsole } from "@/components/webview/ActionConsole";
 import { ConsentForm } from "@/components/webview/ConsentForm";
 import { PendingApprovals } from "@/components/webview/PendingApprovals";
+import { BusyRegion } from "@/components/ui/BusyRegion";
 import { Pill } from "@/components/ui/Pill";
 import type {
   WebviewActionKind,
@@ -162,66 +163,77 @@ export function WebviewConsole({
         </p>
       ) : null}
 
-      {session === null ? (
-        <ConsentForm busy={busy} onOpen={openSession} />
-      ) : (
-        <>
-          <section
-            data-component="WebviewSessionCard"
-            className="flex flex-col gap-3 rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface)] p-4"
-          >
-            <div className="flex flex-wrap items-center gap-2">
-              <span className="text-sm font-semibold">Session open</span>
-              <Pill tone={session.scope.mode === "interactive" ? "warning" : "success"}>
-                {session.scope.mode}
-              </Pill>
-              <Pill tone="muted">
-                {session.scope.allowed_domains.length} domain
-                {session.scope.allowed_domains.length === 1 ? "" : "s"}
-              </Pill>
-            </div>
-            <code className="text-xs text-[var(--color-muted)]">
-              trace {session.trace_id.slice(0, 20)}
-            </code>
-            <ul className="flex flex-wrap gap-1">
-              {session.scope.allowed_domains.length === 0 ? (
-                <li className="text-xs text-[var(--color-muted)]">
-                  No domains in scope — every navigation will escalate.
-                </li>
-              ) : (
-                session.scope.allowed_domains.map((d) => (
-                  <li
-                    key={d}
-                    className="rounded-md bg-[var(--color-surface-2)] px-2 py-1 font-mono text-xs"
-                  >
-                    {d}
-                  </li>
-                ))
-              )}
-            </ul>
-            <button
-              type="button"
-              disabled={busy}
-              onClick={() => void closeSession()}
-              className="w-fit rounded-xl border border-[var(--color-border)] px-3 py-2 text-sm disabled:opacity-50"
+      {/* Opening a session, driving a navigation and resolving an escalation all
+       * share one `busy` flag and all reach a real browser, so they are all slow
+       * enough to look stalled. The console is covered as a whole: its controls
+       * act on one session, and a stray tap on another one mid-request would
+       * queue an action against a scope that is still being decided. */}
+      <BusyRegion
+        busy={busy}
+        label="Working with the browser…"
+        className="flex flex-col gap-4"
+      >
+        {session === null ? (
+          <ConsentForm busy={busy} onOpen={openSession} />
+        ) : (
+          <>
+            <section
+              data-component="WebviewSessionCard"
+              className="flex flex-col gap-3 rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface)] p-4"
             >
-              Close session
-            </button>
-          </section>
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-sm font-semibold">Session open</span>
+                <Pill tone={session.scope.mode === "interactive" ? "warning" : "success"}>
+                  {session.scope.mode}
+                </Pill>
+                <Pill tone="muted">
+                  {session.scope.allowed_domains.length} domain
+                  {session.scope.allowed_domains.length === 1 ? "" : "s"}
+                </Pill>
+              </div>
+              <code className="text-xs text-[var(--color-muted)]">
+                trace {session.trace_id.slice(0, 20)}
+              </code>
+              <ul className="flex flex-wrap gap-1">
+                {session.scope.allowed_domains.length === 0 ? (
+                  <li className="text-xs text-[var(--color-muted)]">
+                    No domains in scope — every navigation will escalate.
+                  </li>
+                ) : (
+                  session.scope.allowed_domains.map((d) => (
+                    <li
+                      key={d}
+                      className="rounded-md bg-[var(--color-surface-2)] px-2 py-1 font-mono text-xs"
+                    >
+                      {d}
+                    </li>
+                  ))
+                )}
+              </ul>
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => void closeSession()}
+                className="w-fit rounded-xl border border-[var(--color-border)] px-3 py-2 text-sm disabled:opacity-50"
+              >
+                Close session
+              </button>
+            </section>
 
-          <ActionConsole
-            busy={busy}
-            lastResult={lastResult}
-            onRequest={requestAction}
-          />
+            <ActionConsole
+              busy={busy}
+              lastResult={lastResult}
+              onRequest={requestAction}
+            />
 
-          <PendingApprovals
-            pending={session.pending}
-            busy={busy}
-            onResolve={resolveApproval}
-          />
-        </>
-      )}
+            <PendingApprovals
+              pending={session.pending}
+              busy={busy}
+              onResolve={resolveApproval}
+            />
+          </>
+        )}
+      </BusyRegion>
     </div>
   );
 }
