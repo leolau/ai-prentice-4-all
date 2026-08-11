@@ -1,306 +1,408 @@
-# FG-29 — Goal tree + insight promotion (the ai4all spine)
+# FG-29 — Goal tree + skill promotion (the ai4all spine)
 
-**Wave:** P6-A′ (with FG-24; before FG-26 renders anything) · **Owner agent:** _unassigned_ · **Status:** PLAN — not started
+**Wave:** P6-A′ (with FG-24; before FG-26 renders anything) · **Owner agent:** _unassigned_ · **Status:** PLAN — not started (edition 2)
 
 ## Summary
 
 ai4all exists to help **one entity** — an individual, a one-person company, a
-family, an SME, a school — achieve **one ultimate goal**, with everyone in the
-organisation contributing toward it. A **profile** is the instrument built for
-one *sub-goal*, carrying the behaviour that sub-goal needs. **People** attach to
-the profiles their work spans, supplying real-world input, acting on output, and
-contributing know-how back.
+family, an SME, a school — achieve **one ultimate goal**, with everyone in it
+contributing toward that goal. A **profile is the instrument for one sub-goal**,
+carrying the behaviour that sub-goal needs. **People participate** in as many
+profiles as their responsibilities span, supplying real-world input, acting on
+output, and contributing know-how back.
 
-That model needs two flows the system does not have:
+Two flows make that an organisation rather than a pile of chatbots:
 
 ```
-        owner's ultimate goal
-                 │  (1) goals flow DOWN — coherence
+        entity goal  ("improve learning outcomes for 500 primary students")
+                 │  (1) goals flow DOWN  — coherence
      ┌───────────┼───────────┐
-  finance     product     P5 Chinese      ← profiles = sub-goal instruments
-  (CFO)       (CTO)       (teacher)
+  P3 Maths    P5 Chinese   Admin          ← profiles = sub-goal instruments
      └───────────┼───────────┘
-                 ▲  (2) insight flows UP — compounding
+                 ▲  (2) skills flow UP   — compounding
 ```
 
-**Down** gives coherence: a sub-goal is only meaningful as a decomposition of
-the goal above it, and the agent can only orient a user's request if it knows
-both. **Up** gives compounding: what one profile learns must be promotable to
-the shared tier, or 500 users produce 500 disconnected conversations instead of
-one organisation that gets better.
+Neither exists today. This FG adds both — and, importantly, **builds each on
+machinery Hermes already has** rather than beside it:
 
-## Correction to the earlier analysis: goals already exist
+| flow | existing machinery | what FG-29 adds |
+|---|---|---|
+| goals down | FG-04/FG-09 goal registry (`goals`, `goal_metrics`, `goal_progress`, four front-ends) | hierarchy, a **lifetime discipline**, cross-profile publish, prompt placement |
+| skills up | the self-improvement loop: `agent/background_review.py` forks after a turn and writes skills; the curator manages their lifecycle | a **shared skill library** and a promotion path across the profile boundary |
 
-An earlier draft of the Phase-6 analysis asserted there was "no goal object
-anywhere in Hermes." **That was wrong**, and the correction narrows this FG
-considerably. FG-04 and FG-09 shipped a real goal registry in
-`hermes_cli/goal_registry.py`, merged and live:
+## Two corrections that shrank this FG
 
-```sql
-goals(id, owner_user_id, visibility, title, description,
-      priority, status, created_at, updated_at, deadline)
-goal_metrics(goal_id, name, target, current, unit,
-             source_query, cadence, direction, last_measured_at)
-goal_progress(goal_id, metric_name, ts, value, note)
-goal_asks(goal_id, user_id, …)      -- proactive measurement solicitation
-goal_links(goal_id, resource_kind ∈ {memory,task,tool}, resource_ref)
-```
+**Goals already exist.** An earlier draft of this analysis claimed Hermes has no
+goal object. Wrong: `hermes_cli/goal_registry.py` ships `goals` (C2-scoped,
+RLS), `goal_metrics`, `goal_progress`, `goal_asks`, `goal_links`, and
+`hermes_cli/goal_management.py` is one service behind channels, Telegram, web
+and MCP. What it lacks is `parent_goal_id`, reach across profiles, and any
+presence in the system prompt.
 
-`goals` is the C2-scoped table (RLS applied); metrics, progress and asks hang
-off it and are reached through a scoped join. FG-09 unified management across
-channels, Telegram, web and MCP.
-
-So this FG does **not** build a goal system. It adds the four things that
-registry lacks for the ai4all model:
-
-1. **Hierarchy.** There is no `parent_goal_id` — the registry is a flat,
-   prioritised list per profile. An owner goal decomposing into sub-goals cannot
-   be expressed.
-2. **Reach across profiles.** Goals live in the profile's app schema, and with
-   FG-27 each profile gets its own. The owner's goal is invisible to the
-   profiles meant to serve it.
-3. **Ambient presence.** `goals` is **never injected into the system prompt** —
-   confirmed: `agent/system_prompt.py` and `agent/prompt_builder.py` contain no
-   goal-loading path. The agent learns a goal only if it *calls a tool*. FG-09
-   made that choice deliberately for cache safety ("via tool calls whose results
-   are appended — never by mutating the system prompt"). That is right for
-   *operational* goals, which change often; it is wrong for a *long-term* goal,
-   which is the thing that should orient every turn without being asked for.
-4. **Any upward path.** Nothing promotes local knowledge to the shared tier.
+**The up-flow already exists too — as skills.** A previous edition of this doc
+proposed a free-text `insight_candidates` table. That was reinventing the
+feature that is the reason to build on Hermes at all: the agent already studies
+its own sessions and distils reusable skills. What is missing is not *producing*
+know-how but **moving it across a profile boundary**. So promotion operates on
+**skills**, not prose — a skill is already an executable, tested, formatted
+artefact, so the shared tier accumulates things that *work* instead of things
+someone found interesting.
 
 ## Design / approach
 
-### 1. Hierarchy — one nullable column
+### 1. Goal lifetime is the load-bearing distinction
+
+Some goals last years; some are born and die inside one session. Conflating them
+is the single most dangerous thing this FG could do, because **a goal that can
+change mid-session must never touch the system prompt** — that is what protects
+the per-conversation prefix cache.
+
+So lifetime is not a label, it is a **commitment about mutability**, and it
+decides placement:
+
+| tier | lifetime | example | prompt placement |
+|---|---|---|---|
+| `entity` | years | "Improve learning outcomes for 500 primary students" | **stable** tier |
+| `profile` | quarters–years | "Improve P5 Chinese learning outcomes" | **stable** tier |
+| `participant` | months–years | "Raise P5 comprehension scores for my 100 students" | **volatile** tier (FG-24 snapshot) |
+| `operational` | a session or minutes | "Draft this week's homework set" | **never in the prompt** — tool-appended, exactly as FG-09 does today |
 
 ```sql
 ALTER TABLE goals ADD COLUMN parent_goal_id UUID NULL REFERENCES goals(id);
 ALTER TABLE goals ADD COLUMN tier TEXT NOT NULL DEFAULT 'operational';
-  -- tier ∈ {'entity', 'profile', 'participant', 'operational'}
+  -- CHECK (tier IN ('entity','profile','participant','operational'))
 ```
 
-- **`entity`** — the owner's ultimate goal. Exactly one active per deployment.
-- **`profile`** — this profile's sub-goal; its parent is the entity goal.
-- **`participant`** — a person's sub-goal *within* a profile (the teacher's
-  "P5 Chinese"), parent is the profile goal.
-- **`operational`** — today's goals, unchanged, default, no parent required.
+Rules the code enforces, not conventions:
 
-Deliberately **no closure table and no arbitrary depth**: three long-lived tiers
-plus the existing operational layer covers every example in scope (individual,
-OPC, family, SME, school). Depth is capped and validated on write, so the
-recursive-CTE and cycle problems that make hierarchies expensive never arise.
-If real deployments need deeper nesting, FG-25's closure machinery is the
-upgrade path — but it should not be paid for speculatively.
+- **`operational` is the default**, so every goal that exists today keeps its
+  current behaviour and stays out of the prompt.
+- **A tier change takes effect at the next session, never mid-conversation.**
+  Promoting a short-lived goal to `participant` is legitimate — it is how a
+  recurring concern becomes a standing one — but the live prompt is frozen for
+  the life of the session, so the promotion is recorded now and rendered later.
+- **Only the three long-lived tiers may enter a prompt**, checked at build time
+  rather than trusted at write time.
+- **Exactly one active `entity` goal** per deployment.
 
-### 2. Down-flow — publish, never a live link
+### 2. The ladder spans both lifetimes
 
-Profiles are independent by design (`AGENTS.md`: a PR adding live config
-inheritance from the default profile was closed on exactly this point). So the
-entity goal is **copied** into each profile, not read across the boundary:
+This is what makes down-flow real rather than decorative. A short-lived goal
+**declares its parent**, so the chain always resolves upward:
 
 ```
-hermes goal publish            # owner-only, audited (C5)
-  → for each profile in the registry:
-      upsert the entity goal as a local row with
-        tier='entity', source_rev=<n>, published_at=<ts>
+"draft this week's P5 homework"   operational
+   └─ parent: "raise P5 comprehension scores"    participant
+        └─ parent: "improve P5 Chinese outcomes" profile
+             └─ parent: "improve learning outcomes for 500 students"  entity
 ```
 
-- Each copy records `source_rev`; when the owner edits the entity goal the rev
-  bumps and every profile's copy is flagged **stale** until re-published.
-  Staleness is visible in `hermes doctor` and in the console.
-- A profile can **read** its parent goal and **not write** it. Editing a
-  published copy locally is refused, not merged.
-- This is the same copy-at-creation shape `--clone` already uses, so it adds no
-  new coupling the repo has rejected.
+An operational goal with no declared parent defaults to the profile goal. The
+agent can therefore always answer *which longer-term goal does this serve?* —
+and, more usefully, notice when the honest answer is "none", which is the signal
+the owner actually wants.
 
-### 3. Ambient presence — a new stable-tier prompt block
+Depth stays capped at these four tiers with a self-FK and no closure table:
+validated on write, no recursive CTEs, no cycle class of bug. FG-25's closure
+machinery remains the upgrade path if a real deployment ever needs deeper
+nesting; it should not be paid for speculatively.
 
-The system prompt has three tiers (`agent/system_prompt.py`): `stable`
-(identity/SOUL, tool guidance, skills), `context`, and `volatile` (memory
-snapshot, USER.md, session line).
+### 3. Down-flow — publish, never a live link
 
-Add a **Purpose** block to the **stable** tier, immediately after identity:
+Profiles are independent by design (`AGENTS.md` records a closed PR that added
+live config inheritance from the default profile: "coupling profiles together is
+exactly what the design prevents"). So the entity goal is **copied**:
+
+```
+hermes goal publish          # owner-only, audited (C5)
+  → upsert into each profile as a local row, tier='entity',
+    source_rev=<n>, published_at=<ts>, read-only locally
+```
+
+Editing the entity goal bumps the rev and marks every copy **stale**, surfaced
+in `hermes doctor` and the console. A profile may read its parent and may not
+write it. This is the copy-at-creation shape `--clone` already uses.
+
+### 4. Ambient presence — a stable-tier Purpose block
+
+`agent/system_prompt.py` has three tiers: `stable` (identity/SOUL, tool
+guidance, skills), `context`, `volatile` (memory snapshot, USER.md, session
+line). Add to **stable**, immediately after identity:
 
 ```
 [PURPOSE]
-Ultimate goal (owner):  To improve the learning outcome for 500 primary students
-This profile's goal:    To improve P5 Chinese learning outcomes
+Entity goal:   To improve the learning outcome for 500 primary students
+This profile:  To improve P5 Chinese learning outcomes
 ```
 
-Placing it in `stable` is safe **because these goals are long-lived** — that is
-what distinguishes them from FG-04's operational goals, and why FG-09's
-"never in the prompt" rule does not apply to them. A long-term goal changing is
-a genuine identity change for the agent; invalidating the prefix cache at that
-moment is correct, not a regression. The invariant that matters —
-**byte-stability for the life of a session** — is preserved: the block is
-resolved once at prompt build and frozen, exactly like SOUL.md.
+Placing it in `stable` is safe **precisely because of the lifetime discipline in
+§1**. FG-09's "goals never touch the system prompt" rule is correct for
+operational goals and is preserved for them unchanged; the long-lived tiers are
+identity-grade facts like `SOUL.md`, where a change legitimately invalidates the
+prefix cache the same way editing SOUL does. The invariant that must hold is
+**per-session byte-stability**, and it is the first thing to test.
 
-The **participant** goal goes in the **volatile** tier alongside `USER.md`,
-where FG-24 already puts per-user content and already freezes a per-session
-snapshot. Same tier, same freeze, no new cache surface.
+The `participant` goal goes in the **volatile** tier beside `USER.md`, reusing
+FG-24's existing per-session snapshot freeze — same tier, same freeze, no new
+cache surface.
 
-Both are **budget-capped** like memory (a few hundred characters each, refused
-above) so a goal cannot grow into an essay that displaces the prompt, and both
-run through `_scan_context_content` — goal text is operator-supplied text
+Both are **budget-capped** (refused above the cap, never silently truncated) and
+both run through `_scan_context_content`: goal text is operator-supplied text
 entering the system prompt, i.e. an injection surface, and must be scanned on
 the same path SOUL.md already uses.
 
-### 4. Up-flow — insight promotion, proposed by a profile, approved by the owner
+### 5. Participation — one mechanism for both organisational shapes
+
+The unit is **participation = (person × profile)**, and it covers both cases
+without branching:
+
+- **Many people, one sub-goal each** (SME, school, family): a human CTO in
+  `product`, a teacher in `P5-chinese`, another in `P3-maths`.
+- **One person, many sub-goals** (OPC: the founder is CEO, CTO, CMO and CFO):
+  the same GoTrue subject holds a `principals` row in four profiles, with four
+  working contexts.
+
+Nothing new is needed for either — one shared GoTrue means one subject that each
+profile's `principals` row interprets locally.
+
+**But the OPC case exposes a flaw in FG-24 as written.** FG-24 puts *all*
+per-user memory inside the profile, so the founder's identity facts — who they
+are, how they work, their constraints — would be duplicated four times and drift
+apart. Split by what the fact is *about*:
+
+| level | file | scope | example |
+|---|---|---|---|
+| person | `USER.md` | shared across that person's participations | "prefers concise answers; based in Hong Kong; two children" |
+| participation | `memories/users/<id>/MEMORY.md` | one profile only | "the Q3 cashflow model lives in …" (finance profile only) |
+
+One person, one profile-of-self, N working memories. This amends FG-24 and is
+recorded there.
+
+### 6. Up-flow — skill promotion over the existing self-improvement loop
+
+**What exists:** `agent/background_review.py` forks the agent after a turn,
+replays the conversation, and asks "should any skill/memory be saved or
+updated?", writing through a tool whitelist limited to memory and skill
+management. The curator handles lifecycle (archive, restore, provenance,
+usage). Skills are discovered from `~/.hermes/skills/` **plus configured
+`skills.external_dirs`**, which are explicitly *externally owned*: discoverable
+and viewable, but **autonomous lifecycle maintenance must treat them as
+read-only** (`agent/skill_utils.is_external_skill_path`).
+
+**That last property is the shared library, already built.** The org skill tier
+is a directory at the shared root, added to every profile's
+`skills.external_dirs`:
+
+```
+<hermes-root>/skills-shared/          ← org tier: readable by every profile,
+                                        NOT writable by any profile's curator
+~/.hermes/profiles/<p>/skills/        ← the instrument's own learned skills
+```
+
+Read-only-to-curators is exactly the property promotion needs: a profile's
+self-improvement loop cannot write into the shared tier by accident, so the only
+way in is the deliberate, audited promotion path.
 
 ```sql
-insight_candidates(
+skill_promotions(
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  profile_name  TEXT NOT NULL,          -- origin
-  proposed_by   TEXT NOT NULL REFERENCES principals(user_id),
-  body          TEXT NOT NULL,          -- de-identified, budget-capped
-  rationale     TEXT NOT NULL DEFAULT '',
-  goal_id       UUID NULL REFERENCES goals(id),   -- what it serves
-  status        TEXT NOT NULL DEFAULT 'proposed'  -- proposed|approved|rejected
-                CHECK (status IN ('proposed','approved','rejected')),
-  reviewed_by   TEXT NULL REFERENCES principals(user_id),
-  reviewed_at   TIMESTAMPTZ NULL,
-  created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  skill_name     TEXT NOT NULL,
+  origin_profile TEXT NOT NULL,
+  body_hash      TEXT NOT NULL,        -- the reviewed bytes
+  proposed_by    TEXT NOT NULL REFERENCES principals(user_id),
+  rationale      TEXT NOT NULL DEFAULT '',
+  goal_id        UUID NULL REFERENCES goals(id),   -- which goal it serves
+  status         TEXT NOT NULL DEFAULT 'proposed'
+                 CHECK (status IN ('proposed','approved','rejected')),
+  reviewed_by    TEXT NULL REFERENCES principals(user_id),
+  reviewed_at    TIMESTAMPTZ NULL,
+  created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
 )
 ```
 
-Flow: a profile proposes → the owner reviews in the console → on approval the
-body is written to the **shared** memory tier and published down to profiles by
-the same mechanism as goals.
+Flow: a profile proposes a skill it learned → the owner reviews the actual
+SKILL.md text → on approval it is copied to `skills-shared/` with provenance
+(origin profile, proposer, approver, hash) → every profile picks it up through
+the external-dirs path it already reads.
 
-Non-negotiable guardrails, because this is the one path that *deliberately*
-crosses the isolation boundary:
+Guardrails, because this is the one path that *deliberately* crosses profile
+isolation:
 
-- **Approval is owner-only and cannot be delegated to a profile admin** — a
-  profile admin proposing and approving their own promotion would let one
-  cohort write into every other cohort's context.
-- **Nothing `private:<user_id>` may be promoted** without that user's explicit,
-  recorded consent. The candidate body is authored for promotion, not lifted
-  wholesale from someone's memory.
-- **Full C5 audit**: proposer, reviewer, origin profile, decision, body hash.
-- **Rejected candidates are retained**, so the same idea being proposed five
-  times is visible rather than looking like five new ideas.
-- The shared tier stays **budget-capped**; approval competes for space, which is
-  the forcing function that keeps it signal.
+- **Owner-only approval.** A profile admin approving their own promotion would
+  write into every other profile's context.
+- **Single-principal deployments auto-approve.** In an OPC the owner is the only
+  principal, so requiring them to approve their own proposal is pure friction;
+  the promotion is still recorded and audited, just not gated. *(Open question 2
+  below — this is my recommendation, not a decision.)*
+- **The reviewed artefact is the text.** A skill distilled from one class's
+  sessions can carry traces of the students in it, so approval is review of the
+  SKILL.md bytes, and `body_hash` pins exactly what was approved. A skill that
+  names individuals or quotes their material must be rejected or rewritten.
+- **Nothing `private:<user_id>` is promoted** without recorded consent.
+- **Full C5 audit** — origin profile, proposer, approver, hash, decision.
+- **Rejections are retained**, so the same idea proposed five times looks like
+  repetition rather than five new ideas.
+- **Publication takes effect at the next session** for the same reason tier
+  changes do: skills are listed in the *stable* prompt tier, so a live
+  conversation must not gain one mid-flight.
 
 ## Reuse map
 
-- `hermes_cli/goal_registry.py` — `goals`/`goal_metrics`/`goal_progress`; add
-  two columns, do not fork the table.
-- `hermes_cli/goal_management.py` — FG-09's one service layer behind four
-  front-ends; the tree extends it rather than adding a parallel path.
-- `agent/system_prompt.py` tiers + `load_soul_md`'s scan/truncate path.
-- FG-24's per-user snapshot freeze for the participant tier.
-- C5 audit, C12 change management, C2 visibility.
-- FG-28's profile registry as the publish fan-out list.
+- `hermes_cli/goal_registry.py` — add two columns; do not fork the tables.
+- `hermes_cli/goal_management.py` — FG-09's one service, four front-ends.
+- `agent/system_prompt.py` stable/volatile tiers; `load_soul_md`'s scan+cap path.
+- `agent/background_review.py` + curator + `skill_provenance.py` — the up-flow's
+  producer; FG-29 adds no distillation logic.
+- `agent/skill_utils.get_all_skills_dirs` / `is_external_skill_path` and
+  `skills.external_dirs` — the shared library seam, already read-only to
+  autonomous maintenance.
+- FG-24's per-user snapshot freeze; C5 audit; C12 change management; C2.
 
 ## Scope
 
-**In:** `parent_goal_id` + `tier`; entity/profile/participant semantics;
-`hermes goal publish` with rev + staleness; the stable-tier Purpose block and
-volatile participant block, both capped and scanned; `insight_candidates` with
-owner-only approval, promotion to the shared tier and publish-down; console
+**In:** `parent_goal_id` + `tier` with lifetime enforcement and
+next-session-only tier changes; the operational→entity ladder with parent
+declaration; `hermes goal publish` with rev/staleness; the stable-tier Purpose
+block and volatile participant block, capped and scanned; the person-level vs
+participation-level memory split (amending FG-24); `skills-shared/` as an
+external dir plus `skill_promotions` with owner approval and provenance; console
 views for the goal tree and the promotion queue.
 
-**Out:** arbitrary-depth goal trees; automatic sub-goal generation by the agent;
-automatic scoring of whether a sub-goal actually serves its parent (a judgement
-call, deliberately left to the owner); cross-entity goals.
+**Out:** arbitrary-depth goal trees; automatic sub-goal generation; automatic
+scoring of whether a sub-goal really serves its parent (a judgement call, left
+to the owner); cross-entity goals; changing how skills are distilled.
 
 ## Testing requirements
 
-- Tree integrity: a goal cannot be its own ancestor; depth cap enforced on
-  write; deleting a parent is refused while children exist.
-- **Prompt byte-stability**: the Purpose block is identical across every turn of
-  a session; editing the entity goal mid-session does **not** mutate the live
-  prompt (it takes effect on the next session).
-- Publish: rev bump marks every profile stale; re-publish clears it; a profile
-  cannot write its published parent copy.
-- Budget: over-cap goal text is refused, not silently truncated into the prompt.
-- Injection: goal text goes through the same scanner as SOUL.md — assert a
-  planted directive is caught.
-- Promotion negative matrix: a profile admin cannot approve; a `private:<user>`
-  row cannot be promoted without recorded consent; every decision is audited.
-- Real Postgres for anything RLS-adjacent; `goals` is already a C2 table.
+- **Lifetime discipline** (the critical matrix): an `operational` goal never
+  appears in any prompt tier; a tier change mid-session does not alter the live
+  prompt; the Purpose block is byte-identical across every turn of a session.
+- Ladder: parent chain resolves operational → entity; an orphan operational goal
+  defaults to the profile goal; no cycles; depth cap enforced on write.
+- Publish: rev bump marks copies stale; re-publish clears; a profile cannot
+  write its published parent copy.
+- Memory split: a person in two profiles has one `USER.md` and two separate
+  participation memories; a participation fact does not leak to the other.
+- Budget refusal and injection scanning on goal text.
+- Promotion negative matrix: a profile admin cannot approve; a promoted skill
+  cannot be written by a profile's curator into `skills-shared/`; a
+  `private:<user>`-derived skill is refused without consent; a newly approved
+  skill does not enter a live session's prompt; audit rows complete.
+- Real Postgres for anything RLS-adjacent (`goals` is already a C2 table).
 
 ## System testing (system-test box)
 
-On `hermes-systest`: set an entity goal, create two profiles with distinct
-sub-goals, publish, and confirm each agent's system prompt carries the right
-parent+local pair and no other profile's. Propose an insight from one profile,
-approve it as owner, and confirm it appears in the other profile only after
-publish — and that a profile admin cannot approve it.
+On `hermes-systest`: set an entity goal; create two profiles with distinct
+sub-goals; publish; confirm each agent's prompt carries the right parent+local
+pair and no other profile's. Create a session-scoped operational goal under a
+participant goal and confirm the chain resolves while the prompt stays
+byte-stable. Distil a skill in one profile, propose it, approve as owner, and
+confirm the other profile picks it up on its **next** session — and that a
+profile admin cannot approve it.
 
 ## Dependencies
 
 - **Blocked by:** FG-27 Layers 3+1 (per-profile schemas; publish targets them).
-- **Related:** FG-04/FG-09 (the registry being extended), FG-24 (participant
-  tier shares the snapshot freeze), FG-28 (profile registry = publish fan-out),
-  FG-26 (renders the tree and the promotion queue — write this first so the
-  console is not retrofitted).
-- **Supersedes the need for:** FG-25 in v1. With profiles carrying cohort
-  structure, hierarchical multi-dimensional groups are no longer required to
-  express departments or classes.
+- **Amends:** FG-24 (person-level vs participation-level memory).
+- **Related:** FG-04/FG-09 (the registry being extended), FG-28 (profile
+  registry = publish fan-out), FG-26 (renders the tree and promotion queue —
+  sequence this first so the console is not retrofitted).
+- **Supersedes the need for:** FG-25 in v1.
 
 ## Definition of Done
 
-`parent_goal_id`/`tier` with validation; publish + staleness; Purpose block in
-the stable tier and participant goal in volatile, both capped, scanned and
-byte-stable per session; `insight_candidates` with owner-only approval, audit
-and publish-down; console goal tree and promotion queue; full test matrix on
-real Postgres; `scripts/run_tests.sh`, `ruff`, `ty` clean; system test passed.
+Tier + parent with lifetime enforcement and next-session semantics; publish with
+staleness; Purpose block stable-tier and participant volatile, capped, scanned,
+byte-stable per session; person/participation memory split; `skills-shared/` +
+`skill_promotions` with owner approval, provenance and audit; console goal tree
+and promotion queue; full matrix on real Postgres; `scripts/run_tests.sh`,
+`ruff`, `ty` clean; system test passed.
 
 ## Progress checklist
 
-- [ ] `goals.parent_goal_id` + `tier`, with cycle/depth validation
-- [ ] `hermes goal publish` — rev, staleness, read-only parent copies, C5 audit
+- [ ] `goals.parent_goal_id` + `tier`, cycle/depth validation, `operational` default
+- [ ] Lifetime enforcement: only long-lived tiers reach a prompt; tier changes apply next session
+- [ ] Parent declaration on short-lived goals; orphan defaults to the profile goal
+- [ ] `hermes goal publish` — rev, staleness, read-only copies, C5 audit
 - [ ] Stable-tier Purpose block (capped, scanned, byte-stable per session)
-- [ ] Volatile participant goal block, sharing FG-24's snapshot freeze
-- [ ] `insight_candidates` + owner-only approval + promotion to shared tier
-- [ ] Console: goal tree view, promotion queue
-- [ ] Tests: tree integrity, prompt stability, publish, budget, injection, promotion negative matrix
+- [ ] Volatile participant goal block on FG-24's snapshot freeze
+- [ ] Person-level `USER.md` vs participation-level memory split (FG-24 amendment)
+- [ ] `skills-shared/` wired as an external dir in every profile
+- [ ] `skill_promotions` + owner approval (+ single-principal auto-approve) + provenance
+- [ ] Console: goal tree, promotion queue
+- [ ] Tests: lifetime matrix, ladder, publish, memory split, budget, injection, promotion negatives
 - [ ] System test on `hermes-systest` passed
+
+## Open questions (for the owner)
+
+1. **OPC routing.** When one person runs four sub-goal profiles, how do they
+   address the right instrument? One bot/channel per profile (explicit, zero
+   routing logic, four chats) or one entry point that infers the sub-goal
+   (nicer, but a wrong guess writes context into the wrong brain). Biggest
+   remaining UX decision; nothing else in this FG depends on it.
+2. **Auto-approve promotion in single-principal deployments?** Recommended
+   above; confirm.
+3. **School privacy.** Is "the owner reviews the SKILL.md text before it
+   crosses" sufficient for skills distilled from student sessions, or should
+   promotion from a profile containing minors' data require something stricter?
 
 ## Audit log
 
 | Date | Edition | Author | Change | Rationale |
 |------|---------|--------|--------|-----------|
-| 2026-08-10 | 1 | devin (for Leo) | Created FG doc | Leo reframed the domain model: ai4all serves **one entity pursuing one ultimate goal**; a **profile is an instrument for a sub-goal** with matching behavioural characteristics; **people participate in as many profiles as their work spans**, supplying real-world input and contributing know-how back. That reframing resolves the groups-vs-profiles question — a person can already hold a `principals` row in several profiles under one shared GoTrue subject, so multi-cohort membership needs no new machinery and FG-25 is not required for v1 — and it exposes what is actually missing. **Correcting an earlier error in this analysis:** I had asserted Hermes has no goal object; in fact FG-04/FG-09 shipped a full registry (`goals`, `goal_metrics`, `goal_progress`, `goal_asks`, `goal_links`, C2-scoped, four front-ends). What that registry lacks is (1) `parent_goal_id` — it is a flat list, so an owner goal decomposing into sub-goals cannot be expressed; (2) reach across profiles, since goals live in the profile's schema and FG-27 gives each its own; (3) any presence in the system prompt — verified absent from `agent/system_prompt.py` and `agent/prompt_builder.py`, a deliberate FG-09 cache-safety choice that is right for operational goals and wrong for long-term ones; and (4) any upward path for knowledge. Chose publish-with-revision over live inheritance because `AGENTS.md` records a PR closed for coupling profiles, and copy-at-creation is the shape the repo already accepts. Put the Purpose block in the **stable** prompt tier on the argument that a long-term goal is an identity-grade fact like SOUL.md — rare changes legitimately invalidate the prefix cache, and per-session byte-stability, the invariant that actually matters, is preserved. Owner-only approval on insight promotion because it is the one path that intentionally crosses profile isolation: a profile admin approving their own promotion would write into every other cohort's context. | Leo: "a profile is an infrastructure defined to help to improve on sub-goal with similar behavioural characteristics, human-inputs (as users) can assist to provide inputs from the real-world … as well as, to further provide know-hows, insights and innovations on how to achieve the goal." Goals flowing down give coherence; insights flowing up give compounding. Neither existed. |
+| 2026-08-10 | 1 | devin (for Leo) | Created FG doc | Leo reframed the domain model: ai4all serves **one entity pursuing one ultimate goal**; a **profile is an instrument for a sub-goal**; **people participate in as many profiles as their work spans**. That resolved the groups-vs-profiles question (a person can already hold a `principals` row in several profiles under one shared GoTrue subject, so FG-25 is not needed for v1) and exposed what was missing. Corrected an error: I had asserted Hermes has no goal object, when FG-04/FG-09 shipped a full registry; what it lacks is `parent_goal_id`, cross-profile reach, prompt presence (verified absent) and an upward path. Chose publish-with-revision over live inheritance per the closed-PR precedent in `AGENTS.md`. | Leo: "a profile is an infrastructure defined to help to improve on sub-goal with similar behavioural characteristics … to further provide know-hows, insights and innovations on how to achieve the goal." |
+| 2026-08-10 | 2 | devin (for Leo) | Goal **lifetime** made load-bearing; up-flow rebuilt on the **existing skills loop**; participation + memory split added | Three corrections from Leo. **(1) Goals differ by lifetime** — some last years, some come and go inside a single session — and the system must not conflate them. Lifetime is now a *commitment about mutability* that decides placement: only `entity`/`profile`/`participant` may enter a prompt, `operational` stays tool-appended exactly as FG-09 has it, and a tier change takes effect **at the next session** because the live prompt is frozen for the session's life. That preserves FG-09's rule where it is right instead of overriding it, and it is what makes the stable-tier Purpose block defensible. The ladder deliberately spans both lifetimes — a short-lived goal declares its parent — so the agent can always resolve *which long-term goal does this serve*, and can notice when the answer is "none". **(2) The up-flow already exists**: edition 1 proposed a free-text `insight_candidates` table, which reinvented the self-improvement loop that is Leo's reason for building on Hermes at all. Rebuilt on it — `agent/background_review.py` already distils skills, so the missing piece is only *crossing the profile boundary*. The shared library needs no new mechanism either: `skills.external_dirs` already exists and is **read-only to autonomous curation** (`is_external_skill_path`), which is precisely the property promotion requires — a profile's curator cannot write into the org tier by accident, so the audited promotion path is the only way in. Promoting *skills* rather than prose also means the shared tier accumulates executable, tested artefacts. **(3) Both organisational shapes are one mechanism** — participation = (person × profile) covers many-people-one-sub-goal (SME/school/family) and one-person-many-sub-goals (OPC) without branching. But the OPC case exposed a flaw in FG-24: putting *all* per-user memory inside the profile would duplicate the founder's identity facts across four profiles and let them drift, so memory now splits by what the fact is *about* — person-level `USER.md` shared across a person's participations, participation-level memory isolated per profile. | Leo: "some goals are very long term and don't change very often but some goals are very short-lived and will come and go in every session or even in the middle of a session. The system must be careful with this distinction." · "The existing Hermes infrastructure already support self-improving … this should be the 'Insight flows up'." · "in a One-Person-Company (OPC) the CEO is also the CTO is also the CMO is also the CFO. The same person will provide the real-world connections and insights and knowhows for different sub-goals." |
 
 ## Cloud-agent prompt
 
 > Repo `leolau/ai-prentice-4-all`, branch off `develop`. Read
 > `docs/design/master-plan/README.md`, `AGENTS.md`, FG-04, FG-09, FG-24, FG-27
-> and this doc. **Do not build a goal system — one exists.**
-> `hermes_cli/goal_registry.py` already has `goals`/`goal_metrics`/
-> `goal_progress`/`goal_asks` and `hermes_cli/goal_management.py` is the single
-> service behind four front-ends. Extend them.
+> and this doc.
 >
-> **(1) Hierarchy:** add `parent_goal_id UUID NULL REFERENCES goals(id)` and
-> `tier TEXT` (`entity`/`profile`/`participant`/`operational`, default
-> `operational` so existing rows are untouched). Validate on write: no cycles,
-> capped depth. No closure table.
+> **Build nothing that exists.** There is already a goal registry
+> (`hermes_cli/goal_registry.py`, one service in `hermes_cli/goal_management.py`
+> behind four front-ends) and already a self-improvement loop that distils
+> skills (`agent/background_review.py` + curator). Extend both.
+>
+> **(1) Lifetime discipline — the part to get right.** Add
+> `parent_goal_id UUID NULL REFERENCES goals(id)` and `tier`
+> (`entity`/`profile`/`participant`/`operational`, default `operational` so
+> existing rows are untouched). Enforce at prompt-build time that **only the
+> three long-lived tiers can reach a prompt**, and that a **tier change applies
+> at the next session, never mid-conversation**. Short-lived goals declare a
+> parent; an orphan defaults to the profile goal. No closure table; validate
+> cycles and depth on write.
 >
 > **(2) Down-flow:** `hermes goal publish` copies the entity goal into every
-> profile in the registry as a **read-only local row** with `source_rev`;
-> editing the entity goal bumps the rev and marks every copy stale, surfaced in
-> `hermes doctor`. Copy, never a live cross-profile read — `AGENTS.md` records a
-> closed PR on exactly that coupling.
+> profile as a **read-only** local row with `source_rev`; editing bumps the rev
+> and marks copies stale (surface in `hermes doctor`). Copy, never a live
+> cross-profile read — `AGENTS.md` records a closed PR on exactly that coupling.
 >
-> **(3) Ambient presence:** add a `[PURPOSE]` block to the **stable** tier of
-> `agent/system_prompt.py`, right after identity, carrying the published entity
-> goal and this profile's goal; put the participant goal in the **volatile**
-> tier beside `USER.md`, reusing FG-24's per-session snapshot freeze. Budget-cap
-> both and run them through the same `_scan_context_content` path SOUL.md uses —
-> this is operator text entering the system prompt. The test that matters:
-> the block is byte-identical across every turn of a session, and editing a goal
-> mid-session does not mutate the live prompt.
+> **(3) Prompt:** `[PURPOSE]` block in the **stable** tier of
+> `agent/system_prompt.py` after identity (entity + profile goals); participant
+> goal in the **volatile** tier beside `USER.md`, reusing FG-24's snapshot
+> freeze. Budget-cap both; run both through `_scan_context_content` — this is
+> operator text entering the system prompt. Test that the block is
+> byte-identical across every turn and that editing a goal mid-session does not
+> mutate the live prompt.
 >
-> **(4) Up-flow:** `insight_candidates` (schema in this doc). A profile
-> proposes; **only the owner approves** — a profile admin must not be able to,
-> since approval writes into every other profile's context. No `private:<user>`
-> content may be promoted without recorded consent. Approved bodies go to the
-> shared memory tier and publish down. Full C5 audit including origin profile
-> and body hash; keep rejected candidates.
+> **(4) Memory split (amends FG-24):** person-level `USER.md` shared across a
+> person's participations; participation-level memory per profile. Test that one
+> person in two profiles has one profile-of-self and two isolated working
+> memories.
 >
-> Tests on real Postgres: tree integrity, prompt byte-stability, publish and
-> staleness, budget refusal, injection scanning, and the promotion negative
-> matrix. Then the `hermes-systest` procedure in this doc.
-> `scripts/run_tests.sh`, `ruff`, `ty` clean.
+> **(5) Up-flow:** add `<hermes-root>/skills-shared/` to every profile's
+> `skills.external_dirs` — it is already read-only to autonomous curation
+> (`agent/skill_utils.is_external_skill_path`), which is the property that keeps
+> a profile's curator out of the org tier. Add `skill_promotions` (schema
+> above): propose → **owner-only** approval of the SKILL.md **bytes**
+> (`body_hash` pins what was approved) → copy to `skills-shared/` with
+> provenance. Auto-approve only when the deployment has a single principal.
+> Refuse promotion of `private:<user>`-derived content without recorded consent.
+> Newly approved skills take effect **next session** (skills are listed in the
+> stable tier). Full C5 audit; keep rejections.
+>
+> Tests on real Postgres: the lifetime matrix first, then ladder, publish,
+> memory split, budget refusal, injection scanning, promotion negatives. Then
+> the `hermes-systest` procedure above. `scripts/run_tests.sh`, `ruff`, `ty`
+> clean.

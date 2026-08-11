@@ -172,7 +172,7 @@ footgun before FG-25/FG-26 add identity-bearing tables to the shared schema.
 | [24](./feature-groups/FG-24-per-principal-curated-memory.md) | Per-principal curated memory (memory layers 1–2 become per-user) | **P6-A** (Phase-6) | `tools/memory_tool.py` (`get_memory_dir`, `MemoryStore`, frozen snapshot), `agent/agent_init.py` (principal already in scope), `agent/system_prompt.py` volatile tier |
 | [25](./feature-groups/FG-25-group-scopes-multi-dimensional.md) | ~~Group scopes: multi-dimensional, hierarchical audiences + scoped admin~~ (**DEFERRED** — profiles carry cohort structure; C10 stays reserved) | ~~P6-A~~ **deferred** | `hermes_cli/access.py` C2 (`scope_filter`/`apply_scope_rls`/`bind_principal`), FG-19 `item_grants` clause pattern, FG-21 elevation GUC + `memory_access_audit` |
 | [26](./feature-groups/FG-26-users-groups-admin-console.md) | Users & Groups admin console + invitation activation | **P6-B** (after FG-25) | `hermes_cli/members.py` (`MemberService`, `GoTrueAdminClient`), `/api/comms/members*`, FG-20 BFF + `MembersView.tsx`, C5/C8 |
-| [29](./feature-groups/FG-29-goal-tree-and-insight-promotion.md) | Goal tree + insight promotion (the ai4all spine: goals flow down, insights flow up) | **P6-A′** (with FG-24; before FG-26) | `hermes_cli/goal_registry.py` (`goals`/`goal_metrics`/`goal_progress` — already shipped by FG-04/FG-09), `hermes_cli/goal_management.py` one-service-four-frontends, `agent/system_prompt.py` stable+volatile tiers, FG-24 snapshot freeze |
+| [29](./feature-groups/FG-29-goal-tree-and-insight-promotion.md) | Goal tree + **skill** promotion (the ai4all spine: goals flow down by lifetime tier, skills flow up) | **P6-A′** (with FG-24; before FG-26) | `hermes_cli/goal_registry.py` (`goals`/`goal_metrics`/`goal_progress` — already shipped by FG-04/FG-09), `hermes_cli/goal_management.py` one-service-four-frontends, `agent/system_prompt.py` stable+volatile tiers, FG-24 snapshot freeze, `agent/background_review.py` self-improvement loop + `skills.external_dirs` (already read-only to curators) |
 | [28](./feature-groups/FG-28-multi-profile-administration.md) | Multi-profile administration + **one gateway for all profiles** | **P6-C** (after FG-26; needs FG-27 L1+L3) | `hermes_cli/profiles.py` (`profiles_to_serve`), `_comms_resolve_principal` C1 (already 409s for unenrolled subjects), per-profile `principals` as the entitlement list, FG-20 BFF |
 
 ---
@@ -301,9 +301,12 @@ WAVE P6-0 (prerequisite — small; Layers 1+2 must land before P6-A adds tables)
 WAVE P6-A (parallel — two independent agents)
   ├─ FG-24  per-principal curated memory        (needs C1 only; touches tools/memory_tool.py,
   │         agent/agent_init.py, agent/system_prompt.py — no DB change)
-  └─ FG-29  goal tree + insight promotion       (extends the SHIPPED FG-04/FG-09 goal registry
-            with parent_goal_id + tier, publish-down, a stable-tier PURPOSE block,
-            and owner-approved insight_candidates. The ai4all spine.)
+  └─ FG-29  goal tree + skill promotion        (extends the SHIPPED FG-04/FG-09 registry with
+            parent_goal_id + a LIFETIME tier: only entity/profile/participant may
+            reach a prompt, operational stays tool-appended per FG-09, and tier
+            changes apply next session. Up-flow rides the SHIPPED self-improvement
+            loop: skills promoted into a shared skills.external_dirs tier.
+            Also amends FG-24: person-level USER.md, participation-level memory.)
 
   (FG-25 group scopes — DEFERRED. Profiles are sub-goal instruments and people
    participate in several, so cohorts no longer need hierarchical groups.)
