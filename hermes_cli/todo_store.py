@@ -790,6 +790,54 @@ class TodoStore:
             if own:
                 await conn.close()
 
+    async def record_outbound(
+        self,
+        principal: Principal,
+        todo_id: str,
+        *,
+        event: str,
+        channel: str,
+        actor: str,
+        connection: Optional["asyncpg.Connection"] = None,
+    ) -> None:
+        """Append an outgoing-action decision to the to-do's own history.
+
+        The proposal, the approval and the refusal all belong on the same
+        timeline as the stage changes: "we finished this and offered to reply,
+        and you said no" is one story, and splitting it across two tables makes
+        it unreadable in the one place the user looks. The ``action:`` prefix
+        does for these what ``stage:`` does for the rest.
+        """
+        predicate = scope_filter(
+            principal,
+            start_index=2,
+            grant_item_kind=GRANT_ITEM_KIND,
+            id_column=GRANT_ID_COLUMN,
+        )
+        own = connection is None
+        conn = connection or await self._connect()
+        try:
+            visible = await conn.fetchval(
+                f"SELECT 1 FROM {TASKS_TABLE} WHERE id = $1 AND {predicate.sql}",
+                todo_id,
+                *predicate.params,
+            )
+            if visible is None:
+                raise LookupError("to-do not found or not visible")
+            await conn.execute(
+                f"""
+                INSERT INTO {TRANSITIONS_TABLE} (task_id, from_state, to_state, actor)
+                VALUES ($1, $2, $3, $4)
+                """,
+                todo_id,
+                "action:new",
+                f"action:{event}:{channel}",
+                actor,
+            )
+        finally:
+            if own:
+                await conn.close()
+
     async def _record_transition(
         self,
         conn: "asyncpg.Connection",

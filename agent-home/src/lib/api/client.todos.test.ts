@@ -108,4 +108,33 @@ describe("HermesApiClient to-dos", () => {
       until: "2026-08-20T09:00:00Z",
     });
   });
+
+  it("completeTodo carries the outcome and the drafted action", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(ok({}));
+
+    await client().completeTodo("t1", {
+      outcome: "sent the quote",
+      // No channel or target: the reply route is the server's to resolve from
+      // the arrival (C4), so the client only ever sends the words.
+      proposed_action: { body: "Quote attached.", subject: "Re: tender" },
+    });
+
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(String(url)).toBe(
+      "http://api.test/api/registry/todos/t1/complete",
+    );
+    expect(init?.method).toBe("POST");
+    expect(JSON.parse(String(init?.body))).toEqual({
+      outcome: "sent the quote",
+      proposed_action: { body: "Quote attached.", subject: "Re: tender" },
+    });
+  });
+
+  it("completeTodo finishes with no proposal when nothing was drafted", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(ok({}));
+
+    await client().completeTodo("t1");
+
+    expect(JSON.parse(String(fetchMock.mock.calls[0][1]?.body))).toEqual({});
+  });
 });

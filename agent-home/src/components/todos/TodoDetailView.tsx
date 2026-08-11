@@ -1,0 +1,248 @@
+"use client";
+
+import Link from "next/link";
+import { useState } from "react";
+
+import { surfaceGlyph } from "@/components/inbox/IncomingRow";
+import { TodoCompleteForm } from "@/components/todos/TodoCompleteForm";
+import { STAGE_LABEL, sourceGlyph } from "@/components/todos/TodoRow";
+import { formatWhen } from "@/components/files/FilesView";
+import type { Todo, TodoDetail, TodoStage } from "@/types";
+
+/** The moves offered from each stage, in the order a user reaches for them. */
+const NEXT_STAGES: Record<TodoStage, TodoStage[]> = {
+  staged: ["open", "working", "done", "dismissed"],
+  open: ["working", "done", "dismissed"],
+  working: ["done", "dismissed"],
+  done: ["working"],
+  dismissed: ["open"],
+};
+
+const STAGE_VERB: Record<TodoStage, string> = {
+  staged: "Back to staged",
+  open: "Open it",
+  working: "Work on it",
+  done: "Mark done",
+  dismissed: "Dismiss",
+};
+
+/** Snooze offsets, in hours. "Later" is only useful if it is one tap. */
+const SNOOZES: { label: string; hours: number }[] = [
+  { label: "3 hours", hours: 3 },
+  { label: "Tomorrow", hours: 24 },
+  { label: "Next week", hours: 24 * 7 },
+];
+
+/**
+ * One to-do in full: what it is, where it came from, and everything that has
+ * happened to it.
+ *
+ * The arrival that caused it is quoted inline rather than merely linked. *Why
+ * is this here?* is the first question anyone asks of something an agent put
+ * in front of them, and answering it a click away is answering it late. When
+ * the arrival is gone or was never linked, `source_note` carries the weaker
+ * provenance instead — "a WhatsApp message from this number" beats silence.
+ */
+export function TodoDetailView({ todo }: { todo: TodoDetail }) {
+  const [current, setCurrent] = useState<TodoDetail>(todo);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function post(path: string, body: unknown) {
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await fetch(
+        `/api/todos/${encodeURIComponent(current.id)}${path}`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(body),
+        },
+      );
+      const payload = (await res.json()) as Todo & { detail?: string };
+      if (!res.ok) {
+        setError(payload.detail ?? "That didn't stick — try again.");
+        return;
+      }
+      setCurrent({ ...current, ...payload });
+    } catch {
+      setError("Couldn't reach the AI layer.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const source = current.source;
+
+  return (
+    <div data-component="TodoDetailView" className="flex flex-col gap-4">
+      <Link href="/todos" className="text-xs text-[var(--color-muted)]">
+        ← To-dos
+      </Link>
+
+      <div className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface)] p-4">
+        <h1 className="flex items-start gap-2 text-sm font-semibold">
+          <span aria-hidden>{sourceGlyph(current.source_kind)}</span>
+          <span className="break-words">{current.title}</span>
+        </h1>
+
+        <dl className="mt-3 grid grid-cols-[auto,1fr] gap-x-3 gap-y-1 text-xs">
+          <Row label="Stage">{STAGE_LABEL[current.stage]}</Row>
+          <Row label="Priority">{current.priority}</Row>
+          {current.due_at ? (
+            <Row label="Due">{formatWhen(current.due_at)}</Row>
+          ) : null}
+          {current.snoozed_until ? (
+            <Row label="Snoozed until">{formatWhen(current.snoozed_until)}</Row>
+          ) : null}
+          <Row label="Raised by">
+            {current.origin === "triage" ? "Triage" : current.origin}
+          </Row>
+          {current.outcome ? (
+            <Row label="Outcome">{current.outcome}</Row>
+          ) : null}
+        </dl>
+
+        {current.description ? (
+          <p className="mt-4 whitespace-pre-wrap text-sm">
+            {current.description}
+          </p>
+        ) : null}
+
+        <div className="mt-4 flex flex-wrap gap-1.5 text-[11px]">
+          {/* Finishing goes through the form below instead: it is the one
+              transition that may also propose something outgoing. */}
+          {NEXT_STAGES[current.stage]
+            .filter((stage) => stage !== "done")
+            .map((stage) => (
+              <button
+                key={stage}
+                type="button"
+                disabled={busy}
+                onClick={() => void post("/stage", { stage })}
+                className="rounded-lg border border-[var(--color-border)] px-2 py-1 text-[var(--color-muted)] transition hover:border-[var(--color-accent)] hover:text-[var(--color-accent)] disabled:opacity-50"
+              >
+                {STAGE_VERB[stage]}
+              </button>
+            ))}
+        </div>
+
+        {current.stage !== "done" && current.stage !== "dismissed" ? (
+          <div className="mt-2 flex">
+            <TodoCompleteForm
+              todo={current}
+              onDone={(completed) => setCurrent({ ...current, ...completed })}
+            />
+          </div>
+        ) : null}
+
+        {current.stage === "staged" || current.stage === "open" ? (
+          <div className="mt-2 flex flex-wrap items-center gap-1.5 text-[11px] text-[var(--color-muted)]">
+            <span>Snooze:</span>
+            {SNOOZES.map((option) => (
+              <button
+                key={option.hours}
+                type="button"
+                disabled={busy}
+                onClick={() =>
+                  void post("/snooze", {
+                    until: new Date(
+                      Date.now() + option.hours * 3_600_000,
+                    ).toISOString(),
+                  })
+                }
+                className="rounded-lg border border-[var(--color-border)] px-2 py-1 transition hover:border-[var(--color-accent)] hover:text-[var(--color-accent)] disabled:opacity-50"
+              >
+                {option.label}
+              </button>
+            ))}
+          </div>
+        ) : null}
+
+        {error ? (
+          <p className="mt-2 text-xs text-[var(--color-muted)]">{error}</p>
+        ) : null}
+      </div>
+
+      {source ? (
+        <div
+          data-component="TodoSource"
+          className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface)] p-4"
+        >
+          <h2 className="text-xs uppercase tracking-wide text-[var(--color-muted)]">
+            Because of
+          </h2>
+          <Link
+            href={`/inbox/${encodeURIComponent(source.id)}`}
+            className="mt-2 flex items-start gap-2 text-sm"
+          >
+            <span aria-hidden>{surfaceGlyph(source.surface)}</span>
+            <span className="min-w-0 flex-1">
+              <span className="block truncate font-medium">
+                {source.subject?.trim() ||
+                  source.sender_name?.trim() ||
+                  source.sender_id?.trim() ||
+                  "(untitled)"}
+              </span>
+              <span className="mt-0.5 block text-xs text-[var(--color-muted)]">
+                {formatWhen(source.occurred_at)}
+              </span>
+            </span>
+          </Link>
+          {source.body ? (
+            <blockquote className="mt-2 border-l-2 border-[var(--color-border)] pl-3 text-xs text-[var(--color-muted)]">
+              {source.body.slice(0, 400)}
+              {source.body.length > 400 ? "…" : ""}
+            </blockquote>
+          ) : null}
+          <Link
+            href={`/todos?source_ref=${encodeURIComponent(source.id)}&stage=staged,open,working,done,dismissed`}
+            className="mt-3 inline-block text-xs text-[var(--color-muted)]"
+          >
+            Everything this arrival raised →
+          </Link>
+        </div>
+      ) : current.source_note ? (
+        <p
+          data-component="TodoSourceNote"
+          className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface)] p-4 text-xs text-[var(--color-muted)]"
+        >
+          Raised from {current.source_note}. The original message is no longer
+          linked.
+        </p>
+      ) : null}
+
+      {current.history.length > 0 ? (
+        <div
+          data-component="TodoHistory"
+          className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface)] p-4"
+        >
+          <h2 className="text-xs uppercase tracking-wide text-[var(--color-muted)]">
+            History
+          </h2>
+          <ul className="mt-2 flex flex-col gap-1 text-xs text-[var(--color-muted)]">
+            {current.history.map((step, index) => (
+              <li key={`${step.at}-${index}`} className="flex gap-2">
+                <span className="shrink-0">{formatWhen(step.at)}</span>
+                <span className="min-w-0 flex-1 break-words">
+                  {step.from} → {step.to}
+                  {step.actor ? ` · ${step.actor}` : ""}
+                </span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function Row({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <>
+      <dt className="text-[var(--color-muted)]">{label}</dt>
+      <dd className="break-words">{children}</dd>
+    </>
+  );
+}
