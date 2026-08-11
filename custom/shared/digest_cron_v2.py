@@ -88,6 +88,51 @@ def call_deepseek(prompt):
         return None
 
 
+def collect_open_todos(limit=5):
+    """Lines for the digest's to-do section. Best-effort; never fatal.
+
+    The roll-up is what makes a conservative push bar affordable: the to-dos
+    that deliberately did not interrupt still reach the user within the hour.
+    """
+    try:
+        import asyncio
+
+        from hermes_cli.todo_notifier import default_stores, digest_lines, open_todos
+        from shared.todo_registration import resolve_owner
+
+        async def _read():
+            principal = await resolve_owner()
+            if principal is None:
+                return []
+            store, _ = default_stores()
+            return digest_lines(
+                await open_todos(store, principal, limit=limit * 4), limit=limit
+            )
+
+        return asyncio.run(_read())
+    except Exception as e:
+        print(f"[digest] Could not read open to-dos: {e}")
+        return []
+
+
+def sweep_todo_notifications():
+    """Announce open to-dos nobody has been told about. Returns the count."""
+    import asyncio
+
+    from hermes_cli.todo_notifier import announce_pending, default_stores
+    from shared.todo_registration import resolve_owner
+
+    async def _run():
+        principal = await resolve_owner()
+        if principal is None:
+            return 0
+        store, notifications = default_stores()
+        results = await announce_pending(store, notifications, principal)
+        return sum(1 for r in results if r.notified)
+
+    return asyncio.run(_run())
+
+
 def generate_digest():
     """Generate a merged hourly digest of WhatsApp + Email activity."""
     db = get_db()
@@ -163,6 +208,17 @@ def generate_digest():
 
     total_msgs = wa_msg_count + email_count
 
+    # Announce anything that reached `open` without being announced inline —
+    # a to-do the user promoted themselves, a snooze that lapsed, a triage run
+    # that raced a database outage. The inline path stays the fast one; this
+    # is the floor under it.
+    try:
+        announced = sweep_todo_notifications()
+        if announced:
+            print(f"[digest] Announced {announced} open to-do(s)")
+    except Exception as e:
+        print(f"[digest] To-do announce sweep failed: {e}")
+
     if total_msgs == 0 and not wa_pending_tasks and not email_pending_tasks:
         print(f"[digest] No activity in last {DIGEST_INTERVAL_MIN}min, skipping digest")
         db.close()
@@ -201,6 +257,12 @@ def generate_digest():
         for t in all_tasks[:5]:
             context_parts.append(f"  - [{t['priority']}] {t['description']} (due: {t['due_date'] or 'none'})")
 
+    todo_lines = collect_open_todos()
+    if todo_lines:
+        context_parts.append(f"\n--- OPEN TO-DOS ({len(todo_lines)}) ---")
+        for line in todo_lines:
+            context_parts.append(f"  - {line}")
+
     all_escalations = list(wa_escalations) + list(email_escalations)
     if all_escalations:
         context_parts.append(f"\n--- ESCALATIONS ({len(all_escalations)}) ---")
@@ -230,6 +292,10 @@ def generate_digest():
         f"<i>{now.strftime('%H:%M UTC')} | WA: {wa_msg_count} msgs, Email: {email_count} emails</i>\n\n"
         f"{summary}"
     )
+
+    if todo_lines:
+        joined = "\n".join(f"  \u2022 {line}" for line in todo_lines)
+        digest_msg += f"\n\n\u2705 <b>Open to-dos</b>\n{joined}"
 
     if pending_merges > 0:
         digest_msg += f"\n\n\U0001f517 {pending_merges} pending contact merge suggestion(s)"
