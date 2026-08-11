@@ -51,7 +51,12 @@ if TYPE_CHECKING:
 
 TASKS_TABLE = "tasks"
 TASK_STATUSES = ("pending", "in_progress", "completed", "cancelled")
-TASK_ORIGINS = ("explicit", "discovered")
+# ``triage`` is neither of the other two: the user did not ask for it, and it
+# did not come from the repetition-signal discovery engine below — it is a
+# to-do the triage pipeline produced from an arrival. Keeping it distinct is
+# what lets the discovery engine's anti-loop guard and its C6 proposal path
+# stay exactly as they are.
+TASK_ORIGINS = ("explicit", "discovered", "triage")
 
 _SCHEMA_SQL = f"""
 CREATE TABLE IF NOT EXISTS {TASKS_TABLE} (
