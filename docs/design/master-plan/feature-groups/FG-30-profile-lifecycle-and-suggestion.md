@@ -146,6 +146,45 @@ thing the person must remember to address.
 Archives are kept (`hermes profile export`), so retirement is reversible even
 though memory division is not.
 
+### 5. The first goal — a default, editable in settings
+
+FG-30 fixes the "which profiles do I need?" cold start, but there is a second
+one just before it: a new owner meets an empty system and a goal-shaped hole,
+and an entity goal nobody wrote means every downstream mechanism (publication,
+roll-up, conflict detection, skill scoring) has nothing to hang off.
+
+So the entity goal is **seeded with a system default** at first run — a generic
+but real long-term goal, e.g. *"To optimise the effectiveness of this
+organisation"* — marked as a default so the console can prompt for a better one
+without nagging. It is then **editable in `agent-home` settings**
+(`agent-home/src/app/settings` + `components/settings/SettingsView.tsx`, which
+already exist), alongside its primary metric (FG-29 §7).
+
+Two properties this must keep:
+
+- **Seeded, not blank.** A default goal that is obviously generic invites
+  replacement; an empty field invites being skipped.
+- **Editing it is a publication event.** Changing the entity goal bumps the
+  revision and marks every profile's copy stale (FG-29 §3) — the settings page
+  is a writer into the goal tree, not a text box.
+
+The existing `agent-home/src/app/onboarding` route is the natural place to ask
+for it the first time.
+
+### 6. Invitation delivery — the owner's own channel, by decision
+
+Earlier drafts treated the absence of SMTP as a hole. It is a **decision**: the
+owner shares the invitation link by whatever means they already use. That is
+honest about the deployment (a family or an OPC has no mail server and does not
+want one) and it keeps FG-26 free of a mail dependency.
+
+What it costs must stay written down rather than being forgotten: a link relayed
+through a chat app sits in that app's scrollback and on its servers, and the
+relaying owner could in principle activate the account themselves. The short TTL
+and single-use property (FG-26) bound the window; "the user set their own
+password" is not an integrity property this deployment can claim. Recorded here
+so the trade is visible if the audit ledger is ever used in a dispute.
+
 ## Reuse map
 
 - `hermes_cli/profiles.py` — `create_profile` (already takes `description`,
@@ -158,11 +197,15 @@ though memory division is not.
 - FG-29 — goal publication, the promotion path, the weekly digest.
 - FG-27 — never inherit a resolved DSN; new profile gets its own schema.
 - FG-28 — the console renders the queue; gateway collision detection.
+- `agent-home/src/app/settings` + `components/settings/SettingsView.tsx` and the
+  existing `onboarding` route — the first-goal editor, already built.
+- FG-26 invitations (delivery is the owner's own channel, by decision).
 - C5 audit; C12 change management.
 
 ## Scope
 
-**In:** `profile_suggestions` with evidence and owner-only adoption; suggestion
+**In:** a **seeded default entity goal** editable in `agent-home` settings (an
+edit is a publication event); `profile_suggestions` with evidence and owner-only adoption; suggestion
 generation on the weekly digest; adoption wiring `create_profile` with sub-goal
 + promoted skills + person-level `USER.md`; channel-less start and the
 commit-to-channel step; retire/merge with a one-time promotion offer; idle
@@ -175,6 +218,8 @@ on the same evidence.
 
 ## Testing requirements
 
+- First run seeds a default entity goal; editing it in settings bumps the
+  revision and marks profile copies stale.
 - A suggestion is never auto-adopted; only the owner can adopt; a profile admin
   cannot.
 - Adoption creates a profile with the sub-goal, the published entity goal and
@@ -221,6 +266,7 @@ console queue; full negative matrix on real Postgres; `scripts/run_tests.sh`,
 - [ ] Channel-less start; commit-to-channel step; `hermes doctor` reporting
 - [ ] Retire/merge with one-time promotion offer + archive
 - [ ] Idle-profile detection in the digest
+- [ ] Seeded default entity goal + settings/onboarding editor; editing bumps the publish revision
 - [ ] Console: suggestion queue with evidence
 - [ ] Tests + system test
 
@@ -237,6 +283,7 @@ console queue; full negative matrix on real Postgres; `scripts/run_tests.sh`,
 | Date | Edition | Author | Change | Rationale |
 |------|---------|--------|--------|-----------|
 | 2026-08-10 | 1 | devin (for Leo) | Created FG doc | Leo's answer to the OPC-routing question turned out to be a new capability rather than a UX choice: **support both** — a channel per profile for clarity, but starting from one or a couple of profiles because "the human may not know what kind of profile does he/she needs", with the system **suggesting more profiles over time, as part of the learning and promotion**. Every other Phase-6 doc had assumed static, up-front profile structure. Profile creation becomes an *output* of the same loop FG-29 uses for skills: the evidence that distils a skill also shows where work clusters into a distinct sub-goal. Three holes that the suggestion mechanism opens are addressed here rather than left implicit: (a) a bot token needs a human at BotFather, so a mandatory credential step would block the routine act of adopting a suggestion — adopted profiles therefore start **channel-less** and earn a channel when the owner commits; (b) suggestion without **retirement/merge** produces sprawl, and each profile costs a memory, a channel and a thing to remember, so idle detection and a retire path with a one-time promotion offer are in scope; (c) **splitting memory** between a parent and a new profile is a judgement no heuristic makes well and nobody will do by hand, so adoption deliberately inherits only the unambiguous parts (sub-goal, promoted skills, person-level `USER.md`) — lossy but honest and automatable, and it gives skill promotion a second purpose, since a promoted skill is what a new instrument starts life with. | Leo: "We need to support both. Each profile should have its own bot/channel to make things more clear and efficient for both the human and the system. However, at the beginning, the human may not know what kind of profile does he/she needs. Therefore, the system should be able to start with just one profile or a couple of profiles and the ability to suggest more profiles to add over time, as part of the learning and promotion." |
+| 2026-08-10 | 2 | devin (for Leo) | First goal seeded + editable in `agent-home` settings; invitation delivery recorded as a decision, not a hole | Leo closed the two smaller onboarding gaps. The **first goal** is seeded from a system default and edited in settings — which matters more than it sounds: an entity goal nobody wrote means publication, roll-up, conflict detection and skill scoring all have nothing to hang off, and a *seeded* generic goal invites replacement where an empty field invites being skipped. The settings page is therefore a writer into the goal tree — an edit bumps the publish revision and marks every profile's copy stale (FG-29 §3), rather than being a text box. The **invitation link** is shared by the owner through their own channel, so the missing SMTP is a decision rather than a gap; the cost is written down here instead of being forgotten — a relayed link sits in a chat app's scrollback and the relaying owner could activate the account themselves, so "the user set their own password" is not an integrity property this deployment can claim. | Leo: "The first goal can come from the system default, but also must be configurable at the settings page in the agent-home. The invitation link can be shared by the owner using his/her own mean." |
 
 ## Cloud-agent prompt
 
