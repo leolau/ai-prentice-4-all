@@ -1,5 +1,6 @@
 "use client";
 
+import { Spinner } from "@/components/ui/Spinner";
 import type { ProfileSummary } from "@/types";
 
 /** The profile the picker means when nothing is selected. */
@@ -19,12 +20,15 @@ export function ProfilePicker({
   selected,
   onSelect,
   disabled = false,
+  switching = false,
 }: {
   profiles: ProfileSummary[];
   selected: string;
   onSelect: (profile: string) => void;
   /** True while a turn is in flight — switching mid-turn is refused. */
   disabled?: boolean;
+  /** True while the chosen profile's conversations are still loading. */
+  switching?: boolean;
 }) {
   if (profiles.length < 2) return null;
 
@@ -44,7 +48,7 @@ export function ProfilePicker({
       <select
         id="chat-profile"
         value={selected}
-        disabled={disabled}
+        disabled={disabled || switching}
         onChange={(e) => onSelect(e.target.value)}
         className="min-w-0 flex-1 rounded-full border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-1 text-xs text-[var(--color-fg)] disabled:opacity-50"
       >
@@ -55,7 +59,18 @@ export function ProfilePicker({
           </option>
         ))}
       </select>
-      {active?.description ? (
+      {/* Switching swaps a whole HERMES_HOME, so the reload takes long enough to
+       * look like the tap missed. The select is held until it lands. */}
+      {switching ? (
+        <span
+          role="status"
+          aria-live="polite"
+          className="inline-flex shrink-0 items-center gap-1 text-[var(--color-accent)]"
+        >
+          <Spinner />
+          Loading…
+        </span>
+      ) : active?.description ? (
         <span className="hidden truncate text-[var(--color-muted)] sm:block">
           {active.description}
         </span>

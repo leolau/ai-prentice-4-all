@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, useTransition } from "react";
 
 import { useRouter } from "next/navigation";
 
@@ -97,6 +97,7 @@ export function ChatPane({
   profile,
 }: ChatPaneProps) {
   const router = useRouter();
+  const [switchingProfile, startProfileSwitch] = useTransition();
   // Every client read below carries the selected profile, because a profile is
   // a whole HERMES_HOME: reading the default profile's sessions while the turn
   // runs in another is what files one profile's reply in another's history.
@@ -391,11 +392,15 @@ export function ChatPane({
    */
   function switchProfile(next: string) {
     if (next === profile || sendingKeys.length > 0) return;
-    router.push(
-      next === DEFAULT_PROFILE
-        ? "/chat"
-        : `/chat?profile=${encodeURIComponent(next)}`,
-    );
+    // In a transition so the picker can report the wait: the server has to load
+    // another home's sessions and transcript, which is not instant.
+    startProfileSwitch(() => {
+      router.push(
+        next === DEFAULT_PROFILE
+          ? "/chat"
+          : `/chat?profile=${encodeURIComponent(next)}`,
+      );
+    });
   }
 
   function reorderSessions(orderedIds: string[]) {
@@ -657,6 +662,7 @@ export function ChatPane({
         selected={profile}
         onSelect={switchProfile}
         disabled={sendingKeys.length > 0}
+        switching={switchingProfile}
       />
 
       {/* Tag filter bar */}
