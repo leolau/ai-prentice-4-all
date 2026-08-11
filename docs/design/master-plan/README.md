@@ -157,7 +157,7 @@ Every FG must obey these or it will not merge:
 | [22](./feature-groups/FG-22-memory-visualizer.md) | Read-only memory visualizer on the operator dashboard | **V1→V4** (Phase-5) | `hermes_cli/memory_explorer.py` over FG-21's store, `_comms_resolve_principal` C1, `memory_projection` under the same C2 RLS as `memories`, `web/` SPA + `@observablehq/plot` |
 | [23](./feature-groups/FG-23-memory-on-agent-home.md) | The memory visualizer on `agent-home` (the phone) | **A0→A5** (Phase-5) | FG-22's `/api/memory/explorer/*` endpoints (unchanged), FG-20 BFF (`HermesApiClient`, `requirePrincipal`, `MobileShell`), `deploy/hermes-deploy.sh` + `deploy_state.py` |
 
-### Phase 6 — FG-24–28 (scaling one profile to hundreds of principals)
+### Phase 6 — FG-24–29 (from one profile to an entity pursuing one goal)
 
 Phase 1 built multi-user for a handful of principals in one profile. Phase 6 is
 what an organisation of 500 actually needs: personal curated memory, a way to
@@ -170,9 +170,10 @@ footgun before FG-25/FG-26 add identity-bearing tables to the shared schema.
 |----|-------|------|-----------------------|
 | [27](./feature-groups/FG-27-profile-scoped-datastore-isolation.md) | Profile-scoped app-layer datastore isolation (close the shared-schema footgun) | **P6-0** (before P6-A touches app tables) | `hermes_cli/datastore.py` C3 router (`get_store`, `initialize_supabase_app`), `hermes_cli/profiles.py` (`_CLONE_CONFIG_FILES`, `get_active_profile_name`), `hermes_constants.set_hermes_home_override` |
 | [24](./feature-groups/FG-24-per-principal-curated-memory.md) | Per-principal curated memory (memory layers 1–2 become per-user) | **P6-A** (Phase-6) | `tools/memory_tool.py` (`get_memory_dir`, `MemoryStore`, frozen snapshot), `agent/agent_init.py` (principal already in scope), `agent/system_prompt.py` volatile tier |
-| [25](./feature-groups/FG-25-group-scopes-multi-dimensional.md) | Group scopes: multi-dimensional, hierarchical audiences + scoped admin (**publishes C10**) | **P6-A** (Phase-6) | `hermes_cli/access.py` C2 (`scope_filter`/`apply_scope_rls`/`bind_principal`), FG-19 `item_grants` clause pattern, FG-21 elevation GUC + `memory_access_audit` |
+| [25](./feature-groups/FG-25-group-scopes-multi-dimensional.md) | ~~Group scopes: multi-dimensional, hierarchical audiences + scoped admin~~ (**DEFERRED** — profiles carry cohort structure; C10 stays reserved) | ~~P6-A~~ **deferred** | `hermes_cli/access.py` C2 (`scope_filter`/`apply_scope_rls`/`bind_principal`), FG-19 `item_grants` clause pattern, FG-21 elevation GUC + `memory_access_audit` |
 | [26](./feature-groups/FG-26-users-groups-admin-console.md) | Users & Groups admin console + invitation activation | **P6-B** (after FG-25) | `hermes_cli/members.py` (`MemberService`, `GoTrueAdminClient`), `/api/comms/members*`, FG-20 BFF + `MembersView.tsx`, C5/C8 |
-| [28](./feature-groups/FG-28-multi-profile-administration.md) | Multi-profile administration (one admin, several profiles) | **P6-C** (after FG-26; needs FG-27 L1+L3) | `hermes_cli/profiles.py` (`profiles_to_serve`), `_comms_resolve_principal` C1 (already 409s for unenrolled subjects), per-profile `principals` as the entitlement list, FG-20 BFF |
+| [29](./feature-groups/FG-29-goal-tree-and-insight-promotion.md) | Goal tree + insight promotion (the ai4all spine: goals flow down, insights flow up) | **P6-A′** (with FG-24; before FG-26) | `hermes_cli/goal_registry.py` (`goals`/`goal_metrics`/`goal_progress` — already shipped by FG-04/FG-09), `hermes_cli/goal_management.py` one-service-four-frontends, `agent/system_prompt.py` stable+volatile tiers, FG-24 snapshot freeze |
+| [28](./feature-groups/FG-28-multi-profile-administration.md) | Multi-profile administration + **one gateway for all profiles** | **P6-C** (after FG-26; needs FG-27 L1+L3) | `hermes_cli/profiles.py` (`profiles_to_serve`), `_comms_resolve_principal` C1 (already 409s for unenrolled subjects), per-profile `principals` as the entitlement list, FG-20 BFF |
 
 ---
 
@@ -290,35 +291,40 @@ only the FG-20 doc, keeps baseline + web build green, preserves the one-brain
 chat path (cache-safe), and re-runs the negative-access RLS + C6 checks. The
 existing `web/` operator console is left intact.
 
-### Phase 6 (FG-24–28 scale-out) — waves (start after Phase-5 `develop` is merged; the FG-26 "assign profile" question is resolved by FG-28)
+### Phase 6 (FG-24–29 scale-out) — waves (start after Phase-5 `develop` is merged; the FG-26 "assign profile" question is resolved by FG-28)
 
 ```
 WAVE P6-0 (prerequisite — small; Layers 1+2 must land before P6-A adds tables)
   └─ FG-27  profile-scoped datastore isolation  (C3 router + profile clone; no new
                                                  contract, no shape change)
 
-WAVE P6-A (parallel — two independent agents; FG-25 publishes C10 first)
+WAVE P6-A (parallel — two independent agents)
   ├─ FG-24  per-principal curated memory        (needs C1 only; touches tools/memory_tool.py,
   │         agent/agent_init.py, agent/system_prompt.py — no DB change)
-  └─ FG-25  group scopes / C10                  (needs C1/C2, C3, C5, C8; extends scope_filter +
-            apply_scope_rls + bind_principal — SMALL CONTRACT PR FIRST, like Wave 0)
+  └─ FG-29  goal tree + insight promotion       (extends the SHIPPED FG-04/FG-09 goal registry
+            with parent_goal_id + tier, publish-down, a stable-tier PURPOSE block,
+            and owner-approved insight_candidates. The ai4all spine.)
 
-WAVE P6-B (after FG-25 merges)
-  └─ FG-26  Users & Groups console + invitations (needs C10/FG-25, FG-20 BFF, C5, C8;
-            also carries the list_principals N+1 fix that the roster needs at N=500)
+  (FG-25 group scopes — DEFERRED. Profiles are sub-goal instruments and people
+   participate in several, so cohorts no longer need hierarchical groups.)
 
-WAVE P6-C (after FG-26; gated on FG-27 Layers 1+3 and on one open decision)
-  └─ FG-28  Multi-profile administration — one console, several profiles, scoped
-            to the profiles where the caller holds an admin principal row.
-            Fan-out to per-profile processes, NOT in-process multiplexing:
-            HERMES_HOME is a contextvar but os.environ is not, so one process
-            cannot hold per-profile secrets.
+WAVE P6-B (after FG-29 — the console must render the goal tree, not be retrofitted)
+  └─ FG-26  Users & Goals console + invitations (needs FG-20 BFF, C5, C8; also carries the
+            list_principals N+1 fix the roster needs at N=500)
+
+WAVE P6-C (after FG-26; gated on FG-27 Layers 3+1)
+  └─ FG-28  One console over the goal tree, scoped to the participations the caller
+            holds — plus the ONE-GATEWAY-FOR-ALL-PROFILES consolidation
+            (gateway.multiplex_profiles; the mechanism and its fail-closed
+            context-local secret scope already exist — the work is finishing
+            the get_secret() migration: 6 of ~2,250 env reads done, and an
+            unmigrated os.getenv returns the WRONG profile's value silently).
 ```
 
-**Phase-6 parallelization:** FG-24 and FG-25 share no files and can run as two
-agents immediately; **FG-25 lands C10 as a small contract PR first** so FG-26
-builds against a frozen seam. FG-26 must not start before FG-25 merges — it
-renders groups it cannot otherwise query. Runtime scale-out (gateway workers
+**Phase-6 parallelization:** FG-24 and FG-29 share no files and can run as two
+agents immediately. FG-26 must not start before FG-29 merges — the console
+renders the goal tree and the insight-promotion queue, and retrofitting those
+into a finished users/groups console costs more than sequencing them. Runtime scale-out (gateway workers
 sharded by session key, `SessionDB` off SQLite, per-principal rate/cost quotas,
 the D8 8/32 resize) is **separate work, not part of Phase 6**: Phase 6 makes the
 *access model* serve thousands of registered principals, while concurrent-session
@@ -536,6 +542,33 @@ transient, and in-place-resize to 8/32 (same-family, ~5 min, no data migration
   header no longer denies the request, it executes it as the *target profile's
   owner*. FG-28 requires forwarding the caller's original GoTrue token and
   refusing owner-fallback on console-routed requests, with a negative test.
+- **The `get_secret()` migration is asymmetric, and that asymmetry is the
+  risk (FG-28).** `agent/secret_scope.py` gives the multiplexing gateway a
+  context-local, fail-closed secret scope that never mutates `os.environ` — an
+  unscoped `get_secret()` read *raises*. But an unmigrated **`os.getenv`** read
+  does not raise; it silently returns whichever profile's value the process
+  environment happens to hold. Only **6** call sites use `get_secret()` against
+  ~2,250 direct env reads, so `gateway.multiplex_profiles` must not be enabled
+  with per-profile-distinct bot tokens or model keys until the credential paths
+  reachable from a gateway turn are audited and migrated.
+- **A long-term goal in the stable prompt tier is a deliberate cache trade
+  (FG-29).** FG-09 keeps operational goals out of the system prompt for cache
+  safety. FG-29 puts the *entity* and *profile* goals into the stable tier
+  anyway, on the argument that they are identity-grade and change rarely — so a
+  change legitimately invalidates the prefix cache, the way editing SOUL.md
+  does. The invariant that must hold is per-session byte-stability, and it is
+  the thing to test. If goals in practice churn like operational ones, this
+  decision is wrong and should be revisited rather than patched.
+- **Insight promotion is the one path that intentionally crosses profile
+  isolation (FG-29).** Approval must be owner-only — a profile admin approving
+  their own promotion would write into every other profile's context — and no
+  `private:<user>` content may be promoted without recorded consent. Everything
+  else in Phase 6 works to keep profiles apart; this one feature deliberately
+  does not, so it carries the strictest gate.
+- **Goal text is operator-supplied text entering the system prompt (FG-29)** and
+  is therefore an injection surface. It must run through the same
+  `_scan_context_content` path SOUL.md uses, and be budget-capped so it cannot
+  displace the rest of the prompt.
 - **Supabase resource budget** on a 4/16 box with the full bundle + Node tools
   + concurrent cores — monitor; resize to 8/32 (D8) if RAM-bound.
 - **Multi-user vs upstream Hermes divergence** — keep the access layer as an
@@ -606,3 +639,4 @@ transient, and in-place-resize to 8/32 (same-family, ~5 min, no data migration
 | 2026-08-10 | 21 | devin (for Leo) | FG-27 / profile isolation / risks | **Added FG-27 — profile-scoped app-layer datastore isolation**, sequenced as a Phase-6 **prerequisite** (P6-0) ahead of FG-25/FG-26. Found while scoping multi-profile administration: `get_store()` hard-codes the app schema to `app_dev`/`app_prod`, so a profile's data is addressed by `(dsn, "app_prod")` and the **only** discriminator is a DSN string in that profile's `config.yaml`. `hermes profile create --clone` — the documented "start from my default" path — copies `config.yaml` verbatim (`_CLONE_CONFIG_FILES = ["config.yaml", ".env", "SOUL.md"]`, no mention of `dsn`), so the recommended workflow produces two "isolated" profiles sharing one `principals`/`memories`/`memory_projection`/`changes`/`item_grants` set. Nothing detects it (concurrent connections to one schema are what a legitimate single profile looks like; `initialize_supabase_app()` is `IF NOT EXISTS`) and nothing on disk shows it (`state.db`, `memories/`, `config.yaml`, `skills/` are genuinely separate). RLS does not help — it scopes rows correctly inside a database both profiles treat as their own. Three layers specified, cheapest first: a fail-closed `schema_owner` claim/verify marker, `--clone` no longer copying the app DSN blindly, and profile-derived schema names (`app_prod_<profile>`, default profile byte-identical) resolved through `get_active_profile_name()` so a multiplexed gateway turn scoped with `set_hermes_home_override()` picks the right schema with no caller changes. Prevention is prioritised over migration because interleaved rows carry no provenance column and **cannot** be disentangled automatically. Also recorded three new §8 risks: this footgun, the shared kanban board's missing identity namespace (`tasks.owner_user_id`/`visibility` use C2's vocabulary on a deliberately cross-profile board while `principals` is per profile), and the fact that any multi-profile administration console is a **deliberate reversal** of the "profiles are independent islands on purpose" intent recorded in `AGENTS.md` and must be argued in its own FG. Docs-only, no code. | Leo asked whether each profile has its own SQLite and Supabase DB. SQLite yes, by construction; Supabase only by convention — which surfaced the footgun. He then asked for it as a separate FG. Sequenced first because FG-25/FG-26 add exactly the identity-bearing tables (`groups`, `invitations`) whose cross-profile leakage would be most damaging: an invitation redeemable in the wrong profile is far worse than a merged memory row. |
 | 2026-08-10 | 22 | devin (for Leo) | FG-28 / multi-profile administration | **Added FG-28 — one administrator managing users in several profiles** (owner assigns `engineers`+`testers` to the CTO and `hr` to the CFO), with users still belonging to exactly one profile and no user-visible data crossing a boundary. Two findings shaped it. **(a) The entitlement model needs no new tables.** The Supabase dashboard-auth provider verifies GoTrue's access token and uses the `sub` claim as the identity, and `hermes_cli/access.py` uses that same UUID as `principal.user_id` — so with one shared GoTrue, "CTO may administer `engineers`" means exactly "CTO has an `admin` row in `engineers`' `principals`". The per-profile `principals` table *is* the per-profile grant: already RLS-protected, already fail-closed (absence of a row is absence of authority), and `_comms_resolve_principal` already returns 409 for an authenticated-but-unenrolled subject rather than falling back to owner. **(b) The architecture is forced by the process environment.** `set_hermes_home_override()` is a `contextvar`, but `_expand_env_vars` resolves `dsn: ${DATABASE_URL}` from the process-global `os.environ` and `reload_env()` writes to it — so one process cannot hold per-profile secrets (DSN, service-role key, model keys), and with ~2,250 env call sites there is no context-local seam. FG-28 therefore **fans out to per-profile processes** rather than multiplexing in-process: the process boundary is what keeps secrets apart, and only a control-plane profile registry is shared (the shape already accepted for `kanban.db`). Recorded the sharpest hole: `_comms_resolve_principal`'s owner fallback for sessionless requests is correct today but becomes an escalation to *the target profile's owner* the moment a console→profile-API hop exists, so FG-28 requires forwarding the caller's original GoTrue token and refusing owner-fallback on console routes, with a negative test. Also flagged that the **gateway already multiplexes profiles in one process** and may therefore already be exposed to (b) — verifying that is FG-28's first task and outranks the feature if confirmed. Sequenced as P6-C after FG-26 and gated on FG-27 Layers 1+3, which turn a wrong-DSN resolution from a silent merge into a detectable error, and on one open decision: whether all profiles share a single GoTrue. | Leo: "the owner can assign Engineers profile and Testers profile to admin CTO, and HR profile to admin CFO … Is this a big scope change? Does it allow access to cross profile?" Answer: no cross-profile access for users, and medium scope — but it is a deliberate reversal of the "profiles are independent islands on purpose" intent in `AGENTS.md`, so it gets its own FG and its own argument rather than riding along with FG-26. |
 | 2026-08-10 | 23 | devin (for Leo) | Shared-Supabase decision propagated through FG-26/27/28 | Leo confirmed **all profiles share one Supabase instance**. Three consequences recorded. **(1) FG-28's entitlement model is confirmed** — one GoTrue means one subject namespace, so a per-profile `principals` row is a sufficient per-profile grant with no new authority tables, and the shared kanban `owner_user_id` ambiguity closes incidentally. **(2) FG-27 changes shape** — one Supabase is one Postgres, so every profile has the same DSN *by design* and the shared-schema collision stops being a footgun and becomes the guaranteed outcome: the second profile merges into the first on contact, with no configuration that avoids it. Layer 3 (profile-derived schemas) is promoted from "the real fix" to **the enabling mechanism for having more than one profile at all**; build order becomes **3 → 1 → 2**; Layer 1 is unaffected because its marker keys on the schema rather than the DSN; and Layer 2 as written is now *wrong* — blanking the cloned DSN would break the intended topology — so it is re-scoped from "don't share the database" to "share the database, never the schema". **(3) A new hole, the sharpest one: global accounts, local authority.** With `auth.users` shared, `MemberService`'s ban/delete/password-reset run through the GoTrue admin API with the shared service-role key gated only by `require_member_admin` against the *current* profile, so an `hr` admin can ban an account enrolled in `engineers`. FG-26 gains §3.5 splitting **enrolment-level** verbs (add/remove/re-role the principals row — confined to the acting profile) from **account-level** verbs (ban/delete/reset — box-wide), makes profile-context "deactivate" mean *un-enrol*, and requires owner (or a target enrolled solely in profiles the actor administers) for account-level operations. Symmetrically, every profile process holding that key means one compromised process is a box-wide account compromise, which is the strongest argument for account operations living behind FG-28's control plane. Also corrected FG-28's `os.environ` finding honestly: with a shared Supabase the DSN and service-role key are identical across profiles, so it is no longer a correctness blocker for the datastore — fan-out drops from hard requirement to strong recommendation, justified by per-profile model keys and by the property holding only through an unenforced coincidence. | Leo: "all profile shares the same supabase instance. How does it affect the design?" |
+| 2026-08-10 | 24 | devin (for Leo) | Domain model corrected: profiles are sub-goal instruments — FG-29 added, FG-25 deferred, FG-28 reframed, one gateway adopted | Leo restated what ai4all is: a system helping **one entity** (individual, OPC, family, SME, school) achieve **one ultimate goal**, where a **profile is the instrument for a sub-goal** with matching behavioural characteristics, and **people participate in as many profiles as their work spans** — supplying real-world input, acting on output, and contributing know-how back. Four changes follow. **(1)** The reframing retires the "a user belongs to exactly one profile" premise I had been designing against: it was an imported constraint, not one the system imposes, since one shared GoTrue subject can hold a `principals` row in several profiles with separate memory in each. The multi-cohort case (a teacher on two classes, an engineer on two projects) therefore needs no new machinery. **(2) FG-25 (group scopes) is deferred** — profiles now carry the cohort structure hierarchical groups were designed to express, and it was the most expensive item in Phase 6 while buying isolation *by policy* where profiles give it *by construction*. C10 stays reserved; groups remain right for scoping *within* one large profile. **(3) FG-29 added as the spine**, after correcting an error of mine: I had told Leo there was no goal object in Hermes, when FG-04/FG-09 shipped a full registry (`goals`, `goal_metrics`, `goal_progress`, `goal_asks`, `goal_links`, C2-scoped, four front-ends). What it lacks is hierarchy (no `parent_goal_id`), reach across profiles, any presence in the system prompt (verified absent — a deliberate FG-09 cache-safety choice, right for operational goals and wrong for long-term ones), and any upward path for knowledge. FG-29 adds two flows: **goals down** by publish-with-revision (copy, not live inheritance, per the closed-PR precedent in `AGENTS.md`) for coherence, and **insights up** via owner-approved `insight_candidates` for compounding — without which 500 users produce 500 disconnected conversations. **(4) One gateway for all profiles adopted** into FG-28 on Leo's request and measured evidence (150 MB per gateway daemon, ~225 MB per console, ~3.7 GB idle at ten profiles against 9.6 GB available). Reading the code corrected a second claim of mine: `agent/secret_scope.py` already solves the process-global-environment problem for the gateway path, so the work is finishing the `get_secret()` migration rather than building the mechanism. | Leo: "a profile is an infrastructure defined to help to improve on sub-goal with similar behavioural characteristics … what would be the best way to organize these different parts into a single, user-friendly and effective solution, ai4all?" plus "Please put into the plan to support one gateway for all profiles running on the same box." |

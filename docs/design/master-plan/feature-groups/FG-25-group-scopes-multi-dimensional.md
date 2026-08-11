@@ -1,6 +1,23 @@
 # FG-25 — Group scopes: multi-dimensional, hierarchical audiences + scoped admin (**publishes C10**)
 
-**Wave:** P6-A (Phase-6) · **Owner agent:** _unassigned_ · **Status:** PLAN — not started
+**Wave:** ~~P6-A~~ **DEFERRED — optional, not in v1** · **Owner agent:** _unassigned_ · **Status:** PLAN — deferred 2026-08-10
+
+> **Deferred (2026-08-10).** The domain model settled in FG-29 makes a
+> **profile the instrument for one sub-goal**, and a **person a participant in
+> as many profiles as their work spans** — one shared GoTrue subject holding a
+> `principals` row in each, with separate memory in each. Departments, classes,
+> cohorts and projects are therefore expressed by *profiles*, not by groups, and
+> the multi-cohort case that motivated this FG (a teacher on two classes, an
+> engineer on two projects) is already supported with no new machinery.
+>
+> This was the most expensive item in Phase 6 (2–3 sessions, mostly the RLS
+> negative-access matrix) and it bought isolation **by policy** where profiles
+> give isolation **by construction** — a worse trade for a system whose whole
+> value rests on not leaking one cohort's data into another's.
+>
+> Groups remain the right answer for scoping *within* one large profile (P5 vs
+> P6 inside a single teaching instrument). Revisit when a real deployment needs
+> that; nothing here is discarded, and C10 stays reserved.
 
 ## Summary
 
