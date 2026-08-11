@@ -213,30 +213,47 @@ skill_promotions(
   rationale      TEXT NOT NULL DEFAULT '',
   goal_id        UUID NULL REFERENCES goals(id),   -- which goal it serves
   status         TEXT NOT NULL DEFAULT 'proposed'
-                 CHECK (status IN ('proposed','approved','rejected')),
-  reviewed_by    TEXT NULL REFERENCES principals(user_id),
-  reviewed_at    TIMESTAMPTZ NULL,
+                 CHECK (status IN ('proposed','profile_approved','approved','rejected')),
+  profile_reviewed_by TEXT NULL REFERENCES principals(user_id),   -- stage 1: origin profile
+  profile_reviewed_at TIMESTAMPTZ NULL,
+  owner_reviewed_by   TEXT NULL REFERENCES principals(user_id),   -- stage 2: owner
+  owner_reviewed_at   TIMESTAMPTZ NULL,
   created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
 )
 ```
 
-Flow: a profile proposes a skill it learned → the owner reviews the actual
-SKILL.md text → on approval it is copied to `skills-shared/` with provenance
-(origin profile, proposer, approver, hash) → every profile picks it up through
-the external-dirs path it already reads.
+Flow: a profile proposes a skill it learned → **the origin profile's reviewer**
+approves → **the owner** approves → it is copied to `skills-shared/` with
+provenance (origin profile, proposer, both approvers, hash) → every profile
+picks it up through the external-dirs path it already reads.
+
+**Review is a weekly digest, not an interrupt.** Promotion runs on a batch
+cadence: one message listing the skills the profiles learned, each with its
+text, its origin and the goal it serves, to approve/reject/edit in one sitting.
+That suits the loop's shape — `background_review` already runs asynchronously
+after turns and writes *locally*; only the crossing needs a human — and at
+weekly cadence human approval costs about a minute, which is why there is **no
+auto-approve path even for single-principal deployments**: one code path,
+always audited.
+
+**Two stages, because the two reviewers know different things.** The origin
+profile's reviewer (the teacher, the CFO) is the only one who can tell whether a
+skill carries traces of the people it was learned from; the owner is the only
+one who can tell whether it belongs to the whole entity. `principals` carries a
+profile-level `reviewer` role; the owner is always the second stage.
 
 Guardrails, because this is the one path that *deliberately* crosses profile
 isolation:
 
-- **Owner-only approval.** A profile admin approving their own promotion would
-  write into every other profile's context.
-- **Single-principal deployments auto-approve.** In an OPC the owner is the only
-  principal, so requiring them to approve their own proposal is pure friction;
-  the promotion is still recorded and audited, just not gated. *(Open question 2
-  below — this is my recommendation, not a decision.)*
-- **The reviewed artefact is the text.** A skill distilled from one class's
-  sessions can carry traces of the students in it, so approval is review of the
-  SKILL.md bytes, and `body_hash` pins exactly what was approved. A skill that
+- **Owner approval is always the final stage.** A profile admin approving their
+  own promotion would write into every other profile's context.
+- **The origin profile's reviewer approves first.** In a school this is the
+  teacher: a skill distilled from a class's sessions can carry traces of the
+  students in it, and only the teacher can see that. This stage is mandatory,
+  not advisory.
+- **The reviewed artefact is the text.** Approval is review of the SKILL.md
+  bytes and `body_hash` pins exactly what was approved, so an edit after
+  approval is a new proposal rather than a silent substitution. A skill that
   names individuals or quotes their material must be rejected or rewritten.
 - **Nothing `private:<user_id>` is promoted** without recorded consent.
 - **Full C5 audit** — origin profile, proposer, approver, hash, decision.
@@ -328,23 +345,22 @@ and promotion queue; full matrix on real Postgres; `scripts/run_tests.sh`,
 - [ ] Volatile participant goal block on FG-24's snapshot freeze
 - [ ] Person-level `USER.md` vs participation-level memory split (FG-24 amendment)
 - [ ] `skills-shared/` wired as an external dir in every profile
-- [ ] `skill_promotions` + owner approval (+ single-principal auto-approve) + provenance
-- [ ] Console: goal tree, promotion queue
+- [ ] `skill_promotions` + two-stage approval (profile reviewer → owner) on a weekly digest + provenance
+- [ ] Console: goal tree, promotion queue (weekly digest view)
 - [ ] Tests: lifetime matrix, ladder, publish, memory split, budget, injection, promotion negatives
 - [ ] System test on `hermes-systest` passed
 
-## Open questions (for the owner)
+## Open questions — all three resolved (2026-08-10)
 
-1. **OPC routing.** When one person runs four sub-goal profiles, how do they
-   address the right instrument? One bot/channel per profile (explicit, zero
-   routing logic, four chats) or one entry point that infers the sub-goal
-   (nicer, but a wrong guess writes context into the wrong brain). Biggest
-   remaining UX decision; nothing else in this FG depends on it.
-2. **Auto-approve promotion in single-principal deployments?** Recommended
-   above; confirm.
-3. **School privacy.** Is "the owner reviews the SKILL.md text before it
-   crosses" sufficient for skills distilled from student sessions, or should
-   promotion from a profile containing minors' data require something stricter?
+1. **OPC routing → both, in sequence.** Each profile gets its own bot/channel
+   (clear for the human, and no inference means no wrong-brain writes), but a
+   deployment starts with one or two profiles and grows as the system *suggests*
+   more. That answer was large enough to become its own FG — see **FG-30**.
+2. **Auto-approve in single-principal deployments → no.** Promotion is a weekly
+   digest, so human approval costs about a minute; one code path, always
+   audited, is worth more than the saved minute.
+3. **School privacy → the teacher reviews first.** Two-stage approval, origin
+   profile reviewer then owner (§6).
 
 ## Audit log
 
@@ -352,6 +368,7 @@ and promotion queue; full matrix on real Postgres; `scripts/run_tests.sh`,
 |------|---------|--------|--------|-----------|
 | 2026-08-10 | 1 | devin (for Leo) | Created FG doc | Leo reframed the domain model: ai4all serves **one entity pursuing one ultimate goal**; a **profile is an instrument for a sub-goal**; **people participate in as many profiles as their work spans**. That resolved the groups-vs-profiles question (a person can already hold a `principals` row in several profiles under one shared GoTrue subject, so FG-25 is not needed for v1) and exposed what was missing. Corrected an error: I had asserted Hermes has no goal object, when FG-04/FG-09 shipped a full registry; what it lacks is `parent_goal_id`, cross-profile reach, prompt presence (verified absent) and an upward path. Chose publish-with-revision over live inheritance per the closed-PR precedent in `AGENTS.md`. | Leo: "a profile is an infrastructure defined to help to improve on sub-goal with similar behavioural characteristics … to further provide know-hows, insights and innovations on how to achieve the goal." |
 | 2026-08-10 | 2 | devin (for Leo) | Goal **lifetime** made load-bearing; up-flow rebuilt on the **existing skills loop**; participation + memory split added | Three corrections from Leo. **(1) Goals differ by lifetime** — some last years, some come and go inside a single session — and the system must not conflate them. Lifetime is now a *commitment about mutability* that decides placement: only `entity`/`profile`/`participant` may enter a prompt, `operational` stays tool-appended exactly as FG-09 has it, and a tier change takes effect **at the next session** because the live prompt is frozen for the session's life. That preserves FG-09's rule where it is right instead of overriding it, and it is what makes the stable-tier Purpose block defensible. The ladder deliberately spans both lifetimes — a short-lived goal declares its parent — so the agent can always resolve *which long-term goal does this serve*, and can notice when the answer is "none". **(2) The up-flow already exists**: edition 1 proposed a free-text `insight_candidates` table, which reinvented the self-improvement loop that is Leo's reason for building on Hermes at all. Rebuilt on it — `agent/background_review.py` already distils skills, so the missing piece is only *crossing the profile boundary*. The shared library needs no new mechanism either: `skills.external_dirs` already exists and is **read-only to autonomous curation** (`is_external_skill_path`), which is precisely the property promotion requires — a profile's curator cannot write into the org tier by accident, so the audited promotion path is the only way in. Promoting *skills* rather than prose also means the shared tier accumulates executable, tested artefacts. **(3) Both organisational shapes are one mechanism** — participation = (person × profile) covers many-people-one-sub-goal (SME/school/family) and one-person-many-sub-goals (OPC) without branching. But the OPC case exposed a flaw in FG-24: putting *all* per-user memory inside the profile would duplicate the founder's identity facts across four profiles and let them drift, so memory now splits by what the fact is *about* — person-level `USER.md` shared across a person's participations, participation-level memory isolated per profile. | Leo: "some goals are very long term and don't change very often but some goals are very short-lived and will come and go in every session or even in the middle of a session. The system must be careful with this distinction." · "The existing Hermes infrastructure already support self-improving … this should be the 'Insight flows up'." · "in a One-Person-Company (OPC) the CEO is also the CTO is also the CMO is also the CFO. The same person will provide the real-world connections and insights and knowhows for different sub-goals." |
+| 2026-08-10 | 3 | devin (for Leo) | Promotion becomes a **weekly digest with two-stage approval**; auto-approve dropped; open questions closed; profile lifecycle split out to FG-30 | Leo answered all three open questions. **(1)** Promotion cadence is weekly, so human approval is affordable — which removes the reason for the single-principal auto-approve path I had recommended, and one always-audited code path is worth more than a saved minute. Batching also fits the loop's shape: `background_review` already runs asynchronously and writes locally, so only the *crossing* needs a human, and it can wait for a review moment. **(2)** The teacher must review before promotion, which is stronger than the owner-only gate I had and splits the judgement correctly: the origin profile's reviewer is the only person who can tell whether a skill carries traces of the people it was learned from, while the owner is the only person who can tell whether it belongs to the whole entity. Both stages are recorded separately in `skill_promotions`, and because `body_hash` pins the approved bytes, an edit after approval is a new proposal rather than a silent substitution. **(3)** The routing answer — per-profile channels, but starting from one or two profiles with the system suggesting more over time — turned out to be a new capability rather than a UX preference, since every doc so far assumed static profile structure; it is written up as **FG-30 (profile lifecycle: suggest, adopt, retire)** and depends on this FG's digest and promotion path. | Leo: "How often does the skill promotion happen, if once a day or once a week, it is ok to let the human to approve the system suggested promotion" · "Yes, teacher needs to review before promotion" · "Each profile should have its own bot/channel … However, at the beginning, the human may not know what kind of profile does he/she needs." |
 
 ## Cloud-agent prompt
 
@@ -395,9 +412,11 @@ and promotion queue; full matrix on real Postgres; `scripts/run_tests.sh`,
 > `skills.external_dirs` — it is already read-only to autonomous curation
 > (`agent/skill_utils.is_external_skill_path`), which is the property that keeps
 > a profile's curator out of the org tier. Add `skill_promotions` (schema
-> above): propose → **owner-only** approval of the SKILL.md **bytes**
-> (`body_hash` pins what was approved) → copy to `skills-shared/` with
-> provenance. Auto-approve only when the deployment has a single principal.
+> above): propose → **origin profile reviewer** approves → **owner** approves,
+> both reviewing the SKILL.md **bytes** (`body_hash` pins what was approved) →
+> copy to `skills-shared/` with provenance. Review is a **weekly digest**, never
+> an interrupt; there is no auto-approve path, including for single-principal
+> deployments.
 > Refuse promotion of `private:<user>`-derived content without recorded consent.
 > Newly approved skills take effect **next session** (skills are listed in the
 > stable tier). Full C5 audit; keep rejections.
