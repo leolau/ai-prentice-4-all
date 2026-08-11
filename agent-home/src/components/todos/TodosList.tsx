@@ -3,13 +3,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { TodoRow } from "@/components/todos/TodoRow";
+import { TodosFilters } from "@/components/todos/TodosFilters";
 import {
   EMPTY_FILTERS,
-  TodosFilters,
   filtersFromParams,
   filtersToParams,
   type TodosFilterState,
-} from "@/components/todos/TodosFilters";
+} from "@/components/todos/filters";
 import type { Todo, TodoStage, TodosFacets, TodosResponse } from "@/types";
 
 const PAGE_SIZE = 50;
