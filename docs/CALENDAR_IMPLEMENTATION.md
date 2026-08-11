@@ -231,14 +231,41 @@ Tools:
 }
 ```
 
+## Credentials
+
+The poller resolves each account's OAuth material in this order:
+
+1. `GCAL_CLIENT_ID` + `GCAL_CLIENT_SECRET` with a `GCAL_REFRESH_TOKEN_<n>`
+   (or the `refresh_token_env` named in `config.json`) — an explicit override.
+2. The Google Workspace MCP credential store,
+   `$HERMES_HOME/google-workspace/credentials/<email>.json` (override with
+   `WORKSPACE_MCP_CREDENTIALS_DIR`).
+
+The second path exists because the agent already runs `workspace-mcp` against
+these same calendars, so its consent — which carries the `calendar` scope, and
+a client id/secret **per account** — is the one the box actually has. Requiring
+a separate `GCAL_*` provisioning meant granting the same consent twice, and in
+practice it was never granted at all: the poller skipped every account and the
+calendar tables stayed empty.
+
+## Service
+
+The poller runs under `hermes-calendar-poller.service`
+(`deploy/hermes-calendar-poller.service`), alongside the triage agent's own
+unit. Both are needed: the poller fetches events, the triage agent classifies
+them.
+
 ## Recovery Instructions
 
 If the calendar pipeline stops:
 
-1. Check processes: `docker exec hermes-agent ps aux | grep calendar`
-2. Check logs: `docker exec hermes-agent cat /opt/data/calendar/poller.log | tail -20`
-3. Restart poller: `docker exec -d hermes-agent bash -c 'cd /opt/data/whatsapp-messages && python3 calendar_poller.py > /opt/data/calendar/poller.log 2>&1'`
-4. If OAuth token expired: re-run auth flow script to get new refresh token
+1. Check the units: `systemctl status hermes-calendar-poller hermes-calendar-triage`
+2. Check logs: `tail -20 /var/log/hermes-calendar-poller.log`, or
+   `curl -s localhost:7903/health` for the last poll and last error
+3. Restart: `systemctl restart hermes-calendar-poller`
+4. If every account is skipped for credentials, confirm the Workspace
+   credential files exist and still carry the `calendar` scope
+5. If OAuth consent was revoked: re-run the auth flow to get a new refresh token
 
 ## Progress Tracking
 

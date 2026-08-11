@@ -1,6 +1,6 @@
 # FG-24 — Per-principal curated memory (memory layers 1–2 become per-user)
 
-**Wave:** P6-A (Phase-6) · **Owner agent:** _unassigned_ · **Status:** PLAN — not started
+**Wave:** P6-A (Phase-6) · **Owner agent:** _unassigned_ · **Status:** PLAN — not started (**amended 2026-08-10** — see "Person level vs participation level" below)
 
 ## Summary
 
@@ -47,6 +47,35 @@ the live prompt.
 
 **No change to D2 is required; this FG records the narrower reading:** curated
 memory must be *frozen per session*, not *identical across sessions*.
+
+
+## Amendment (2026-08-10) — person level vs participation level
+
+**This FG as written puts *all* per-user memory inside the profile. That is
+wrong for one of the two organisational shapes ai4all must serve.**
+
+In a one-person company the founder is CEO, CTO, CMO and CFO — one person
+participating in four sub-goal profiles (FG-29 §5). Under the design below,
+their identity facts ("prefers concise answers", "based in Hong Kong", "two
+children") would be written four times and then **drift apart**, so the same
+person would be modelled slightly differently by each of their own instruments.
+
+Split by *what the fact is about*, not by where it was learned:
+
+| level | file | scope | example |
+|---|---|---|---|
+| **person** | `USER.md` | shared across that person's participations | "prefers concise answers; based in Hong Kong" |
+| **participation** | `memories/users/<user_id>/MEMORY.md` | one profile only | "the Q3 cashflow model lives in …" |
+
+One person, one profile-of-self, N working memories. The isolation that matters
+— what the founder is *doing* in finance staying out of the product instrument —
+is preserved; what is duplicated and drifting today is eliminated.
+
+The unit of isolation is therefore **participation = (person × profile)**, not
+"user in profile". Everything below applies at the participation level except
+`USER.md`, which is person-level.
+
+Rationale is recorded in FG-29's audit log (edition 2).
 
 ## Decisions applied
 
