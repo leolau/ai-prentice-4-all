@@ -158,6 +158,14 @@ export function IncomingDetailView({ item }: { item: IncomingDetail }) {
             )}
           </button>
         )}
+        {/* The other direction of the same link the to-do detail page shows:
+            an arrival is only half the story once triage acted on it. */}
+        <Link
+          href={`/todos?source_ref=${encodeURIComponent(current.id)}&stage=staged,open,working,done,dismissed`}
+          className="rounded-lg border border-[var(--color-border)] px-3 py-1.5"
+        >
+          To-dos from this
+        </Link>
       </div>
     </div>
   );

@@ -35,6 +35,16 @@ describe("nav-items", () => {
     expect(secondaryHrefs).not.toContain("/memory");
   });
 
+  // To-dos took Graph's primary slot: the to-do list is where the user is
+  // asked for something, so it has to be one tap away.
+  it("has To-dos in primary nav and Graph in secondary", () => {
+    const primaryHrefs = PRIMARY_NAV.map((i) => i.href);
+    const secondaryHrefs = SECONDARY_NAV.map((i) => i.href);
+    expect(primaryHrefs).toContain("/todos");
+    expect(secondaryHrefs).toContain("/graph");
+    expect(primaryHrefs).not.toContain("/graph");
+  });
+
   it("keeps primary nav at or below five tabs", () => {
     expect(PRIMARY_NAV.length).toBeLessThanOrEqual(5);
   });
