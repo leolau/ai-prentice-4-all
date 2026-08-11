@@ -7,14 +7,15 @@ import { NextRequest, NextResponse } from "next/server";
 
 import { HermesApiError } from "@/lib/api/client";
 import { apiClientForRequest, getPrincipal } from "@/lib/auth/principal";
+import { profileFromBody, profileFromUrl } from "@/lib/chat/profile";
 
-export async function GET(): Promise<NextResponse> {
+export async function GET(request: Request): Promise<NextResponse> {
   const principal = await getPrincipal();
   if (!principal) {
     return NextResponse.json({ error: "unauthenticated" }, { status: 401 });
   }
   try {
-    const client = await apiClientForRequest();
+    const client = await apiClientForRequest({ profile: profileFromUrl(request.url) });
     const data = await client.listTags();
     return NextResponse.json(data);
   } catch (err) {
@@ -62,7 +63,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   const color = body?.color;
 
   try {
-    const client = await apiClientForRequest();
+    const client = await apiClientForRequest({ profile: profileFromBody(body) });
     const data = await client.createTag(name, color);
     return NextResponse.json(data);
   } catch (err) {

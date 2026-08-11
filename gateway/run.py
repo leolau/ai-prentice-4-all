@@ -1386,21 +1386,15 @@ def _profile_runtime_scope(profile_home: "Path"):
     ``.env`` here does NOT mutate ``os.environ`` — ``build_profile_secret_scope``
     returns an isolated dict — which is what keeps subprocesses (MCP, kanban)
     from inheriting cross-profile secrets.
-    """
-    from hermes_constants import set_hermes_home_override, reset_hermes_home_override
-    from agent.secret_scope import (
-        build_profile_secret_scope,
-        set_secret_scope,
-        reset_secret_scope,
-    )
 
-    home_token = set_hermes_home_override(str(profile_home))
-    secret_token = set_secret_scope(build_profile_secret_scope(Path(profile_home)))
-    try:
+    The two seams live in :func:`agent.profile_runtime.profile_runtime_scope`
+    so the dashboard's per-turn profile scope (agent-home chat) is the same
+    mechanism rather than a second implementation of it.
+    """
+    from agent.profile_runtime import profile_runtime_scope
+
+    with profile_runtime_scope(profile_home):
         yield
-    finally:
-        reset_secret_scope(secret_token)
-        reset_hermes_home_override(home_token)
 
 
 _DOCKER_VOLUME_SPEC_RE = re.compile(r"^(?P<host>.+):(?P<container>/[^:]+?)(?::(?P<options>[^:]+))?$")

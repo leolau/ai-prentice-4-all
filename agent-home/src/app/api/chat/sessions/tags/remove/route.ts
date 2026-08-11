@@ -7,6 +7,7 @@ import { NextResponse } from "next/server";
 
 import { HermesApiError } from "@/lib/api/client";
 import { apiClientForRequest, getPrincipal } from "@/lib/auth/principal";
+import { profileFromBody } from "@/lib/chat/profile";
 
 export async function POST(req: Request): Promise<NextResponse> {
   const principal = await getPrincipal();
@@ -28,7 +29,7 @@ export async function POST(req: Request): Promise<NextResponse> {
     );
   }
   try {
-    const client = await apiClientForRequest();
+    const client = await apiClientForRequest({ profile: profileFromBody(body) });
     const data = await client.removeSessionTag(sessionId, tagId);
     return NextResponse.json(data);
   } catch (err) {

@@ -1,7 +1,7 @@
 /**
  * POST /api/chat/send — BFF send-one-turn (FG-20 Wave C1).
  *
- * Body: `{ sessionId?, message, attachments? }`. When `sessionId` is absent a
+ * Body: `{ sessionId?, message, attachments?, profile? }`. When `sessionId` is absent a
  * conversation is created first. Forwards to the Python API
  * `POST /api/sessions/{id}/chat` under the bridged C1 principal, which drives
  * one one-brain `AIAgent` turn against the shared `SessionDB`. The browser
@@ -11,6 +11,7 @@ import { NextResponse } from "next/server";
 
 import { HermesApiError } from "@/lib/api/client";
 import { apiClientForRequest, getPrincipal } from "@/lib/auth/principal";
+import { profileFromBody } from "@/lib/chat/profile";
 import { mediaRef } from "@/lib/chat/media-ref";
 import { canReadMediaPath, createMediaSignedUrl } from "@/lib/supabase/storage";
 import type { AgentAttachmentPayload, ChatAttachment, Principal } from "@/types";
@@ -19,6 +20,8 @@ interface SendBody {
   sessionId?: unknown;
   message?: unknown;
   attachments?: unknown;
+  /** Which profile's brain answers this turn (FG-28); default when absent. */
+  profile?: unknown;
 }
 
 /**
@@ -110,7 +113,7 @@ export async function POST(request: Request): Promise<NextResponse> {
   const message = withAttachments(rawMessage, attachments);
 
   try {
-    const client = await apiClientForRequest();
+    const client = await apiClientForRequest({ profile: profileFromBody(body) });
     let sessionId =
       typeof body.sessionId === "string" && body.sessionId ? body.sessionId : "";
     if (!sessionId) {

@@ -7,14 +7,18 @@ import { NextResponse } from "next/server";
 
 import { HermesApiError } from "@/lib/api/client";
 import { apiClientForRequest, getPrincipal } from "@/lib/auth/principal";
+import { profileFromBody } from "@/lib/chat/profile";
 
-export async function POST(): Promise<NextResponse> {
+export async function POST(request: Request): Promise<NextResponse> {
   const principal = await getPrincipal();
   if (!principal) {
     return NextResponse.json({ error: "unauthenticated" }, { status: 401 });
   }
+  // A conversation belongs to the profile it was started in: created in that
+  // profile's own session store, not the default one's.
+  const body = await request.json().catch(() => ({}));
   try {
-    const client = await apiClientForRequest();
+    const client = await apiClientForRequest({ profile: profileFromBody(body) });
     const data = await client.createSession();
     return NextResponse.json(data);
   } catch (err) {
