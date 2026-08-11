@@ -230,6 +230,31 @@ class TestEventSync(unittest.TestCase):
         me = [a for a in attendees if a['email'] == 'leo11lau@gmail.com'][0]
         self.assertEqual(me['self'], 1)
 
+    @patch('calendar_poller.gcal_api')
+    @patch('calendar_poller.get_access_token')
+    def test_paged_sync_repeats_the_query(self, mock_token, mock_api):
+        """Every page must repeat page one's window, or Google 400s the token."""
+        mock_token.return_value = 'fake-token'
+        mock_api.side_effect = [
+            {
+                'items': [make_google_event('evt1', 'Page one')],
+                'nextPageToken': 'page-2',
+            },
+            {
+                'items': [make_google_event('evt2', 'Page two')],
+                'nextSyncToken': 'sync-1',
+            },
+        ]
+
+        from calendar_poller import sync_events
+        created, _, _ = sync_events(self.db, 'gcal1', 'refresh-token')
+
+        self.assertEqual(created, 2)
+        first, second = (call.args[2] for call in mock_api.call_args_list)
+        self.assertEqual(second.get('pageToken'), 'page-2')
+        for key in ('timeMin', 'timeMax', 'orderBy', 'singleEvents'):
+            self.assertEqual(second.get(key), first.get(key))
+
 
 class TestConferenceExtraction(unittest.TestCase):
     """Test extraction of video conference links."""

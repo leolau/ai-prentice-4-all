@@ -240,20 +240,21 @@ def sync_events(db, account_id, credentials, calendar_id='primary'):
     page_token = None
     new_sync_token = None
 
+    # Google rejects a pageToken whose request does not repeat the query it
+    # was issued for ("Invalid page token value"), so the window is built once
+    # and every page reuses it — a calendar with more than one page of events
+    # used to fail on page two and sync nothing.
+    base_params = {'maxResults': 250, 'singleEvents': True}
+    if sync_token:
+        base_params['syncToken'] = sync_token
+    else:
+        # Full sync: get events from 30 days ago to 365 days ahead
+        base_params['timeMin'] = (now - timedelta(days=30)).isoformat()
+        base_params['timeMax'] = (now + timedelta(days=365)).isoformat()
+        base_params['orderBy'] = 'startTime'
+
     while True:
-        params = {'maxResults': 250, 'singleEvents': True}
-
-        if sync_token and not page_token:
-            params['syncToken'] = sync_token
-        else:
-            if not page_token:
-                # Full sync: get events from 30 days ago to 365 days ahead
-                time_min = (now - timedelta(days=30)).isoformat()
-                time_max = (now + timedelta(days=365)).isoformat()
-                params['timeMin'] = time_min
-                params['timeMax'] = time_max
-                params['orderBy'] = 'startTime'
-
+        params = dict(base_params)
         if page_token:
             params['pageToken'] = page_token
 
