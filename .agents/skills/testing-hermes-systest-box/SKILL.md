@@ -582,7 +582,25 @@ git -C /opt/data/hermes-deploy-state -c safe.directory=... \
 ```
 
 Verify with `git -C ... log --oneline origin/main..main` on the box: empty means
-the trail is actually published.
+the trail is actually published. The off-box `git am` produces a *different* sha
+for the same tree, so afterwards point the box's `main` at `origin/main` (keep the
+local commit on a branch, and only after `git diff main origin/main` is empty) —
+otherwise the box reports one unpushed commit forever and the check that proves
+publication stops meaning anything.
+
+`capture` needs every one of its arguments (`--hermes-home`, `--deploy-script`,
+`--secrets-out`, the three `--credential-glob`s — see
+`docs/deployment/deployment-path.md`). Called short it exits **2** and writes
+nothing, which is how a week passed with no capture: the weekly check then answers
+with a dozen findings that all mean "nobody captured", and a real finding hides
+among them.
+
+**A unit installed by hand starts life outside every check we have.** The
+snapshot is the baseline, so `deploy_state.py check` cannot report a unit it has
+never seen: `hermes-calendar-triage.service` was installed on 2026-08-11 without
+`User=` and ran as the only root process on the box for a day, silently. After
+adding a unit: give it the `10-unprivileged.conf` drop-in, commit the unit under
+`deploy/`, and capture.
 
 ### The handover document is checked state too
 

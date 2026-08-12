@@ -5,7 +5,9 @@ It states what exists, what is verified, what is *not*, and where the detail
 lives. The per-topic documents are authoritative for procedure; this file is
 authoritative for **what is currently true of the live box**.
 
-Last verified: 2026-08-11, application at `4d67f892e`.
+Last verified: 2026-08-12, application at `7325746aa` (what the box runs; the
+repo is three merges ahead — the box is deployed by whoever merges, not by this
+document).
 
 That line is **checked**, not a promise: `deploy_state.py handover` reports this
 document as stale once anything it describes — `deploy/`, `deploy_state.py`,
@@ -73,7 +75,8 @@ cannot be scoped to a subdirectory.
 
 ## What runs
 
-14 long-running services, all as `hermes`:
+15 long-running services, all as `hermes` — which was untrue for a day, see
+below:
 
 ```
 hermes-gateway        hermes-dashboard      hermes-digest        hermes-escalation
@@ -82,6 +85,16 @@ hermes-email-poller   hermes-email-batcher  hermes-email-triage  hermes-embed
 hermes-calendar-poller       hermes-calendar-triage
 agent-home            (the phone PWA — note the name, see below)
 ```
+
+`hermes-calendar-triage` ran as **root** from 2026-08-11 to 2026-08-12: it was
+installed by hand, its unit was in no repository, and the 2026-07-31
+de-privileging drop-ins could not cover a unit that did not exist yet. Nothing
+reported it — `deploy_state.py check` compares units against the snapshot, and
+the snapshot had never seen this unit either. Both calendar units and a
+`10-unprivileged.conf` for the triage agent are now captured state, and
+`deploy/hermes-calendar-triage.service` exists so a rebuild does not repeat it.
+The lesson is the general one: *a unit installed by hand starts life outside
+every check we have.*
 
 `hermes-calendar-poller` was installed on 2026-08-11. Before that only the
 triage half of the calendar pipeline had a unit, so nothing fetched events:
@@ -136,7 +149,10 @@ captured base unit stays byte-identical:
    the deployed revision
 
 Confirm the drop-in set with `systemctl cat hermes-drift-check.service`; the
-fourth line was added on 2026-08-05 and, like the others, is captured state.
+fourth line is captured state like the others. It was written on 2026-08-05 but
+only *installed* on 2026-08-12 — for a week this document described a check the
+box was not running, which is the same failure one level up. A drop-in is
+installed when it appears in `systemctl cat`, not when it is merged.
 
 `SuccessExitStatus=0 1` matters: drift is signalled by exit 1, and without it
 drift in the first check would stop the other two from running. Silence means
@@ -217,7 +233,9 @@ hermes owner alias admin      # links the login subject to the owner principal
 
 Identity lives in `app_prod` (`principals`, `principal_aliases`) regardless of
 the datastore mode, because channels and the web surface share one identity
-space; memories live in the *configured* mode's schema (`app_dev` here). Both
+space; memories live in the *configured* mode's schema — `app_prod` since the
+2026-08 prod-schema move (`datastore.mode: prod`, and `app_dev` still holds 109
+older rows that the prod schema does not see). Both
 facts are easy to trip over and neither is obvious from an error message.
 
 **Not verified: nobody has decrypted a bundle.** The box holds only the public
@@ -258,8 +276,22 @@ compares, "we have backups" is a belief. Do this periodically, not once.
 ```bash
 PY=/opt/data/hermes-agent/.venv/bin/python
 STATE=/opt/data/hermes-deploy-state
-sudo $PY scripts/deploy_state.py --state-root $STATE capture --deployment hermes-systest ...
+cd /opt/data/hermes-agent
+sudo $PY scripts/deploy_state.py --state-root $STATE capture \
+  --deployment hermes-systest \
+  --hermes-home /opt/data/hermes-home-staging \
+  --deploy-script /opt/data/deploy-hermes.sh \
+  --secrets-out /opt/data/deploy/state-secrets.env \
+  --credential-glob 'google-workspace/credentials/*.json' \
+  --credential-glob 'whatsapp/session-*/creds.json' \
+  --credential-glob 'mcp-tokens/*.json'
 ```
+
+Every argument is required: `capture` with a missing `--hermes-home` exits 2 and
+writes nothing, so a state trail can quietly stop being updated. It did — no
+capture ran between 2026-08-05 and 2026-08-12, and the weekly check answered
+with 16 findings that were all just "nobody captured", which is exactly the
+noise that gets a real finding ignored.
 
 Then commit the diff in the state repo **from a session, not from the box** — the
 box's key is read-only. The `git diff` there is the review: it names the MCP
