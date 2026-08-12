@@ -384,6 +384,28 @@ def find_local_skill(skill_name: str) -> Optional[Path]:
     return fallback
 
 
+def contained_shared_path(skill_name: str) -> Path:
+    """Where ``skill_name`` may live in the shared library, or refuse.
+
+    A skill's name comes from its own frontmatter (or its directory), and the
+    self-improvement loop writes both without a human in the loop — so a name
+    is untrusted input on a path that copies directories and deletes what it
+    replaces. Anything that does not resolve to a single child of the shared
+    library is refused rather than normalised: a promotion is a deliberate act,
+    and a name that needs normalising is not the name anybody reviewed.
+    """
+    name = (skill_name or "").strip()
+    shared = shared_skills_dir()
+    candidate = shared / name
+    resolved = candidate.resolve()
+    if not name or resolved.parent != shared.resolve() or resolved == shared.resolve():
+        raise PromotionError(
+            f"Refusing to promote a skill named {skill_name!r}: it does not "
+            f"name a single directory inside {shared}"
+        )
+    return candidate
+
+
 def body_hash(body: str) -> str:
     """The hash recorded at review time and re-checked at approval time."""
     return hashlib.sha256(body.encode("utf-8")).hexdigest()
@@ -585,6 +607,7 @@ class SkillPromotionStore:
                 f"Skill {skill_name!r} already lives in an external/shared "
                 f"directory; there is nothing to promote"
             )
+        contained_shared_path(skill_name)
         body = path.read_text(encoding="utf-8")
         activity, age, _ = local_activity(skill_name)
         score = score_candidate(
@@ -1176,8 +1199,8 @@ class SkillPromotionStore:
         scripts it references; a shared skill missing its helper script would
         fail in every profile at once.
         """
+        target = contained_shared_path(skill_name)
         register_shared_dir()
-        target = shared_skills_dir() / skill_name
         target.parent.mkdir(parents=True, exist_ok=True)
         if target.exists():
             shutil.rmtree(target)
@@ -1185,7 +1208,7 @@ class SkillPromotionStore:
         return target
 
     def _uninstall(self, skill_name: str) -> None:
-        target = shared_skills_dir() / skill_name
+        target = contained_shared_path(skill_name)
         if target.exists():
             shutil.rmtree(target, ignore_errors=True)
 
@@ -1237,6 +1260,7 @@ __all__ = [
     "SharedSkill",
     "SkillPromotionStore",
     "body_hash",
+    "contained_shared_path",
     "digest_lines",
     "find_local_skill",
     "local_activity",
