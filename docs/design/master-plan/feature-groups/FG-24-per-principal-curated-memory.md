@@ -331,20 +331,36 @@ Baseline + cache-invariant tests green; per-principal isolation proven;
       `persons/<owner>/USER.md` with every entry intact and the legacy file kept
       as `.pre-fg24` (the migration round-trips through the entry serialiser, so
       the copy differs from the original by a trailing newline).
-- [ ] Unscoped sessions: resolve the principal from the login user, else the
+- [x] Unscoped sessions: resolve the principal from the login user, else the
       setup/pairing binding, else ask once and remember (owner's decision,
-      2026-08-12). Until then an unresolved session's `target='memory'` write
-      still lands in the file resolved principals read as the profile-wide
-      **shared** block, and after migration it renders no person block at all —
-      both confirmed live on the box. Also unfixed: `hermes doctor`,
-      `hermes profile` and the dashboard's memory settings/reset only know the
-      two legacy files, so a reset claims to erase everything while leaving
-      every participation and person file in place.
+      2026-08-12; implemented 2026-08-13 in `hermes_cli/principal_binding.py`).
+      The ladder is: remembered binding → login subject (through
+      `principal_aliases`, falling back to the subject itself) → the sole
+      enrolled principal (the person who set the box up) → ask, but only when a
+      terminal is attached, so a cron job or poller never blocks on a prompt.
+      The answer is remembered per profile in `local_principal.json` and is
+      re-validated every session: a binding whose person was un-enrolled is
+      forgotten, and a role change is re-read rather than frozen into the file
+      (a demoted admin must not keep shared-block authority).
+      **Fails closed where it cannot resolve:** with two or more principals
+      enrolled and no binding, `MemoryStore(unresolved_principal=True)` refuses
+      every write target with an audited
+      `memory_unresolved_write_denied` row and tells the caller to run
+      `hermes member local-principal --set <user_id>`. Reads are untouched — a
+      background job still sees what the profile shares. A deployment with one
+      principal, or none reachable (no database configured), keeps the
+      pre-FG-24 single-user path exactly as before.
+- [ ] Legacy maintenance paths still know only the two pre-FG-24 files:
+      `hermes doctor`, `hermes profile` and the dashboard's memory
+      settings/reset, so a reset claims to erase everything while leaving every
+      participation and person file in place. Carried as follow-up work — it is
+      maintenance/UX over the new layout, not the isolation contract.
 
 ## Audit log
 
 | Date | Edition | Author | Change | Rationale |
 |------|---------|--------|--------|-----------|
+| 2026-08-13 | 4 | devin (for Leo) | Implemented the unscoped-session ladder (`hermes_cli/principal_binding.py`, `agent/agent_init.py`, `MemoryStore(unresolved_principal=…)`, `hermes member local-principal`). Scoped it to curated memory only. | The owner's answer resolves *identity*, so the tempting move was to set the session's principal globally — but `_internal_user_id` also keys session continuity (C4), todos and goals, and a locally-inferred principal changing a session key would silently split conversations. FG-24 owns memory, so the binding is applied where the hole is and the wider question stays with FG-28's identity forwarding. The remaining decision was what to do when the ladder ends without an answer: refusing *all* writes (not just `shared`) is the only honest option, because in an unscoped store `memory` **is** the shared file — a "safe" fallback to the person's own block does not exist to fall back to. Reads stay open so the digest and pollers keep their context. |
 | 2026-08-12 | 3 | devin (for Leo) | Reviewed and system-tested on `hermes-systest`. Ticked the system-test item with its evidence and recorded the unscoped-session decision as the one open item. | Isolation, authority, the audited refusal and migration fidelity all hold live. The unscoped-session hole is a policy question the owner has now answered (resolve by login, else the setup/pairing binding, else ask once and remember), so it is written down as work rather than left as a review finding. |
 | 2026-08-11 | 3 | devin (for Leo) | Implemented. Recorded three deviations: person identity lives at `<root>/persons/<user_id>/USER.md` (not under the profile home), three snapshot blocks instead of four (no `shared_user` tier exists after the amendment), and `target=shared` is refused rather than aliased in an unscoped session. | The amendment makes identity person-level while `$HERMES_HOME` is profile-level; storing `USER.md` under the profile home would recreate the drifting-copies problem the amendment exists to remove, and a `shared_user` block would have no referent. |
 | 2026-08-10 | 1 | devin (for Leo) | Created FG doc | Scale-out to hundreds of principals in one profile makes an instance-wide `USER.md` incoherent and its shared 2200-char budget a hard blocker (already at 2029, writes refused). Investigation of `prompt_caching.py` (single `system_and_3` layout, one system breakpoint) and `system_prompt.py` (per-session `Session ID` line already in the volatile tier) shows the "per-user memory breaks the prompt cache" constraint does not hold — the prompt is already unique per session, and the real invariant (byte-stable within a conversation) is preserved by the existing frozen-snapshot mechanism. |

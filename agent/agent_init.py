@@ -164,6 +164,38 @@ def _merge_custom_provider_extra_body(agent, custom_providers: List[Dict[str, An
     agent.request_overrides = overrides
 
 
+def _resolve_memory_principal():
+    """Whose memory is this channel-less session's? (FG-24 unscoped sessions)
+
+    The C1 seam only resolves inbound channel identities, so the CLI, cron
+    jobs, the digest and the pollers reach here with no principal — and an
+    unscoped FG-24 store's ``memory`` file is the profile's *shared* block.
+    The ladder (remembered binding → login subject → sole enrolled principal →
+    ask once) lives in ``hermes_cli.principal_binding``; asking is offered only
+    when a human is attached to this process, so a background service never
+    blocks on a prompt.
+    """
+    from hermes_cli.principal_binding import (
+        LocalResolution,
+        can_ask,
+        resolve_local_principal,
+    )
+
+    try:
+        return resolve_local_principal(
+            ask=_ask_for_memory_principal if can_ask() else None,
+        )
+    except Exception as err:  # noqa: BLE001 - memory must not break agent init
+        _ra().logger.debug("Local principal resolution skipped: %s", err)
+        return LocalResolution(binding=None, candidates=0)
+
+
+def _ask_for_memory_principal(candidates):
+    from hermes_cli.principal_binding import prompt_for_principal
+
+    return prompt_for_principal(candidates)
+
+
 def init_agent(
     agent,
     base_url: str = None,
@@ -1245,13 +1277,27 @@ def init_agent(
                 # FG-24: bind the resolved C1 principal (and the role the
                 # ``principals`` table holds for it) so working memory is
                 # scoped to this participation and identity to the person.
-                # No principal (local CLI) => pre-FG-24 profile-wide files.
+                memory_user_id = agent._internal_user_id
+                memory_role = agent._internal_user_role
+                unresolved_principal = False
+                if not memory_user_id:
+                    # No channel identity (local CLI, cron, digest, pollers).
+                    # Resolve the person this session belongs to instead of
+                    # writing into the file every principal reads as the
+                    # profile's SHARED block.
+                    resolution = _resolve_memory_principal()
+                    if resolution.binding is not None:
+                        memory_user_id = resolution.binding.user_id
+                        memory_role = resolution.binding.role
+                    else:
+                        unresolved_principal = resolution.ambiguous
                 agent._memory_store = MemoryStore(
                     memory_char_limit=mem_config.get("memory_char_limit", 2200),
                     user_char_limit=mem_config.get("user_char_limit", 1375),
                     shared_memory_char_limit=mem_config.get("shared_memory_char_limit", 2200),
-                    user_id=agent._internal_user_id,
-                    role=agent._internal_user_role,
+                    user_id=memory_user_id,
+                    role=memory_role,
+                    unresolved_principal=unresolved_principal,
                 )
                 agent._memory_store.load_from_disk()
         except Exception:
