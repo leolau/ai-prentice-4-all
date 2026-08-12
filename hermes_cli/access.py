@@ -41,7 +41,14 @@ import re
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Callable, Literal, Mapping, Protocol
+from typing import (
+    TYPE_CHECKING,
+    Callable,
+    Literal,
+    Mapping,
+    Protocol,
+    Sequence,
+)
 
 if TYPE_CHECKING:
     import asyncpg
@@ -999,16 +1006,22 @@ def _principal_filters(
     query: str | None,
     role: Role | None,
     active: bool | None = None,
+    user_ids: Sequence[str] | None = None,
 ) -> tuple[str, list[object]]:
     """Build the shared ``WHERE`` clause for listing/counting principals.
 
     Search matches ``display`` or ``user_id`` case-insensitively. Email lives
     in GoTrue, not here, so an email search is applied by the caller that holds
-    the account join (``MemberService``) — this predicate stays inside the
-    profile's own schema.
+    the account join (``MemberService``): it resolves the addresses it matched
+    to ``user_ids`` and passes them here, which keeps this predicate inside the
+    profile's own schema. An empty ``user_ids`` means "no account matched" and
+    must therefore match nothing — not everything.
     """
     clauses: list[str] = []
     params: list[object] = []
+    if user_ids is not None:
+        params.append([str(u) for u in user_ids])
+        clauses.append(f"user_id = ANY(${len(params)}::text[])")
     text = (query or "").strip()
     if text:
         params.append(f"%{text}%")
@@ -1187,6 +1200,7 @@ class PrincipalStore:
         query: str | None = None,
         role: Role | None = None,
         active: bool | None = None,
+        user_ids: Sequence[str] | None = None,
         limit: int | None = None,
         offset: int = 0,
         connection: asyncpg.Connection | None = None,
@@ -1211,7 +1225,7 @@ class PrincipalStore:
         conn = connection or await self._store.connect()
         try:
             await initialize_access(conn)
-            where, params = _principal_filters(query, role, active)
+            where, params = _principal_filters(query, role, active, user_ids)
             sql = f"""
                 SELECT user_id, display, role, created_at, active
                 FROM principals
@@ -1250,6 +1264,7 @@ class PrincipalStore:
         query: str | None = None,
         role: Role | None = None,
         active: bool | None = None,
+        user_ids: Sequence[str] | None = None,
         connection: asyncpg.Connection | None = None,
     ) -> int:
         """Count the principals :meth:`list_principals` would return unpaged.
@@ -1264,7 +1279,7 @@ class PrincipalStore:
         conn = connection or await self._store.connect()
         try:
             await initialize_access(conn)
-            where, params = _principal_filters(query, role, active)
+            where, params = _principal_filters(query, role, active, user_ids)
             total = await conn.fetchval(
                 f"SELECT COUNT(*) FROM principals {where}", *params
             )

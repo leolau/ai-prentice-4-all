@@ -746,6 +746,11 @@ class MemberService:
         ``active`` filters on the *enrolment* (this profile's ``principals``),
         not the box-wide account: "who is deactivated here" is the question an
         admin of this profile can actually answer.
+
+        An email search is resolved here rather than in SQL, because email is
+        the one identifier the console *displays* and the profile schema does
+        not hold: ``principals`` knows a ``user_id`` and a display name. Typing
+        an address matched nothing at all until this join existed.
         """
         require_member_admin(actor)
         limit = max(1, min(int(limit or DEFAULT_PAGE_SIZE), MAX_PAGE_SIZE))
@@ -753,17 +758,21 @@ class MemberService:
         if role is not None and role not in ROLES:
             raise MemberError(f"Unknown role filter: {role!r}")
 
+        accounts = self._accounts_or_empty()
+        user_ids = _ids_matching_email(accounts, query)
+        if user_ids is not None:
+            query = None
         principals = await self._store.list_principals(
             query=query,
             role=role,
             active=active,
+            user_ids=user_ids,
             limit=limit,
             offset=offset,
         )
         total = await self._store.count_principals(
-            query=query, role=role, active=active
+            query=query, role=role, active=active, user_ids=user_ids
         )
-        accounts = self._accounts_or_empty()
         invitations = await self.invitations.latest_for_users(
             [p.user_id for p in principals]
         )
@@ -1374,6 +1383,31 @@ def _random_password() -> str:
     point of deleting the browser's ``generatePassword`` path.
     """
     return f"Hz-{secrets.token_urlsafe(_PLACEHOLDER_PASSWORD_BYTES)}"
+
+
+def _ids_matching_email(
+    accounts: Mapping[str, Mapping[str, Any]],
+    query: str | None,
+) -> list[str] | None:
+    """The account ids whose email contains ``query``, or ``None``.
+
+    ``None`` means "this is not an email search" and leaves the SQL predicate
+    untouched. A returned list may be empty — an address nobody holds matches
+    nobody, and answering with the whole roster instead would be the opposite
+    of a search.
+
+    Recognised by the ``@``: a console user searching ``ada@`` or
+    ``@example.com`` is looking for an address, and nothing else in this data
+    contains one.
+    """
+    text = (query or "").strip().lower()
+    if "@" not in text:
+        return None
+    return [
+        user_id
+        for user_id, account in accounts.items()
+        if text in str(account.get("email") or "").lower()
+    ]
 
 
 def _member_view(

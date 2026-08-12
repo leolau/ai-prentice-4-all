@@ -52,4 +52,16 @@ PUBLIC_API_PATHS: frozenset[str] = frozenset({
     # the NAS relay's bearer-only callback reaches the verifier instead of a
     # 401 no_cookie. The JWT — not this allowlist — is the security boundary.
     "/api/cron/fire",
+    # FG-26 activation and password-recovery request. Unauthenticated by
+    # definition: the invitee has no account to log in with yet, so gating these
+    # makes activation impossible on precisely the deployments that have a gate
+    # (the box 401'd every activation with `no_cookie`). Neither is a read: the
+    # security boundary is the invitation itself — a single-use token stored only
+    # as a SHA-256 hash, expiring in five minutes, rate-limited per IP and per
+    # token, with every failure answering one identical body so the endpoint
+    # cannot be used to enumerate accounts or probe token state. The request
+    # endpoint never returns a link (an admin hands it over) and always answers
+    # `{"ok": true}`.
+    "/api/auth/invitations/redeem",
+    "/api/auth/invitations/request",
 })

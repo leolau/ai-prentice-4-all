@@ -264,8 +264,11 @@ class _FakeStore:
         query: str | None,
         role: Role | None,
         active: bool | None,
+        user_ids: list[str] | None = None,
     ) -> list[Principal]:
         rows = list(self.principals.values())
+        if user_ids is not None:
+            rows = [p for p in rows if p.user_id in set(user_ids)]
         text = (query or "").strip().lower()
         if text:
             rows = [
@@ -285,10 +288,11 @@ class _FakeStore:
         query: str | None = None,
         role: Role | None = None,
         active: bool | None = None,
+        user_ids: list[str] | None = None,
         limit: int | None = None,
         offset: int = 0,
     ) -> list[Principal]:
-        rows = self._filtered(query, role, active)[offset:]
+        rows = self._filtered(query, role, active, user_ids)[offset:]
         return rows[:limit] if limit is not None else rows
 
     async def count_principals(
@@ -297,8 +301,9 @@ class _FakeStore:
         query: str | None = None,
         role: Role | None = None,
         active: bool | None = None,
+        user_ids: list[str] | None = None,
     ) -> int:
-        return len(self._filtered(query, role, active))
+        return len(self._filtered(query, role, active, user_ids))
 
     async def get(self, user_id: str) -> Principal | None:
         return self.principals.get(user_id)
@@ -827,6 +832,42 @@ async def test_list_members_search_and_filters_are_applied_with_the_total() -> N
     assert inactive.total == 1
     assert inactive.members[0].user_id == "u3"
     assert inactive.members[0].enrolled is False
+
+
+@pytest.mark.asyncio
+async def test_list_members_searches_the_email_the_console_displays() -> None:
+    """Searching an address must find the row that shows that address.
+
+    Email lives in GoTrue, not in the profile schema, so the SQL predicate
+    (display + user_id) could never match one: on the box, typing the email a
+    console row was displaying returned an empty roster.
+    """
+    store = _FakeStore()
+    store.principals = {
+        "u1": Principal(user_id="u1", display="Ann", role="admin"),
+        "u2": Principal(user_id="u2", display="Bob", role="member"),
+    }
+    admin = _FakeAdmin(
+        users={
+            "u1": {"id": "u1", "email": "ann@example.com"},
+            "u2": {"id": "u2", "email": "bob@other.test"},
+        }
+    )
+    svc = _service(store, admin)
+
+    exact = await svc.list_members(_principal("owner"), query="bob@other.test")
+    assert exact.total == 1 and exact.members[0].user_id == "u2"
+
+    domain = await svc.list_members(_principal("owner"), query="@example.com")
+    assert domain.total == 1 and domain.members[0].user_id == "u1"
+
+    # An address nobody holds matches nobody — not the whole roster.
+    missing = await svc.list_members(_principal("owner"), query="nope@nope.io")
+    assert missing.total == 0 and missing.members == ()
+
+    # A non-email query still searches display/user_id in Postgres.
+    by_name = await svc.list_members(_principal("owner"), query="ann")
+    assert by_name.total == 1 and by_name.members[0].user_id == "u1"
 
 
 @pytest.mark.asyncio
