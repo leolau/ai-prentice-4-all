@@ -323,6 +323,64 @@ def _check_stale_published_goals(issues: list[str]) -> None:
     )
 
 
+def _check_app_datastore_binding(issues: list[str]) -> None:
+    """Report which ``(database, schema)`` this profile's rows live in (FG-27).
+
+    Profiles share one Postgres by design, so the schema is the only thing
+    keeping two profiles' principals and memories apart — and the DSN is
+    indirect (``dsn: ${DATABASE_URL}``), so config alone does not answer "which
+    database am I on". A schema claimed by *another* profile is a failure, not a
+    note: the first agent turn will refuse to connect, and the operator should
+    learn that here rather than from a broken session.
+    """
+    import asyncio
+
+    from hermes_cli.datastore import MODES, app_schema, get_store, profile_schema_slug
+    from hermes_cli.datastore_binding import read_schema_claims, redact_dsn
+    from hermes_cli.profiles import get_active_profile_name
+
+    try:
+        store = get_store("supabase-app", "prod")
+    except Exception:
+        return
+    if not store.dsn:
+        check_info("App datastore: not configured (core-only profile)")
+        return
+
+    profile = get_active_profile_name()
+    slug = profile_schema_slug(profile)
+    schemas = [app_schema(mode) for mode in MODES]
+    database = redact_dsn(store.dsn)
+    try:
+        claims = asyncio.run(read_schema_claims(store.dsn, schemas))
+    except Exception as error:
+        check_warn(
+            f"App datastore {database} unreachable",
+            f"(schemas {', '.join(schemas)}; {error})",
+        )
+        return
+
+    foreign = [claim for claim in claims if claim.conflicts_with(slug)]
+    if foreign:
+        _fail_and_issue(
+            f"App schema claimed by another profile on {database}",
+            "("
+            + "; ".join(
+                f"{claim.schema} → {claim.claimed_by} at {claim.claimed_home}"
+                for claim in foreign
+            )
+            + ")",
+            "Move it aside: hermes datastore split-profile "
+            f"--from-profile {foreign[0].claimed_by} --to-profile <name>",
+            issues,
+        )
+        return
+    check_ok(
+        f"App datastore {database}",
+        f"(profile {profile}: {', '.join(schemas)})",
+    )
+
+
 def _check_s6_supervision(issues: list[str]) -> None:
     """Inside a container under our s6 /init, surface what s6 sees.
 
@@ -1390,6 +1448,7 @@ def run_doctor(args):
 
     _check_gateway_service_linger(issues)
     _check_s6_supervision(issues)
+    _check_app_datastore_binding(issues)
     _check_stale_published_goals(issues)
 
     if sys.platform != "win32":

@@ -13310,6 +13310,7 @@ async def list_profiles_endpoint():
 @app.post("/api/profiles")
 async def create_profile_endpoint(body: ProfileCreate):
     from hermes_cli import profiles as profiles_mod
+    from hermes_cli.datastore import SchemaOwnershipError
     explicit_source = (body.clone_from or "").strip()
     if explicit_source:
         # Duplicating a specific profile: clone its config/skills/SOUL (or full
@@ -13349,6 +13350,11 @@ async def create_profile_endpoint(body: ProfileCreate):
         collision = profiles_mod.check_alias_collision(body.name)
         if not collision:
             profiles_mod.create_wrapper_script(body.name)
+    except SchemaOwnershipError as e:
+        # FG-27 Layer 2: the name would land on another profile's app schema.
+        # 409 rather than 400 — the request is well-formed, the conflict is
+        # with existing state.
+        raise HTTPException(status_code=409, detail=str(e))
     except (ValueError, FileExistsError, FileNotFoundError) as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:

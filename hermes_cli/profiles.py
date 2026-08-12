@@ -30,7 +30,7 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
-from typing import List, Optional, Tuple
+from typing import Callable, List, Optional, Tuple
 
 from agent.skill_utils import is_excluded_skill_path
 
@@ -968,6 +968,34 @@ def profiles_to_serve(multiplex: bool) -> List[Tuple[str, Path]]:
     return serve
 
 
+def check_datastore_binding(
+    name: str,
+    source_home: Path,
+    *,
+    report: Optional[Callable[[str], None]] = None,
+) -> None:
+    """Refuse a new profile whose app schema belongs to another profile (FG-27).
+
+    Profiles are *meant* to share the database — one Supabase per box — so the
+    schema is the whole boundary, and ``--clone`` copies the very config that
+    resolves it. Checking here turns a silent data merge (discovered as "why can
+    this user see the other team's rows") into a refusal before the profile
+    exists, and prints the resolved ``(database, schema)`` so an inherited
+    database is visible rather than implied.
+
+    An unreachable or unconfigured database is reported, not fatal: Layer 1
+    still verifies ownership on first connect, and a profile must remain
+    creatable while Postgres is down.
+    """
+    from hermes_cli.datastore_binding import describe_binding
+
+    binding = describe_binding(name, source_home=source_home)
+    binding.raise_on_conflict()
+    if report is not None:
+        for line in binding.lines():
+            report(line)
+
+
 def create_profile(
     name: str,
     clone_from: Optional[str] = None,
@@ -976,6 +1004,8 @@ def create_profile(
     no_alias: bool = False,
     no_skills: bool = False,
     description: Optional[str] = None,
+    verify_datastore: bool = True,
+    report: Optional[Callable[[str], None]] = None,
 ) -> Path:
     """Create a new profile directory.
 
@@ -998,6 +1028,13 @@ def create_profile(
         a marker file so ``hermes update`` skips re-seeding this profile's
         skills. Mutually exclusive with ``clone_config``/``clone_all`` (those
         explicitly copy skills from the source).
+    verify_datastore:
+        If True (default), resolve the app ``(database, schema)`` binding the
+        new profile will get and refuse to create it when another profile
+        already owns that schema (FG-27 Layer 2).
+    report:
+        Optional sink for the resolved-binding lines, so an inherited database
+        is visible to the operator instead of implied.
 
     Returns
     -------
@@ -1022,7 +1059,7 @@ def create_profile(
         raise FileExistsError(f"Profile '{canon}' already exists at {profile_dir}")
 
     # Resolve clone source
-    source_dir = None
+    source_dir: Optional[Path] = None
     if clone_from is not None or clone_all or clone_config:
         if clone_from is None:
             # Default: clone from active profile
@@ -1036,6 +1073,19 @@ def create_profile(
             raise FileNotFoundError(
                 f"Source profile '{clone_from or 'active'}' does not exist at {source_dir}"
             )
+
+    # FG-27 Layer 2, before anything is written so a refusal cannot leave a
+    # half-created profile behind.  With no clone source the new profile still
+    # inherits the process environment's DSN, so the active home is the honest
+    # thing to resolve against.
+    if verify_datastore:
+        from hermes_constants import get_hermes_home
+
+        check_datastore_binding(
+            canon,
+            source_dir if source_dir is not None else get_hermes_home(),
+            report=report,
+        )
 
     if clone_all and source_dir:
         # Full copy of source profile (exclude sibling ~/.hermes/profiles/)
@@ -1799,11 +1849,23 @@ def _inspect_profile_archive_roots(archive: Path) -> set[str]:
     return top_dirs
 
 
-def import_profile(archive_path: str, name: Optional[str] = None) -> Path:
+def import_profile(
+    archive_path: str,
+    name: Optional[str] = None,
+    *,
+    verify_datastore: bool = True,
+    report: Optional[Callable[[str], None]] = None,
+) -> Path:
     """Import a profile from a tar.gz archive.
 
     If *name* is not given, infers it from the archive's top-level directory.
     Returns the imported profile directory.
+
+    An import carries the exporting deployment's ``config.yaml`` and ``.env``,
+    so it inherits a DSN exactly as ``--clone`` does. The staged tree is checked
+    against the schema it would resolve to (FG-27 Layer 2) before it is moved
+    into place, so an import that would land on another profile's schema is
+    refused rather than discovered on the first agent turn.
     """
     import tempfile
 
@@ -1856,6 +1918,9 @@ def import_profile(archive_path: str, name: Optional[str] = None) -> Path:
         if archive_root != canon:
             final_source = staging_root / canon
             extracted.rename(final_source)
+
+        if verify_datastore:
+            check_datastore_binding(canon, final_source, report=report)
 
         shutil.move(str(final_source), str(profile_dir))
 

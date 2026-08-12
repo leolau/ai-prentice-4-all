@@ -43,6 +43,10 @@ _VALID_SCHEMA = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _MAX_IDENTIFIER = 63
 _DEFAULT_PROFILE = "default"
 
+#: The modes an app datastore exists in.  Both schemas belong to the profile,
+#: so anything reasoning about a profile's binding must consider both.
+MODES: tuple[StoreMode, ...] = ("prod", "dev")
+
 logger = logging.getLogger(__name__)
 
 
@@ -154,6 +158,17 @@ def _profile_slug(profile: str) -> str:
     if safe != profile or not safe or safe[0].isdigit():
         safe = f"{safe}_{_short_hash(profile)}"
     return safe
+
+
+def profile_schema_slug(profile: str) -> str:
+    """Return the schema slug a *named* profile resolves to.
+
+    The default profile keeps its own name (its schemas are the unsuffixed
+    historical ones), every other name is made identifier-safe.
+    """
+    if profile == _DEFAULT_PROFILE:
+        return _DEFAULT_PROFILE
+    return _profile_slug(profile)
 
 
 def active_profile_slug() -> str:

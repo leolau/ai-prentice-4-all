@@ -616,6 +616,7 @@ def install_distribution(
     """
     from hermes_cli.profiles import (
         check_alias_collision,
+        check_datastore_binding,
         create_wrapper_script,
     )
 
@@ -628,6 +629,11 @@ def install_distribution(
                 "Use `hermes profile update` to upgrade in place, "
                 "or pass --force to overwrite."
             )
+
+        # A distribution brings its own config.yaml, so it can bring a DSN —
+        # the same inheritance ``--clone`` has (FG-27 Layer 2). Checked against
+        # the staged tree, before anything is copied into place.
+        check_datastore_binding(plan.manifest.name, plan.staged_dir, report=print)
 
         # Fresh install: config.yaml comes from the distribution.
         _bootstrap_user_dirs(plan.target_dir)
