@@ -11403,6 +11403,44 @@ def cmd_profile(args):
                     print(f"      default: {er['default']}")
         print()
 
+    elif action == "registry":
+        from hermes_cli.profile_registry import (
+            get_profile_registry,
+            probe_registry,
+        )
+
+        sub = getattr(args, "registry_action", None) or "list"
+        entries = get_profile_registry()
+        if sub == "health":
+            entries = probe_registry(entries)
+
+        if not entries:
+            print("No profiles found.")
+            return
+
+        # FG-28 control-plane view: no authority data, just routing + schema
+        # + a health badge the switcher can show before routing an admin turn.
+        print(
+            f"\n {'Profile':<16} {'Served':<8} {'Base URL':<14} "
+            f"{'Schema':<22} Health"
+        )
+        print(
+            f" {'\u2500' * 15} {'\u2500' * 7} {'\u2500' * 13} "
+            f"{'\u2500' * 21} {'\u2500' * 18}"
+        )
+        for e in entries:
+            marker = " \u25c6" if e.is_default else "  "
+            served = "yes" if e.served else "\u2014"
+            base = e.base_url or "\u2014"
+            health = e.health
+            if e.health_detail:
+                health = f"{e.health} ({e.health_detail})"
+            print(
+                f"{marker}{e.name:<15} {served:<8} {base:<14} "
+                f"{e.schema:<22} {health}"
+            )
+        print()
+
 
 def _render_distribution_plan(plan) -> None:
     """Print a human-readable summary of a pending distribution install."""
