@@ -45,7 +45,24 @@ done
 git diff > "/opt/data/backups/deploy-$TS/local-mods.diff" || true
 
 echo "== fetching origin/$BRANCH =="
-git fetch --no-tags origin "$BRANCH"
+# Retried: the fetch is over SSH to github.com from cn-hongkong, where a
+# connect timeout is an occasional fact of life. Aborting is correct — a deploy
+# must never install a revision it could not verify — but a single blip then
+# leaves the box on the old revision, and the operator has to notice the abort
+# among the passing output to know nothing happened.
+fetched=
+for attempt in 1 2 3; do
+  if git fetch --no-tags origin "$BRANCH"; then
+    fetched=yes
+    break
+  fi
+  echo "   fetch attempt $attempt failed; retrying in $((attempt * 5))s"
+  sleep $((attempt * 5))
+done
+if [ -z "$fetched" ]; then
+  echo "FETCH FAILED after 3 attempts — nothing deployed, box unchanged at $(git rev-parse --short HEAD)" >&2
+  exit 1
+fi
 BEFORE=$(git rev-parse --short HEAD)
 git checkout -q "$BRANCH" 2>/dev/null || git checkout -q -b "$BRANCH" --track "origin/$BRANCH"
 git checkout -f "origin/$BRANCH" -- .

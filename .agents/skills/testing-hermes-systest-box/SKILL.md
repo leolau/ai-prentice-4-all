@@ -150,6 +150,21 @@ sudo -u hermes -H HERMES_HOME=/opt/data/hermes-home-staging ./.venv/bin/hermes m
 Note `hermes config get <key>` does **not** exist — use `hermes config path` and read the YAML,
 or grep `/opt/data/hermes-home-staging/config.yaml` directly.
 
+**Omitting `HERMES_HOME` does not fail — it answers about the wrong deployment.**
+With the variable unset, `get_hermes_home()` falls back to `$HOME/.hermes`, which for
+`hermes` is `/opt/data/hermes-user/.hermes`: a real, empty, core-only home. So
+`sudo -u hermes -H ./.venv/bin/hermes profile list` shows only `default` (the live
+`maintenance` profile invisible) and `hermes datastore show` reports "not configured —
+this profile is core-only" on a box that is plainly running on Postgres. Every answer is
+internally consistent and about a home nobody uses. `sudo -u hermes -H env
+HERMES_HOME=/opt/data/hermes-home-staging ...` is not optional, including inside
+`sh -lc`, which does not inherit it either.
+
+Per-profile commands take `--profile <name>` **before** the subcommand
+(`hermes --profile maintenance datastore show`) — it is the global profile selector, eaten
+before the subparser sees argv, so a trailing `--profile` silently selects rather than
+targets (this is what made `hermes goal publish --profile X` publish *from* X; see #207).
+
 Root `git` commands against the live checkout need
 `-c safe.directory=/opt/data/hermes-agent` (differing owner), and the same for
 `/opt/data/hermes-deploy-state`.
