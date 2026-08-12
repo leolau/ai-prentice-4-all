@@ -457,6 +457,8 @@ console with a dropdown.
 **In:**
 
 - profile registry at the shared root (`hermes profile registry` CRUD, health);
+- account-level verbs (ban/delete/reset) behind one guarded chokepoint — not a
+  relocation, see §"global accounts, local authority";
 - one console with a profile switcher listing **only** profiles where the caller
   holds an `admin`/`owner` principal row, each request entering the target
   profile's scope at one chokepoint;
@@ -532,12 +534,34 @@ administrative verbs FG-26 treats as one thing are actually two:
 | **enrolment-level** | add / remove / re-role the `principals` row, group membership | the acting profile only |
 | **account-level** | GoTrue ban (deactivate), delete, set/reset password | **every profile the account is enrolled in** |
 
-`MemberService` performs the account-level operations through the GoTrue admin
-API with the **service-role key**, gated by `require_member_admin`, which checks
-the actor's role *in the current profile*. So an admin of `hr` can ban an
-account that is also enrolled in `engineers` and revoke their access there —
-per-profile authority exercised through a globally-scoped credential. The
-profile boundary holds perfectly for data and does not hold at all for accounts.
+`MemberService` holds the GoTrue admin client and the **service-role key**, and
+most of its mutations are gated by `require_member_admin`, which checks the
+actor's role *in the current profile*. On that reading an admin of `hr` could ban
+an account also enrolled in `engineers` and revoke their access there — per-profile
+authority exercised through a globally-scoped credential.
+
+### Re-read against the shipped code, 2026-08-13 — the hazard is latent, not live
+
+FG-26 shipped, so this is now a question about code rather than intent, and the
+code does **not** expose the escalation. Verified in `hermes_cli/members.py` at
+`develop`:
+
+```
+deactivate (set_member_active)  flips principals.active — an un-enrol, no GoTrue call
+delete_member                   require_owner, and the account is deliberately left alone
+_GoTrueAdmin.set_banned         no production caller reaches it as an admin verb
+set_password                    only the invitation/reset redemption path — the account
+                                holder presenting a valid single-use token
+delete_user                     only rollback of an enrolment the same request just made
+```
+
+So **there is currently no admin-reachable account-level verb**: requirement 1
+below shipped as the actual behaviour, and requirement 2 was not approximated —
+it was made unnecessary by not exposing the verbs at all. The table above
+describes the blast radius those verbs *would* have, and the hazard is that
+`set_banned` is a working primitive sitting behind the shared key with nothing but
+absence in front of it. A future contributor wiring it to a route inherits
+`require_member_admin` by convention and reintroduces the escalation silently.
 
 Symmetrically: **every profile's process holds a key that can mint an account
 valid in every profile**, so compromising one profile's process is a box-wide
@@ -552,11 +576,22 @@ Requirements (mirrored in FG-26 §3.5):
 - **Account-level operations require owner, or that the target is enrolled
   solely in profiles the actor administers** — checked server-side across
   profiles, with the affected profiles named in the confirmation dialog.
-- **Preferred:** account-level operations move behind the control plane and stop
-  being reachable from each profile's process, so the service-role key lives in
-  exactly one place. This is the strongest argument for the registry service
-  being more than a lookup table, and it should be decided before FG-26 ships
-  its delete/deactivate UI — otherwise that UI has to be rebuilt.
+- **~~Preferred:~~ relocation behind the control plane — decided 2026-08-13:
+  NOT in FG-28's scope.** The stale version of this line conditioned the decision
+  on "before FG-26 ships its delete/deactivate UI"; FG-26 shipped (#217), so the
+  decision is recorded here instead. Two reasons it is moot rather than deferred:
+  the one-process decision (§"Architecture decision") already puts the
+  service-role key in exactly one place, which was this requirement's whole prize;
+  and per §"Re-read against the shipped code" there is **no admin-reachable
+  account-level verb to relocate**. FG-26's UI does not have to be rebuilt.
+- **In scope instead, and small: a chokepoint, so absence stops being the
+  control.** Any account-level verb must pass one guarded seam that requires
+  `owner` **or** that the target is enrolled solely in profiles the actor
+  administers — with a test that a bare `require_member_admin` route cannot reach
+  the GoTrue admin client. FG-28 is the right FG for it because FG-28's
+  cross-profile read is what makes "solely in profiles the actor administers"
+  computable for the first time; before it, that check could only be approximated,
+  which is why FG-26 correctly refused to ship it.
 
 ## Related finding
 
@@ -583,6 +618,7 @@ secret-isolation tests green on real Postgres; `scripts/run_tests.sh`, `ruff`,
 - [ ] One console + profile switcher scoped to administered profiles, each request scoped to its target profile
 - [ ] Identity carried into the target scope + owner-fallback refusal on console routes (with negative tests)
 - [ ] FG-26 create-user picker over administered profiles
+- [ ] Account-level verbs behind one guarded chokepoint (owner, or target enrolled solely in administered profiles) + a test that a bare `require_member_admin` route cannot reach the GoTrue admin client
 - [ ] Cross-profile audit in the target profile's ledger
 - [ ] Negative matrix + secret-isolation tests on real Postgres
 - [ ] System test on `hermes-systest` passed
@@ -591,6 +627,7 @@ secret-isolation tests green on real Postgres; `scripts/run_tests.sh`, `ruff`,
 
 | Date | Edition | Author | Change | Rationale |
 |------|---------|--------|--------|-----------|
+| 2026-08-13 | 6 | devin (for Leo) | Account-level verb relocation ruled **out of scope**; replaced with a chokepoint requirement | Leo noticed this section's “decide before FG-26 ships” condition had expired — FG-26 shipped in #217 — and asked whether moving ban/delete/reset behind the control plane was still in scope. Re-read the shipped code instead of the doc's intent, and the premise turned out stale: `set_member_active` is an un-enrol with no GoTrue call, `delete_member` is owner-only and deliberately leaves the box-wide account alone, `set_password` is only the token-redemption path, `delete_user` is only enrolment rollback, and `set_banned` has **no production caller as an admin verb**. So no admin-reachable account-level verb exists to relocate, and the one-process decision already puts the service-role key in one place — relocation is moot, not deferred, and FG-26's UI does not need rebuilding. What replaces it is smaller and stronger: the escalation is currently prevented by *absence*, so any future account-level verb must pass one guarded seam requiring owner or “enrolled solely in profiles the actor administers”, asserted by a test that a bare `require_member_admin` route cannot reach the GoTrue admin client. That check is only computable once FG-28 can read across profiles, which is why FG-26 was right to refuse it. |
 | 2026-08-13 | 5 | devin (for Leo) | Architecture resolved: **one process, profile-scoped per request**; fan-out demoted to a recorded rejected alternative | Leo read the doc and found the contradiction edition 4 introduced: the body recommended fan-out because “the process boundary is what keeps secrets apart” while the new pickup prompt said in-process multiplexing was the direction. Resolved in favour of one process, on three grounds. **(1)** Fan-out's argument was load-bearing on a premise that is no longer true — `set_secret_scope` is context-local and `get_secret` fails closed, and #219/#220 extended that to a spawned child's environment. **(2)** Fan-out is *incompatible* with the one-gateway consolidation this same FG carries: with `multiplex_profiles` on, port-binding platforms are a hard startup error for a secondary profile and the default profile serves the rest under `/p/<profile>/`, so the per-profile HTTP endpoints a console would fan out to stop existing. The doc was asking for two mutually exclusive runtimes. **(3)** “Keep one process per profile, exactly as today” was factually wrong for this tier — the box runs exactly one `hermes-dashboard` unit on one `HERMES_HOME`, which is precisely why FG-26's picker can only see the current profile; fan-out would have been N new units at ~225 MB, not the status quo. Recorded what the decision *costs*, because fan-out's real prize was never the secrets: authority re-derived at the destination stops being a process boundary and becomes a discipline, so the doc now requires a single scoping chokepoint, the principal re-resolved from the target profile's own `principals`, owner-fallback refused there, FG-27's schema-ownership guard as the loud backstop, and the credential migration done *before* a second profile is served — with the two-profiles-one-process secret-isolation test promoted to load-bearing. |
 | 2026-08-13 | 4 | devin (for Leo) | Item 1 recorded as closed; the cloud-agent prompt rewritten for a cold pickup | Leo asked whether another agent could pick this FG up from the repo alone. The code and the findings were committed and pushed, but the prompt would have misdirected the reader on four counts: it gated the FG behind FG-27 (done and deployed), it opened with a Task 0 that is now answered (the `os.environ` leaks, confirmed on four paths and fixed in #219/#220), it still carried the retired "users belong to exactly one profile" premise, and — most consequentially — it instructed the reader to keep one process per profile **because no context-local seam for `os.environ` existed**. That seam now exists, which inverts the architectural instruction while leaving its underlying reason intact: 6 of ~2,250 env reads are migrated, and an unmigrated `os.getenv` returns the wrong profile's value silently. The prompt now states the four settled decisions (shared GoTrue with box-wide accounts and profile-local authority, FG-25 deferred, Leo's owner/admin-picks-the-profile rule, and the closed leak investigation), points at the reframing that supersedes §"Summary", and names what a cloud agent cannot do — no SSH to `hermes-systest`, so deployment and the live system test stay with the box operator. |
 | 2026-08-10 | 3 | devin (for Leo) | Reframed as the goal-tree console; one-gateway-for-all-profiles brought into scope | Leo's domain model: a **profile is the instrument for one sub-goal**, not a tenant and not a container of people, and **people participate in as many profiles as their work spans**. That retires this FG's "users belong to exactly one profile" premise — an imported constraint, not one the system imposes, since one shared GoTrue subject can hold a `principals` row in several profiles with separate memory in each — and it retires FG-25 for v1, because profiles now carry the cohort structure that hierarchical groups were designed to express. The mechanics below (authority via the `principals` row, target-profile routing, owner-fallback refusal, account-vs-enrolment split) are unchanged; only the motivation is. **Also brought one gateway per box into scope**, at Leo's request and on measured evidence: a per-profile daemon is 150 MB resident before any conversation (plus ~225 MB for a per-profile console), so ten sub-goal profiles cost ~3.7 GB idle against 9.6 GB available. Reading the code corrected an earlier claim of mine: `agent/secret_scope.py` **already solves** the process-global-environment problem for the gateway path with a context-local, fail-closed secret scope that never mutates `os.environ`, alongside same-token collision detection and a shared listener with `/p/<profile>/` routing. The remaining work is finishing the migration, not building it — and the risk is precisely asymmetric: an unmigrated `get_secret()` caller raises, while an unmigrated `os.getenv` caller silently returns the wrong profile's value, with only 6 of ~2,250 env reads migrated so far. |

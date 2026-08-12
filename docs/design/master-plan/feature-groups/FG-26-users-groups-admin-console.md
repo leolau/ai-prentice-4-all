@@ -291,9 +291,14 @@ Requirements:
 - **Every per-profile process holding the shared service-role key is the same
   problem from the other side** — that key can mint an account valid in every
   profile, so compromising one profile's process is a box-wide account-system
-  compromise. Preferred direction: account-level operations move behind a single
-  control-plane service (see FG-28) and stop being reachable from each profile's
-  process. Recorded here as the open decision it is.
+  compromise. ~~Preferred direction: account-level operations move behind a single
+  control-plane service.~~ **Closed 2026-08-13 (FG-28):** relocation is moot
+  rather than deferred — FG-28 serves every profile from one process, so the key
+  already lives in one place, and as shipped no admin-reachable account-level verb
+  exists to relocate (`set_banned` has no production caller; `set_password` is the
+  token-redemption path; `delete_user` is enrolment rollback). What FG-28 takes on
+  instead is a guarded chokepoint, so that this section's restriction stays
+  enforced by code rather than by absence when the admin path arrives.
 
 ### 4. What else is needed (answering "anything else?")
 
