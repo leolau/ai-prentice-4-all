@@ -912,6 +912,16 @@ DEFAULT_CONFIG = {
             "prod": {"supabase_app": {"dsn": ""}},
         },
     },
+    # FG-26 invitation activation. Behavioural, so it lives here rather than in
+    # an env var. The activation window is short on purpose: an admin hands the
+    # link over live (or regenerates it), and a link that outlives the
+    # conversation is a standing credential.
+    "invitations": {
+        "ttl_seconds": 300,
+        # Self-service password recovery is not handed over live, so it gets a
+        # longer — still bounded — window.
+        "recovery_ttl_seconds": 3600,
+    },
     # C8 interaction tracing is an append-only application-datastore side
     # channel. Sampling applies only to tool_call/tool_result spans.
     "action_tracking": {
