@@ -1,6 +1,6 @@
 # FG-26 — Users admin console + invitation activation
 
-**Wave:** P6-B (Phase-6, after FG-27) · **Owner agent:** _unassigned_ · **Status:** PLAN — not started, rescoped 2026-08-12
+**Wave:** P6-B (Phase-6, after FG-27) · **Owner agent:** devin · **Status:** DONE — implemented, reviewed, deployed and system-tested on `hermes-systest` at `da000448a` (2026-08-12)
 
 > **Rescoped 2026-08-12 — groups are out, and the profile picker is settled.**
 > FG-25 was deferred (profiles, not groups, carry the cohort structure), so
@@ -428,12 +428,68 @@ clean; system test passed.
 - [x] Channel-linking UI
 - [x] Admin activity view over C5
 - [x] Tests (invitation security, authority, profile scope on two real schemas, pagination/query-count, delete strategies, frontend, E2E)
-- [ ] System test on `hermes-systest` passed
+- [x] System test on `hermes-systest` passed — see "System test record"
+
+## System test record
+
+Run on `hermes-systest` against the live deployment (`app_prod`, one shared
+GoTrue) in eight stages, each cleaning up after itself. Every account,
+enrolment, invitation, channel link and memory row the run created was removed;
+the roster afterwards is the owner plus the pre-existing FG-24 test member.
+
+Two defects were found that **only a real deployment could show**, both since
+fixed and re-tested on the deployed revision:
+
+| Found live | Why no unit test could see it | Fixed in |
+|---|---|---|
+| `POST /api/auth/invitations/redeem` answered `401 no_cookie`, so every activation and every password reset on the box was refused before the handler ran | the invitee's endpoint is deliberately unauthenticated, and a bare test client has no auth gate to be caught by — the bug exists only where a gate does, i.e. on every deployment | #215 |
+| the roster could not be searched by the email it displays; the first fix for that then *replaced* the name search, so `fg26.eve` found nobody while `fg26.eve@…` found her | email lives in GoTrue and the predicate lives in the profile schema, so no schema-level test has an address to search for | #215, #216 |
+
+What passed live, over real HTTP unless noted:
+
+```
+create + required profile   foreign profile → 409 and no GoTrue account created
+                            missing profile → 400 naming the profile
+                            duplicate create → refused, role not silently dropped
+invitation                  regenerate invalidates the link already handed out
+                            reused / tampered / expired → one identical neutral failure
+                            weak password → password policy, not a token error
+activation                  redeemed from a second, cookieless client → 200
+                            banned_until cleared; she then signs in with her own
+                            password (200, member) and a wrong one gets 401
+reset request               known and unknown address → identical 200 {"ok": true}
+search                      display name, name fragment, local part, domain and
+                            user_id prefix all find her; an unknown string finds nobody
+existing box-wide account   enrolled into this profile: no new account, 0
+                            invitations minted, her existing password still works
+suspension                  channel resolves nobody, web 403, hidden from the
+                            directory, FG-24 binding dropped; restore returns all three
+CSV                         dry run created no accounts; apply enrolled; a foreign
+                            profile in the file → 409
+self-protection             cannot demote, suspend or delete self, nor mint an owner
+hard delete                 transfer moved ownership; purge deleted her private rows
+                            and transferred the shared ones, leaving no dangling owner
+exposure                    unauthenticated /users leaked no roster and no address;
+                            the activity view returned events with no raw token
+platform                    15 units active, every one running as `hermes`;
+                            no deployment-state drift; no runtime drift
+```
+
+Two findings left deliberately unchanged, both needing a decision rather than a
+fix:
+
+- **55 memory rows are owned by `owner_user_id = 'owner'`**, an id with no row in
+  `principals` — unreachable by anybody, and predating this FG. Reassigning or
+  deleting somebody's memory is not a side effect a system test should have.
+- **The management page's first page is 25 rows where §"Users page" says 50.**
+  Left at 25 deliberately: this is the mobile-first `agent-home` surface, and
+  the paginator, search and filters that make the number cheap are all in place.
 
 ## Audit log
 
 | Date | Edition | Author | Change | Rationale |
 |------|---------|--------|--------|-----------|
+| 2026-08-12 | 4 | devin (for Leo) | System-tested on `hermes-systest`; two live-only defects fixed | The live run is recorded above rather than summarised away, because the two defects it found are the argument for having it at all. The activation gate is the sharper one: FG-26's own tests pass and always would, since a test client carries no auth gate — the invitee's endpoint was unreachable on **every** real deployment, so "invitations work" was a claim no green suite could have supported. The second is the same shape one layer down: email lives in GoTrue and the search predicate lives in the profile schema, so the one identifier the console *displays* was the one it could not search — and the first fix for that resolved the search in two places and let the email match replace the name match, which is worth recording as the failure mode of splitting one search box across two stores. Also fixed off the back of the run: a self-service reset request rendered as "invite open", telling an admin a live link existed when the token had been returned to nobody, so the row now reads "reset requested" and the action reads "Send reset link". Not changed, and listed above with why: the 55 orphaned memory rows and the 25-vs-50 first page. |
 | 2026-08-12 | 3 | devin (for Leo) | Built FG-26: users console, invitations, activation, profile-scoped enrolment | Everything except the live-box system test is implemented; what follows is the decisions that were not in the doc. **Deactivate is now enrolment-local, not a GoTrue ban.** The doc's §"kind / operations / blast radius" table put "deactivate" under *account-level*, but a ban on a shared `auth.users` row locks the person out of every profile — including profiles this console has no authority over — so the reversible suspend became an `active` flag on the profile's own `principals` row, and `MemberView` reports the box-wide ban state and the profile-local enrolment state as two separate fields. Consequence worth knowing: a member can be *enrolled* here and still unable to log in because they never activated, which the row labels "awaiting activation" rather than "suspended". Account-level delete stayed owner-only, per the settled gate. **`invitations` carries a `kind`** (`activation` | `recovery`) so self-service reset reuses one hashed-single-use-token mechanism instead of a second one, with its own longer TTL (3600s) in `config.yaml` beside the 300s activation TTL. Minting revokes older open tokens of the same kind for that user, which is what makes Regenerate actually invalidate the link already in somebody's inbox. **Ownership resolution is discovered, not hard-coded**: `hermes_cli/ownership.py` reads `information_schema` for `owner_user_id` columns in the profile schema, so a table added later cannot silently start orphaning rows on delete; audit tables are excluded because rewriting history is worse than a dangling id, and a post-condition query asserts no dangling owners remain. **A refusal must not leave an orphan**, so the profile check runs before the GoTrue call, and a failed `principals` insert deletes the account it just created — both have their own tests. Frontend: `/members` now redirects to `/users` (old links survive), `generatePassword` and the whole temporary-password relay are deleted, and `/activate/<token>` is `noindex` with `Referrer-Policy: no-referrer` because until it is redeemed the URL *is* the credential. Not done: the live `hermes-systest` run, left for the parent session, and cross-profile assignment (FG-28). |
 | 2026-08-12 | 2 | devin (for Leo) | Rescoped off the deferred FG-25; "assign profile" resolved | Two things made this doc unbuildable as written, and both are now closed. **Groups:** FG-25 was deferred on 2026-08-10, but this FG still had a `/groups` page, group-admin assignment, `elevation_enabled` and the `/me/access` ledger in its checklist — 4 of 15 items against tables that will not exist. Whoever picked it up would have built the deferred model or guessed, so they are removed *and listed* in a "Removed with FG-25" table with where each went; group filters become **profile** scope, which is isolation by construction rather than by policy. **Assign profile:** Leo's rule is that the owner/admin selects the profile. The doc's original A/B/C readings were obsolete — they predate the shared-Supabase decision, under which an account is already box-wide and "which profile" is just which `principals` table gets the row, needing no shared identity store. The real constraint is FG-27's ownership guard: a process running as profile A cannot open B's schema, by design. Leo chose to ship the picker scoped to the administered profile and hand cross-profile assignment to FG-28 (which builds the control plane entitled to several schemas) rather than add a second privileged door now. Two consequences are written in because they are silent-failure shaped: the `profile` field must be **refused with 409, not ignored**, when it names another profile (and must create no orphan GoTrue account on the way out), and "all accounts" ≠ "the people in this brain" — with one shared `auth.users`, listing the former in a profile console is a data-exposure bug, not a copy nit. Also recorded: an existing account being added to a second profile is an **enrolment**, not an error and not a new invitation — the common case under this topology, and a dead end if the form treats a duplicate email as a failure. |
 | 2026-08-10 | 1 | devin (for Leo) | Created FG doc | Leo's UI requirements: a Users page scoped by access, owner/admin CRUD over groups and users, and creation that assigns groups + login name and issues a **5-minute invitation link** so the new user sets their own password. Replaces the current browser-generated temporary-password relay in `MembersView.tsx`. Chose an own `invitations` table over GoTrue `admin/generate_link` (global-only expiry, email-oriented, no single-use/revoke/audit); accounts are created **banned** so an unactivated account cannot be logged into; hard delete must resolve data ownership because cascades do not reach memories/files/GTS. Flagged **"assign profile" as an open decision** — a profile is an isolated brain, not a user attribute, so the requirement as stated cannot be implemented without cross-profile identity. |
