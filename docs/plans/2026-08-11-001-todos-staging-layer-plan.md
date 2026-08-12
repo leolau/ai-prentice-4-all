@@ -13,6 +13,12 @@ depends_on:
 
 # To-dos
 
+> **Amended by** `docs/plans/2026-08-13-001-todos-and-projects-design-revision.md`
+> (ed.2): steps 1–6 below shipped; the CLI + skill, `POST /{id}/start`, the
+> linked memory document, the `/files` back-link and the nav badge are designed
+> there, `/advance` is deferred there, and all five open questions below are
+> answered there as defaults.
+
 ## What this is for
 
 Everything in the system today runs in one of two modes. Either it is fully
