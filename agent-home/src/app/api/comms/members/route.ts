@@ -1,31 +1,56 @@
 /**
- * BFF for member management (FG-20 PR-4 / multi-user item e — frontend).
+ * BFF for the users list + user creation (FG-26).
  *
- * - `GET`  → list enrolled members (joined with GoTrue account state).
- * - `POST` → create a Supabase account + enrol it as a principal.
+ * - `GET`  → one page of this profile's roster (search / role / activity
+ *   filters and paging are forwarded, and resolved in Postgres upstream, so a
+ *   thousand-person roster costs the same as a ten-person one).
+ * - `POST` → enrol somebody: a new account is created **banned with a
+ *   server-side random password** and the response carries a one-time
+ *   activation link. No password crosses this boundary in either direction.
  *
- * Both forward to the Python API `/api/comms/members` under the bridged C1
- * principal. Authorization is owner/admin-only and is enforced **twice**: this
- * server-side route rejects a non-admin principal early (clean UX), and the
- * Python layer enforces it independently as the authority. The browser never
- * calls GoTrue and never holds the service-role key.
+ * `profile` is required on create and is forwarded verbatim. A value naming
+ * another profile is refused upstream with 409 before any account exists —
+ * this route must not "helpfully" substitute the current profile, because that
+ * would silently enrol somebody somewhere the admin didn't choose.
+ *
+ * Authorization is owner/admin and enforced **twice**: here for a clean UX, and
+ * independently in Python as the authority. The browser never calls GoTrue.
  */
 import { NextResponse } from "next/server";
 
 import { forwardMemberError, requireMemberAdmin } from "@/lib/api/member-bff";
+import type { Role } from "@/types";
 
 interface CreateBody {
   email?: unknown;
-  password?: unknown;
+  profile?: unknown;
   display?: unknown;
   role?: unknown;
 }
 
-export async function GET(): Promise<NextResponse> {
+const ASSIGNABLE: readonly string[] = ["admin", "member", "viewer"];
+
+function intParam(raw: string | null, fallback: number): number {
+  const value = Number.parseInt(raw ?? "", 10);
+  return Number.isFinite(value) && value >= 0 ? value : fallback;
+}
+
+export async function GET(request: Request): Promise<NextResponse> {
   const gate = await requireMemberAdmin();
   if ("response" in gate) return gate.response;
+  const params = new URL(request.url).searchParams;
+  const role = (params.get("role") ?? "").trim();
+  const active = (params.get("active") ?? "").trim();
   try {
-    return NextResponse.json(await gate.client.members());
+    return NextResponse.json(
+      await gate.client.members({
+        limit: intParam(params.get("limit"), 25),
+        offset: intParam(params.get("offset"), 0),
+        q: (params.get("q") ?? "").trim() || undefined,
+        role: ASSIGNABLE.includes(role) || role === "owner" ? (role as Role) : undefined,
+        active: active === "" ? undefined : active === "true",
+      }),
+    );
   } catch (err) {
     return forwardMemberError(err);
   }
@@ -41,16 +66,25 @@ export async function POST(request: Request): Promise<NextResponse> {
     return NextResponse.json({ error: "invalid_json" }, { status: 400 });
   }
   const email = typeof body.email === "string" ? body.email.trim() : "";
-  const password = typeof body.password === "string" ? body.password : "";
+  const profile = typeof body.profile === "string" ? body.profile.trim() : "";
   const display = typeof body.display === "string" ? body.display.trim() : "";
   const role = typeof body.role === "string" ? body.role.trim() : "member";
-  if (!email || !password) {
+  if (!email) {
     return NextResponse.json(
-      { error: "invalid_input", detail: "email and password are required." },
+      { error: "invalid_input", detail: "An email address is required." },
       { status: 400 },
     );
   }
-  if (role !== "admin" && role !== "member" && role !== "viewer") {
+  if (!profile) {
+    return NextResponse.json(
+      {
+        error: "invalid_input",
+        detail: "A profile is required — choose which profile to enrol into.",
+      },
+      { status: 400 },
+    );
+  }
+  if (!ASSIGNABLE.includes(role)) {
     return NextResponse.json(
       { error: "invalid_role", detail: "role must be admin, member, or viewer." },
       { status: 400 },
@@ -58,7 +92,12 @@ export async function POST(request: Request): Promise<NextResponse> {
   }
   try {
     return NextResponse.json(
-      await gate.client.createMember({ email, password, display, role }),
+      await gate.client.createMember({
+        email,
+        profile,
+        display,
+        role: role as Role,
+      }),
     );
   } catch (err) {
     return forwardMemberError(err);

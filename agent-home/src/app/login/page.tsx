@@ -1,5 +1,6 @@
 import { redirect } from "next/navigation";
 
+import { ResetRequestForm } from "@/components/auth/ResetRequestForm";
 import { LoginForm, type ProviderOption } from "@/components/LoginForm";
 import { MobileShell } from "@/components/MobileShell";
 import { HermesApiClient, HermesApiError } from "@/lib/api/client";
@@ -31,6 +32,11 @@ export default async function LoginPage() {
         Sign in with your Hermes account to open your agent home.
       </p>
       <LoginForm providers={providers} />
+      {/* Self-service recovery: a locked-out user cannot sign in to ask, and
+       * nobody hands out temporary passwords by hand any more. */}
+      <div className="mt-4">
+        <ResetRequestForm />
+      </div>
     </MobileShell>
   );
 }

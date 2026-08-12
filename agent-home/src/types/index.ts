@@ -528,11 +528,34 @@ export interface ChangeOpResponse {
 }
 
 /**
- * A brain member (mirror of `members.MemberView.as_dict`): an enrolled
- * principal joined with its Supabase (GoTrue) account state. `email`/`active`
- * come from GoTrue — `email` is blank and `active` is `true` for a principal
- * GoTrue doesn't know (e.g. the bootstrap owner enrolled before Supabase);
- * `active` is `false` when the account is deactivated (banned).
+ * Where an invitation stands (mirror of `invitations.Invitation.status`). The
+ * raw token is deliberately absent from this shape — it exists exactly once, in
+ * the create/regenerate response, and is stored only as a hash.
+ */
+export type InvitationStatus = "open" | "used" | "revoked" | "expired";
+
+/** An activation/recovery link's lifecycle (mirror of `Invitation.as_dict`). */
+export interface Invitation {
+  id: string;
+  user_id: string;
+  kind: "activation" | "recovery";
+  status: InvitationStatus;
+  expires_at: string;
+  used_at: string | null;
+  revoked_at: string | null;
+  created_by: string;
+  created_at: string;
+}
+
+/**
+ * A user in this profile (mirror of `members.MemberView.as_dict`): an enrolled
+ * principal joined with its Supabase (GoTrue) account state.
+ *
+ * The two "active" notions are genuinely different and both matter in the UI:
+ * `active` is the **box-wide account** (false while banned — which is how a
+ * created-but-not-yet-activated user looks), while `enrolled` is this
+ * **profile's** enrolment (`principals.active`). Somebody can be a live account
+ * elsewhere on the box and a suspended enrolment here.
  */
 export interface Member {
   user_id: string;
@@ -540,20 +563,81 @@ export interface Member {
   role: Role;
   email: string;
   active: boolean;
+  enrolled: boolean;
   channels: string[];
   is_owner: boolean;
+  invitation: Invitation | null;
 }
 
-/** `GET /api/comms/members`: the enrolled members (owner/admin only). */
+/** `GET /api/comms/members`: one page of the roster (owner/admin only). */
 export interface MembersResponse {
   configured: boolean;
   members: Member[];
+  total: number;
+  limit: number;
+  offset: number;
+  /** The profile this console administers (FG-27 derives its schema). */
+  profile?: string;
 }
 
-/** `POST /api/comms/members`: the freshly created + enrolled member. */
+/** What any enrolled principal may see about a colleague (FG-26 §3.1). */
+export interface DirectoryEntry {
+  user_id: string;
+  display: string;
+  role: Role;
+  channels: string[];
+}
+
+/** `GET /api/comms/directory`: the colleague list, visible to everyone here. */
+export interface DirectoryResponse {
+  configured: boolean;
+  entries: DirectoryEntry[];
+  total: number;
+  profile?: string;
+}
+
+/**
+ * `POST /api/comms/members`: a new account (with its one-time activation link)
+ * or an enrolment of an account that already existed on the box.
+ *
+ * `activation_path` is present only for a genuinely new account and only in
+ * this response — somebody who already had an account already has a password,
+ * and a link that could be re-fetched would not be single-use.
+ */
 export interface MemberCreateResponse {
   ok: boolean;
-  member: { user_id: string; display: string; role: Role };
+  enrolled_existing: boolean;
+  member: { user_id: string; display: string; role: Role; email: string };
+  invitation: Invitation | null;
+  activation_path: string | null;
+}
+
+/** `POST /api/comms/members/{id}/invitation`: a freshly minted link, once. */
+export interface MemberInvitationResponse {
+  ok: boolean;
+  invitation: Invitation;
+  activation_path: string;
+}
+
+/** One CSV row's outcome (mirror of `members.ImportRow.as_dict`). */
+export interface MemberImportRow {
+  line: number;
+  email: string;
+  display: string;
+  role: Role;
+  planned: string;
+  user_id: string;
+  error: string;
+  activation_path: string | null;
+}
+
+/** `POST /api/comms/members/import`: a preview, or what was applied. */
+export interface MemberImportResponse {
+  ok: boolean;
+  dry_run: boolean;
+  rows: MemberImportRow[];
+  total: number;
+  failed: number;
 }
 
 /** `PUT /api/comms/members/{id}/role`: the re-roled member. */
@@ -562,7 +646,43 @@ export interface MemberRoleResponse {
   member: { user_id: string; role: Role };
 }
 
-/** Generic ack for password reset / (de)activation member mutations. */
+/** `PUT /api/comms/members/{id}/display`: the renamed member. */
+export interface MemberDisplayResponse {
+  ok: boolean;
+  member: { user_id: string; display: string };
+}
+
+/** `POST /api/comms/members/{id}/channels`: the member's linked handles. */
+export interface MemberChannelsResponse {
+  ok: boolean;
+  member: { user_id: string; channels: string[] };
+}
+
+/** `DELETE /api/comms/members/{id}`: what happened to the rows they owned. */
+export interface MemberDeleteResponse {
+  ok: boolean;
+  user_id: string;
+  strategy: "transfer" | "purge";
+  rows_transferred: number;
+  rows_deleted: number;
+}
+
+/** One identity-administration event from the C5 log (never a raw token). */
+export interface IdentityEvent {
+  change_ref: string;
+  actor_user_id: string;
+  action: string;
+  user_id: string;
+  payload: Record<string, unknown>;
+}
+
+/** `GET /api/comms/members/activity`: recent identity events (owner/admin). */
+export interface IdentityActivityResponse {
+  configured: boolean;
+  events: IdentityEvent[];
+}
+
+/** Generic ack for the (de)activation member mutations. */
 export interface MemberOkResponse {
   ok: boolean;
   active?: boolean;

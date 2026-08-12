@@ -32,6 +32,53 @@ export async function requireMemberAdmin(): Promise<
   return { client: await apiClientForRequest() };
 }
 
+/**
+ * Resolve an **owner-only** API client, or a `NextResponse` with the right
+ * status. FG-26 keeps account-level operations (hard delete) owner-only: the
+ * doc's finer rule — "the target is enrolled solely in profiles the actor
+ * administers" — cannot be evaluated from one profile's process at all, since
+ * FG-27 fail-closes a cross-profile read, so the console does not approximate
+ * it. Python enforces the same guard independently.
+ */
+export async function requireMemberOwner(): Promise<
+  { client: HermesApiClient } | { response: NextResponse }
+> {
+  const principal = await getPrincipal();
+  if (!principal) {
+    return { response: NextResponse.json({ error: "unauthenticated" }, { status: 401 }) };
+  }
+  if (principal.role !== "owner") {
+    return {
+      response: NextResponse.json(
+        {
+          error: "forbidden",
+          detail:
+            "Only the owner can delete a user: the account is box-wide and " +
+            "may serve other profiles.",
+        },
+        { status: 403 },
+      ),
+    };
+  }
+  return { client: await apiClientForRequest() };
+}
+
+/**
+ * Resolve a client for **any enrolled principal** — the directory's gate. A
+ * member who cannot see who else is in the profile cannot delegate to them, so
+ * this read is deliberately not owner/admin-only. It still requires a session:
+ * the roster is not public.
+ */
+export async function requireEnrolled(): Promise<
+  { client: HermesApiClient } | { response: NextResponse }
+> {
+  const principal = await getPrincipal();
+  if (!principal) {
+    return { response: NextResponse.json({ error: "unauthenticated" }, { status: 401 }) };
+  }
+  return { client: await apiClientForRequest() };
+}
+
 /** Map an upstream failure onto the BFF's error envelope + status. */
 export function forwardMemberError(err: unknown): NextResponse {
   if (err instanceof HermesApiError) {

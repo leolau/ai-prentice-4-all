@@ -102,6 +102,12 @@ class Principal:
     role: Role
     channels: tuple[str, ...] = field(default_factory=tuple)
     created_at: datetime | None = None
+    #: Whether this *enrolment* is live in the current profile. A deactivated
+    #: enrolment keeps the row (so ``owner_user_id`` attribution and audit
+    #: history stay correct) but carries no authority here — and, because
+    #: accounts are box-wide under one shared GoTrue, it leaves the person's
+    #: login and their other profiles untouched (FG-26 §3.5).
+    active: bool = True
 
     def __post_init__(self) -> None:
         if self.role not in ROLES:
@@ -521,6 +527,13 @@ CREATE TABLE IF NOT EXISTS principals (
     role TEXT NOT NULL CHECK (role IN ('owner', 'admin', 'member', 'viewer')),
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+-- Enrolment state (FG-26). Deactivating somebody in a profile console must be
+-- a *per-profile* verb: with one shared GoTrue an account is box-wide, so
+-- banning it would revoke their access in every other profile too. Additive so
+-- a deployment created before FG-26 gains the column without a migration.
+ALTER TABLE principals
+    ADD COLUMN IF NOT EXISTS active BOOLEAN NOT NULL DEFAULT TRUE;
 
 -- Exactly-one-owner invariant: at most one principal may hold the owner role.
 CREATE UNIQUE INDEX IF NOT EXISTS principals_single_owner
@@ -971,13 +984,43 @@ def _row_to_principal(
     row: Mapping[str, object],
     channels: tuple[str, ...] = (),
 ) -> Principal:
+    active = row.get("active")
     return Principal(
         user_id=str(row["user_id"]),
         display=str(row["display"] or ""),
         role=_coerce_role(row["role"]),
         channels=channels,
         created_at=_coerce_dt(row.get("created_at")),
+        active=True if active is None else bool(active),
     )
+
+
+def _principal_filters(
+    query: str | None,
+    role: Role | None,
+    active: bool | None = None,
+) -> tuple[str, list[object]]:
+    """Build the shared ``WHERE`` clause for listing/counting principals.
+
+    Search matches ``display`` or ``user_id`` case-insensitively. Email lives
+    in GoTrue, not here, so an email search is applied by the caller that holds
+    the account join (``MemberService``) — this predicate stays inside the
+    profile's own schema.
+    """
+    clauses: list[str] = []
+    params: list[object] = []
+    text = (query or "").strip()
+    if text:
+        params.append(f"%{text}%")
+        clauses.append(f"(display ILIKE ${len(params)} OR user_id ILIKE ${len(params)})")
+    if role is not None:
+        params.append(role)
+        clauses.append(f"role = ${len(params)}")
+    if active is not None:
+        params.append(active)
+        clauses.append(f"active = ${len(params)}")
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    return where, params
 
 
 def _coerce_role(value: object) -> Role:
@@ -1017,6 +1060,17 @@ class PrincipalStore:
     def mode(self) -> str:
         return self._store.mode
 
+    @property
+    def app_store(self) -> SupabaseAppStore:
+        """The C3 store (and therefore the profile schema) this store writes to.
+
+        Exposed so a collaborator that must reach *other* tables in the same
+        profile schema — the FG-26 invitation table, the ownership sweep a hard
+        delete runs — uses the same store instead of resolving a second one and
+        risking a different profile.
+        """
+        return self._store
+
     async def _channels_for(
         self,
         connection: asyncpg.Connection,
@@ -1032,6 +1086,36 @@ class PrincipalStore:
             user_id,
         )
         return tuple(f"{r['platform']}:{r['channel_user_id']}" for r in rows)
+
+    async def _channels_by_user(
+        self,
+        connection: asyncpg.Connection,
+        user_ids: list[str],
+    ) -> dict[str, tuple[str, ...]]:
+        """Return ``{user_id: channels}`` for ``user_ids`` in **one** query.
+
+        The per-principal :meth:`_channels_for` is correct but costs one round
+        trip each, so listing a 500-person profile issued 501 queries (FG-26).
+        Grouping in Postgres keeps the ordering the single-user path produces
+        (``platform``, then ``channel_user_id``) so the two agree row for row.
+        """
+        if not user_ids:
+            return {}
+        rows = await connection.fetch(
+            """
+            SELECT user_id,
+                   ARRAY_AGG(platform || ':' || channel_user_id
+                             ORDER BY platform, channel_user_id) AS channels
+            FROM channel_identities
+            WHERE user_id = ANY($1::text[])
+            GROUP BY user_id
+            """,
+            user_ids,
+        )
+        return {
+            str(row["user_id"]): tuple(str(c) for c in (row["channels"] or ()))
+            for row in rows
+        }
 
     async def enroll(
         self,
@@ -1059,7 +1143,7 @@ class PrincipalStore:
                 INSERT INTO principals (user_id, display, role)
                 VALUES ($1, $2, $3)
                 ON CONFLICT (user_id) DO UPDATE SET display = principals.display
-                RETURNING user_id, display, role, created_at
+                RETURNING user_id, display, role, created_at, active
                 """,
                 user_id,
                 display,
@@ -1084,7 +1168,7 @@ class PrincipalStore:
             await initialize_access(conn)
             row = await conn.fetchrow(
                 """
-                SELECT user_id, display, role, created_at
+                SELECT user_id, display, role, created_at, active
                 FROM principals WHERE user_id = $1
                 """,
                 user_id,
@@ -1100,21 +1184,38 @@ class PrincipalStore:
     async def list_principals(
         self,
         *,
+        query: str | None = None,
+        role: Role | None = None,
+        active: bool | None = None,
+        limit: int | None = None,
+        offset: int = 0,
         connection: asyncpg.Connection | None = None,
     ) -> list[Principal]:
-        """Return every enrolled principal (owner first), with channels.
+        """Return the enrolled principals (owner first), with channels.
 
         Ordered owner → admin → member → viewer, then by enrolment time, so a
         management UI/CLI lists the most privileged accounts first.
+
+        ``query`` matches display name or ``user_id`` case-insensitively, and
+        ``limit``/``offset`` page the result **in Postgres** — a 500-person
+        roster must not be read whole to render one page. Channels are loaded
+        with a single grouped query for the page (see :meth:`_channels_by_user`).
         """
+        if role is not None and role not in ROLES:
+            raise ValueError(f"Unknown role: {role!r}")
+        if limit is not None and limit < 0:
+            raise ValueError("limit cannot be negative")
+        if offset < 0:
+            raise ValueError("offset cannot be negative")
         own_connection = connection is None
         conn = connection or await self._store.connect()
         try:
             await initialize_access(conn)
-            rows = await conn.fetch(
-                """
-                SELECT user_id, display, role, created_at
+            where, params = _principal_filters(query, role, active)
+            sql = f"""
+                SELECT user_id, display, role, created_at, active
                 FROM principals
+                {where}
                 ORDER BY
                     CASE role
                         WHEN 'owner' THEN 0
@@ -1125,12 +1226,159 @@ class PrincipalStore:
                     created_at,
                     user_id
                 """
+            if limit is not None:
+                params.append(limit)
+                sql += f" LIMIT ${len(params)}"
+            if offset:
+                params.append(offset)
+                sql += f" OFFSET ${len(params)}"
+            rows = await conn.fetch(sql, *params)
+            channels = await self._channels_by_user(
+                conn, [str(row["user_id"]) for row in rows]
             )
-            result: list[Principal] = []
-            for row in rows:
-                channels = await self._channels_for(conn, str(row["user_id"]))
-                result.append(_row_to_principal(row, channels))
-            return result
+            return [
+                _row_to_principal(row, channels.get(str(row["user_id"]), ()))
+                for row in rows
+            ]
+        finally:
+            if own_connection:
+                await conn.close()
+
+    async def count_principals(
+        self,
+        *,
+        query: str | None = None,
+        role: Role | None = None,
+        active: bool | None = None,
+        connection: asyncpg.Connection | None = None,
+    ) -> int:
+        """Count the principals :meth:`list_principals` would return unpaged.
+
+        The page-count a paginated console needs; kept next to the list so the
+        two share :func:`_principal_filters` and cannot disagree about what a
+        search matches.
+        """
+        if role is not None and role not in ROLES:
+            raise ValueError(f"Unknown role: {role!r}")
+        own_connection = connection is None
+        conn = connection or await self._store.connect()
+        try:
+            await initialize_access(conn)
+            where, params = _principal_filters(query, role, active)
+            total = await conn.fetchval(
+                f"SELECT COUNT(*) FROM principals {where}", *params
+            )
+            return int(total or 0)
+        finally:
+            if own_connection:
+                await conn.close()
+
+    async def set_active(
+        self,
+        user_id: str,
+        active: bool,
+        *,
+        connection: asyncpg.Connection | None = None,
+    ) -> Principal:
+        """Deactivate or reactivate an enrolment **in this profile only**.
+
+        The per-profile counterpart to a GoTrue ban: the row survives, so rows
+        the person owns keep a resolvable ``owner_user_id`` and the audit trail
+        stays attributed, but they hold no authority here until reactivated. The
+        owner enrolment cannot be deactivated — a profile with no owner has no
+        principal the machine-operator surface can resolve.
+        """
+        user_id = _validate_user_id(user_id)
+        own_connection = connection is None
+        conn = connection or await self._store.connect()
+        try:
+            await initialize_access(conn)
+            current = await conn.fetchrow(
+                "SELECT role FROM principals WHERE user_id = $1", user_id
+            )
+            if current is None:
+                raise KeyError(f"No such principal: {user_id}")
+            if current["role"] == _OWNER_ROLE and not active:
+                raise ValueError(
+                    "Cannot deactivate the owner's enrolment; transfer "
+                    "ownership first ('hermes owner transfer')."
+                )
+            row = await conn.fetchrow(
+                """
+                UPDATE principals SET active = $2 WHERE user_id = $1
+                RETURNING user_id, display, role, created_at, active
+                """,
+                user_id,
+                active,
+            )
+            channels = await self._channels_for(conn, user_id)
+            return _row_to_principal(row, channels)
+        finally:
+            if own_connection:
+                await conn.close()
+
+    async def set_display(
+        self,
+        user_id: str,
+        display: str,
+        *,
+        connection: asyncpg.Connection | None = None,
+    ) -> Principal:
+        """Rename a principal's display name in this profile."""
+        user_id = _validate_user_id(user_id)
+        own_connection = connection is None
+        conn = connection or await self._store.connect()
+        try:
+            await initialize_access(conn)
+            row = await conn.fetchrow(
+                """
+                UPDATE principals SET display = $2 WHERE user_id = $1
+                RETURNING user_id, display, role, created_at, active
+                """,
+                user_id,
+                display,
+            )
+            if row is None:
+                raise KeyError(f"No such principal: {user_id}")
+            channels = await self._channels_for(conn, user_id)
+            return _row_to_principal(row, channels)
+        finally:
+            if own_connection:
+                await conn.close()
+
+    async def unenroll(
+        self,
+        user_id: str,
+        *,
+        connection: asyncpg.Connection | None = None,
+    ) -> bool:
+        """Delete a principal row (and its channel identities) from this profile.
+
+        The hard half of a hard delete: callers must already have resolved what
+        happens to the rows the person owns, because ``ON DELETE CASCADE``
+        reaches ``channel_identities`` and ``principal_aliases`` and nothing
+        else — memories, files and GTS items would be left pointing at a
+        ``user_id`` no principal answers to. Refuses the owner.
+        """
+        user_id = _validate_user_id(user_id)
+        own_connection = connection is None
+        conn = connection or await self._store.connect()
+        try:
+            await initialize_access(conn)
+            current = await conn.fetchrow(
+                "SELECT role FROM principals WHERE user_id = $1", user_id
+            )
+            if current is None:
+                return False
+            if current["role"] == _OWNER_ROLE:
+                raise ValueError(
+                    "Cannot delete the owner; transfer ownership first "
+                    "('hermes owner transfer')."
+                )
+            await conn.execute(
+                "DELETE FROM principals WHERE user_id = $1", user_id
+            )
+            return True
         finally:
             if own_connection:
                 await conn.close()
@@ -1174,7 +1422,7 @@ class PrincipalStore:
             row = await conn.fetchrow(
                 """
                 UPDATE principals SET role = $2 WHERE user_id = $1
-                RETURNING user_id, display, role, created_at
+                RETURNING user_id, display, role, created_at, active
                 """,
                 user_id,
                 role,
@@ -1293,7 +1541,7 @@ class PrincipalStore:
             await initialize_access(conn)
             row = await conn.fetchrow(
                 """
-                SELECT p.user_id, p.display, p.role, p.created_at
+                SELECT p.user_id, p.display, p.role, p.created_at, p.active
                 FROM channel_identities ci
                 JOIN principals p ON p.user_id = ci.user_id
                 WHERE ci.platform = $1 AND ci.channel_user_id = $2
@@ -1321,7 +1569,7 @@ class PrincipalStore:
             await initialize_access(conn)
             row = await conn.fetchrow(
                 """
-                SELECT user_id, display, role, created_at
+                SELECT user_id, display, role, created_at, active
                 FROM principals WHERE role = 'owner'
                 """
             )
