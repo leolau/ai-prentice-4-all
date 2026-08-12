@@ -187,6 +187,58 @@ failure** — the live box has one profile, so it cannot be exhibiting it.
 Confirming or refuting it is the **first task** of this FG, because if it is
 real it is a bug in shipped code and outranks the feature.
 
+### Verified 2026-08-12 — **confirmed, on three paths, and closed**
+
+Two profile homes with deliberately different `.env` values, one process, real
+`profile_runtime_scope()`, real files on disk. The already-migrated seams
+(`get_secret`, `runtime_provider`, MCP `${VAR}` interpolation) held. Three
+unmigrated paths did not, and every one of them decides a credential that a
+turn actually uses:
+
+```
+config ${VAR} expansion   dsn/service_role_key → the PROCESS value, both profiles
+gateway platform tokens   telegram token       → the PROCESS value, both profiles
+resolve_anthropic_token   ANTHROPIC_API_KEY    → the PROCESS value, both profiles
+```
+
+Each is worse than "reads the wrong variable":
+
+- **`_expand_env_vars`** is applied once per config load and the *expanded*
+  result is cached per config path. A single unscoped load of a profile's config
+  (`hermes status` walking every profile) therefore left the process-env
+  expansion in the cache, and that profile's next turn was served it. The cache
+  key now includes a fingerprint of the active secret scope.
+- **`_apply_env_overrides`** applies every platform token as an override on top
+  of the profile's own `config.yaml`, so the process environment *beat* each
+  profile's `.env`. Both profiles resolved one token — which then either polls
+  the wrong bot, or is refused by the same-credential collision check as a clash
+  with a profile it shares no credential with. The 28 credential-shaped reads in
+  that function now go through the scope; the tuning knobs beside them still read
+  `os.environ`, which is correct for a deployment-level override.
+- **`resolve_anthropic_token`** is the provider fallback, so a turn could be
+  billed to, and authenticated as, another profile's account. Now fails closed.
+
+A fourth, found while probing and the most damaging of the four: **any per-turn
+call to `load_hermes_dotenv()` writes a whole `.env` into `os.environ` with
+`override=True`** (two such callers exist on the MCP config path). In a
+multiplexer that makes the process environment become the last profile to reach
+that line, poisoning every unscoped read and every subprocess. It is now refused
+while multiplexing is active — the interpolation those callers wanted is already
+scope-aware.
+
+**Still open, deliberately:** a subprocess started inside a profile's turn
+inherits the *process* environment, i.e. the default profile's credentials, not
+the scoped ones. `secret_scope`'s not touching `os.environ` prevents one
+secondary profile from seeing another's, but it does not give a child the right
+values. MCP stdio spawns are safe (`_build_safe_env` allowlists, and config
+`env:` is scope-interpolated); the terminal tool and any other spawn that passes
+the ambient environment are not. Asserted as a stated property in
+`tests/gateway/test_multiplex_env_leak_paths.py` so closing it flips a test.
+
+None of this was exhibiting on the box: `gateway.multiplex_profiles` is false
+and `hermes-systest` serves one profile. It was a real defect in shipped code
+that the first profile to be given its own credentials would have triggered.
+
 ## One gateway for all profiles (decided 2026-08-10)
 
 **In scope for this FG: run a single gateway per box, serving every profile.**
@@ -427,7 +479,7 @@ secret-isolation tests green on real Postgres; `scripts/run_tests.sh`, `ruff`,
 
 ## Progress checklist
 
-- [ ] **First:** verify or refute the multiplexed-gateway `os.environ` issue; file separately if real
+- [x] **First:** verify or refute the multiplexed-gateway `os.environ` issue; file separately if real — **confirmed on three paths and fixed** (see §"Verified 2026-08-12"); subprocess env inheritance remains, asserted as a stated property
 - [ ] Decision recorded: single shared GoTrue across profiles (yes/no)
 - [ ] Profile registry at the shared root + CLI
 - [ ] Console fan-out + profile switcher scoped to administered profiles

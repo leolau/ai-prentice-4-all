@@ -22,6 +22,28 @@ from utils import env_int, is_truthy_value
 logger = logging.getLogger(__name__)
 
 
+def _credential_env(name: str, default: Optional[str] = None) -> Optional[str]:
+    """Read a platform credential, honoring the active profile's secret scope.
+
+    Every platform token below is applied as an *override* on top of the
+    profile's own ``config.yaml``. In a multiplexing gateway that made the
+    process environment win over each profile's ``.env``: a secondary profile's
+    adapter was built with the default profile's bot token, so it either polled
+    the wrong bot or was refused by the duplicate-credential check as a clash
+    with a profile it does not share a token with.
+
+    Non-credential knobs in this function keep reading ``os.getenv`` on purpose
+    — they are deployment settings, and a process-level override of a timeout or
+    a policy flag is legitimate for every profile.
+    """
+    try:
+        from agent.secret_scope import expand_env_ref
+    except Exception:
+        return os.getenv(name, default)
+    value = expand_env_ref(name)
+    return default if value is None else value
+
+
 def _coerce_bool(value: Any, default: bool = True) -> bool:
     """Coerce bool-ish config values, preserving a caller-provided default."""
     if value is None:
@@ -1268,7 +1290,7 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
         return platform_config
     
     # Telegram
-    telegram_token = os.getenv("TELEGRAM_BOT_TOKEN")
+    telegram_token = _credential_env("TELEGRAM_BOT_TOKEN")
     if telegram_token:
         telegram_config = _enable_from_env(Platform.TELEGRAM)
         telegram_config.token = telegram_token
@@ -1298,7 +1320,7 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
         )
     
     # Discord
-    discord_token = os.getenv("DISCORD_BOT_TOKEN")
+    discord_token = _credential_env("DISCORD_BOT_TOKEN")
     if discord_token:
         discord_config = _enable_from_env(Platform.DISCORD)
         discord_config.token = discord_token
@@ -1346,7 +1368,7 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
     # outbound, public webhook inbound. Both adapters can run in parallel
     # against different phone numbers.
     whatsapp_cloud_phone_id = os.getenv("WHATSAPP_CLOUD_PHONE_NUMBER_ID")
-    whatsapp_cloud_token = os.getenv("WHATSAPP_CLOUD_ACCESS_TOKEN")
+    whatsapp_cloud_token = _credential_env("WHATSAPP_CLOUD_ACCESS_TOKEN")
     if whatsapp_cloud_phone_id and whatsapp_cloud_token:
         if Platform.WHATSAPP_CLOUD not in config.platforms:
             config.platforms[Platform.WHATSAPP_CLOUD] = PlatformConfig()
@@ -1359,7 +1381,7 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
         wa_cloud_app_id = os.getenv("WHATSAPP_CLOUD_APP_ID")
         if wa_cloud_app_id:
             config.platforms[Platform.WHATSAPP_CLOUD].extra["app_id"] = wa_cloud_app_id
-        wa_cloud_app_secret = os.getenv("WHATSAPP_CLOUD_APP_SECRET")
+        wa_cloud_app_secret = _credential_env("WHATSAPP_CLOUD_APP_SECRET")
         if wa_cloud_app_secret:
             config.platforms[Platform.WHATSAPP_CLOUD].extra["app_secret"] = wa_cloud_app_secret
         # Optional: WABA id (analytics, future use)
@@ -1367,7 +1389,7 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
         if wa_cloud_waba_id:
             config.platforms[Platform.WHATSAPP_CLOUD].extra["waba_id"] = wa_cloud_waba_id
         # Webhook verify token — Meta hub.verify_token shared secret
-        wa_cloud_verify_token = os.getenv("WHATSAPP_CLOUD_VERIFY_TOKEN")
+        wa_cloud_verify_token = _credential_env("WHATSAPP_CLOUD_VERIFY_TOKEN")
         if wa_cloud_verify_token:
             config.platforms[Platform.WHATSAPP_CLOUD].extra["verify_token"] = wa_cloud_verify_token
         # Webhook server bind config (defaults baked into the adapter)
@@ -1397,7 +1419,7 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
         )
 
     # Slack
-    slack_token = os.getenv("SLACK_BOT_TOKEN")
+    slack_token = _credential_env("SLACK_BOT_TOKEN")
     if slack_token:
         if Platform.SLACK not in config.platforms:
             # No yaml config for Slack — env-only setup, enable it
@@ -1449,7 +1471,7 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
         )
 
     # Mattermost
-    mattermost_token = os.getenv("MATTERMOST_TOKEN")
+    mattermost_token = _credential_env("MATTERMOST_TOKEN")
     if mattermost_token:
         mattermost_url = os.getenv("MATTERMOST_URL", "")
         if not mattermost_url:
@@ -1467,9 +1489,9 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
         )
 
     # Matrix
-    matrix_token = os.getenv("MATRIX_ACCESS_TOKEN")
+    matrix_token = _credential_env("MATRIX_ACCESS_TOKEN")
     matrix_homeserver = os.getenv("MATRIX_HOMESERVER", "")
-    if matrix_token or os.getenv("MATRIX_PASSWORD"):
+    if matrix_token or _credential_env("MATRIX_PASSWORD"):
         if not matrix_homeserver:
             logger.warning("MATRIX_ACCESS_TOKEN/MATRIX_PASSWORD set but MATRIX_HOMESERVER is missing")
         matrix_config = _enable_from_env(Platform.MATRIX)
@@ -1479,7 +1501,7 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
         matrix_user = os.getenv("MATRIX_USER_ID", "")
         if matrix_user:
             matrix_config.extra["user_id"] = matrix_user
-        matrix_password = os.getenv("MATRIX_PASSWORD", "")
+        matrix_password = _credential_env("MATRIX_PASSWORD", "")
         if matrix_password:
             matrix_config.extra["password"] = matrix_password
         matrix_e2ee_mode = os.getenv("MATRIX_E2EE_MODE", "").strip().lower()
@@ -1503,7 +1525,7 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
         )
 
     # Home Assistant
-    hass_token = os.getenv("HASS_TOKEN")
+    hass_token = _credential_env("HASS_TOKEN")
     if hass_token:
         if Platform.HOMEASSISTANT not in config.platforms:
             config.platforms[Platform.HOMEASSISTANT] = PlatformConfig()
@@ -1515,7 +1537,7 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
 
     # Email
     email_addr = os.getenv("EMAIL_ADDRESS")
-    email_pwd = os.getenv("EMAIL_PASSWORD")
+    email_pwd = _credential_env("EMAIL_PASSWORD")
     email_imap = os.getenv("EMAIL_IMAP_HOST")
     email_smtp = os.getenv("EMAIL_SMTP_HOST")
     if all([email_addr, email_pwd, email_imap, email_smtp]):
@@ -1542,7 +1564,7 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
         if Platform.SMS not in config.platforms:
             config.platforms[Platform.SMS] = PlatformConfig()
         config.platforms[Platform.SMS].enabled = True
-        config.platforms[Platform.SMS].api_key = os.getenv("TWILIO_AUTH_TOKEN", "")
+        config.platforms[Platform.SMS].api_key = _credential_env("TWILIO_AUTH_TOKEN", "")
     sms_home = os.getenv("SMS_HOME_CHANNEL")
     if sms_home and Platform.SMS in config.platforms:
         config.platforms[Platform.SMS].home_channel = HomeChannel(
@@ -1554,7 +1576,7 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
 
     # API Server
     api_server_enabled = os.getenv("API_SERVER_ENABLED", "").lower() in {"true", "1", "yes"}
-    api_server_key = os.getenv("API_SERVER_KEY", "")
+    api_server_key = _credential_env("API_SERVER_KEY", "")
     api_server_cors_origins = os.getenv("API_SERVER_CORS_ORIGINS", "")
     api_server_port = os.getenv("API_SERVER_PORT")
     api_server_host = os.getenv("API_SERVER_HOST")
@@ -1582,7 +1604,7 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
     # Webhook platform
     webhook_enabled = os.getenv("WEBHOOK_ENABLED", "").lower() in {"true", "1", "yes"}
     webhook_port = os.getenv("WEBHOOK_PORT")
-    webhook_secret = os.getenv("WEBHOOK_SECRET", "")
+    webhook_secret = _credential_env("WEBHOOK_SECRET", "")
     if webhook_enabled:
         if Platform.WEBHOOK not in config.platforms:
             config.platforms[Platform.WEBHOOK] = PlatformConfig()
@@ -1653,7 +1675,7 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
 
     # DingTalk
     dingtalk_client_id = os.getenv("DINGTALK_CLIENT_ID")
-    dingtalk_client_secret = os.getenv("DINGTALK_CLIENT_SECRET")
+    dingtalk_client_secret = _credential_env("DINGTALK_CLIENT_SECRET")
     if dingtalk_client_id and dingtalk_client_secret:
         if Platform.DINGTALK not in config.platforms:
             config.platforms[Platform.DINGTALK] = PlatformConfig()
@@ -1673,7 +1695,7 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
 
     # Feishu / Lark
     feishu_app_id = os.getenv("FEISHU_APP_ID")
-    feishu_app_secret = os.getenv("FEISHU_APP_SECRET")
+    feishu_app_secret = _credential_env("FEISHU_APP_SECRET")
     if feishu_app_id and feishu_app_secret:
         if Platform.FEISHU not in config.platforms:
             config.platforms[Platform.FEISHU] = PlatformConfig()
@@ -1684,10 +1706,10 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
             "domain": os.getenv("FEISHU_DOMAIN", "feishu"),
             "connection_mode": os.getenv("FEISHU_CONNECTION_MODE", "websocket"),
         })
-        feishu_encrypt_key = os.getenv("FEISHU_ENCRYPT_KEY", "")
+        feishu_encrypt_key = _credential_env("FEISHU_ENCRYPT_KEY", "")
         if feishu_encrypt_key:
             config.platforms[Platform.FEISHU].extra["encrypt_key"] = feishu_encrypt_key
-        feishu_verification_token = os.getenv("FEISHU_VERIFICATION_TOKEN", "")
+        feishu_verification_token = _credential_env("FEISHU_VERIFICATION_TOKEN", "")
         if feishu_verification_token:
             config.platforms[Platform.FEISHU].extra["verification_token"] = feishu_verification_token
         feishu_home = os.getenv("FEISHU_HOME_CHANNEL")
@@ -1701,7 +1723,7 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
 
     # WeCom (Enterprise WeChat)
     wecom_bot_id = os.getenv("WECOM_BOT_ID")
-    wecom_secret = os.getenv("WECOM_SECRET")
+    wecom_secret = _credential_env("WECOM_SECRET")
     if wecom_bot_id and wecom_secret:
         if Platform.WECOM not in config.platforms:
             config.platforms[Platform.WECOM] = PlatformConfig()
@@ -1724,7 +1746,7 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
 
     # WeCom callback mode (self-built apps)
     wecom_callback_corp_id = os.getenv("WECOM_CALLBACK_CORP_ID")
-    wecom_callback_corp_secret = os.getenv("WECOM_CALLBACK_CORP_SECRET")
+    wecom_callback_corp_secret = _credential_env("WECOM_CALLBACK_CORP_SECRET")
     if wecom_callback_corp_id and wecom_callback_corp_secret:
         if Platform.WECOM_CALLBACK not in config.platforms:
             config.platforms[Platform.WECOM_CALLBACK] = PlatformConfig()
@@ -1733,14 +1755,14 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
             "corp_id": wecom_callback_corp_id,
             "corp_secret": wecom_callback_corp_secret,
             "agent_id": os.getenv("WECOM_CALLBACK_AGENT_ID", ""),
-            "token": os.getenv("WECOM_CALLBACK_TOKEN", ""),
-            "encoding_aes_key": os.getenv("WECOM_CALLBACK_ENCODING_AES_KEY", ""),
+            "token": _credential_env("WECOM_CALLBACK_TOKEN", ""),
+            "encoding_aes_key": _credential_env("WECOM_CALLBACK_ENCODING_AES_KEY", ""),
             "host": os.getenv("WECOM_CALLBACK_HOST", "0.0.0.0"),
             "port": env_int("WECOM_CALLBACK_PORT", 8645),
         })
 
     # Weixin (personal WeChat via iLink Bot API)
-    weixin_token = os.getenv("WEIXIN_TOKEN")
+    weixin_token = _credential_env("WEIXIN_TOKEN")
     weixin_account_id = os.getenv("WEIXIN_ACCOUNT_ID")
     if weixin_token or weixin_account_id:
         if Platform.WEIXIN not in config.platforms:
@@ -1783,7 +1805,7 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
 
     # BlueBubbles (iMessage)
     bluebubbles_server_url = os.getenv("BLUEBUBBLES_SERVER_URL")
-    bluebubbles_password = os.getenv("BLUEBUBBLES_PASSWORD")
+    bluebubbles_password = _credential_env("BLUEBUBBLES_PASSWORD")
     if bluebubbles_server_url and bluebubbles_password:
         if Platform.BLUEBUBBLES not in config.platforms:
             config.platforms[Platform.BLUEBUBBLES] = PlatformConfig()
@@ -1823,7 +1845,7 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
 
     # QQ (Official Bot API v2)
     qq_app_id = os.getenv("QQ_APP_ID")
-    qq_client_secret = os.getenv("QQ_CLIENT_SECRET")
+    qq_client_secret = _credential_env("QQ_CLIENT_SECRET")
     if qq_app_id or qq_client_secret:
         if Platform.QQBOT not in config.platforms:
             config.platforms[Platform.QQBOT] = PlatformConfig()
@@ -1864,8 +1886,8 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
             )
 
     # Yuanbao — YUANBAO_APP_ID preferred
-    yuanbao_app_id = os.getenv("YUANBAO_APP_ID") or os.getenv("YUANBAO_APP_KEY")
-    yuanbao_app_secret = os.getenv("YUANBAO_APP_SECRET")
+    yuanbao_app_id = os.getenv("YUANBAO_APP_ID") or _credential_env("YUANBAO_APP_KEY")
+    yuanbao_app_secret = _credential_env("YUANBAO_APP_SECRET")
     if yuanbao_app_id and yuanbao_app_secret:
         if Platform.YUANBAO not in config.platforms:
             config.platforms[Platform.YUANBAO] = PlatformConfig()
