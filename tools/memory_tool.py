@@ -184,6 +184,24 @@ def _drift_error(path: "Path", bak_path: str) -> Dict[str, Any]:
     }
 
 
+def record_unresolved_write_denied(target: str) -> Dict[str, Any]:
+    """Audit a write refused because nobody could be attributed (FG-24).
+
+    Shaped like the shared-write refusal so both land in one ledger: an
+    operator asking "who has been refused memory writes?" gets one answer.
+    """
+    return _record_memory_refusal(
+        kind="memory_unresolved_write_denied",
+        target=target,
+        actor_user_id="unresolved",
+        actor_role=None,
+        summary=(
+            f"Refused {target!r} memory write from a session with no resolved "
+            f"principal while several people are enrolled"
+        ),
+    )
+
+
 def record_shared_write_denied(
     *,
     actor_user_id: str,
@@ -196,25 +214,42 @@ def record_shared_write_denied(
     forwarded to the FG-12 change log / FG-16 trace when those sinks are
     registered. Never raises into the write path.
     """
+    return _record_memory_refusal(
+        kind="memory_shared_write_denied",
+        target="shared",
+        actor_user_id=actor_user_id,
+        actor_role=actor_role,
+        summary=(
+            f"Refused shared-memory write by {actor_user_id} "
+            f"(role {actor_role!r}; owner/admin only)"
+        ),
+    )
+
+
+def _record_memory_refusal(
+    *,
+    kind: str,
+    target: str,
+    actor_user_id: str,
+    actor_role: Optional[str],
+    summary: str,
+) -> Dict[str, Any]:
     event = {
         "id": f"chg_{uuid.uuid4().hex}",
         "ts": time.time(),
         "actor_user_id": actor_user_id,
         "target_kind": "data",
         "op": {
-            "kind": "memory_shared_write_denied",
-            "target": "shared",
+            "kind": kind,
+            "target": target,
             "actor_role": actor_role,
         },
         "inverse_op": None,
         "reversible": False,
         "approval_ref": None,
         "backup_ref": None,
-        "kind": "memory_shared_write_denied",
-        "summary": (
-            f"Refused shared-memory write by {actor_user_id} "
-            f"(role {actor_role!r}; owner/admin only)"
-        ),
+        "kind": kind,
+        "summary": summary,
     }
     try:
         from agent.core_boundary import emit_audit_event
@@ -249,6 +284,7 @@ class MemoryStore:
         shared_memory_char_limit: int = 2200,
         user_id: Optional[str] = None,
         role: Optional[str] = None,
+        unresolved_principal: bool = False,
     ):
         self.memory_entries: List[str] = []
         self.user_entries: List[str] = []
@@ -263,6 +299,13 @@ class MemoryStore:
         # (instance-level), and ``shared`` is the profile-wide block.
         self._user_id: Optional[str] = None
         self._role: Optional[str] = None
+        # Set when the caller tried to resolve a principal for this session,
+        # failed, and *several* people are enrolled.  Then the unscoped files
+        # are not "this user's" — they are the profile-wide shared block plus a
+        # person block belonging to nobody, so writing them is refused rather
+        # than attributed to whoever happens to be reading later.  Reads still
+        # work: the session sees what the profile shares, which is correct.
+        self._unresolved_principal = bool(unresolved_principal) and not user_id
         if user_id:
             from hermes_cli.access import normalize_role, validate_user_id
 
@@ -558,6 +601,22 @@ class MemoryStore:
         The refusal is explicit (never a silent redirect to the principal's own
         block) and is audited C5-shaped.
         """
+        if self._unresolved_principal:
+            record_unresolved_write_denied(target)
+            return {
+                "success": False,
+                "done": True,
+                "error": (
+                    "Write denied: this session has no resolved principal and "
+                    "several people are enrolled, so there is no memory that is "
+                    "yours to write — the unscoped files are the profile's "
+                    "shared block, which every enrolled person reads. Tell the "
+                    "user to run 'hermes member local-principal --set "
+                    "<user_id>' once (or to message through their linked "
+                    "channel) and the fact can be saved to the right person. "
+                    "This attempt has been audited."
+                ),
+            }
         if target != "shared":
             return None
         if self._user_id is None:

@@ -204,6 +204,63 @@ def _set_active(user_id: str, *, active: bool) -> int:
     return 0
 
 
+def member_local_principal_command(args: argparse.Namespace) -> int:
+    """Run ``hermes member local-principal`` — whose memory local sessions write.
+
+    Sessions that arrive without a channel identity (the CLI, cron jobs, the
+    digest, the pollers) have no sender for C1 to resolve, so FG-24 resolves the
+    person they act as: a remembered binding, else the login subject, else the
+    only enrolled principal, else this command.
+    """
+    from hermes_cli.principal_binding import (
+        binding_path,
+        forget_binding,
+        read_binding,
+        remember_binding,
+    )
+
+    if args.clear:
+        if forget_binding():
+            print("Cleared the local principal binding.")
+        else:
+            print("No local principal binding was set.")
+        return 0
+
+    if args.set:
+        try:
+            store = _prod_store()
+            principal = asyncio.run(store.get(args.set))
+        except (RuntimeError, ValueError) as error:
+            print(f"Could not read the principal: {error}", file=sys.stderr)
+            raise SystemExit(1) from error
+        if principal is None:
+            print(
+                f"No enrolled principal {args.set!r}; 'hermes member list' "
+                "shows who is enrolled.",
+                file=sys.stderr,
+            )
+            raise SystemExit(1)
+        binding = remember_binding(principal.user_id, principal.role, "asked")
+        print(
+            f"Local sessions in this profile now act as {binding.user_id} "
+            f"({binding.role})."
+        )
+        return 0
+
+    binding = read_binding()
+    if binding is None:
+        print(
+            "No local principal binding is set. Hermes resolves one per "
+            "session (login subject, else the only enrolled principal, else it "
+            "asks); set one explicitly with --set <user_id>."
+        )
+        return 0
+    print(f"Local sessions act as {binding.user_id} ({binding.role})")
+    print(f"Resolved by: {binding.source}")
+    print(f"Stored in:   {binding_path()}")
+    return 0
+
+
 def register_member_subparser(subparsers: argparse._SubParsersAction) -> None:
     """Register ``hermes member`` and its sub-actions."""
     parser = subparsers.add_parser(
@@ -294,3 +351,29 @@ def register_member_subparser(subparsers: argparse._SubParsersAction) -> None:
     )
     activate.add_argument("user_id", help="The member's principal id")
     activate.set_defaults(func=member_activate_command)
+
+    local_principal = member_sub.add_parser(
+        "local-principal",
+        help="Show/set which person channel-less sessions act as (FG-24)",
+        description=(
+            "Sessions with no channel identity — the local CLI, cron jobs, the "
+            "digest, the email poller — have no sender to resolve, so Hermes "
+            "resolves the person they act as: a remembered binding, else the "
+            "login subject, else the only enrolled principal, else it asks "
+            "once and remembers. Use this to see, set or clear that answer. "
+            "With several people enrolled and no binding, memory writes are "
+            "refused rather than landing in the profile's shared block."
+        ),
+    )
+    local_principal.add_argument(
+        "--set",
+        metavar="USER_ID",
+        default=None,
+        help="Bind local sessions to this enrolled principal",
+    )
+    local_principal.add_argument(
+        "--clear",
+        action="store_true",
+        help="Forget the binding (it will be resolved again next session)",
+    )
+    local_principal.set_defaults(func=member_local_principal_command)
