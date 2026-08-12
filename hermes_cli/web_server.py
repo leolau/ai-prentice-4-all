@@ -3140,6 +3140,17 @@ async def _comms_resolve_principal(request: "Request", *, allow_as: bool = False
                         "user."
                     ),
                 )
+            if not actor.active:
+                # FG-26 §3.5: suspension is profile-local, so the shared
+                # account still logs in — the profile's own surfaces are where
+                # it has to bite, for reads as well as writes.
+                raise HTTPException(
+                    status_code=403,
+                    detail=(
+                        "This enrolment has been suspended in the current "
+                        "profile."
+                    ),
+                )
         else:
             actor = await principals.get_owner()
             if actor is None:
@@ -3660,7 +3671,7 @@ async def auth_redeem_invitation(request: Request):
     body = body if isinstance(body, dict) else {}
     token = str(body.get("token", "") or "")
     password = str(body.get("password", "") or "")
-    client_ip = request.client.host if request.client else ""
+    client_ip = _forwarded_client_ip(request)
     if not token or not _redeem_throttle().allow(ip=client_ip, token=token):
         # Indistinguishable from a bad token on purpose: a 429 would tell an
         # attacker their guess reached a real rate limiter for a real token.
@@ -3685,6 +3696,27 @@ async def auth_redeem_invitation(request: Request):
     return {"ok": True}
 
 
+def _forwarded_client_ip(request: "Request") -> str:
+    """The invitee's own IP for the unauthenticated invitation endpoints.
+
+    Every activation arrives through the agent-home BFF, so ``request.client``
+    is the BFF — one address for the whole internet. Per-IP throttling keyed on
+    it is not a control at all: it is a single shared bucket that a CSV import's
+    invitees exhaust for each other, while an attacker gets the same allowance
+    as everybody else combined. So the first ``X-Forwarded-For`` hop is used
+    instead, and **only** when the peer is loopback (the BFF and Caddy are
+    on-box); a header from anywhere else is ignored, because a spoofable key is
+    worse than a coarse one.
+    """
+    peer = (request.client.host if request.client else "").lower()
+    if peer in _LOOPBACK_HOSTS:
+        forwarded = (request.headers.get("X-Forwarded-For") or "").split(",")
+        candidate = forwarded[0].strip()
+        if candidate:
+            return candidate
+    return peer
+
+
 @app.post("/api/auth/invitations/request")
 async def auth_request_invitation(request: Request):
     """Ask an administrator for a reset link. **Unauthenticated.**
@@ -3701,7 +3733,7 @@ async def auth_request_invitation(request: Request):
         body = {}
     body = body if isinstance(body, dict) else {}
     email = str(body.get("email", "") or "")
-    client_ip = request.client.host if request.client else ""
+    client_ip = _forwarded_client_ip(request)
     if email and _redeem_throttle().allow(ip=client_ip, token=email):
         try:
             service = _comms_user_service()

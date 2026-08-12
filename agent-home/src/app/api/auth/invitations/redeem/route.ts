@@ -13,6 +13,7 @@
 import { NextResponse } from "next/server";
 
 import { HermesApiClient, HermesApiError } from "@/lib/api/client";
+import { callerIp } from "@/lib/api/callerIp";
 
 interface RedeemBody {
   token?: unknown;
@@ -30,7 +31,10 @@ export async function POST(request: Request): Promise<NextResponse> {
   const password = typeof body.password === "string" ? body.password : "";
   try {
     return NextResponse.json(
-      await new HermesApiClient().redeemInvitation({ token, password }),
+      await new HermesApiClient().redeemInvitation(
+        { token, password },
+        callerIp(request),
+      ),
     );
   } catch (err) {
     if (err instanceof HermesApiError) {
