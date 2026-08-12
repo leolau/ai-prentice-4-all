@@ -267,14 +267,15 @@ class _FakeStore:
         user_ids: list[str] | None = None,
     ) -> list[Principal]:
         rows = list(self.principals.values())
-        if user_ids is not None:
-            rows = [p for p in rows if p.user_id in set(user_ids)]
         text = (query or "").strip().lower()
         if text:
+            matched = set(user_ids or ())
             rows = [
                 p
                 for p in rows
-                if text in p.display.lower() or text in p.user_id.lower()
+                if text in p.display.lower()
+                or text in p.user_id.lower()
+                or p.user_id in matched
             ]
         if role is not None:
             rows = [p for p in rows if p.role == role]
@@ -861,6 +862,10 @@ async def test_list_members_searches_the_email_the_console_displays() -> None:
     domain = await svc.list_members(_principal("owner"), query="@example.com")
     assert domain.total == 1 and domain.members[0].user_id == "u1"
 
+    # The local part, with no ``@`` — the half of an address people remember.
+    local = await svc.list_members(_principal("owner"), query="bob@")
+    assert local.total == 1 and local.members[0].user_id == "u2"
+
     # An address nobody holds matches nobody — not the whole roster.
     missing = await svc.list_members(_principal("owner"), query="nope@nope.io")
     assert missing.total == 0 and missing.members == ()
@@ -868,6 +873,32 @@ async def test_list_members_searches_the_email_the_console_displays() -> None:
     # A non-email query still searches display/user_id in Postgres.
     by_name = await svc.list_members(_principal("owner"), query="ann")
     assert by_name.total == 1 and by_name.members[0].user_id == "u1"
+
+
+@pytest.mark.asyncio
+async def test_list_members_search_matches_a_name_or_an_address() -> None:
+    """One search box: the email join widens the search, it does not replace it.
+
+    A fragment that is somebody's display name and somebody else's address must
+    return both rows — filtering to the email matches would have hidden the
+    person whose *name* matched.
+    """
+    store = _FakeStore()
+    store.principals = {
+        "u1": Principal(user_id="u1", display="Ada", role="admin"),
+        "u2": Principal(user_id="u2", display="Grace", role="member"),
+    }
+    admin = _FakeAdmin(
+        users={
+            "u1": {"id": "u1", "email": "al@corp.example"},
+            "u2": {"id": "u2", "email": "ada.hopper@corp.example"},
+        }
+    )
+    svc = _service(store, admin)
+
+    page = await svc.list_members(_principal("owner"), query="ada")
+    assert page.total == 2
+    assert {m.user_id for m in page.members} == {"u1", "u2"}
 
 
 @pytest.mark.asyncio

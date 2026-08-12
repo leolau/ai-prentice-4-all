@@ -750,7 +750,9 @@ class MemberService:
         An email search is resolved here rather than in SQL, because email is
         the one identifier the console *displays* and the profile schema does
         not hold: ``principals`` knows a ``user_id`` and a display name. Typing
-        an address matched nothing at all until this join existed.
+        an address matched nothing at all until this join existed. It widens the
+        one search box rather than replacing it, so a fragment that is a name to
+        one person and an address to another finds both.
         """
         require_member_admin(actor)
         limit = max(1, min(int(limit or DEFAULT_PAGE_SIZE), MAX_PAGE_SIZE))
@@ -760,8 +762,6 @@ class MemberService:
 
         accounts = self._accounts_or_empty()
         user_ids = _ids_matching_email(accounts, query)
-        if user_ids is not None:
-            query = None
         principals = await self._store.list_principals(
             query=query,
             role=role,
@@ -1389,19 +1389,17 @@ def _ids_matching_email(
     accounts: Mapping[str, Mapping[str, Any]],
     query: str | None,
 ) -> list[str] | None:
-    """The account ids whose email contains ``query``, or ``None``.
+    """The account ids whose email contains ``query``; ``None`` if no query.
 
-    ``None`` means "this is not an email search" and leaves the SQL predicate
-    untouched. A returned list may be empty — an address nobody holds matches
-    nobody, and answering with the whole roster instead would be the opposite
-    of a search.
+    Any fragment is tried against the address, not only one carrying an ``@``:
+    an admin looking for ``ada.lovelace@corp.example`` types ``ada``, and the
+    local part is the half of an address people actually remember.
 
-    Recognised by the ``@``: a console user searching ``ada@`` or
-    ``@example.com`` is looking for an address, and nothing else in this data
-    contains one.
+    The ids *widen* the roster search (see :func:`_principal_filters`), so an
+    empty result is not "no matches" — the display-name predicate still runs.
     """
     text = (query or "").strip().lower()
-    if "@" not in text:
+    if not text:
         return None
     return [
         user_id
