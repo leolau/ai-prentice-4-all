@@ -226,14 +226,41 @@ that line, poisoning every unscoped read and every subprocess. It is now refused
 while multiplexing is active — the interpolation those callers wanted is already
 scope-aware.
 
-**Still open, deliberately:** a subprocess started inside a profile's turn
-inherits the *process* environment, i.e. the default profile's credentials, not
-the scoped ones. `secret_scope`'s not touching `os.environ` prevents one
-secondary profile from seeing another's, but it does not give a child the right
-values. MCP stdio spawns are safe (`_build_safe_env` allowlists, and config
-`env:` is scope-interpolated); the terminal tool and any other spawn that passes
-the ambient environment are not. Asserted as a stated property in
-`tests/gateway/test_multiplex_env_leak_paths.py` so closing it flips a test.
+### The subprocess seam — closed 2026-08-13
+
+A contextvar does not cross a process boundary, so every spawn built its child's
+environment from `os.environ` — which in a multiplexer is the **default
+profile's** `.env`, loaded at import time by `gateway/run.py` before any turn
+exists. `secret_scope` not mutating `os.environ` kept one secondary profile from
+seeing another's values, but it could not give a child the *right* ones.
+
+The exposure was narrower than the raw statement suggests, and worth recording
+because the narrowing is deliberate design that already existed: every spawn
+surface strips credentials by default (`_HERMES_PROVIDER_ENV_BLOCKLIST`,
+`_ALWAYS_STRIP_KEYS`, `_is_hermes_internal_secret`), and MCP stdio spawns
+allowlist their environment outright. What remained were the two paths that pass
+a credential through *on purpose*: `inherit_credentials=True` for a blessed
+model-driving CLI (`claude`, `codex`, `gemini`), and a skill-registered
+`env_passthrough` key in the terminal. Both handed the child the default
+profile's value, so a secondary profile's turn would have authenticated and
+billed as the default profile.
+
+The fix keeps provenance rather than guessing it. `load_hermes_dotenv` now
+records which names it wrote into `os.environ`
+(`secret_scope.note_env_file_keys`), because once loaded, a profile-owned value
+and one the operator exported in the unit file are indistinguishable strings —
+and only the former may be corrected. `apply_scope_to_subprocess_env` then, under
+an active scope, replaces a surviving key with the scope's value and **drops** an
+env-file-derived key the profile does not define, so a child fails closed rather
+than inheriting a stranger's credential. It runs on the `os.environ`-derived
+layer of all three builders (`_make_run_env`, `_sanitize_subprocess_env`,
+`hermes_subprocess_env`) and only ever overrides or removes — it cannot re-admit
+a key a spawn surface stripped, and it is a no-op with no scope installed, which
+is every single-profile deployment.
+
+Still not scope-corrected, and correctly so: the terminal's session snapshot is
+a file written by the child shell and re-sourced by later commands in the *same*
+backend instance, which belongs to one session and therefore one profile.
 
 None of this was exhibiting on the box: `gateway.multiplex_profiles` is false
 and `hermes-systest` serves one profile. It was a real defect in shipped code
@@ -259,7 +286,8 @@ read on 2026-08-10:
 - `agent/secret_scope.py` is the answer to the process-global environment
   problem described above: a **context-local** secret scope that propagates into
   the agent worker thread via `copy_context()`, deliberately does **not** mutate
-  `os.environ` (so subprocesses cannot inherit another profile's keys), and
+  `os.environ` (a spawn's own environment is corrected per profile instead — see
+  §"The subprocess seam"), and
   **fails closed** — when multiplexing is active an unscoped read raises
   `UnscopedSecretError` rather than silently returning the wrong profile's value.
 - Same-credential collision detection: two profiles polling one bot token is
@@ -479,7 +507,7 @@ secret-isolation tests green on real Postgres; `scripts/run_tests.sh`, `ruff`,
 
 ## Progress checklist
 
-- [x] **First:** verify or refute the multiplexed-gateway `os.environ` issue; file separately if real — **confirmed on three paths and fixed** (see §"Verified 2026-08-12"); subprocess env inheritance remains, asserted as a stated property
+- [x] **First:** verify or refute the multiplexed-gateway `os.environ` issue; file separately if real — **confirmed on three paths and fixed** (see §"Verified 2026-08-12"), and the subprocess seam closed with it (see §"The subprocess seam")
 - [ ] Decision recorded: single shared GoTrue across profiles (yes/no)
 - [ ] Profile registry at the shared root + CLI
 - [ ] Console fan-out + profile switcher scoped to administered profiles

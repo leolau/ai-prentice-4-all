@@ -156,11 +156,31 @@ def _sanitize_loaded_credentials() -> None:
         )
 
 
+def _note_env_file_keys(path: Path) -> None:
+    """Tell ``agent.secret_scope`` which names came from an env file.
+
+    A multiplexing gateway has to be able to tell a profile-owned value in
+    ``os.environ`` (this file's) from a deployment-level one the operator
+    exported, so it can correct a spawned child's environment to the profile
+    whose turn is running. Once both are strings in ``os.environ`` nothing
+    distinguishes them, so the provenance is recorded here, at load time.
+    """
+    try:
+        from dotenv import dotenv_values
+
+        from agent.secret_scope import note_env_file_keys
+
+        note_env_file_keys(k for k in dotenv_values(dotenv_path=path) if k)
+    except Exception:  # noqa: BLE001 — provenance is best-effort, never blocks startup
+        logger.debug("could not record env-file provenance for %s", path, exc_info=True)
+
+
 def _load_dotenv_with_fallback(path: Path, *, override: bool) -> None:
     try:
         load_dotenv(dotenv_path=path, override=override, encoding="utf-8")
     except UnicodeDecodeError:
         load_dotenv(dotenv_path=path, override=override, encoding="latin-1")
+    _note_env_file_keys(path)
     # Strip non-ASCII characters from credential env vars that were just
     # loaded.  API keys must be pure ASCII since they're sent as HTTP
     # header values (httpx encodes headers as ASCII).  Non-ASCII chars
