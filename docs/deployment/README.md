@@ -5,8 +5,8 @@ It states what exists, what is verified, what is *not*, and where the detail
 lives. The per-topic documents are authoritative for procedure; this file is
 authoritative for **what is currently true of the live box**.
 
-Last verified: 2026-08-12, application at `7325746aa` (what the box runs; the
-repo is three merges ahead — the box is deployed by whoever merges, not by this
+Last verified: 2026-08-12, application at `e18b223e1` (what the box runs; the
+repo moves ahead of it — the box is deployed by whoever merges, not by this
 document).
 
 That line is **checked**, not a promise: `deploy_state.py handover` reports this
@@ -211,11 +211,25 @@ Verified on the live box, not in a fixture:
   200 (37 memories, 20 never recalled), `/api/memory/{rows,projection,query}`
   200, query placement returning 5 neighbours; every route 401 without a cookie
   and 401 with a one-byte-tampered one. Hermes tokens stay server-side.
-- The deploy prints `deploy OK (<sha>)` and reports all 12 long-running units.
-  Until 2026-08-05 it exited **3 on every successful deploy** and reported 2 of
-  them: `hermes-*` matched the timer-invoked oneshots, and `is-active` on a
-  finished oneshot exits 3 under `set -e` (#113). A deploy also no longer *runs*
-  those oneshots — check their `ExecMainStartTimestamp` across a deploy.
+- The deploy prints `deploy OK (<sha>)` and reports all 14 long-running units
+  plus `agent-home`. Until 2026-08-05 it exited **3 on every successful deploy**
+  and reported 2 of them: `hermes-*` matched the timer-invoked oneshots, and
+  `is-active` on a finished oneshot exits 3 under `set -e` (#113). A deploy also
+  no longer *runs* those oneshots — check their `ExecMainStartTimestamp` across a
+  deploy.
+- The `git fetch` is retried three times, and a persistent failure prints
+  `FETCH FAILED after 3 attempts — nothing deployed, box unchanged at <sha>`
+  (#210). One `github.com:22` connect timeout from `cn-hongkong` used to abort
+  the deploy amid otherwise ordinary output, so a caller reading the tail could
+  conclude a deploy had happened while the box never moved.
+- Profile→schema isolation holds live (FG-27, 2026-08-12): a `--clone` reports
+  the **shared** database with **distinct** schemas, three profiles query that
+  one Postgres concurrently with disjoint `principals`, a profile pointed at
+  another's schema is refused on connect, and `hermes datastore split-profile`
+  moves a whole schema with verified row counts. Every box `hermes` invocation
+  must pass `HERMES_HOME=/opt/data/hermes-home-staging`: unset, it resolves
+  `$HOME/.hermes` — a real, empty, core-only home — and answers coherently about
+  a deployment nobody uses (`datastore show` → "not configured").
 - The map **renders** in a real browser (confirmed by Leo on the live phone URL,
   2026-08-05). This needed a human: `MemoryMap` fetches client-side, so server
   HTML contains no `<circle>` and `curl` cannot see a single dot — and the bug
@@ -366,7 +380,8 @@ for r in results:
 
 1. Checks for unexpected local modifications (aborts if any exist — a hotfix
    must never be silently clobbered).
-2. Fetches `origin/develop` and fast-forwards.
+2. Fetches `origin/develop` (three attempts, backing off) and fast-forwards; a
+   fetch that never succeeds aborts with `nothing deployed, box unchanged`.
 3. `pip install -e .` (reinstalls the package).
 4. Rebuilds the dashboard bundle (`web/`) only when `web/` changed.
 5. Rebuilds the agent-home bundle only when `agent-home/` or `package-lock.json`
@@ -378,7 +393,8 @@ for r in results:
 9. Prints `deploy OK (<sha>)` or exits 1 on any inactive unit.
 10. Runs `deploy_state.py handover` (reports doc staleness, never blocks).
 
-A successful deploy ends with `deploy OK (<sha>)` and all 13 services `active`.
+A successful deploy ends with `deploy OK (<sha>)` and all 15 services `active`
+(14 `hermes-*` plus `agent-home`).
 
 ### Common pitfalls
 
