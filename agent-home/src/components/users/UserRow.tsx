@@ -52,6 +52,14 @@ export function UserRow({
   const [handle, setHandle] = useState("");
 
   const invitation = member.invitation;
+  // A reset *request* mints a recovery invitation whose token is never returned
+  // to anybody — by design, since the requester is unauthenticated. So "invite
+  // open" would tell an admin a live link exists when none was ever handed out,
+  // and they must still regenerate one.
+  const resetRequested =
+    invitation !== null &&
+    invitation.kind === "recovery" &&
+    invitation.status === "open";
 
   return (
     <li
@@ -83,8 +91,15 @@ export function UserRow({
             </span>
           )}
           {invitation ? (
-            <span className="rounded-full bg-[var(--color-surface-2)] px-2 py-1">
-              invite {invitation.status}
+            <span
+              title={
+                resetRequested
+                  ? "This person asked to reset their password. No link has been handed over — regenerate one."
+                  : undefined
+              }
+              className="rounded-full bg-[var(--color-surface-2)] px-2 py-1"
+            >
+              {resetRequested ? "reset requested" : `invite ${invitation.status}`}
             </span>
           ) : null}
           {member.channels.map((c) => (
@@ -139,7 +154,11 @@ export function UserRow({
             onClick={() => onInvite(member)}
             className="rounded-lg bg-[var(--color-surface-2)] px-3 py-1 text-xs disabled:opacity-50"
           >
-            {invitation ? "Regenerate link" : "Send link"}
+            {resetRequested
+              ? "Send reset link"
+              : invitation
+                ? "Regenerate link"
+                : "Send link"}
           </button>
           {invitation && invitation.status === "open" ? (
             <button

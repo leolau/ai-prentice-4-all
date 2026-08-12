@@ -1012,20 +1012,24 @@ def _principal_filters(
 
     Search matches ``display`` or ``user_id`` case-insensitively. Email lives
     in GoTrue, not here, so an email search is applied by the caller that holds
-    the account join (``MemberService``): it resolves the addresses it matched
-    to ``user_ids`` and passes them here, which keeps this predicate inside the
-    profile's own schema. An empty ``user_ids`` means "no account matched" and
-    must therefore match nothing — not everything.
+    the account join (``MemberService``): it resolves the addresses the same
+    text matched to ``user_ids`` and passes them here, which keeps this
+    predicate inside the profile's own schema.
+
+    ``user_ids`` **widens** the search rather than narrowing it — one search box
+    matching a display name, an id or an address — so it is only consulted when
+    there is text to match, and an empty list simply adds nothing.
     """
     clauses: list[str] = []
     params: list[object] = []
-    if user_ids is not None:
-        params.append([str(u) for u in user_ids])
-        clauses.append(f"user_id = ANY(${len(params)}::text[])")
     text = (query or "").strip()
     if text:
         params.append(f"%{text}%")
-        clauses.append(f"(display ILIKE ${len(params)} OR user_id ILIKE ${len(params)})")
+        matched = f"display ILIKE ${len(params)} OR user_id ILIKE ${len(params)}"
+        if user_ids is not None:
+            params.append([str(u) for u in user_ids])
+            matched += f" OR user_id = ANY(${len(params)}::text[])"
+        clauses.append(f"({matched})")
     if role is not None:
         params.append(role)
         clauses.append(f"role = ${len(params)}")

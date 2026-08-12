@@ -159,6 +159,33 @@ describe("UsersView", () => {
     expect(html).toContain("awaiting activation");
   });
 
+  it("shows a reset request as a request, not as a link that was sent", () => {
+    // A reset request mints a recovery invitation whose token is returned to
+    // nobody — the requester is unauthenticated. "invite open" would tell an
+    // admin a live link exists when none was ever handed over.
+    const html = renderToStaticMarkup(
+      <UsersView
+        role="owner"
+        userId="leo_owner"
+        profile="acme"
+        directory={DIRECTORY}
+        initialPage={page([
+          {
+            ...MEMBER,
+            invitation: {
+              ...PENDING.invitation!,
+              user_id: MEMBER.user_id,
+              kind: "recovery",
+            },
+          },
+        ])}
+      />,
+    );
+    expect(html).toContain("reset requested");
+    expect(html).not.toContain("invite open");
+    expect(html).toContain("Send reset link");
+  });
+
   it("keeps the owner row free of role and removal controls", () => {
     const html = renderToStaticMarkup(
       <UsersView
