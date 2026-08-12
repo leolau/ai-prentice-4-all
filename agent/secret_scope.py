@@ -26,7 +26,7 @@ import hashlib
 import os
 from contextvars import ContextVar, Token
 from pathlib import Path
-from typing import Dict, Mapping, Optional
+from typing import Dict, FrozenSet, Iterable, Mapping, MutableMapping, Optional
 
 
 # ── multiplex-active flag ────────────────────────────────────────────────
@@ -50,6 +50,11 @@ def set_multiplex_active(active: bool) -> None:
 def is_multiplex_active() -> bool:
     """Return whether the process is running as a profile multiplexer."""
     return _MULTIPLEX_ACTIVE
+
+
+# Names that reached os.environ from an env file in this process. See
+# note_env_file_keys() for why the provenance has to be remembered.
+_ENV_FILE_KEYS: set[str] = set()
 
 
 # ── the secret scope contextvar ──────────────────────────────────────────
@@ -202,6 +207,64 @@ def expand_env_ref(name: str) -> Optional[str]:
     if scope is not None:
         return scope.get(name)
     return os.environ.get(name)
+
+
+def note_env_file_keys(keys: Iterable[str]) -> None:
+    """Record that ``keys`` were written into ``os.environ`` from an env file.
+
+    ``load_hermes_dotenv`` calls this. The set is what lets a spawned child be
+    corrected per profile: a value in ``os.environ`` that came from *a* profile's
+    ``.env`` is by definition profile-owned, so under another profile's scope it
+    is wrong, whereas a value the operator exported in the unit file or the shell
+    is deployment-level and must survive untouched. Nothing distinguishes the two
+    once they are both strings in ``os.environ``, so the provenance has to be
+    remembered at load time.
+
+    Process-global and append-only, like ``_MULTIPLEX_ACTIVE``: it describes what
+    this process has done to its own environment, not a per-task value.
+    """
+    _ENV_FILE_KEYS.update(keys)
+
+
+def env_file_keys() -> FrozenSet[str]:
+    """Names ``os.environ`` received from an env file in this process."""
+    return frozenset(_ENV_FILE_KEYS)
+
+
+def apply_scope_to_subprocess_env(env: MutableMapping[str, str]) -> None:
+    """Correct an already-filtered child environment to the active profile.
+
+    A child process cannot see a contextvar, so a spawn inside profile B's turn
+    inherits whatever ``os.environ`` holds — and in a multiplexer that is the
+    default profile's ``.env``, loaded at import time before any turn. A
+    ``claude``/``codex`` executor spawned for B then authenticates as A, and a
+    terminal command with a skill-registered passthrough key reads A's value.
+
+    Two rules, applied to the dict the caller has *already* filtered:
+
+    - a key the scope defines and that survived filtering takes the scope's
+      value;
+    - a key that came from an env file but is absent from the scope is dropped,
+      because inheriting another profile's value is worse than the child finding
+      nothing.
+
+    It deliberately never *adds* a key. The blocklists in
+    ``tools/environments/local.py`` decide what a child may see at all; this only
+    corrects *whose* value it is, so a profile scope can never re-admit a
+    credential a spawn surface had stripped on purpose.
+
+    No-op when nothing is scoped, which is every single-profile deployment.
+    """
+    scope = _SECRET_SCOPE.get()
+    if scope is None:
+        return
+    for key in list(env):
+        if _is_global_env(key):
+            continue
+        if key in scope:
+            env[key] = str(scope[key])
+        elif key in _ENV_FILE_KEYS:
+            del env[key]
 
 
 def load_env_file(env_path: Path) -> Dict[str, str]:

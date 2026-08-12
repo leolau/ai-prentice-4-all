@@ -271,6 +271,29 @@ def _is_hermes_internal_secret(key: str) -> bool:
     return False
 
 
+def _apply_profile_secret_scope(env: dict) -> None:
+    """Correct inherited credentials to the profile whose turn is running.
+
+    A contextvar does not cross a process boundary, so without this a spawn
+    inside profile B's turn inherits the credentials sitting in ``os.environ`` —
+    in a multiplexing gateway, the default profile's ``.env``, loaded at import
+    time. Only *overrides or drops* what is already in the dict, so it can never
+    re-admit a key a spawn surface stripped on purpose. No-op unscoped, i.e. in
+    every single-profile deployment.
+
+    Applied to the ``os.environ``-derived layer *before* explicit per-call env is
+    merged on top: an explicit value is something a caller resolved deliberately
+    (``terminal.env``, a ``_HERMES_FORCE_`` provider override), and the usual
+    precedence has to keep holding for it.
+    """
+    try:
+        from agent.secret_scope import apply_scope_to_subprocess_env
+
+        apply_scope_to_subprocess_env(env)
+    except Exception:  # noqa: BLE001 — never block a spawn on scope bookkeeping
+        logger.debug("could not apply the profile secret scope", exc_info=True)
+
+
 def _inject_context_hermes_home(env: dict) -> None:
     """Bridge the context-local Hermes home override into subprocess env."""
     try:
@@ -339,7 +362,10 @@ def _sanitize_subprocess_env(base_env: dict | None, extra_env: dict | None = Non
 
     sanitized: dict[str, str] = {}
 
-    for key, value in (base_env or {}).items():
+    base_env = dict(base_env or {})
+    _apply_profile_secret_scope(base_env)
+
+    for key, value in base_env.items():
         if key.startswith(_HERMES_PROVIDER_ENV_FORCE_PREFIX):
             continue
         if _is_hermes_internal_secret(key):
@@ -471,6 +497,12 @@ def hermes_subprocess_env(*, inherit_credentials: bool = False) -> dict[str, str
 
     # Windows UTF-8 safety for spawned processes (#31420).
     env.setdefault("PYTHONUTF8", "1")
+
+    # After both strip tiers, so the scope can only correct whose credentials a
+    # child sees — never re-admit one that was stripped. This is what makes
+    # ``inherit_credentials=True`` safe in a multiplexer: the blessed model CLI
+    # gets the *running* profile's key, not the default profile's.
+    _apply_profile_secret_scope(env)
 
     _inject_context_hermes_home(env)
     from hermes_constants import apply_subprocess_home_env
@@ -758,7 +790,9 @@ def _make_run_env(env: dict) -> dict:
     except Exception:
         _is_passthrough = lambda _: False  # noqa: E731
 
-    merged = dict(os.environ | env)
+    inherited = dict(os.environ)
+    _apply_profile_secret_scope(inherited)
+    merged = dict(inherited | env)
     run_env = {}
     for k, v in merged.items():
         if k.startswith(_HERMES_PROVIDER_ENV_FORCE_PREFIX):

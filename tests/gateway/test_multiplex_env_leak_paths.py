@@ -229,26 +229,130 @@ class TestDotenvNeverReachesTheProcessEnvironment:
 
 
 class TestSubprocessInheritance:
-    """Documents the remaining gap: a child process inherits the process env.
+    """A child spawned in profile A's turn must not carry another profile's keys.
 
-    ``profile_runtime_scope`` deliberately does not mutate ``os.environ``, so a
-    subprocess started inside profile A's turn inherits whatever the *process*
-    was started with — the default profile's credentials, not A's. Asserted so
-    the property is stated rather than assumed, and so closing it (passing a
-    scoped env to every spawn) has a test to flip.
+    A contextvar does not cross a process boundary, so every spawn surface builds
+    the child's environment from ``os.environ`` — which in a multiplexer is the
+    *default* profile's ``.env``, loaded at import time by ``gateway/run.py``
+    before any turn exists. These drive the real env builders every spawn goes
+    through, then actually run a child with what they produced.
     """
 
-    def test_child_sees_the_process_env_not_the_scope(self, tmp_path, monkeypatch):
+    def _child_env_value(self, env, name):
+        out = subprocess.run(
+            [sys.executable, "-c", f"import os;print(os.environ.get({name!r}))"],
+            capture_output=True,
+            text=True,
+            check=True,
+            env=env,
+        ).stdout.strip()
+        return None if out == "None" else out
+
+    def test_terminal_child_gets_the_running_profile_key(self, tmp_path, monkeypatch):
+        """The terminal spawn path, with the key allowed through as passthrough."""
+        from tools.environments.local import _make_run_env
+
         monkeypatch.setenv("ANTHROPIC_API_KEY", "key-process")
+        monkeypatch.setattr(
+            "tools.env_passthrough.is_env_passthrough",
+            lambda key: key == "ANTHROPIC_API_KEY",
+        )
+        _ss().note_env_file_keys(["ANTHROPIC_API_KEY"])
         _ss().set_multiplex_active(True)
         a = _make_profile(tmp_path, "a", _DATASTORE_CONFIG)
 
         with profile_runtime_scope(a):
-            out = subprocess.run(
-                [sys.executable, "-c", "import os;print(os.environ.get('ANTHROPIC_API_KEY'))"],
-                capture_output=True,
-                text=True,
-                check=True,
-            ).stdout.strip()
+            run_env = _make_run_env({})
 
-        assert out == "key-process"
+        assert self._child_env_value(run_env, "ANTHROPIC_API_KEY") == "key-a"
+
+    def test_model_cli_child_gets_the_running_profile_key(self, tmp_path, monkeypatch):
+        """``inherit_credentials=True`` — the blessed claude/codex executor."""
+        from tools.environments.local import hermes_subprocess_env
+
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "key-process")
+        _ss().note_env_file_keys(["ANTHROPIC_API_KEY"])
+        _ss().set_multiplex_active(True)
+        a = _make_profile(tmp_path, "a", _DATASTORE_CONFIG)
+        b = _make_profile(tmp_path, "b", _DATASTORE_CONFIG)
+
+        with profile_runtime_scope(a):
+            env_a = hermes_subprocess_env(inherit_credentials=True)
+        with profile_runtime_scope(b):
+            env_b = hermes_subprocess_env(inherit_credentials=True)
+
+        assert self._child_env_value(env_a, "ANTHROPIC_API_KEY") == "key-a"
+        assert self._child_env_value(env_b, "ANTHROPIC_API_KEY") == "key-b"
+
+    def test_a_key_the_profile_lacks_is_dropped_not_inherited(self, tmp_path, monkeypatch):
+        """Fail closed: the child finds nothing rather than another profile's key."""
+        from tools.environments.local import hermes_subprocess_env
+
+        monkeypatch.setenv("DEEPSEEK_API_KEY", "deepseek-process")
+        _ss().note_env_file_keys(["DEEPSEEK_API_KEY"])
+        _ss().set_multiplex_active(True)
+        a = _make_profile(tmp_path, "a", _DATASTORE_CONFIG)
+
+        with profile_runtime_scope(a):
+            env = hermes_subprocess_env(inherit_credentials=True)
+
+        assert "DEEPSEEK_API_KEY" not in env
+
+    def test_a_stripped_key_is_not_re_admitted_by_the_scope(self, tmp_path, monkeypatch):
+        """The scope corrects *whose* credential a child sees, never *whether*."""
+        from tools.environments.local import hermes_subprocess_env
+
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "key-process")
+        monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "9999:bot-process")
+        _ss().set_multiplex_active(True)
+        a = _make_profile(tmp_path, "a", _DATASTORE_CONFIG)
+
+        with profile_runtime_scope(a):
+            env = hermes_subprocess_env()
+
+        # Tier 2 (provider keys, no inherit_credentials) and Tier 1 (bot tokens).
+        assert "ANTHROPIC_API_KEY" not in env
+        assert "TELEGRAM_BOT_TOKEN" not in env
+
+    def test_operator_exported_settings_survive(self, tmp_path, monkeypatch):
+        """A value the operator exported is deployment-level, not profile-owned."""
+        from tools.environments.local import hermes_subprocess_env
+
+        monkeypatch.setenv("SOME_OPERATOR_SETTING", "from-the-unit-file")
+        _ss().set_multiplex_active(True)
+        a = _make_profile(tmp_path, "a", _DATASTORE_CONFIG)
+
+        with profile_runtime_scope(a):
+            env = hermes_subprocess_env()
+
+        assert env["SOME_OPERATOR_SETTING"] == "from-the-unit-file"
+
+    def test_single_profile_child_is_unchanged(self, tmp_path, monkeypatch):
+        """No scope, no multiplexing: exactly the pre-FG-28 environment."""
+        from tools.environments.local import hermes_subprocess_env
+
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "key-process")
+        _ss().note_env_file_keys(["ANTHROPIC_API_KEY"])
+
+        env = hermes_subprocess_env(inherit_credentials=True)
+
+        assert self._child_env_value(env, "ANTHROPIC_API_KEY") == "key-process"
+
+
+class TestEnvFileProvenance:
+    """``load_hermes_dotenv`` must record which names it wrote to ``os.environ``.
+
+    Without that record a profile-owned value and an operator-exported one are
+    indistinguishable strings, and the spawn surfaces cannot tell which of the
+    two they are allowed to correct.
+    """
+
+    def test_loading_records_the_keys(self, tmp_path, monkeypatch):
+        from hermes_cli.env_loader import load_hermes_dotenv
+
+        a = _make_profile(tmp_path, "a", _DATASTORE_CONFIG)
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+
+        load_hermes_dotenv(hermes_home=str(a))
+
+        assert {"ANTHROPIC_API_KEY", "DATABASE_URL"} <= _ss().env_file_keys()
