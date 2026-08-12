@@ -1,6 +1,6 @@
 # FG-28 — Multi-profile administration (one admin, several profiles)
 
-**Wave:** P6-C (Phase-6 follow-on — after FG-26; requires FG-27 Layers 3+1). **Also carries the one-gateway-for-all-profiles consolidation.** · **Owner agent:** _unassigned_ · **Status:** PLAN — not started
+**Wave:** P6-C (Phase-6 follow-on — after FG-26; requires FG-27 Layers 3+1). **Also carries the one-gateway-for-all-profiles consolidation.** · **Owner agent:** _unassigned_ · **Status:** IN PROGRESS — item 1 done (the `os.environ` leaks, #219 + #220); items 2–9 open
 
 ## Reframing (2026-08-10) — this is the console over the goal tree
 
@@ -450,7 +450,8 @@ including with a hand-crafted request naming that profile directly.
 
 ## Dependencies
 
-- **Blocked by:** FG-27 Layers 1+3; FG-26 (the console this extends).
+- **Blocked by:** nothing outstanding. FG-27 (all layers, system-tested, PR #210) and
+  FG-26 (system-tested, PR #217) are both **done and deployed**.
 - **Related:** C1 (principal), C3 (datastore router), FG-20 (BFF), the kanban
   identity gap below.
 
@@ -521,34 +522,53 @@ secret-isolation tests green on real Postgres; `scripts/run_tests.sh`, `ruff`,
 
 | Date | Edition | Author | Change | Rationale |
 |------|---------|--------|--------|-----------|
+| 2026-08-13 | 4 | devin (for Leo) | Item 1 recorded as closed; the cloud-agent prompt rewritten for a cold pickup | Leo asked whether another agent could pick this FG up from the repo alone. The code and the findings were committed and pushed, but the prompt would have misdirected the reader on four counts: it gated the FG behind FG-27 (done and deployed), it opened with a Task 0 that is now answered (the `os.environ` leaks, confirmed on four paths and fixed in #219/#220), it still carried the retired "users belong to exactly one profile" premise, and — most consequentially — it instructed the reader to keep one process per profile **because no context-local seam for `os.environ` existed**. That seam now exists, which inverts the architectural instruction while leaving its underlying reason intact: 6 of ~2,250 env reads are migrated, and an unmigrated `os.getenv` returns the wrong profile's value silently. The prompt now states the four settled decisions (shared GoTrue with box-wide accounts and profile-local authority, FG-25 deferred, Leo's owner/admin-picks-the-profile rule, and the closed leak investigation), points at the reframing that supersedes §"Summary", and names what a cloud agent cannot do — no SSH to `hermes-systest`, so deployment and the live system test stay with the box operator. |
 | 2026-08-10 | 3 | devin (for Leo) | Reframed as the goal-tree console; one-gateway-for-all-profiles brought into scope | Leo's domain model: a **profile is the instrument for one sub-goal**, not a tenant and not a container of people, and **people participate in as many profiles as their work spans**. That retires this FG's "users belong to exactly one profile" premise — an imported constraint, not one the system imposes, since one shared GoTrue subject can hold a `principals` row in several profiles with separate memory in each — and it retires FG-25 for v1, because profiles now carry the cohort structure that hierarchical groups were designed to express. The mechanics below (authority via the `principals` row, target-profile routing, owner-fallback refusal, account-vs-enrolment split) are unchanged; only the motivation is. **Also brought one gateway per box into scope**, at Leo's request and on measured evidence: a per-profile daemon is 150 MB resident before any conversation (plus ~225 MB for a per-profile console), so ten sub-goal profiles cost ~3.7 GB idle against 9.6 GB available. Reading the code corrected an earlier claim of mine: `agent/secret_scope.py` **already solves** the process-global-environment problem for the gateway path with a context-local, fail-closed secret scope that never mutates `os.environ`, alongside same-token collision detection and a shared listener with `/p/<profile>/` routing. The remaining work is finishing the migration, not building it — and the risk is precisely asymmetric: an unmigrated `get_secret()` caller raises, while an unmigrated `os.getenv` caller silently returns the wrong profile's value, with only 6 of ~2,250 env reads migrated so far. |
 | 2026-08-10 | 2 | devin (for Leo) | Shared-Supabase decision resolved; account-vs-enrolment authority split added | Leo confirmed **all profiles share one Supabase instance**, closing prerequisite (1): one GoTrue, one subject namespace, so the no-new-tables entitlement model holds and the kanban identity ambiguity closes incidentally. Two corrections follow. **(a) The `os.environ` finding is weaker than written** — with one Supabase, `DATABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` are the *same value* in every profile, so the process-global environment cannot make them wrong and in-process multiplexing is feasible for the datastore. What survives is per-profile secrets that genuinely differ (model API keys) and the fact that the property holds only by coincidence — nothing declares or enforces that the values must match, so the day one profile gets its own key the multiplexed process silently uses the wrong one. Fan-out is therefore downgraded from hard blocker to strong recommendation, with an explicit fail-closed assertion required if multiplexing is chosen instead. **(b) A new hole, and the sharper one:** the account is now box-wide while authority stays per profile. `MemberService` performs ban/delete/reset through the GoTrue admin API with the shared service-role key, gated only by `require_member_admin` against the *current* profile — so an `hr` admin can ban an account enrolled in `engineers` and revoke access there. Split the verbs: "deactivate" in a profile means **un-enrol**, and account-level operations need owner or a target enrolled solely in profiles the actor administers. Symmetrically, every profile process holding that key means one compromised process is a box-wide account compromise, which argues for account operations living behind the control plane. Also promoted FG-27 Layer 3 to an absolute prerequisite: one Supabase means every profile shares a DSN, so without profile-derived schemas the second profile merges into the first on contact. |
 | 2026-08-10 | 1 | devin (for Leo) | Created FG doc | Leo asked for one admin to create users in several profiles (CTO → engineers+testers, CFO → hr) while users stay single-profile. Code reading found the entitlement model needs **no new tables** — the GoTrue `sub` is already `principal.user_id`, so a per-profile `principals` row *is* the per-profile grant, and `_comms_resolve_principal` already 409s for an authenticated-but-unenrolled subject. It also found the architectural constraint: `HERMES_HOME` is a contextvar but `os.environ` is not, and `dsn: ${DATABASE_URL}` resolves through `_expand_env_vars` reading `os.environ`, with ~2,250 env call sites and no context-local seam — so a single process cannot hold per-profile secrets, and the console must fan out to per-profile processes rather than multiplex in-process. Recorded the owner-fallback in `_comms_resolve_principal` as the most dangerous hole: correct today, an escalation to *the target profile's owner* the moment a sessionless service-to-service hop is introduced. Sequenced after FG-27 Layers 1+3 because per-profile schemas turn a wrong-DSN resolution from a silent merge into a detectable error. |
 
 ## Cloud-agent prompt
 
-> **[Phase-6 follow-on — do not start until FG-27 Layers 3+1 are merged.
-> Prerequisite (1) is answered: all profiles share ONE Supabase instance]** Repo `leolau/ai-prentice-4-all`, branch
-> off `develop`. Read `docs/design/master-plan/README.md`, `AGENTS.md`, FG-26,
-> FG-27 and this doc. Goal: one admin console at one URL where an administrator
-> manages users in **several** profiles, scoped to the profiles where they hold
-> an `admin`/`owner` principal row, with users still belonging to exactly one
-> profile.
+> **[Start here. Nothing gates this FG any more: FG-26 and FG-27 are done,
+> deployed and system-tested, and item 1 of this FG's checklist is closed.]**
+> Repo `leolau/ai-prentice-4-all`, branch off `develop`. Read
+> `docs/design/master-plan/README.md`, `AGENTS.md`, FG-26, FG-27, FG-29 and this
+> doc — including §"Reframing", which supersedes the motivation in §"Summary".
+> Goal: one admin console at one URL where an administrator manages users in
+> **several** profiles, scoped to the profiles where they hold an `admin`/`owner`
+> principal row.
 >
-> **Task 0 (do this first, and report before building anything).** Determine
-> whether the multiplexed gateway already mis-resolves per-profile secrets:
-> `set_hermes_home_override()` is a contextvar, but `_expand_env_vars` in
-> `hermes_cli/config.py` resolves `${DATABASE_URL}` from the process-global
-> `os.environ`, and `reload_env()` writes to it. If two profiles served by one
-> process can have different `DATABASE_URL` or `SUPABASE_SERVICE_ROLE_KEY`
-> values, this is a shipped bug and takes priority over the feature.
+> **Four things are already settled — do not reopen them.**
 >
-> **Architecture:** one process per profile (unchanged) plus a control-plane
-> **profile registry** at the shared Hermes root — name, base URL, health — and
-> a console that fans out to per-profile APIs. Do **not** multiplex profiles
-> in-process in the web tier; the process boundary is what keeps per-profile
-> secrets apart, and there is no context-local seam for `os.environ` (~2,250
-> call sites).
+> 1. **All profiles share ONE Supabase instance**, so one GoTrue and one
+>    `auth.users`. An **account is box-wide; enrolment and authority are
+>    profile-local**, and the same person legitimately holds `principals` rows in
+>    several profiles. The "users belong to exactly one profile" line in
+>    §"Summary" was an imported constraint and is retired.
+> 2. **FG-25 (hierarchical groups) is deferred.** Profiles carry the cohort
+>    structure. Build no groups UI, no group CRUD, no elevation ledger.
+> 3. **Leo's decision on profile assignment:** owner/admin picks the profile when
+>    creating a user — never self-selection, never a default-profile fallback.
+>    FG-26 shipped the picker limited to the current profile *because* this FG is
+>    what makes cross-profile writes possible; widening it is your item.
+> 4. **The `os.environ` question is answered and closed** (was Task 0). It was
+>    real, on four paths, fixed in #219 and #220 — see §"Verified 2026-08-12" and
+>    §"The subprocess seam". Do not re-probe it; do **read** it, because it is
+>    the mechanism your architecture rests on.
+>
+> **Architecture.** A control-plane **profile registry** at the shared Hermes
+> root (name, base URL, health; **no authority data**), and a console that reaches
+> several profiles. In-process multiplexing is now viable and is the direction —
+> `set_hermes_home_override` + `set_secret_scope` are the two context-local seams,
+> `get_secret` fails closed when multiplexing is on, and spawned children are
+> corrected per profile. The earlier instruction in this prompt to keep one
+> process per profile *because* no context-local seam existed is superseded; the
+> seam exists. What has **not** changed is the reason process isolation mattered:
+> only 6 of ~2,250 env reads are migrated, and an unmigrated `os.getenv` returns
+> the wrong profile's value **silently**, while `get_secret` raises. So migrate
+> every credential read reachable from a console route before you serve two
+> profiles from one process, and assert isolation with a real test (below), not by
+> inspection.
 >
 > **Authority model: add no new tables.** The GoTrue `sub` is already
 > `principal.user_id`, so "CTO may administer engineers" means exactly "CTO has
@@ -574,3 +594,11 @@ secret-isolation tests green on real Postgres; `scripts/run_tests.sh`, `ruff`,
 > test with two profiles on different DSNs and different service-role keys
 > exercised concurrently. Then the `hermes-systest` procedure in this doc.
 > `scripts/run_tests.sh`, `ruff`, `ty` clean.
+>
+> **What you cannot do, and must hand back.** You have no SSH path to
+> `hermes-systest` and no credentials for it, so the deployment and the live
+> system test stay with the box operator. Everything else — including the real-
+> Postgres tests — runs locally. Note also that `tests/agent` makes **real**
+> provider calls, so run focused selections rather than the whole tree, and
+> compare any broad failure set against `develop` before attributing it to your
+> branch.

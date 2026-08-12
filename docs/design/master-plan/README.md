@@ -170,12 +170,12 @@ FG-26 is scoped by profile rather than by group.
 
 | FG | Title | Wave | Primary reuse anchors |
 |----|-------|------|-----------------------|
-| [27](./feature-groups/FG-27-profile-scoped-datastore-isolation.md) | Profile-scoped app-layer datastore isolation (close the shared-schema footgun) | **P6-0** (before P6-A touches app tables) | `hermes_cli/datastore.py` C3 router (`get_store`, `initialize_supabase_app`), `hermes_cli/profiles.py` (`_CLONE_CONFIG_FILES`, `get_active_profile_name`), `hermes_constants.set_hermes_home_override` |
-| [24](./feature-groups/FG-24-per-principal-curated-memory.md) | Per-principal curated memory (memory layers 1–2 become per-user) | **P6-A** (Phase-6) | `tools/memory_tool.py` (`get_memory_dir`, `MemoryStore`, frozen snapshot), `agent/agent_init.py` (principal already in scope), `agent/system_prompt.py` volatile tier |
+| [27](./feature-groups/FG-27-profile-scoped-datastore-isolation.md) | Profile-scoped app-layer datastore isolation (close the shared-schema footgun) | **P6-0** — **DONE**, deployed and system-tested on `hermes-systest` 2026-08-11 | `hermes_cli/datastore.py` C3 router (`get_store`, `initialize_supabase_app`), `hermes_cli/profiles.py` (`_CLONE_CONFIG_FILES`, `get_active_profile_name`), `hermes_constants.set_hermes_home_override` |
+| [24](./feature-groups/FG-24-per-principal-curated-memory.md) | Per-principal curated memory (memory layers 1–2 become per-user) | **P6-A** — **DONE**, deployed and system-tested on `hermes-systest` 2026-08-11 | `tools/memory_tool.py` (`get_memory_dir`, `MemoryStore`, frozen snapshot), `agent/agent_init.py` (principal already in scope), `agent/system_prompt.py` volatile tier |
 | [25](./feature-groups/FG-25-group-scopes-multi-dimensional.md) | ~~Group scopes: multi-dimensional, hierarchical audiences + scoped admin~~ (**DEFERRED** — profiles carry cohort structure; C10 stays reserved) | ~~P6-A~~ **deferred** | `hermes_cli/access.py` C2 (`scope_filter`/`apply_scope_rls`/`bind_principal`), FG-19 `item_grants` clause pattern, FG-21 elevation GUC + `memory_access_audit` |
 | [26](./feature-groups/FG-26-users-groups-admin-console.md) | Users admin console + invitation activation (rescoped 2026-08-12: groups out with FG-25; profile assignment settled) | **P6-B** — **DONE**, deployed and system-tested on `hermes-systest` 2026-08-12 | `hermes_cli/members.py` (`MemberService`, `GoTrueAdminClient`), `/api/comms/members*`, FG-20 BFF + `MembersView.tsx`, C5/C8 |
-| [29](./feature-groups/FG-29-goal-tree-and-insight-promotion.md) | Goal tree + **skill** promotion (the ai4all spine: goals flow down by lifetime tier, skills flow up) | **P6-A′** (with FG-24; before FG-26) | `hermes_cli/goal_registry.py` (`goals`/`goal_metrics`/`goal_progress` — already shipped by FG-04/FG-09), `hermes_cli/goal_management.py` one-service-four-frontends, `agent/system_prompt.py` stable+volatile tiers, FG-24 snapshot freeze, `agent/background_review.py` self-improvement loop + `skills.external_dirs` (already read-only to curators) |
-| [28](./feature-groups/FG-28-multi-profile-administration.md) | Multi-profile administration + **one gateway for all profiles** | **P6-C** (after FG-26; needs FG-27 L1+L3) | `hermes_cli/profiles.py` (`profiles_to_serve`), `_comms_resolve_principal` C1 (already 409s for unenrolled subjects), per-profile `principals` as the entitlement list, FG-20 BFF |
+| [29](./feature-groups/FG-29-goal-tree-and-insight-promotion.md) | Goal tree + **skill** promotion (the ai4all spine: goals flow down by lifetime tier, skills flow up) | **P6-A′** — **DONE**, deployed and system-tested on `hermes-systest` 2026-08-11 | `hermes_cli/goal_registry.py` (`goals`/`goal_metrics`/`goal_progress` — already shipped by FG-04/FG-09), `hermes_cli/goal_management.py` one-service-four-frontends, `agent/system_prompt.py` stable+volatile tiers, FG-24 snapshot freeze, `agent/background_review.py` self-improvement loop + `skills.external_dirs` (already read-only to curators) |
+| [28](./feature-groups/FG-28-multi-profile-administration.md) | Multi-profile administration + **one gateway for all profiles** | **P6-C** — **IN PROGRESS**: item 1 done (the multiplexed-`os.environ` credential leaks, #219 + #220); nothing gates the rest | `hermes_cli/profiles.py` (`profiles_to_serve`), `_comms_resolve_principal` C1 (already 409s for unenrolled subjects), per-profile `principals` as the entitlement list, FG-20 BFF |
 | [30](./feature-groups/FG-30-profile-lifecycle-and-suggestion.md) | Profile lifecycle: suggest, adopt, retire (start with one profile; the loop proposes more) | **P6-D** (after FG-29) | `hermes_cli/profiles.py` (`create_profile` already takes `description`/`clone_config`, `delete_profile`, export/import, `profile.yaml`), `hermes_cli/profile_describer.py` aux-LLM "what this profile is good at", `agent/background_review.py` + `tools/skill_usage.py` evidence, FG-29 digest + promotion |
 | [31](./feature-groups/FG-31-capacity-headroom-indicator.md) | Capacity headroom indicator ("when should I upgrade the box?") | **P6-E** (independent; after FG-28) | `hermes_cli/active_sessions.py` (leases + `max_concurrent_sessions`, shipped), `gateway/run.py` `_running_agents`, `hermes_state.py` WAL busy/retry paths, `hermes status`/`doctor`, FG-29 digest |
 
@@ -298,11 +298,11 @@ existing `web/` operator console is left intact.
 ### Phase 6 (FG-24–29 scale-out) — waves (start after Phase-5 `develop` is merged; FG-26's "assign profile" question is **resolved** — see §8)
 
 ```
-WAVE P6-0 (prerequisite — small; Layers 1+2 must land before P6-A adds tables)
+WAVE P6-0 — DONE (deployed, system-tested 2026-08-11)
   └─ FG-27  profile-scoped datastore isolation  (C3 router + profile clone; no new
                                                  contract, no shape change)
 
-WAVE P6-A (parallel — two independent agents)
+WAVE P6-A — DONE (both deployed, system-tested 2026-08-11)
   ├─ FG-24  per-principal curated memory        (needs C1 only; touches tools/memory_tool.py,
   │         agent/agent_init.py, agent/system_prompt.py — no DB change)
   └─ FG-29  goal tree + skill promotion        (extends the SHIPPED FG-04/FG-09 registry with
@@ -315,14 +315,15 @@ WAVE P6-A (parallel — two independent agents)
   (FG-25 group scopes — DEFERRED. Profiles are sub-goal instruments and people
    participate in several, so cohorts no longer need hierarchical groups.)
 
-WAVE P6-B (after FG-29 — the console must render the goal tree, not be retrofitted)
+WAVE P6-B — DONE (deployed, system-tested 2026-08-12)
   └─ FG-26  Users & Goals console + invitations (needs FG-20 BFF, C5, C8; also carries the
             list_principals N+1 fix the roster needs at N=500)
             RESCOPED 2026-08-12: no groups pages (FG-25 deferred); the roster and
             directory are scoped to the administered profile; the create form's
             profile field is required and a foreign profile is refused (FG-28)
 
-WAVE P6-C (after FG-26; gated on FG-27 Layers 3+1)
+WAVE P6-C — IN PROGRESS, nothing gating it (item 1 of 9 done: the multiplexed-os.environ
+         credential leaks, #219 + #220 — read them before choosing the runtime shape)
   └─ FG-28  One console over the goal tree, scoped to the participations the caller
             holds — plus the ONE-GATEWAY-FOR-ALL-PROFILES consolidation
             (gateway.multiplex_profiles; the mechanism and its fail-closed
@@ -330,7 +331,7 @@ WAVE P6-C (after FG-26; gated on FG-27 Layers 3+1)
             the get_secret() migration: 6 of ~2,250 env reads done, and an
             unmigrated os.getenv returns the WRONG profile's value silently).
 
-WAVE P6-D (after FG-29 — suggestion is an output of the same loop)
+WAVE P6-D — NEXT AFTER P6-C (FG-29 is done)
   └─ FG-30  profile lifecycle: suggest / adopt / retire
             (a deployment starts with ONE profile; the weekly digest proposes new
             sub-goal instruments from clustered skills+goals; adoption seeds only
