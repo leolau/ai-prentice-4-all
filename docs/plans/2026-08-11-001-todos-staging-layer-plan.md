@@ -17,7 +17,9 @@ depends_on:
 > (ed.2): steps 1–6 below shipped; the CLI + skill, `POST /{id}/start`, the
 > linked memory document, the `/files` back-link and the nav badge are designed
 > there, `/advance` is deferred there, and all five open questions below are
-> answered there as defaults.
+> answered there as defaults. §9's `hermes todos send` — the command
+> `todo_outbound.command_for()` already writes into every approval — is pulled
+> forward into that CLI rather than left to the follow-up FG.
 
 ## What this is for
 

@@ -2,11 +2,14 @@
 title: "design: To-dos ed.2 and Projects ed.2 — the gaps, the seam between them, and every open question answered"
 status: draft — spec for review
 date: 2026-08-13
+revised: 2026-08-13 (ed.2a — three review questions answered: `--actor` not `--as`;
+  `hermes todos send` is in scope, Part 1.1b; the `spawn_seeded_session()`
+  boundary, Part 1.2a)
 type: design revision
 target_repo: ai-prentice-4-all
 origin: user request — "Another agent is working on another part of the system. I want you to focus on the to-do page and project page design."
 supersedes_sections:
-  - docs/plans/2026-08-11-001-todos-staging-layer-plan.md §5, §6, §8, "Open questions" (the CLI, /start, the detail panel, the badge)
+  - docs/plans/2026-08-11-001-todos-staging-layer-plan.md §5, §6, §8, §9, "Open questions" (the CLI, /start, the detail panel, the badge, and the `send` verb §9 deferred)
   - docs/plans/2026-08-12-001-projects-page-plan.md §11 (all six questions now answered as defaults)
 depends_on:
   - hermes_cli/todo_store.py (shipped — the store this designs against, not around)
@@ -54,6 +57,7 @@ Ground truth, from the tree at `develop`, not from the plans:
 | **No `/advance`** | FG-06 progress states have no driver. Low cost to skip; see Part 1.4. |
 | **Detail panel: no linked memory doc** | `todos_api.get_todo` resolves `history` + `source` (the arrival). The plan also promised the memory document the arrival produced. |
 | **`/files` has no back-link** | `/inbox/[id]` links out to `/todos?source_ref=…` (`IncomingDetailView.tsx:164`); the files detail surface never got the same. |
+| **`hermes todos send` does not exist** | `todo_outbound.command_for()` already writes it into every outgoing approval's `command`. The product prints a command line that would fail with `invalid choice: 'todos'`. See Part 1.1b. |
 | **Nav has no open count** | The plan called the badge "the honest answer to *does this system have anything for me right now*". `nav-items.ts` has no count mechanism at all. |
 
 Projects: **nothing built.** Plan reviewed and merged (PR #204); no store change,
@@ -70,13 +74,16 @@ the whole repo is about — is not a participant.
 
 **Where it goes.** A new `hermes_cli/todos_cmd.py` registered in
 `hermes_cli/main.py` beside `incomings` and `goal`, following the
-`goal_tree_cmd.py` shape exactly (`register_*_subparser(subparsers)`, one
-`async def _verb(...)` per subcommand, `_run(coro)` bridging to sync,
-`--as <user>` for the actor). It calls `todo_store.TodoStore` **directly**, not
-over HTTP: the CLI runs on the box with the datastore router already resolved,
-and going through `todos_api` would mean minting a token to talk to ourselves.
+`goal_tree_cmd.py` shape (`register_*_subparser(subparsers)`, one
+`async def _verb(...)` per subcommand, `_run(coro)` bridging to sync, and
+**`--actor <user>`** on the top-level parser — the existing convention, at
+`goal_tree_cmd.py:518`). It calls `todo_store.TodoStore` **directly**, not over
+HTTP: the CLI runs on the box with the datastore router already resolved, and
+going through `todos_api` would mean minting a token to talk to ourselves.
 
 ```
+hermes todos [--actor <user>] <verb> …
+
 hermes todos list    [--stage staged,open,working] [--priority high] [--q TEXT]
                      [--source-kind inbound] [--limit N] [--json]
 hermes todos show    <id>            # + history + the source arrival
@@ -85,16 +92,61 @@ hermes todos add     "<title>" [--why TEXT] [--priority p] [--due YYYY-MM-DD]
 hermes todos stage   <id> <stage> [--outcome TEXT]
 hermes todos start   <id> [--session]        # Part 1.2
 hermes todos done    <id> [--outcome TEXT] [--propose-reply]
+hermes todos send    <id> --channel <c> --to <t> [--account A] [--thread T]
+                                     # the approved outgoing action; Part 1.1b
 hermes todos snooze  <id> --until <when>
 hermes todos facets                  # the same counts the chips use
 hermes todos expire  [--days 14] [--dry-run]   # what the digest cron calls
 hermes todos backfill --since <date>           # To-dos Q4's escape hatch
 ```
 
-Every verb maps 1:1 onto a `TodoStore` method that already exists
+Every verb but `send` maps 1:1 onto a `TodoStore` method that already exists
 (`list`, `get`+`history`, `create`, `set_stage`, `update`, `snooze`, `facets`,
 `expire_staged`). `add` and `stage` are the only writes the skill encourages;
 the rest is reading.
+
+### 1.1b `hermes todos send` — the verb the shipped code already names
+
+`todo_outbound.command_for()` (`hermes_cli/todo_outbound.py:159`) already writes
+`hermes todos send <id> --channel … --to …` into every outgoing approval's
+`command` field. That subcommand does not exist, so the string FG-10 shows the
+user is currently unrunnable. It belongs in this CLI, not in the deferred §9,
+and it is cheap because the egress already exists:
+
+- **Nothing executes `command` today.** `HumanComms.answer()` only settles the
+  row (`human_comms.py:507`); no dispatcher runs the string. So the command is
+  today a *legible artefact* — what the user is shown before approving, and what
+  they could paste. That is precisely why it must resolve: a command line the
+  product prints and the CLI rejects with `invalid choice: 'todos'` is a broken
+  promise in the one place the user is being asked to trust the system.
+- **The body is not in the command, on purpose.** `command_for` passes only
+  routing (`--channel/--to/--account/--thread`) plus the to-do id. So `send`
+  **reads the body from the approval row**, never from argv. A body on the
+  command line would let an approved routing decision carry unapproved text.
+- **Delivery reuses `hermes send`'s path.** `send_cmd.cmd_send` already resolves
+  gateway credentials and delivers through `tools.send_message_tool` for
+  Telegram/Discord/Slack/Signal/SMS/WhatsApp. `hermes todos send` composes the
+  `platform:target[:thread]` string and calls the same tool — no new egress.
+
+So `send` is a **gate plus a delegation**, in this order, and it refuses at the
+first step that does not hold:
+
+1. Find the to-do's approval by `dedupe_key = 'todo-action:<id>'`.
+2. Require `status='answered'` **and** a granted answer. Pending → exit 3
+   ("not approved yet"); denied → exit 3; missing → exit 4. It never sends on
+   its own authority, which is D6 and the whole point of `reversible=False`.
+3. Require the routing in argv to match the approval's `command`. A user who
+   approved a reply to Ada does not thereby approve one to Bob.
+4. Deliver, then `store.record_outbound(event='sent'|'failed', channel=…)`
+   (that method already exists and already records `'proposed'`).
+
+A channel the gateway cannot reach exits non-zero with *"channel `<c>` has no
+configured egress"* and records `event='failed'` — never a silent success. That
+is the only part §9 still fills in, and it is now one function rather than a
+missing subcommand.
+
+**Not a stub.** A `send` that parses and no-ops would be worse than the current
+gap: the approval would read as executed. Either it delivers or it says why not.
 
 **`--json` on every read.** The agent parses; the human reads the table. One
 flag, both audiences, no second command tree.
@@ -141,11 +193,9 @@ Behaviour:
 3. If `session: true`, build the seed prompt from the to-do (title, description,
    `source_note`), the source arrival's body when `source_ref` resolves, and its
    attachments as file paths — then spawn through **the path `cron/scheduler.py`
-   already uses** (`AIAgent` construction at `cron/scheduler.py:2875`), not a new
-   one. The extraction is the work: that call site is inside a scheduler
-   function, so it moves to a small `spawn_seeded_session(prompt, *, profile,
-   origin)` helper that both callers use. One spawn path on the box, or we will
-   have two that drift on `HERMES_HOME` resolution.
+   already uses** (`AIAgent` construction at `cron/scheduler.py:2875`), extracted
+   to a shared `spawn_seeded_session(...)`. Its exact boundary is Part 1.2a,
+   because "share the spawn" is only safe if the *right* half is shared.
 4. Record `session_id` on the transition row (`task_transitions` already carries
    the actor; the session id goes in its note), so `/todos/[id]` can link into
    `/chat/<id>` and the C8 trace tail in `/activity`.
@@ -157,6 +207,79 @@ Behaviour:
 **Why the profile is a parameter.** FG-28: a to-do raised on the `personal`
 profile may be work for `research`. Default is the caller's bound profile; an
 explicit `profile` must be one the caller holds a `principals` row in.
+
+### 1.2a `spawn_seeded_session()` — where the seam falls
+
+The question the ed.1 text left open: the `AIAgent(...)` call at
+`cron/scheduler.py:2875` takes ~30 arguments and sits after a long preamble
+(config load, runtime resolution, fallback chain, credential pool, MCP
+discovery, `SessionDB`, toolset resolution, reasoning config, prefill
+messages). Thin helper or thick one?
+
+**Answer: thick on plumbing, thin on policy.** The split is not "how much code
+can we move" — it is *which lines would be a bug if the two callers resolved
+them differently*. Those go inside. Everything a caller is entitled to decide
+stays a parameter.
+
+| the preamble | where it goes | why |
+|---|---|---|
+| Profile scope (`HERMES_HOME`, `.env`) | **inside**, via `agent.profile_runtime.profile_runtime_scope()` | This is the drift the ed.1 text was worried about, and the mechanism already exists and is already the canonical one (extracted for FG-28 profile-bound chat in `5a09b5e2e`). It is a contextvar pair, so it propagates into the worker thread through `copy_context()` — which is exactly how the run must be scoped. **Cron does not use it today** (it relies on the process's own `HERMES_HOME`), so sharing the helper is what puts both callers on one seam instead of documenting a hope. |
+| Config load, runtime resolution (provider/model/`api_mode`/`base_url`/acp), fallback chain, credential pool for the resolved provider | **inside**, with an optional `runtime` override | Pure derivation from config. Two copies of "which model, which key, which fallback" is how one surface silently runs a different brain from the other. The override exists because cron *pins* a job's runtime and must be able to pass its own. |
+| MCP discovery (`discover_mcp_tools()`) | **inside**, non-fatal | Idempotent by design and already non-fatal in cron. A `/start` session that silently had no MCP tools while a cron job had them would be an invisible capability difference between two surfaces that look identical to the user. |
+| `SessionDB` construction + `session_id` | **inside**, `session_id` a parameter | Both callers need the transcript discoverable by `session_search`; only the caller knows the id's shape (`cron_<job>_<ts>` / `todo_<id>_<ts>`). |
+| `AIAgent(...)` construction + `run_conversation` | **inside** | The point of the exercise. |
+| Inactivity-timeout wait loop + `copy_context()` worker thread | **inside**, with the limit as a parameter | ~40 lines of concurrency that must not be written twice. Cron passes its `HERMES_CRON_TIMEOUT`-derived value; `/start` passes its own. |
+| Toolsets, `max_iterations`, `reasoning_config`, `prefill_messages`, `quiet_mode`, `load_soul_identity`, `skip_memory`, `skip_context_files`/workdir, `platform` | **parameters** | Policy. Cron sets `skip_memory=True` because a cron system prompt would corrupt user representations; a to-do session is a *user's* work and wants memory. Getting that wrong in a shared default would be a real regression, so it is never a default — it is passed. |
+| Cron's config-drift/pin guard, wake-gate prerun script, job-registry bookkeeping, the run's Markdown document, `_start_cron_trace` | **stay in cron** | Job policy, not session spawning. The helper accepts an optional `context` to run inside so each caller binds its own C8 trace (`bind_trace` for `/start`). |
+
+```python
+# agent/seeded_session.py — not cron/, so a router importing it does not
+# drag the scheduler in; and both cron/ and hermes_cli/ already import agent/.
+
+@dataclass(frozen=True)
+class SeededSession:
+    session_id: str
+    result: Any | None
+    timed_out: bool
+    error: str | None          # set instead of raising; a caller decides what a
+                               # failed spawn means for its own state machine
+
+def spawn_seeded_session(
+    prompt: str,
+    *,
+    origin: str,                     # 'cron' | 'todo' → AIAgent(platform=…)
+    session_id: str,
+    profile_home: Path | None = None,      # None → the process's own home
+    runtime: Mapping[str, Any] | None = None,   # None → resolve from config
+    enabled_toolsets: Sequence[str] | None = None,
+    disabled_toolsets: Sequence[str] | None = None,
+    max_iterations: int | None = None,
+    reasoning_config: Mapping[str, Any] | None = None,
+    prefill_messages: Sequence[Any] | None = None,
+    workdir: str | None = None,
+    load_soul_identity: bool = True,
+    skip_memory: bool = False,
+    quiet_mode: bool = True,
+    inactivity_limit: float | None = 600.0,
+    context: contextvars.Context | None = None,
+) -> SeededSession: ...
+```
+
+**One more thing `/start` needs that cron does not: not to wait.** An HTTP
+request cannot block for a run that may take minutes, so `/start` calls the
+helper on a detached `copy_context()` thread and returns `session_id` at once —
+the stage is already `working` and the page has somewhere to link. Cron calls it
+in the foreground and reads the result. So the helper *returns* a
+`SeededSession` and does **not** own the detach decision; who waits is the
+caller's business, and pushing a `background=True` flag into the helper would
+put two lifetimes inside one function.
+
+**Landing order.** The extraction lands with `/start` in the same PR (step 8),
+not before it: a refactor whose only caller is still cron has nothing proving
+the boundary is right. The contract that makes it safe is the regression test —
+*cron runs a job through the extracted helper and produces the same run document
+as before* — because a config-resolution difference is otherwise invisible until
+a job runs on the wrong model.
 
 ### 1.3 The detail panel's missing half, the `/files` back-link, the badge
 
@@ -300,8 +423,8 @@ is a one-line instruction and not a re-plan.
 
 | step | scope | note |
 |---|---|---|
-| **7** | `hermes_cli/todos_cmd.py` + `skills/productivity/todos/SKILL.md` | The gap that matters. Independent of everything else; can land immediately. |
-| **8** | `spawn_seeded_session()` extracted from `cron/scheduler.py`, then `POST /{id}/start` + the page's "Work on this" | Extraction lands with the endpoint that needs it, so the refactor has a caller and a test. |
+| **7** | `hermes_cli/todos_cmd.py` + `skills/productivity/todos/SKILL.md` | The gap that matters. Independent of everything else; can land immediately. `send` (Part 1.1b) rides along — it is the same parser and it closes a dangling reference already in production code. |
+| **8** | `spawn_seeded_session()` extracted to `agent/seeded_session.py`, then `POST /{id}/start` + the page's "Work on this" | Extraction lands with the endpoint that needs it, so the refactor has a caller and a test. |
 | **9** | `payload["memory"]` on `get_todo` + the `TodoDetailView` row + the `/files` back-link | Small, cosmetic, one PR. |
 | **10** | `badge?: "todos-open"` + the shell's facets read | Touches nav tests; landed alone so a nav regression is unambiguous. |
 
@@ -321,8 +444,19 @@ Behaviour contracts, not change detectors.
 - **CLI:** `hermes todos add --stage open` writes exactly one row and one
   transition with actor `agent:*`/`user:*`; `--json` output round-trips through
   `json.loads` for every read verb; `list --stage` rejects an unknown stage
-  rather than returning everything; `expire --dry-run` writes nothing; `--as`
-  against a principal the caller may not act as is refused.
+  rather than returning everything; `expire --dry-run` writes nothing;
+  `--actor` against a principal the caller may not act as is refused.
+- **`send`:** the string `command_for()` produces parses and dispatches — the
+  round-trip test, so the two can never drift again; a pending approval refuses
+  and sends nothing; a denied one refuses; argv routing that differs from the
+  approval's refuses; the body comes from the approval row and a body passed on
+  the command line is not accepted at all; an unwired channel exits non-zero and
+  records `event='failed'`.
+- **`spawn_seeded_session()`:** the extraction is proved by a cron regression
+  test — the same job produces the same run document through the helper as
+  before; a named profile's home scopes config, SOUL and `.env` inside the worker
+  thread (the contextvar propagation, asserted, not assumed); a runtime override
+  wins over config resolution; `skip_memory` is never defaulted.
 - **`/start`:** `session: false` moves to `working` and spawns nothing;
   `session: true` records a `session_id` on the transition; **a spawn failure
   still leaves the to-do `working` and returns `spawned: false`** (the one that
@@ -353,16 +487,24 @@ Behaviour contracts, not change detectors.
    directly** — rung 2, no core tool, no self-HTTP.
 2. **`/start` separates the state change from the spawn.** The stage moves
    first, unconditionally; the spawn is best-effort and reports itself.
-3. **One session-spawn path on the box.** `cron`'s is extracted and shared, not
-   copied.
-4. **`/advance` is deferred** until a producer of intermediate progress states
+3. **One session-spawn path on the box, thick on plumbing and thin on policy.**
+   Profile scope, runtime/credential resolution, MCP discovery, `SessionDB`,
+   construction and the timeout loop move inside; memory, toolsets, workdir and
+   identity stay parameters; cron's job policy stays in cron. The helper returns
+   a result and does not decide who waits.
+4. **`hermes todos send` is built with the CLI, gated on an answered
+   approval, and takes its body from the approval row — never from argv.** The
+   shipped `command_for()` already names it; a printed command the CLI rejects is
+   not an acceptable state to leave in a trust surface.
+5. **`--actor`, not `--as`** — the convention `goal` already set.
+6. **`/advance` is deferred** until a producer of intermediate progress states
    exists.
-5. **The nav badge is a name in a static array plus a count passed as a prop.**
+7. **The nav badge is a name in a static array plus a count passed as a prop.**
    `nav-items.ts` stays server-safe; zero renders nothing.
-6. **Promotion to a card is human-only, one-way, and pointer-based.** No
+8. **Promotion to a card is human-only, one-way, and pointer-based.** No
    heuristic, no reverse sync, no `project_id` on `tasks`. Projects depends on
    to-dos; to-dos never learn about Projects.
-7. **All eleven open questions are answered as defaults**, each with its cost of
+9. **All eleven open questions are answered as defaults**, each with its cost of
    reversal stated. The two worth arguing about before code lands are To-dos Q5
    (one owner principal — expensive to change once rows exist) and Projects Q5
    (repoint the desktop in the same PR — expensive to defer). The other nine are
