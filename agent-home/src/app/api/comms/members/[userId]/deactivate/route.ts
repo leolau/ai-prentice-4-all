@@ -1,8 +1,11 @@
 /**
- * POST /api/comms/members/{userId}/deactivate — block a member's login without
- * deleting the account (owner/admin). The Python layer bans the GoTrue account;
- * the principal row and any owned data are preserved, so it is reversible via
- * the reactivate route.
+ * POST /api/comms/members/{userId}/deactivate — suspend a member's enrolment in
+ * **this profile** (owner/admin).
+ *
+ * Deliberately profile-local: the box-wide GoTrue account is left alone because
+ * it may serve other profiles on the same Supabase, and banning it here would
+ * lock somebody out of a profile this console has no authority over. The
+ * principal row and everything it owns survive, so Restore is a one-click undo.
  */
 import { NextResponse } from "next/server";
 

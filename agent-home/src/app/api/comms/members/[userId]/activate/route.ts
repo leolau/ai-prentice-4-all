@@ -1,6 +1,10 @@
 /**
- * POST /api/comms/members/{userId}/activate — restore a deactivated member's
- * login (owner/admin). The Python layer unbans the GoTrue account.
+ * POST /api/comms/members/{userId}/activate — restore a suspended enrolment in
+ * **this profile** (owner/admin).
+ *
+ * The counterpart to `/deactivate`, and equally profile-local: it does not touch
+ * the box-wide account, so it cannot open an account that is locked because it
+ * was never activated. That one needs an invitation link.
  */
 import { NextResponse } from "next/server";
 

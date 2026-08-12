@@ -242,8 +242,15 @@ kind of thing:
 
 | kind | operations | blast radius |
 |---|---|---|
-| **enrolment-level** | add / remove / re-role the `principals` row | the acting profile only |
-| **account-level** | GoTrue ban (deactivate), delete, set/reset password | **every profile the account is enrolled in** |
+| **enrolment-level** | add / remove / re-role the `principals` row; suspend / restore the enrolment | the acting profile only |
+| **account-level** | delete, set/reset password, GoTrue ban | **every profile the account is enrolled in** |
+
+As built, "deactivate" moved from the second row to the first: it flips `active`
+on this profile's `principals` row instead of banning the shared `auth.users`
+row, because a ban would lock the person out of profiles this console has no
+authority over. A member's box-wide ban state (never activated, or banned) and
+their profile-local enrolment state are therefore two separate fields on
+`MemberView`, and the row distinguishes "awaiting activation" from "suspended".
 
 `MemberService` currently performs the account-level ones through the GoTrue
 **admin** API with the service-role key, gated only by `require_member_admin`,
@@ -399,23 +406,24 @@ clean; system test passed.
 ## Progress checklist
 
 - [x] Resolve the "assign profile" open decision — owner/admin selects the profile; scoped to the administered profile, cross-profile deferred to FG-28 (Leo, 2026-08-12)
-- [ ] `list_principals` N+1 fix + paginated/searchable `/api/comms/members`
-- [ ] `/users` page: directory (all) + management (owner/admin), pagination, search, filters, and the administered profile named on screen
-- [ ] `invitations` table + mint/regenerate/revoke + hashed single-use tokens + rate limiting + RLS
-- [ ] Create-user flow: required `profile` (409 + no orphan account on mismatch) → banned GoTrue account → principal → invitation link (shown once); an existing account enrols without one
-- [ ] `/activate/<token>` page + unauthenticated `redeem` endpoint + password policy + audit
-- [ ] Update / deactivate / hard-delete (transfer|purge) + self-protection + last-admin guard
-- [ ] Self-service password reset (recovery token)
-- [ ] Bulk CSV import with dry-run + generated-links export
-- [ ] Channel-linking UI
-- [ ] Admin activity view over C5
-- [ ] Tests (invitation security, authority, profile scope on two real schemas, pagination/query-count, delete strategies, frontend, E2E)
+- [x] `list_principals` N+1 fix + paginated/searchable `/api/comms/members`
+- [x] `/users` page: directory (all) + management (owner/admin), pagination, search, filters, and the administered profile named on screen
+- [x] `invitations` table + mint/regenerate/revoke + hashed single-use tokens + rate limiting + RLS
+- [x] Create-user flow: required `profile` (409 + no orphan account on mismatch) → banned GoTrue account → principal → invitation link (shown once); an existing account enrols without one
+- [x] `/activate/<token>` page + unauthenticated `redeem` endpoint + password policy + audit
+- [x] Update / deactivate (profile-local suspend) / hard-delete (transfer|purge) + self-protection + last-admin guard
+- [x] Self-service password reset (recovery token)
+- [x] Bulk CSV import with dry-run + generated-links export
+- [x] Channel-linking UI
+- [x] Admin activity view over C5
+- [x] Tests (invitation security, authority, profile scope on two real schemas, pagination/query-count, delete strategies, frontend, E2E)
 - [ ] System test on `hermes-systest` passed
 
 ## Audit log
 
 | Date | Edition | Author | Change | Rationale |
 |------|---------|--------|--------|-----------|
+| 2026-08-12 | 3 | devin (for Leo) | Built FG-26: users console, invitations, activation, profile-scoped enrolment | Everything except the live-box system test is implemented; what follows is the decisions that were not in the doc. **Deactivate is now enrolment-local, not a GoTrue ban.** The doc's §"kind / operations / blast radius" table put "deactivate" under *account-level*, but a ban on a shared `auth.users` row locks the person out of every profile — including profiles this console has no authority over — so the reversible suspend became an `active` flag on the profile's own `principals` row, and `MemberView` reports the box-wide ban state and the profile-local enrolment state as two separate fields. Consequence worth knowing: a member can be *enrolled* here and still unable to log in because they never activated, which the row labels "awaiting activation" rather than "suspended". Account-level delete stayed owner-only, per the settled gate. **`invitations` carries a `kind`** (`activation` | `recovery`) so self-service reset reuses one hashed-single-use-token mechanism instead of a second one, with its own longer TTL (3600s) in `config.yaml` beside the 300s activation TTL. Minting revokes older open tokens of the same kind for that user, which is what makes Regenerate actually invalidate the link already in somebody's inbox. **Ownership resolution is discovered, not hard-coded**: `hermes_cli/ownership.py` reads `information_schema` for `owner_user_id` columns in the profile schema, so a table added later cannot silently start orphaning rows on delete; audit tables are excluded because rewriting history is worse than a dangling id, and a post-condition query asserts no dangling owners remain. **A refusal must not leave an orphan**, so the profile check runs before the GoTrue call, and a failed `principals` insert deletes the account it just created — both have their own tests. Frontend: `/members` now redirects to `/users` (old links survive), `generatePassword` and the whole temporary-password relay are deleted, and `/activate/<token>` is `noindex` with `Referrer-Policy: no-referrer` because until it is redeemed the URL *is* the credential. Not done: the live `hermes-systest` run, left for the parent session, and cross-profile assignment (FG-28). |
 | 2026-08-12 | 2 | devin (for Leo) | Rescoped off the deferred FG-25; "assign profile" resolved | Two things made this doc unbuildable as written, and both are now closed. **Groups:** FG-25 was deferred on 2026-08-10, but this FG still had a `/groups` page, group-admin assignment, `elevation_enabled` and the `/me/access` ledger in its checklist — 4 of 15 items against tables that will not exist. Whoever picked it up would have built the deferred model or guessed, so they are removed *and listed* in a "Removed with FG-25" table with where each went; group filters become **profile** scope, which is isolation by construction rather than by policy. **Assign profile:** Leo's rule is that the owner/admin selects the profile. The doc's original A/B/C readings were obsolete — they predate the shared-Supabase decision, under which an account is already box-wide and "which profile" is just which `principals` table gets the row, needing no shared identity store. The real constraint is FG-27's ownership guard: a process running as profile A cannot open B's schema, by design. Leo chose to ship the picker scoped to the administered profile and hand cross-profile assignment to FG-28 (which builds the control plane entitled to several schemas) rather than add a second privileged door now. Two consequences are written in because they are silent-failure shaped: the `profile` field must be **refused with 409, not ignored**, when it names another profile (and must create no orphan GoTrue account on the way out), and "all accounts" ≠ "the people in this brain" — with one shared `auth.users`, listing the former in a profile console is a data-exposure bug, not a copy nit. Also recorded: an existing account being added to a second profile is an **enrolment**, not an error and not a new invitation — the common case under this topology, and a dead end if the form treats a duplicate email as a failure. |
 | 2026-08-10 | 1 | devin (for Leo) | Created FG doc | Leo's UI requirements: a Users page scoped by access, owner/admin CRUD over groups and users, and creation that assigns groups + login name and issues a **5-minute invitation link** so the new user sets their own password. Replaces the current browser-generated temporary-password relay in `MembersView.tsx`. Chose an own `invitations` table over GoTrue `admin/generate_link` (global-only expiry, email-oriented, no single-use/revoke/audit); accounts are created **banned** so an unactivated account cannot be logged into; hard delete must resolve data ownership because cascades do not reach memories/files/GTS. Flagged **"assign profile" as an open decision** — a profile is an isolated brain, not a user attribute, so the requirement as stated cannot be implemented without cross-profile identity. |
 
