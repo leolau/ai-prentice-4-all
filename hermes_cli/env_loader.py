@@ -2,12 +2,25 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import sys
 from pathlib import Path
 
 from dotenv import load_dotenv
 from utils import atomic_replace, fast_safe_load
+
+logger = logging.getLogger(__name__)
+
+
+def _multiplex_active() -> bool:
+    """Whether this process serves several profiles (gateway multiplexing)."""
+    try:
+        from agent.secret_scope import is_multiplex_active
+
+        return is_multiplex_active()
+    except Exception:
+        return False
 
 
 # Env var name suffixes that indicate credential values.  These are the
@@ -222,6 +235,18 @@ def load_hermes_dotenv(
       the user env exists.
     - if no user env exists, the project `.env` also overrides stale shell vars.
     """
+    if _multiplex_active():
+        # A multiplexing gateway serves several profiles from one process and
+        # gives each turn its own secret scope. Loading any profile's .env here
+        # would write those secrets into the *process* environment with
+        # override=True, so the last profile to reach this line would become the
+        # value every unscoped read and every spawned subprocess sees — the exact
+        # cross-profile leak the scope exists to prevent. Per-turn callers that
+        # only wanted "make sure secrets are available" are already served by
+        # agent.secret_scope; there is nothing left for this call to do.
+        logger.debug("multiplex active: refusing to load .env into os.environ")
+        return []
+
     loaded: list[Path] = []
 
     home_path = Path(hermes_home or os.getenv("HERMES_HOME", Path.home() / ".hermes"))

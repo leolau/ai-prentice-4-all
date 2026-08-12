@@ -6008,19 +6008,47 @@ def _strip_dotted_keys(cfg: dict, dotted_keys: set) -> Tuple[dict, set]:
     return cfg, stripped
 
 
+def _active_scope_fingerprint() -> str:
+    """The active profile secret scope's fingerprint, or "" when unscoped."""
+    try:
+        from agent.secret_scope import scope_fingerprint
+
+        return scope_fingerprint()
+    except Exception:
+        return ""
+
+
+def _expand_env_ref(name: str) -> Optional[str]:
+    """Resolve one ``${NAME}`` reference, honoring an active profile scope.
+
+    A multi-profile process gives each profile its own ``config.yaml`` *and* its
+    own ``.env``; resolving the former's ``${DATABASE_URL}`` against the shared
+    ``os.environ`` would hand every profile whichever ``.env`` was loaded last.
+    Falls back to ``os.environ`` when nothing is scoped, which is every
+    single-profile caller.
+    """
+    try:
+        from agent.secret_scope import expand_env_ref
+
+        return expand_env_ref(name)
+    except Exception:
+        return os.environ.get(name)
+
+
 def _expand_env_vars(obj):
     """Recursively expand ``${VAR}`` references in config values.
 
     Only string values are processed; dict keys, numbers, booleans, and
-    None are left untouched.  Unresolved references (variable not in
-    ``os.environ``) are kept verbatim so callers can detect them.
+    None are left untouched.  Unresolved references (variable not in the
+    active profile's secrets, nor in ``os.environ``) are kept verbatim so
+    callers can detect them.
     """
+    def _sub(match: "re.Match[str]") -> str:
+        resolved = _expand_env_ref(match.group(1))
+        return match.group(0) if resolved is None else resolved
+
     if isinstance(obj, str):
-        return re.sub(
-            r"\${([^}]+)}",
-            lambda m: os.environ.get(m.group(1), m.group(0)),
-            obj,
-        )
+        return re.sub(r"\${([^}]+)}", _sub, obj)
     if isinstance(obj, dict):
         return {k: _expand_env_vars(v) for k, v in obj.items()}
     if isinstance(obj, list):
@@ -6541,6 +6569,12 @@ def _load_config_impl(*, want_deepcopy: bool) -> Dict[str, Any]:
         ensure_hermes_home()
         config_path = get_config_path()
         path_key = str(config_path)
+        # The cached value is ${VAR}-expanded, so it belongs to the secrets it
+        # was expanded against as much as to the file. In a multi-profile
+        # process the same path can be loaded under different scopes (a turn,
+        # then an unscoped status read), and a single key would serve one
+        # profile a config expanded with another's credentials.
+        cache_key = path_key + "\x00" + _active_scope_fingerprint()
 
         try:
             st = config_path.stat()
@@ -6575,7 +6609,7 @@ def _load_config_impl(*, want_deepcopy: bool) -> Dict[str, Any]:
         else:
             cache_sig = None
 
-        cached = _LOAD_CONFIG_CACHE.get(path_key)
+        cached = _LOAD_CONFIG_CACHE.get(cache_key)
         if cached is not None and cache_sig is not None and cached[:4] == cache_sig:
             return copy.deepcopy(cached[4]) if want_deepcopy else cached[4]
 
@@ -6616,14 +6650,14 @@ def _load_config_impl(*, want_deepcopy: bool) -> Dict[str, Any]:
             # callers all see the same stable cached object. The cached tuple is
             # (user_mtime, user_size, managed_mtime, managed_size, value).
             cached_copy = copy.deepcopy(expanded)
-            _LOAD_CONFIG_CACHE[path_key] = (*cache_sig, cached_copy)
+            _LOAD_CONFIG_CACHE[cache_key] = (*cache_sig, cached_copy)
             # On the readonly path return the same cached object subsequent
             # calls will see — keeps "two readonly calls return the same
             # object" invariant that callers may rely on for identity checks.
             if not want_deepcopy:
                 return cached_copy
         else:
-            _LOAD_CONFIG_CACHE.pop(path_key, None)
+            _LOAD_CONFIG_CACHE.pop(cache_key, None)
         # First-load result is a fresh dict (not aliased to the cache); safe
         # to return directly. For the deepcopy=True path this is the
         # canonical "freshly-built mutable result" the function has always

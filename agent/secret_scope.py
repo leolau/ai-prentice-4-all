@@ -22,6 +22,7 @@ Design rationale lives in ``docs/design/multiplexing-gateway.md`` (Workstream A)
 """
 from __future__ import annotations
 
+import hashlib
 import os
 from contextvars import ContextVar, Token
 from pathlib import Path
@@ -158,6 +159,49 @@ def get_secret(name: str, default: Optional[str] = None) -> Optional[str]:
 
     val = os.environ.get(name)
     return val if val is not None else default
+
+
+def scope_fingerprint() -> str:
+    """A short, stable id for the active scope's *contents* — "" when unscoped.
+
+    Callers that cache a value derived from secrets (``load_config`` caches the
+    ``${VAR}``-expanded config) must key that cache on the scope as well as on
+    the file, or profile A's turn serves profile B a config expanded with A's
+    credentials. Content-based rather than ``id(mapping)`` so the same profile
+    entering a second turn — a fresh dict with identical values — still hits its
+    cache instead of re-parsing the file every turn.
+
+    The digest is not reversible and is never logged with a value beside it, so
+    it does not widen exposure of the secrets it summarises.
+    """
+    scope = _SECRET_SCOPE.get()
+    if scope is None:
+        return ""
+    digest = hashlib.blake2b(digest_size=8)
+    for key in sorted(scope):
+        digest.update(key.encode("utf-8", "replace"))
+        digest.update(b"\x00")
+        digest.update(str(scope[key]).encode("utf-8", "replace"))
+        digest.update(b"\x00")
+    return digest.hexdigest()
+
+
+def expand_env_ref(name: str) -> Optional[str]:
+    """Resolve a ``${NAME}`` config reference against the active profile.
+
+    Deliberately *not* ``get_secret``: config expansion runs on paths that
+    legitimately have no scope installed — the CLI, and the multiplexer's own
+    startup before any turn — so failing closed here would abort the process
+    rather than catch a missed migration. Under a scope the scope is
+    authoritative (no ``os.environ`` fallback, which is the leak this exists to
+    close); with no scope it reads ``os.environ`` exactly as before.
+    """
+    if _is_global_env(name):
+        return os.environ.get(name)
+    scope = _SECRET_SCOPE.get()
+    if scope is not None:
+        return scope.get(name)
+    return os.environ.get(name)
 
 
 def load_env_file(env_path: Path) -> Dict[str, str]:
