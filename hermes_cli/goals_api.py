@@ -29,10 +29,19 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/registry/goals")
 
 
-async def _resolve_principal(request: Request):
+async def _resolve_principal(request: Request, *, allow_as: bool = True):
+    """The acting principal. ``allow_as`` only ever widens a *read*.
+
+    ``?as=`` lets an owner or admin narrow a read to one principal's view, which
+    exposes nothing they could not already see. On a write it would do the
+    opposite: an admin resolving ``?as=<owner>`` would arrive here holding the
+    owner's authority, and the entity goal — the one row that enters the stable
+    prompt tier of every profile — is owner-only. Writes therefore resolve the
+    caller, never a requested identity.
+    """
     from hermes_cli.web_server import _comms_resolve_principal
 
-    return await _comms_resolve_principal(request, allow_as=True)
+    return await _comms_resolve_principal(request, allow_as=allow_as)
 
 
 def _tree():
@@ -89,14 +98,19 @@ async def get_entity_goal(request: Request) -> dict[str, Any]:
     explanation of what belongs in it. The default goal *is* the explanation,
     and creating it is idempotent.
     """
-    principal = await _resolve_principal(request)
+    actor = await _resolve_principal(request, allow_as=False)
+    principal = actor
+    if request.query_params.get("as") or request.headers.get("X-Hermes-User-Id"):
+        principal = await _resolve_principal(request)
     tree = _tree()
     if not await _ready(tree):
         return {"goal": None, "created": False, "effective": "next_session"}
 
     from hermes_cli.goal_purpose import ensure_default_entity_goal
 
-    if not principal.is_owner:
+    # Creating the default goal is a write, so it follows the caller's own
+    # authority: an admin inspecting the owner's view with ``?as=`` reads.
+    if not (principal.is_owner and actor.is_owner):
         goal = await tree.entity_goal(principal)
         if goal is None:
             return {"goal": None, "created": False, "effective": "next_session"}
@@ -113,7 +127,7 @@ async def update_entity_goal(request: Request) -> dict[str, Any]:
     every other profile report itself stale — the copies are not reached into
     from here, they notice next time they are read.
     """
-    principal = await _resolve_principal(request)
+    principal = await _resolve_principal(request, allow_as=False)
     if not principal.is_owner:
         raise HTTPException(
             status_code=403, detail="Only the owner may edit the entity goal"
@@ -156,14 +170,28 @@ async def purpose_state(request: Request) -> dict[str, Any]:
     it actually say", and the second is "how big is it".
     """
     await _resolve_principal(request)
-    from agent.purpose_prompt import PurposeSnapshot, build_stable_block, load_snapshot
+    from agent.purpose_prompt import (
+        PurposeBudgetError,
+        PurposeSnapshot,
+        build_stable_block,
+        load_snapshot,
+    )
 
     snapshot = load_snapshot() or PurposeSnapshot()
-    block = build_stable_block(snapshot)
+    # Over budget the prompt omits the block entirely rather than truncating
+    # it, so the page must say that instead of 500-ing or showing text the
+    # agent will never see.
+    refused = ""
+    try:
+        block = build_stable_block(snapshot)
+    except PurposeBudgetError as exc:
+        block = ""
+        refused = str(exc)
     return {
         "profile": snapshot.profile,
         "block": block,
         "chars": len(block),
+        "refused": refused,
         "stable_goals": [
             {"title": goal.title, "tier": goal.tier, "stale": goal.stale}
             for goal in snapshot.stable
