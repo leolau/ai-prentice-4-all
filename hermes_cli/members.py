@@ -101,7 +101,7 @@ _PLACEHOLDER_PASSWORD_BYTES = 32
 # Page size ceiling for the management list, so a caller cannot ask for the
 # whole roster in one request by passing a huge limit.
 MAX_PAGE_SIZE = 200
-DEFAULT_PAGE_SIZE = 25
+DEFAULT_PAGE_SIZE = 50
 
 
 class MemberError(RuntimeError):

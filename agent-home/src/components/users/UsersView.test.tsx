@@ -1,7 +1,7 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
-import { UsersView } from "@/components/users/UsersView";
+import { PAGE_SIZE, UsersView } from "@/components/users/UsersView";
 import type { DirectoryResponse, Member, MembersResponse } from "@/types";
 
 const DIRECTORY: DirectoryResponse = {
@@ -63,7 +63,7 @@ function page(members: Member[]): MembersResponse {
     configured: true,
     members,
     total: members.length,
-    limit: 25,
+    limit: PAGE_SIZE,
     offset: 0,
     profile: "acme",
   };
