@@ -54,7 +54,6 @@ import csv
 import dataclasses
 import io
 import logging
-import os
 import secrets
 import urllib.parse
 from dataclasses import dataclass
@@ -62,6 +61,7 @@ from typing import Any, Mapping, Optional
 
 import httpx
 
+from agent.secret_scope import UnscopedSecretError, get_secret
 from hermes_cli.access import ROLES, Principal, PrincipalStore, Role
 from hermes_cli.invitations import (
     Invitation,
@@ -1529,9 +1529,33 @@ def _load_supabase_auth_section() -> dict[str, Any]:
     return section if isinstance(section, dict) else {}
 
 
+def _scoped_secret(env_name: str) -> str:
+    """Read a credential env var through the active profile scope (FG-28).
+
+    ``get_secret`` honours the per-profile secret scope a multiplexed console
+    turn installs, so an admin action scoped to profile B resolves B's key
+    rather than the process default. When multiplexing is on but no scope is
+    active — a console route that has not yet entered its target profile's
+    scope — it fails closed: returning empty so the caller refuses the action
+    (``load_admin_client`` → ``None`` → 503) rather than authenticating as
+    another profile. Single-profile deployments are unchanged: multiplexing
+    is off, so ``get_secret`` falls back to ``os.environ`` exactly as before.
+    """
+    try:
+        return (get_secret(env_name) or "").strip()
+    except UnscopedSecretError:
+        logger.warning(
+            "members: %s read with no profile secret scope active while "
+            "multiplexing is on; refusing to return another profile's value. "
+            "Scope the request to a profile before resolving admin credentials.",
+            env_name,
+        )
+        return ""
+
+
 def _resolve_url(section: dict[str, Any]) -> str:
     for env_name in ("HERMES_DASHBOARD_SUPABASE_URL", "SUPABASE_URL"):
-        env = os.environ.get(env_name, "").strip()
+        env = _scoped_secret(env_name)
         if env:
             return env
     return str(section.get("url", "") or "").strip()
@@ -1545,7 +1569,7 @@ def _resolve_service_role_key() -> str:
         "SUPABASE_SERVICE_ROLE_KEY",
         "SUPABASE_SERVICE_KEY",
     ):
-        env = os.environ.get(env_name, "").strip()
+        env = _scoped_secret(env_name)
         if env:
             return env
     return ""
