@@ -17,6 +17,11 @@ depends_on:
 
 # Projects
 
+> **Amended by** `docs/plans/2026-08-13-001-todos-and-projects-design-revision.md`
+> (ed.2): all six open questions in §11 are answered there as defaults (with the
+> desktop repoint folded into step 1), and the to-do → card promotion this plan
+> mentions in §5 is specified there as step 6b.
+
 ## What this is for
 
 To-dos answered *what needs me next*. Projects answers the other half: **what
