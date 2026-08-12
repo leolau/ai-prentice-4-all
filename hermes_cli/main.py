@@ -10824,6 +10824,7 @@ def cmd_profile(args):
         _is_wrapper_dir_in_path,
         _get_wrapper_dir,
     )
+    from hermes_cli.datastore import SchemaOwnershipError
     from hermes_constants import display_hermes_home
 
     action = getattr(args, "profile_action", None)
@@ -10923,6 +10924,7 @@ def cmd_profile(args):
                 no_alias=no_alias,
                 no_skills=no_skills,
                 description=getattr(args, "description", None),
+                report=print,
             )
             print(f"\nProfile '{name}' created at {profile_dir}")
 
@@ -11012,6 +11014,9 @@ def cmd_profile(args):
                 print(f"  Edit {profile_dir_display}/SOUL.md to customize personality")
             print()
 
+        except SchemaOwnershipError as e:
+            print(f"Error: {e}")
+            sys.exit(1)
         except (ValueError, FileExistsError, FileNotFoundError) as e:
             print(f"Error: {e}")
             sys.exit(1)
@@ -11237,7 +11242,9 @@ def cmd_profile(args):
 
         try:
             profile_dir = import_profile(
-                args.archive, name=getattr(args, "import_name", None)
+                args.archive,
+                name=getattr(args, "import_name", None),
+                report=print,
             )
             name = profile_dir.name
             print(f"✓ Imported profile '{name}' at {profile_dir}")
@@ -11249,6 +11256,9 @@ def cmd_profile(args):
                 if wrapper_path:
                     print(f"  Wrapper created: {wrapper_path}")
             print()
+        except SchemaOwnershipError as e:
+            print(f"Error: {e}")
+            sys.exit(1)
         except (ValueError, FileExistsError, FileNotFoundError) as e:
             print(f"Error: {e}")
             sys.exit(1)
@@ -12740,6 +12750,14 @@ def main():
 
     register_goal_tree_subparser(subparsers)
     register_promotion_subparser(subparsers)
+
+    # =========================================================================
+    # datastore command — the profile's resolved (database, schema) binding and
+    # the whole-schema migration between profile names (FG-27)
+    # =========================================================================
+    from hermes_cli.datastore_cmd import register_datastore_subparser
+
+    register_datastore_subparser(subparsers)
 
     # =========================================================================
     # login command  (parser built in hermes_cli/subcommands/login.py)
