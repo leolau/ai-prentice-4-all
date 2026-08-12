@@ -425,21 +425,44 @@ def _external_dirs_cache_clear() -> None:
     _raw_config_cache_clear()
 
 
+def _shared_skills_dir() -> Optional[Path]:
+    """The entity's promoted-skill library, if it exists (FG-29).
+
+    ``skills-shared/`` sits beside the profiles at the Hermes root, and a
+    promoted skill is only useful if the *other* profiles can read it. The
+    promotion path writes the entry into the approving profile's config, which
+    is the one profile that already had it; every other profile would never see
+    the library at all. Resolving it here means "promoted" means visible
+    everywhere, without editing configs a profile did not ask us to touch.
+    """
+    from hermes_constants import get_default_hermes_root
+
+    try:
+        shared = (get_default_hermes_root() / "skills-shared").resolve()
+    except (OSError, RuntimeError):
+        return None
+    return shared if shared.is_dir() else None
+
+
 def get_external_skills_dirs() -> List[Path]:
     """Read ``skills.external_dirs`` from config.yaml and return validated paths.
 
     Each entry is expanded (``~`` and ``${VAR}``) and resolved to an absolute
     path.  Only directories that actually exist are returned.  Duplicates and
     paths that resolve to the local ``~/.hermes/skills/`` are silently skipped.
+    The FG-29 shared library is always included when it exists, config or not.
 
     Cached in-process, keyed on ``config.yaml`` content — the function is
     called once per skill during banner / tool-registry scans, and YAML
     parsing a non-trivial config dominates ``hermes`` cold-start time
     when the cache is absent.
     """
+    shared = _shared_skills_dir()
+    implicit: List[Path] = [shared] if shared is not None else []
+
     config_path = get_config_path()
     if not config_path.exists():
-        return []
+        return list(implicit)
 
     # Digesting the file is ~10us against the ~85ms full YAML parse, so the
     # fast path stays nearly free while remaining edit-accurate.
@@ -453,22 +476,22 @@ def get_external_skills_dirs() -> List[Path]:
 
     parsed = _load_raw_config()
     if not parsed:
-        return []
+        return list(implicit)
 
     skills_cfg = parsed.get("skills")
     if not isinstance(skills_cfg, dict):
-        return []
+        return list(implicit)
 
     raw_dirs = skills_cfg.get("external_dirs")
     if not raw_dirs:
-        result: List[Path] = []
+        result = list(implicit)
         if cache_key is not None:
             _EXTERNAL_DIRS_CACHE[cache_key] = list(result)
         return result
     if isinstance(raw_dirs, str):
         raw_dirs = [raw_dirs]
     if not isinstance(raw_dirs, list):
-        return []
+        return list(implicit)
 
     from hermes_constants import get_hermes_home
 
@@ -477,7 +500,7 @@ def get_external_skills_dirs() -> List[Path]:
     seen: Set[Path] = set()
     result = []
 
-    for entry in raw_dirs:
+    for entry in [*raw_dirs, *implicit]:
         entry = str(entry).strip()
         if not entry:
             continue
