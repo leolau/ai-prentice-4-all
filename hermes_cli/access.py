@@ -1753,6 +1753,13 @@ async def resolve_principal(
        link the channel identity.
     3. Otherwise return ``None`` (unenrolled / unauthorized).
 
+    A **suspended** enrolment (``active`` false, FG-26 §3.5) resolves to
+    ``None`` — the same answer as an identity nobody enrolled. Suspension is
+    profile-local by design (the shared account and the person's other profiles
+    survive), so it has to be enforced where a profile grants authority; a
+    suspended principal returned here would keep its role and keep acting on
+    every channel.
+
     Pairing/authorization stays owned by ``gateway/pairing.py`` +
     ``gateway/authz_mixin.py``; this seam only maps an already-authorized
     identity onto a system principal.
@@ -1768,7 +1775,7 @@ async def resolve_principal(
             platform, channel_user_id, connection=connection
         )
         if existing is not None:
-            return existing
+            return existing if existing.active else None
         if not auto_enroll_if_paired:
             return None
         if is_paired is None:
@@ -1788,8 +1795,13 @@ async def resolve_principal(
             channel_user_id,
             connection=connection,
         )
-        # Re-read so the returned principal carries the linked channel.
-        return await store.get(principal.user_id, connection=connection)
+        # Re-read so the returned principal carries the linked channel. The
+        # enrol above is an upsert, so a suspended enrolment stays suspended
+        # and pairing cannot be used to walk around a suspension.
+        fresh = await store.get(principal.user_id, connection=connection)
+        if fresh is not None and not fresh.active:
+            return None
+        return fresh
     finally:
         await connection.close()
 

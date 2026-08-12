@@ -852,8 +852,25 @@ class MemberService:
 
         existing = self._admin.find_user_by_email(email)
         if existing is not None:
+            existing_id = str(existing["id"])
+            enrolled = await self._store.get(existing_id)
+            if enrolled is not None:
+                # Enrolment is an upsert, so this would have reported success
+                # while changing nothing — not the requested role, and not a
+                # suspended row's `active`. Restoring or re-roling somebody
+                # already here is their row's job, where it is audited as what
+                # it is.
+                suspended = (
+                    " Their enrolment is suspended; restore it from their row."
+                    if not enrolled.active
+                    else ""
+                )
+                raise MemberError(
+                    f"{email} is already enrolled in this profile as "
+                    f"{enrolled.role}.{suspended}"
+                )
             principal = await self._enroll(
-                str(existing["id"]), display=display or email, role=role
+                existing_id, display=display or email, role=role
             )
             await self._audit(
                 actor,

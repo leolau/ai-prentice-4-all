@@ -10,7 +10,7 @@ import "server-only";
 
 import { redirect } from "next/navigation";
 
-import { HermesApiClient } from "@/lib/api/client";
+import { HermesApiClient, HermesApiError } from "@/lib/api/client";
 import { readSession } from "@/lib/auth/session";
 import type { Principal } from "@/types";
 
@@ -58,4 +58,34 @@ export async function resolvePrincipalFromToken(
   const client = new HermesApiClient({ hermesToken });
   const res = await client.whoami();
   return res.configured ? res.principal : null;
+}
+
+/** Outcome of a login's identity step: enrolled, suspended, or neither. */
+export type PrincipalResolution =
+  | { kind: "principal"; principal: Principal }
+  | { kind: "suspended" }
+  | { kind: "none" };
+
+/**
+ * `resolvePrincipalFromToken`, separating a **suspended** enrolment from an
+ * absent one.
+ *
+ * Both refuse the login, but they are different facts and the sign-in page has
+ * to say which: the account and password are fine — they are shared box-wide and
+ * may still work in another profile — and it is *this profile's* enrolment that
+ * has been switched off. Reported as "no principal is enrolled" it reads as a
+ * broken setup, and the person retries their password forever.
+ */
+export async function resolvePrincipalOrStatus(
+  hermesToken: string,
+): Promise<PrincipalResolution> {
+  try {
+    const principal = await resolvePrincipalFromToken(hermesToken);
+    return principal ? { kind: "principal", principal } : { kind: "none" };
+  } catch (err) {
+    if (err instanceof HermesApiError && err.status === 403) {
+      return { kind: "suspended" };
+    }
+    throw err;
+  }
 }

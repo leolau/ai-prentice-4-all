@@ -12,6 +12,7 @@
 import { NextResponse } from "next/server";
 
 import { HermesApiClient } from "@/lib/api/client";
+import { callerIp } from "@/lib/api/callerIp";
 
 interface RequestBody {
   email?: unknown;
@@ -27,7 +28,7 @@ export async function POST(request: Request): Promise<NextResponse> {
   const email = typeof body.email === "string" ? body.email.trim() : "";
   if (email) {
     try {
-      await new HermesApiClient().requestInvitation(email);
+      await new HermesApiClient().requestInvitation(email, callerIp(request));
     } catch {
       // Deliberately swallowed: an error here would distinguish an address the
       // box knows from one it does not.

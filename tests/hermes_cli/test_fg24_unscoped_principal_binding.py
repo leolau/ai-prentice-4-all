@@ -37,9 +37,13 @@ class FakeStore:
         self.aliases = aliases or {}
         self.list_calls = 0
 
-    async def list_principals(self) -> list[Principal]:
+    async def list_principals(
+        self, *, active: bool | None = None
+    ) -> list[Principal]:
         self.list_calls += 1
-        return list(self.principals)
+        return [
+            p for p in self.principals if active is None or p.active == active
+        ]
 
     async def resolve_alias(self, subject: str) -> str | None:
         return self.aliases.get(subject)

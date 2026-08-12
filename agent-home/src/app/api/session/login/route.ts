@@ -15,7 +15,7 @@
 import { NextResponse } from "next/server";
 
 import { hermesApiBaseUrl } from "@/lib/env";
-import { resolvePrincipalFromToken } from "@/lib/auth/principal";
+import { resolvePrincipalOrStatus } from "@/lib/auth/principal";
 import { writeSession } from "@/lib/auth/session";
 
 interface LoginBody {
@@ -85,8 +85,22 @@ export async function POST(request: Request): Promise<NextResponse> {
     );
   }
 
-  const principal = await resolvePrincipalFromToken(token);
-  if (!principal) {
+  const resolved = await resolvePrincipalOrStatus(token);
+  if (resolved.kind === "suspended") {
+    // The credentials were right: the account is shared box-wide and this
+    // profile's enrolment is what has been switched off, so saying "invalid
+    // password" would send them round the reset loop for nothing.
+    return NextResponse.json(
+      {
+        error: "suspended",
+        detail:
+          "Your access to this profile has been suspended. " +
+          "Ask an administrator to restore it.",
+      },
+      { status: 403 },
+    );
+  }
+  if (resolved.kind === "none") {
     return NextResponse.json(
       {
         error: "no_principal",
@@ -95,6 +109,7 @@ export async function POST(request: Request): Promise<NextResponse> {
       { status: 409 },
     );
   }
+  const principal = resolved.principal;
 
   await writeSession({
     hermesToken: token,

@@ -252,6 +252,17 @@ authority over. A member's box-wide ban state (never activated, or banned) and
 their profile-local enrolment state are therefore two separate fields on
 `MemberView`, and the row distinguishes "awaiting activation" from "suspended".
 
+A profile-local flag is only a control where the profile grants authority, and
+the review found the flag was written but not read: a suspended person kept
+their role on every messaging channel, kept every `/api/comms/*` surface, and
+stayed a candidate for the FG-24 memory binding. So `active` is now enforced at
+the three seams that grant authority — `resolve_principal` (C1) answers *nobody*
+for a suspended identity and pairing cannot re-admit them, the web resolver
+answers **403** for reads as well as writes, and the FG-24 ladder drops a
+suspended binding. The account itself is untouched, which is the point: it signs
+in, and this profile refuses it by name ("suspended in this profile") rather than
+by pretending the password is wrong.
+
 `MemberService` currently performs the account-level ones through the GoTrue
 **admin** API with the service-role key, gated only by `require_member_admin`,
 which checks the actor's role *in the current profile*. So an admin of `hr`

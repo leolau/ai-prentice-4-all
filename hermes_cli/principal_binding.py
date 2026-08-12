@@ -305,8 +305,18 @@ def _default_store() -> Any:
 
 
 def _enrolled(*, store: Optional[Any], timeout: float) -> List[Any]:
+    """Candidates for the ladder: only principals *active* in this profile.
+
+    A suspended enrolment (FG-26 §3.5) is not a candidate, for the same reason a
+    demoted admin's remembered role is re-read: the file must not keep granting
+    authority the profile has withdrawn. It also means a remembered binding for
+    a suspended person is forgotten by the "no longer enrolled" rung rather than
+    silently surviving.
+    """
     principal_store = store if store is not None else _default_store()
-    return list(_run_async(principal_store.list_principals(), timeout=timeout))
+    return list(
+        _run_async(principal_store.list_principals(active=True), timeout=timeout)
+    )
 
 
 def _resolve_login_subject(

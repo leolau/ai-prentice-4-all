@@ -588,6 +588,39 @@ async def test_create_member_enrolls_existing_account_without_invitation(
 
 
 @pytest.mark.asyncio
+async def test_create_member_refuses_somebody_already_enrolled_here(
+    audit_events: list[dict[str, Any]],
+) -> None:
+    """Enrolment is an upsert, so a silent success would change nothing.
+
+    The requested role would not be applied and a suspended row would stay
+    suspended, while the console reported that the person had been added.
+    """
+    admin = _FakeAdmin(users={_SUB: {"id": _SUB, "email": "mia@x.io"}})
+    store = _FakeStore()
+    await store.enroll(_SUB, display="Mia", role="member")
+    svc = _service(store, admin)
+
+    with pytest.raises(MemberError) as excinfo:
+        await svc.create_member(
+            _principal("owner"), email="mia@x.io", profile="default", role="admin"
+        )
+    assert "already enrolled" in str(excinfo.value)
+    assert store.principals[_SUB].role == "member"
+    assert audit_events == []
+
+    # A suspended enrolment says so, and points at the action that restores it
+    # (which is audited as a restore rather than hidden inside a create).
+    await store.set_active(_SUB, False)
+    with pytest.raises(MemberError) as suspended:
+        await svc.create_member(
+            _principal("owner"), email="mia@x.io", profile="default"
+        )
+    assert "suspended" in str(suspended.value)
+    assert store.principals[_SUB].active is False
+
+
+@pytest.mark.asyncio
 async def test_create_member_refuses_foreign_profile_before_touching_gotrue(
     audit_events: list[dict[str, Any]],
 ) -> None:

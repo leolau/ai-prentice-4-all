@@ -731,21 +731,29 @@ export class HermesApiClient {
    * upstream (the invitee has no session yet), and every failure mode answers
    * identically so this cannot be used to discover whether a token was real.
    */
-  async redeemInvitation(input: {
-    token: string;
-    password: string;
-  }): Promise<{ ok: boolean }> {
+  async redeemInvitation(
+    input: {
+      token: string;
+      password: string;
+    },
+    clientIp = "",
+  ): Promise<{ ok: boolean }> {
     return this.request("/api/auth/invitations/redeem", {
       method: "POST",
       json: input,
+      headers: forwardedFor(clientIp),
     });
   }
 
   /** Ask an administrator for a reset link. Always answers `{ok: true}`. */
-  async requestInvitation(email: string): Promise<{ ok: boolean }> {
+  async requestInvitation(
+    email: string,
+    clientIp = "",
+  ): Promise<{ ok: boolean }> {
     return this.request("/api/auth/invitations/request", {
       method: "POST",
       json: { email },
+      headers: forwardedFor(clientIp),
     });
   }
 
@@ -1078,6 +1086,18 @@ export class HermesApiClient {
       json: payload,
     });
   }
+}
+
+/**
+ * `X-Forwarded-For` carrying the invitee's own address, or no header at all.
+ *
+ * The unauthenticated invitation endpoints throttle per IP, and every one of
+ * their requests reaches Python from *this* server — so without this the whole
+ * internet shares one bucket. Python only trusts the header from a loopback
+ * peer, which this call is.
+ */
+function forwardedFor(clientIp: string): Record<string, string> {
+  return clientIp ? { "X-Forwarded-For": clientIp } : {};
 }
 
 function safeJson(text: string): unknown {
