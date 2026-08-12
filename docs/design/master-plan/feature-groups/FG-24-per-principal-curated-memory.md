@@ -319,12 +319,33 @@ Baseline + cache-invariant tests green; per-principal isolation proven;
 - [x] Independent budgets + `memory.shared_memory_char_limit` config
 - [x] Migration (owner `USER.md` → `persons/<owner>/`, idempotent)
 - [x] Tests: baseline byte-identity, cache invariant, isolation, containment, authority, threat-scan, budgets, concurrency, migration, real-Postgres resolution path, load-bearing injection
-- [ ] System test on `hermes-systest` passed
+- [x] System test on `hermes-systest` passed — 2026-08-12, two enrolled
+      principals (the live owner plus a temporary member, since deactivated),
+      against real `MemoryStore` code in a copy of the live Hermes home.
+      Evidence: each session rendered its own participation block and the shared
+      block and neither saw the other's participation fact; the person-level
+      block reached only its own person; the member's `target=shared` write was
+      refused with the audited wording and landed in
+      `audit/memory_authority.jsonl` as `memory_shared_write_denied` with the
+      actor and role; the owner's `memories/USER.md` migrated to
+      `persons/<owner>/USER.md` with every entry intact and the legacy file kept
+      as `.pre-fg24` (the migration round-trips through the entry serialiser, so
+      the copy differs from the original by a trailing newline).
+- [ ] Unscoped sessions: resolve the principal from the login user, else the
+      setup/pairing binding, else ask once and remember (owner's decision,
+      2026-08-12). Until then an unresolved session's `target='memory'` write
+      still lands in the file resolved principals read as the profile-wide
+      **shared** block, and after migration it renders no person block at all —
+      both confirmed live on the box. Also unfixed: `hermes doctor`,
+      `hermes profile` and the dashboard's memory settings/reset only know the
+      two legacy files, so a reset claims to erase everything while leaving
+      every participation and person file in place.
 
 ## Audit log
 
 | Date | Edition | Author | Change | Rationale |
 |------|---------|--------|--------|-----------|
+| 2026-08-12 | 3 | devin (for Leo) | Reviewed and system-tested on `hermes-systest`. Ticked the system-test item with its evidence and recorded the unscoped-session decision as the one open item. | Isolation, authority, the audited refusal and migration fidelity all hold live. The unscoped-session hole is a policy question the owner has now answered (resolve by login, else the setup/pairing binding, else ask once and remember), so it is written down as work rather than left as a review finding. |
 | 2026-08-11 | 3 | devin (for Leo) | Implemented. Recorded three deviations: person identity lives at `<root>/persons/<user_id>/USER.md` (not under the profile home), three snapshot blocks instead of four (no `shared_user` tier exists after the amendment), and `target=shared` is refused rather than aliased in an unscoped session. | The amendment makes identity person-level while `$HERMES_HOME` is profile-level; storing `USER.md` under the profile home would recreate the drifting-copies problem the amendment exists to remove, and a `shared_user` block would have no referent. |
 | 2026-08-10 | 1 | devin (for Leo) | Created FG doc | Scale-out to hundreds of principals in one profile makes an instance-wide `USER.md` incoherent and its shared 2200-char budget a hard blocker (already at 2029, writes refused). Investigation of `prompt_caching.py` (single `system_and_3` layout, one system breakpoint) and `system_prompt.py` (per-session `Session ID` line already in the volatile tier) shows the "per-user memory breaks the prompt cache" constraint does not hold — the prompt is already unique per session, and the real invariant (byte-stable within a conversation) is preserved by the existing frozen-snapshot mechanism. |
 

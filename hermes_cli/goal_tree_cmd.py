@@ -562,9 +562,11 @@ def register_goal_tree_subparser(subparsers: argparse._SubParsersAction) -> None
         ),
     )
     publish.add_argument(
-        "--profile",
+        "--into",
+        dest="profile",
         action="append",
         default=None,
+        metavar="PROFILE",
         help="Publish only into this profile (repeatable; default: all)",
     )
 

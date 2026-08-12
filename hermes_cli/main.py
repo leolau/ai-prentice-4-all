@@ -357,6 +357,22 @@ def _apply_profile_override() -> None:
             return False
         return True
 
+    def _inside_goal_publish(index: int) -> bool:
+        """True once argv reaches `hermes goal publish ...`.
+
+        There a profile name is a publish *target*, not the profile to run in:
+        reading it as the global selector silently ran the command inside the
+        target profile and published that profile's goal everywhere else. The
+        flag is spelled ``--into`` now, so this only makes the old spelling fail
+        loudly at argparse instead of doing the opposite of what it says.
+        """
+        try:
+            goal_index = argv.index("goal", 0, index)
+            argv.index("publish", goal_index + 1, index)
+        except ValueError:
+            return False
+        return True
+
     def _resolve_sudo_user_profile_env(name: str) -> str | None:
         """Resolve `sudo hermes -p <name>` against the invoking user's home.
 
@@ -406,6 +422,8 @@ def _apply_profile_override() -> None:
         if arg == "--":
             break
         if arg == "--args" and _inside_mcp_add_args(i):
+            break
+        if (arg.startswith("--profile") or arg == "-p") and _inside_goal_publish(i):
             break
         if arg in {"--profile", "-p"} and i + 1 < len(argv):
             profile_name = argv[i + 1]

@@ -470,7 +470,10 @@ and promotion queue; full matrix on real Postgres; `scripts/run_tests.sh`,
 - [x] Stable-tier Purpose block (capped, scanned, byte-stable per session)
 - [x] Volatile participant goal block, frozen in the same session snapshot
 - [ ] Person-level `USER.md` vs participation-level memory split (FG-24 amendment) — **left to FG-24**
-- [x] `skills-shared/` wired as an external dir in every profile
+- [x] `skills-shared/` wired as an external dir in every profile — the
+      promotion path only writes the entry into the *approving* profile's
+      config, so the library is resolved from the Hermes root by the skills
+      loader; a profile that never approved anything still reads it
 - [x] `skill_promotions` + two-stage approval (profile reviewer → owner) on a weekly digest + provenance
 - [x] `goals.primary_metric` + direction-aware normalisation + parent roll-up
 - [x] Stale-metric reporting for unmeasured long-lived goals
@@ -479,7 +482,21 @@ and promotion queue; full matrix on real Postgres; `scripts/run_tests.sh`,
 - [x] Sibling-conflict detection + immediate owner alert; no auto-resolution
 - [x] Owner surface: entity goal in agent-home settings; goal tree, digest and conflicts on the CLI
 - [x] Tests: lifetime matrix, ladder, publish, budget, injection, promotion negatives (real Postgres)
-- [ ] System test on `hermes-systest` passed
+- [x] System test on `hermes-systest` passed — 2026-08-12, throwaway profiles
+      `fg29a`/`fg29b`, real per-profile Postgres schemas. Evidence: tier→prompt
+      matrix (`entity`/`profile` stable, `participant` volatile, `operational`
+      never); the four-tier ladder resolves upward from an operational goal;
+      cycle, operational→entity and member-edits-entity all refused on write;
+      an owner's mid-session entity edit left both the snapshot bytes and the
+      stable block unchanged and appeared only after `goal sync`; publish
+      created a read-only copy in `fg29b` carrying provenance, a source edit
+      marked it stale in the receiving profile's prompt, and the copy refused
+      both a local edit and a re-publish; promotion refused a member outright,
+      refused the profile admin at the owner stage, and installed into
+      `skills-shared/` only after admin review plus owner approval, with the
+      audit trail naming both actors; a skill whose frontmatter name was
+      `../victim` installed as one contained directory and the victim outside
+      the library survived (PR #205's containment, live).
 
 ## Implementation notes (edition 2 → shipped)
 
@@ -504,12 +521,20 @@ Where the implementation departs from the text above, and why:
    received a copy (from that audit) rather than every profile on the box.
 5. **`skills-shared/` is registered in `config.yaml` on first promotion**
    rather than seeded into every profile at install time — an empty external
-   dir in every profile's config was surface with no consumer.
-6. **Console:** the entity goal is editable in agent-home settings, as the spec
+   dir in every profile's config was surface with no consumer. That covers the
+   approving profile only, so the skills loader also resolves the library from
+   the Hermes root: the system test found a promoted skill invisible in the
+   profile it was promoted *for*, which is the whole point of promoting it.
+6. **The publish target flag is `--into`, not `--profile`.** `--profile`
+   anywhere in argv is the global profile selector (consumed before argparse),
+   so `hermes goal publish --profile finance` ran *inside* `finance` and
+   published that profile's goal into every other one — silently, under owner
+   authority. The old spelling now reaches argparse and is rejected.
+7. **Console:** the entity goal is editable in agent-home settings, as the spec
    requires. The goal tree, the weekly digest, the promotion queue and the
    conflict decisions are CLI-only for now; FG-26 owns those console views and
    this change deliberately does not pre-empt it.
-7. **Every threshold is an uncalibrated guess**, labelled as such in
+8. **Every threshold is an uncalibrated guess**, labelled as such in
    `config.yaml` and at each definition: the promotion threshold, the shared
    cap, the unused-demotion age, the usage saturation point, the
    unmeasured-goal age, and the number of opposed observations that make a
