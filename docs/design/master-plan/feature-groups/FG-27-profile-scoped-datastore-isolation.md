@@ -334,6 +334,44 @@ On `hermes-systest`: create a second profile with `--clone`, confirm it does
 confirm the startup error; then give it its own schema and confirm both profiles
 run concurrently with fully disjoint `principals` and memories.
 
+### Run — 2026-08-12, `develop 76fb221eb`, PASSED
+
+Against the live `127.0.0.1:5432/postgres`, alongside the running `default` and
+`maintenance` profiles.
+
+```
+profile create fg27a --clone    app datastore 127.0.0.1:5432/postgres  (shared, by design)
+                                prod: app_prod_fg27a (unclaimed)   dev: app_dev_fg27a (unclaimed)
+                                cloned .env still carries DATABASE_URL — the DSN is inherited,
+                                the schema is not
+
+principals, one database   app_prod              default      leo_owner/owner + 1 member
+                           app_prod_maintenance  maintenance  leo_owner/owner
+                           app_prod_fg27a        fg27a        fg27a_owner/owner
+
+three profiles concurrently   each `member list` returned only its own roster
+
+fg27a pointed at app_prod     REFUSED: "Schema 'app_prod' is claimed by profile
+                              'default' … this process is profile 'fg27a'"
+
+profile create fg27c          REFUSED (exit 1), and no profiles/fg27c directory was
+(schema pre-claimed by        left behind
+ another profile)
+
+datastore split-profile       app_prod_fg27a → app_prod_fg27b: 4 tables, 2 rows
+  fg27a → fg27b               verified: 4 tables, 2 rows; claimed for 'fg27b'
+                              app_dev_fg27a: source schema does not exist, skipped
+                              fg27b then listed fg27a_owner — the data followed the schema
+                              fg27a came back empty on a freshly adopted schema
+
+hermes doctor                 ✓ App datastore 127.0.0.1:5432/postgres
+                                (profile fg27a: app_prod_fg27a, app_dev_fg27a)
+```
+
+Cleaned up afterwards: both throwaway profiles deleted, all six `*_fg27[abc]`
+schemas dropped, live schemas and principal counts unchanged, all 15 units
+active, deployment-state check clean.
+
 ## Dependencies
 
 - **Blocked by:** none (C3/FG-13 already merged).
@@ -361,7 +399,7 @@ system test passed.
 - [x] `hermes datastore show` / `split-profile` + `hermes doctor` reporting (`hermes_cli/datastore_cmd.py`, `_check_app_datastore_binding()`)
 - [x] Tests: derivation baseline, collision, fail-closed, two-profile isolation on real Postgres (`tests/hermes_cli/test_fg27_profile_schema_isolation.py`, `tests/hermes_cli/test_fg27_schema_isolation_e2e.py`)
 - [x] Tests: clone, RLS-after-rename, migration (`tests/hermes_cli/test_fg27_layer2_binding.py`, `tests/hermes_cli/test_fg27_layer2_e2e.py`)
-- [ ] System test on `hermes-systest` passed
+- [x] System test on `hermes-systest` passed (2026-08-12, `76fb221eb` — see "System testing")
 
 ## Deviations from this spec, as built (Layer 2)
 
@@ -415,6 +453,7 @@ single-profile; it must be fixed by FG-26/FG-28, which own the console.
 
 | Date | Edition | Author | Change | Rationale |
 |------|---------|--------|--------|-----------|
+| 2026-08-12 | 7 | devin (for Leo) | System test passed on `hermes-systest` (`76fb221eb`) — FG-27 complete | Everything the plan asked for held live, including the two cases only a real deployment can show: a `--clone` whose `.env` carries the real `DATABASE_URL` reported the shared database and *distinct* schemas, and three profiles queried the one Postgres concurrently with disjoint rosters. Two findings worth carrying forward. **`hermes` resolves `HERMES_HOME` from `$HOME` when the variable is unset**, so `sudo -u hermes -H hermes datastore show` answers for `/opt/data/hermes-user/.hermes` — a core-only home — and prints "not configured" while the deployment is plainly on Postgres; every box command must pass `HERMES_HOME=/opt/data/hermes-home-staging` explicitly (added to the runbook). And **the deploy aborted on a transient `github.com:22` timeout**, leaving the box on the previous revision; the abort was correct and loud, but it is the second time a network blip has produced a "nothing happened" deploy, so a fetch retry belongs in `hermes-deploy.sh`. |
 | 2026-08-13 | 6 | devin (for Leo) | Layer 2 + `split-profile` + doctor reporting implemented | The check had to resolve, not read: with `dsn: ${DATABASE_URL}` the literal in two profiles' `config.yaml` is identical *and* meaningless, so `resolved_app_dsn()` expands the reference against the profile's own `.env` (the precedence `load_hermes_dotenv` uses) rather than comparing config text. The refusal runs **before** any directory is created — a conflict discovered mid-copy would leave a half-made profile that Layer 1 then refuses to open, which is worse than either outcome alone. Ownership is read over a *raw* connection, deliberately not `SupabaseAppStore.connect()`: that path verifies ownership and would raise on the very schema this needs to describe. `split-profile` runs inside one transaction and compares per-table row counts read from the catalog (not a hard-coded table list, so a schema carrying tables this Hermes does not know about is still verified), then re-claims the marker for the target profile — without that, a moved schema is immediately unopenable by its new owner. The RLS-after-rename test is the one that could have gone either way: the C2 policies are created with unqualified table names against a pinned `search_path`, so they follow the table through `ALTER SCHEMA … RENAME`; it is pinned down because the failure mode (a member reading everyone's rows, silently) leaves nothing in the logs. |
 | 2026-08-11 | 5 | devin (for Leo) | Layers 3 + 1 implemented | Schema resolution moved behind `app_schema(mode)`, which derives `app_prod_<profile>` from `get_active_profile_name()` (default profile byte-identical). The surprise was scale: the schema was hard-coded not only in `get_store()` but in **61 SQL literals** across `promote.py`, `tools_registry.py`, `changes.py`, `access.py`, `interactions.py` and a `SupabaseAppStore("prod", "app_prod", dsn)` in `gateway/run.py` — schema-qualified SQL that bypasses the connection's `search_path`, so changing the router alone would have left every one of those writing into the default profile's schema. All now resolve through `app_schema()`. Layer 1 lands as `schema_owner` claimed during `initialize_supabase_app()` and verified inside `SupabaseAppStore.connect()`, with success cached per `(dsn, schema, slug)` and failure never cached. Deviations recorded above. |
 | 2026-08-10 | 4 | devin (for Leo) | Shared-Supabase decision — build order becomes 3 → 1 → 2, Layer 2 re-scoped | Leo confirmed **all profiles share one Supabase instance**. One Supabase is one Postgres, so every profile has the **same DSN by design** and the collision stops being a footgun: with a hard-coded `app_prod` the second profile merges into the first the moment it connects, and no configuration avoids it. Layer 3 is therefore promoted from "the real fix" to **the enabling mechanism** — profile-derived schemas are the only thing that makes more than one profile possible on this deployment — and it must be built first. Layer 1 is unaffected (its marker keys on the schema, not the DSN) and becomes the fail-closed backstop. Layer 2 as written is now **wrong**: blanking the cloned DSN would break the intended topology, so it is re-scoped from "don't share the database" to "share the database, never the schema" — verify the clone resolves to a distinct schema, print the resolved `(database, schema)`, refuse an already-claimed one. The original framing is retained for deployments that give each profile its own database. |
