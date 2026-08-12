@@ -152,7 +152,7 @@ Two consequences:
    mistake is a silent merge. FG-27 turns this failure mode from catastrophic to
    merely broken.
 
-**Correction after the shared-Supabase decision \u2014 this is a strong
+**Correction after the shared-Supabase decision — this is a strong
 recommendation, not a hard blocker.** Being honest about the weakened argument:
 if all profiles share one Supabase, then `DATABASE_URL` and
 `SUPABASE_SERVICE_ROLE_KEY` are **the same value for every profile**, so the
@@ -161,7 +161,7 @@ being a correctness blocker for the datastore.
 
 What survives:
 
-- **Per-profile secrets that genuinely differ** \u2014 model API keys are the live
+- **Per-profile secrets that genuinely differ** — model API keys are the live
   example (a profile may use a different provider or a separately-billed key),
   and any future per-profile credential. Those still collapse to whichever
   `.env` loaded last.
@@ -171,11 +171,13 @@ What survives:
   A design that is correct only while a coincidence holds is a latent bug with a
   delayed trigger.
 
-So fan-out remains the recommendation \u2014 the process boundary makes the property
-structural instead of coincidental \u2014 but in-process multiplexing is *feasible*
-on this deployment, and if it is chosen it must come with an explicit,
-tested assertion that every served profile resolves identical values for the
-shared secrets, failing closed when they diverge.
+That argued for fan-out when it was written, because the process boundary made
+the property structural instead of coincidental. **It has since been decided the
+other way — see §"Architecture decision" — and the condition attached here is
+what that decision must satisfy:** an explicit, tested assertion that each served
+profile resolves *its own* values, failing closed rather than silently sharing.
+`get_secret` now provides the failing-closed half; the test is item 8 of the
+checklist.
 
 **Latent issue to verify first (not introduced by this FG).** The gateway
 already multiplexes profiles in one process, scoping each turn with
@@ -319,10 +321,67 @@ Tasks:
   test the migration needs.
 - Then enable `gateway.multiplex_profiles` on the box and re-measure.
 
-## Recommended architecture — fan-out, not multiplex
+## Architecture decision (2026-08-13) — one process, profile-scoped per request
 
-Keep **one process per profile**, exactly as today, and put a thin control plane
-in front:
+Editions 1–3 recommended fan-out; edition 4's pickup prompt said multiplex. That
+was a contradiction in the doc, not two readings of one plan, and it is resolved
+here in favour of **one process serving every profile, entering the target
+profile's scope per request**. Three reasons, in order of weight:
+
+1. **Fan-out's load-bearing argument was "a contextvar cannot keep secrets apart,
+   only the process boundary can." That is no longer true.**
+   `set_secret_scope` is context-local and `get_secret` **fails closed** when
+   multiplexing is on — an unscoped read raises rather than returning the wrong
+   profile's value — and a spawned child's environment is corrected per profile
+   (#219, #220). Remove that premise and fan-out's case is cost and deployment
+   complexity in exchange for a property the seam already provides.
+2. **Fan-out is incompatible with the one-gateway consolidation this same FG
+   carries**, which Leo asked for on measured evidence. With
+   `gateway.multiplex_profiles` on, the port-binding platforms — `api_server`,
+   `webhook` and friends — are a hard startup error for a secondary profile: the
+   default profile owns the single listener and serves the rest under
+   `/p/<profile>/`. The per-profile HTTP endpoints a console would fan out to
+   therefore *stop existing* once the consolidation lands. The FG cannot build
+   both.
+3. **"Keep one process per profile, exactly as today" was factually wrong for the
+   console tier.** There is exactly one `hermes-dashboard` unit on the box,
+   serving one `HERMES_HOME` — which is *why* FG-26's picker can only see the
+   current profile. Fan-out is not the status quo here; it is N new units, N
+   ports and a per-profile TLS/routing story, at ~225 MB each.
+
+**What the decision must not lose.** Fan-out's real prize was never the secrets —
+it was that **authority is re-derived at the destination**, structurally, because
+a buggy console physically could not reach a profile the caller has no row in. In
+one process that stops being a boundary and becomes a discipline, so it has to be
+made structural by other means. These are requirements, not advice:
+
+- **Every console-routed request enters the target profile's scope** —
+  `set_hermes_home_override` *and* `set_secret_scope`, the pair
+  `_profile_runtime_scope()` already establishes — before any resolution runs. One
+  chokepoint, so "which profile am I in" is never a parameter threaded through
+  handlers.
+- **The principal is re-resolved inside that scope**, from the target profile's
+  own `principals` table. The picker is a routing hint and never a grant; no row
+  there is a 403/409 regardless of what the caller holds elsewhere.
+- **Owner-fallback is refused on those routes** — see §"The most dangerous hole",
+  which matters *more* here than under fan-out, not less: the hop is now an
+  in-process call, so nothing about it looks remote enough to be suspicious.
+- **FG-27's schema-ownership guard is the backstop.** A wrongly-scoped request
+  fails on connect instead of reading another profile's rows, which is what makes
+  a scoping bug loud rather than silent.
+- **The credential migration comes first.** Only 6 of ~2,250 env reads go through
+  `get_secret`; an unmigrated `os.getenv` returns the wrong profile's value
+  silently. Migrate every credential read reachable from a console route *before*
+  serving a second profile from one process. The risk is lower than the
+  gateway's — the DSN and service-role key are identical across profiles on one
+  Supabase — but "identical today" is exactly the coincidence §above warns about.
+- **The service-role key argument now runs in our favour.** One process holding
+  the box-wide account key is one place to protect instead of N, which is the
+  shape §"global accounts, local authority" already asked for.
+
+**Rejected alternative — fan-out.** Kept because the reasoning is the relevant
+contrast, and because if the credential migration proves intractable this is the
+fallback:
 
 ```
                     ┌──────────────────────────┐
@@ -338,10 +397,10 @@ in front:
               └────────────┘   └────────────┘   └────────────┘
 ```
 
-Why fan-out beats in-process multiplexing here:
+Why fan-out looked better when this was written:
 
-- **The process boundary is what keeps secrets apart** — the one thing the
-  contextvar cannot do.
+- **The process boundary is what keeps secrets apart** — the one thing a
+  contextvar could not do at the time, and now can.
 - **No change to the datastore router.** Each profile API resolves its own
   config and DSN exactly as it does today.
 - **It preserves the "independent islands" intent.** The islands keep their own
@@ -368,21 +427,25 @@ carries no interactive session:
 > token-authed service, or a test client) resolves to the enrolled owner.*
 
 That is correct today, where the only sessionless callers are local internal
-ones. Under fan-out it becomes an **escalation vector**: the console→profile-API
-hop is service-to-service, so if the caller's identity is not forwarded — or is
-dropped on one code path, or the token is accepted without a subject — the
-request resolves to **that profile's owner**. CFO's misrouted request against
-`engineers` would not be denied; it would be executed as the owner of
-`engineers`.
+ones. On any console-routed request it becomes an **escalation vector**: if the
+caller's identity is not carried into the target profile's scope — dropped on one
+code path, or a token accepted without a subject — the request resolves to **that
+profile's owner**. CFO's misrouted request against `engineers` would not be
+denied; it would be executed as the owner of `engineers`.
+
+The in-process decision makes this sharper, not softer. A fan-out hop is an HTTP
+call with a visible identity header, so a missing identity is conspicuous; an
+in-process entry into another profile's scope carries whatever ambient state the
+handler happens to hold, and looks like a function call.
 
 Requirements, all of them tests:
 
-- The fan-out **must** forward the caller's verified subject, and the profile
-  API must **refuse owner-fallback** on any request arriving from the console —
-  a sessionless request on those routes is a 401, never an owner.
-- Prefer forwarding the caller's **original GoTrue access token** over a service
-  token, so the profile API verifies the same JWT it would verify from a
-  browser and the identity cannot be asserted by the middle tier at all.
+- The console route **must** carry the caller's verified subject into the target
+  profile's scope, and resolution there must **refuse owner-fallback** — no
+  verified subject on those routes is a 401, never an owner.
+- Verify the caller's **original GoTrue access token** at the destination, the
+  same JWT a browser would present, so identity is never *asserted* by the
+  routing layer — the property that holds whether the hop is a socket or a call.
 - Negative test: a console request with the identity header stripped must fail
   closed, not fall back.
 
@@ -394,9 +457,12 @@ console with a dropdown.
 **In:**
 
 - profile registry at the shared root (`hermes profile registry` CRUD, health);
-- console fan-out with a profile switcher listing **only** profiles where the
-  caller holds an `admin`/`owner` principal row;
-- per-profile identity forwarding + owner-fallback refusal on console routes;
+- one console with a profile switcher listing **only** profiles where the caller
+  holds an `admin`/`owner` principal row, each request entering the target
+  profile's scope at one chokepoint;
+- identity carried into that scope + owner-fallback refusal on console routes;
+- the credential-read migration for every path a console route reaches, before a
+  second profile is served from one process;
 - FG-26's create-user form: the read-only "creating in: X" label becomes a real
   picker over the caller's administered profiles;
 - audit: every cross-profile administrative action records actor, target
@@ -475,8 +541,9 @@ profile boundary holds perfectly for data and does not hold at all for accounts.
 
 Symmetrically: **every profile's process holds a key that can mint an account
 valid in every profile**, so compromising one profile's process is a box-wide
-account-system compromise. Under fan-out this is N processes holding it instead
-of one.
+account-system compromise. Fan-out would have meant N processes holding it; the
+one-process decision (§"Architecture decision") means one, which is the shape the
+"preferred" requirement below already asked for.
 
 Requirements (mirrored in FG-26 §3.5):
 
@@ -500,8 +567,9 @@ would incidentally close that ambiguity, which is a second argument for it.
 
 ## Definition of Done
 
-Registry + fan-out console with a switcher scoped to the caller's administered
-profiles; identity forwarded and owner-fallback refused on console routes;
+Registry + one console with a switcher scoped to the caller's administered
+profiles; every console request scoped to its target profile with the principal
+re-resolved there and owner-fallback refused;
 FG-26 create-user picker; audit in the target profile; full negative matrix and
 secret-isolation tests green on real Postgres; `scripts/run_tests.sh`, `ruff`,
 `ty` clean; system test passed.
@@ -511,8 +579,9 @@ secret-isolation tests green on real Postgres; `scripts/run_tests.sh`, `ruff`,
 - [x] **First:** verify or refute the multiplexed-gateway `os.environ` issue; file separately if real — **confirmed on three paths and fixed** (see §"Verified 2026-08-12"), and the subprocess seam closed with it (see §"The subprocess seam")
 - [ ] Decision recorded: single shared GoTrue across profiles (yes/no)
 - [ ] Profile registry at the shared root + CLI
-- [ ] Console fan-out + profile switcher scoped to administered profiles
-- [ ] Identity forwarding + owner-fallback refusal on console routes (with negative tests)
+- [ ] Credential reads on console-reachable paths migrated to `get_secret()`
+- [ ] One console + profile switcher scoped to administered profiles, each request scoped to its target profile
+- [ ] Identity carried into the target scope + owner-fallback refusal on console routes (with negative tests)
 - [ ] FG-26 create-user picker over administered profiles
 - [ ] Cross-profile audit in the target profile's ledger
 - [ ] Negative matrix + secret-isolation tests on real Postgres
@@ -522,6 +591,7 @@ secret-isolation tests green on real Postgres; `scripts/run_tests.sh`, `ruff`,
 
 | Date | Edition | Author | Change | Rationale |
 |------|---------|--------|--------|-----------|
+| 2026-08-13 | 5 | devin (for Leo) | Architecture resolved: **one process, profile-scoped per request**; fan-out demoted to a recorded rejected alternative | Leo read the doc and found the contradiction edition 4 introduced: the body recommended fan-out because “the process boundary is what keeps secrets apart” while the new pickup prompt said in-process multiplexing was the direction. Resolved in favour of one process, on three grounds. **(1)** Fan-out's argument was load-bearing on a premise that is no longer true — `set_secret_scope` is context-local and `get_secret` fails closed, and #219/#220 extended that to a spawned child's environment. **(2)** Fan-out is *incompatible* with the one-gateway consolidation this same FG carries: with `multiplex_profiles` on, port-binding platforms are a hard startup error for a secondary profile and the default profile serves the rest under `/p/<profile>/`, so the per-profile HTTP endpoints a console would fan out to stop existing. The doc was asking for two mutually exclusive runtimes. **(3)** “Keep one process per profile, exactly as today” was factually wrong for this tier — the box runs exactly one `hermes-dashboard` unit on one `HERMES_HOME`, which is precisely why FG-26's picker can only see the current profile; fan-out would have been N new units at ~225 MB, not the status quo. Recorded what the decision *costs*, because fan-out's real prize was never the secrets: authority re-derived at the destination stops being a process boundary and becomes a discipline, so the doc now requires a single scoping chokepoint, the principal re-resolved from the target profile's own `principals`, owner-fallback refused there, FG-27's schema-ownership guard as the loud backstop, and the credential migration done *before* a second profile is served — with the two-profiles-one-process secret-isolation test promoted to load-bearing. |
 | 2026-08-13 | 4 | devin (for Leo) | Item 1 recorded as closed; the cloud-agent prompt rewritten for a cold pickup | Leo asked whether another agent could pick this FG up from the repo alone. The code and the findings were committed and pushed, but the prompt would have misdirected the reader on four counts: it gated the FG behind FG-27 (done and deployed), it opened with a Task 0 that is now answered (the `os.environ` leaks, confirmed on four paths and fixed in #219/#220), it still carried the retired "users belong to exactly one profile" premise, and — most consequentially — it instructed the reader to keep one process per profile **because no context-local seam for `os.environ` existed**. That seam now exists, which inverts the architectural instruction while leaving its underlying reason intact: 6 of ~2,250 env reads are migrated, and an unmigrated `os.getenv` returns the wrong profile's value silently. The prompt now states the four settled decisions (shared GoTrue with box-wide accounts and profile-local authority, FG-25 deferred, Leo's owner/admin-picks-the-profile rule, and the closed leak investigation), points at the reframing that supersedes §"Summary", and names what a cloud agent cannot do — no SSH to `hermes-systest`, so deployment and the live system test stay with the box operator. |
 | 2026-08-10 | 3 | devin (for Leo) | Reframed as the goal-tree console; one-gateway-for-all-profiles brought into scope | Leo's domain model: a **profile is the instrument for one sub-goal**, not a tenant and not a container of people, and **people participate in as many profiles as their work spans**. That retires this FG's "users belong to exactly one profile" premise — an imported constraint, not one the system imposes, since one shared GoTrue subject can hold a `principals` row in several profiles with separate memory in each — and it retires FG-25 for v1, because profiles now carry the cohort structure that hierarchical groups were designed to express. The mechanics below (authority via the `principals` row, target-profile routing, owner-fallback refusal, account-vs-enrolment split) are unchanged; only the motivation is. **Also brought one gateway per box into scope**, at Leo's request and on measured evidence: a per-profile daemon is 150 MB resident before any conversation (plus ~225 MB for a per-profile console), so ten sub-goal profiles cost ~3.7 GB idle against 9.6 GB available. Reading the code corrected an earlier claim of mine: `agent/secret_scope.py` **already solves** the process-global-environment problem for the gateway path with a context-local, fail-closed secret scope that never mutates `os.environ`, alongside same-token collision detection and a shared listener with `/p/<profile>/` routing. The remaining work is finishing the migration, not building it — and the risk is precisely asymmetric: an unmigrated `get_secret()` caller raises, while an unmigrated `os.getenv` caller silently returns the wrong profile's value, with only 6 of ~2,250 env reads migrated so far. |
 | 2026-08-10 | 2 | devin (for Leo) | Shared-Supabase decision resolved; account-vs-enrolment authority split added | Leo confirmed **all profiles share one Supabase instance**, closing prerequisite (1): one GoTrue, one subject namespace, so the no-new-tables entitlement model holds and the kanban identity ambiguity closes incidentally. Two corrections follow. **(a) The `os.environ` finding is weaker than written** — with one Supabase, `DATABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` are the *same value* in every profile, so the process-global environment cannot make them wrong and in-process multiplexing is feasible for the datastore. What survives is per-profile secrets that genuinely differ (model API keys) and the fact that the property holds only by coincidence — nothing declares or enforces that the values must match, so the day one profile gets its own key the multiplexed process silently uses the wrong one. Fan-out is therefore downgraded from hard blocker to strong recommendation, with an explicit fail-closed assertion required if multiplexing is chosen instead. **(b) A new hole, and the sharper one:** the account is now box-wide while authority stays per profile. `MemberService` performs ban/delete/reset through the GoTrue admin API with the shared service-role key, gated only by `require_member_admin` against the *current* profile — so an `hr` admin can ban an account enrolled in `engineers` and revoke access there. Split the verbs: "deactivate" in a profile means **un-enrol**, and account-level operations need owner or a target enrolled solely in profiles the actor administers. Symmetrically, every profile process holding that key means one compromised process is a box-wide account compromise, which argues for account operations living behind the control plane. Also promoted FG-27 Layer 3 to an absolute prerequisite: one Supabase means every profile shares a DSN, so without profile-derived schemas the second profile merges into the first on contact. |
@@ -556,19 +626,28 @@ secret-isolation tests green on real Postgres; `scripts/run_tests.sh`, `ruff`,
 >    §"The subprocess seam". Do not re-probe it; do **read** it, because it is
 >    the mechanism your architecture rests on.
 >
-> **Architecture.** A control-plane **profile registry** at the shared Hermes
-> root (name, base URL, health; **no authority data**), and a console that reaches
-> several profiles. In-process multiplexing is now viable and is the direction —
-> `set_hermes_home_override` + `set_secret_scope` are the two context-local seams,
-> `get_secret` fails closed when multiplexing is on, and spawned children are
-> corrected per profile. The earlier instruction in this prompt to keep one
-> process per profile *because* no context-local seam existed is superseded; the
-> seam exists. What has **not** changed is the reason process isolation mattered:
-> only 6 of ~2,250 env reads are migrated, and an unmigrated `os.getenv` returns
-> the wrong profile's value **silently**, while `get_secret` raises. So migrate
-> every credential read reachable from a console route before you serve two
-> profiles from one process, and assert isolation with a real test (below), not by
-> inspection.
+> **Architecture — read §"Architecture decision (2026-08-13)" before writing
+> anything; it is the decision, and §"Recommended architecture" as it stood in
+> editions 1–3 is now the *rejected* alternative recorded beneath it.** Build **one
+> process serving every profile, entering the target profile's scope per
+> request** (`set_hermes_home_override` + `set_secret_scope` at one chokepoint),
+> plus a control-plane **profile registry** at the shared Hermes root (name, base
+> URL, health; **no authority data**). Fan-out to per-profile APIs is not an
+> option you may re-pick unilaterally: it is incompatible with the one-gateway
+> consolidation this FG also carries, since with `multiplex_profiles` on the
+> port-binding platforms are a hard startup error for a secondary profile and the
+> per-profile HTTP endpoints stop existing.
+>
+> **Two things the decision costs you, and they are your first two tasks.**
+> (a) Only 6 of ~2,250 env reads go through `get_secret`, and an unmigrated
+> `os.getenv` returns the wrong profile's value **silently** while `get_secret`
+> raises — so migrate every credential read a console route can reach *before* you
+> serve a second profile from one process, and assert it with a real test (below),
+> never by inspection. (b) The process boundary was what made "authority is
+> re-derived at the destination" structural; in one process you must re-resolve the
+> principal inside the target profile's scope from that profile's own `principals`
+> table, refuse owner-fallback there, and let FG-27's schema-ownership guard be the
+> backstop that makes a scoping bug loud.
 >
 > **Authority model: add no new tables.** The GoTrue `sub` is already
 > `principal.user_id`, so "CTO may administer engineers" means exactly "CTO has
@@ -577,23 +656,28 @@ secret-isolation tests green on real Postgres; `scripts/run_tests.sh`, `ruff`,
 >
 > **The critical security requirement.** `_comms_resolve_principal` currently
 > falls back to the enrolled **owner** for a request with no interactive
-> session. Under fan-out that is an escalation to the target profile's owner.
-> Forward the caller's original GoTrue access token so the profile API verifies
-> the same JWT it would from a browser, and **refuse owner-fallback on
-> console-routed requests** — sessionless is 401, never owner. Add a negative
+> session. On a console-routed request that is an escalation to the target
+> profile's owner. Verify the caller's original GoTrue access token — the same JWT
+> a browser would present — inside the target profile's scope, and **refuse
+> owner-fallback on console-routed requests**: no verified subject is 401, never
+> owner. In one process this is more dangerous than it was under fan-out, because
+> the hop looks like a function call rather than a service call. Add a negative
 > test that strips the identity and asserts failure rather than fallback. The
-> profile picker is a routing hint, never a grant: re-derive authority at the
-> destination and 409/403 when the caller has no row there.
+> profile picker is a routing hint, never a grant: re-derive authority inside the
+> target profile's scope and 409/403 when the caller has no row there, with a test
+> that tries it.
 >
 > **Also:** turn FG-26's read-only "creating in: X" label into a picker over the
 > caller's administered profiles; audit every cross-profile administrative
 > action (C5) in the **target** profile's ledger.
 >
-> **Tests (real Postgres, not mocks):** the full negative matrix at the profile
-> API; owner-fallback refusal; picker-is-not-a-grant; and a secret-isolation
-> test with two profiles on different DSNs and different service-role keys
-> exercised concurrently. Then the `hermes-systest` procedure in this doc.
-> `scripts/run_tests.sh`, `ruff`, `ty` clean.
+> **Tests (real Postgres, not mocks):** the full negative matrix on the console
+> routes; owner-fallback refusal; picker-is-not-a-grant; and a secret-isolation
+> test with two profiles on different DSNs and different service-role keys served
+> concurrently **by one process** — which is now the load-bearing test, not a
+> nice-to-have, since it is what the process boundary used to guarantee for free.
+> Then the `hermes-systest` procedure in this doc. `scripts/run_tests.sh`, `ruff`,
+> `ty` clean.
 >
 > **What you cannot do, and must hand back.** You have no SSH path to
 > `hermes-systest` and no credentials for it, so the deployment and the live
