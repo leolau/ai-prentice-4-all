@@ -1,5 +1,5 @@
 import { MobileShell } from "@/components/MobileShell";
-import { UsersView } from "@/components/users/UsersView";
+import { PAGE_SIZE, UsersView } from "@/components/users/UsersView";
 import { apiClientForRequest, requirePrincipal } from "@/lib/auth/principal";
 import type { DirectoryResponse, MembersResponse } from "@/types";
 
@@ -30,7 +30,7 @@ export default async function Page() {
   try {
     const client = await apiClientForRequest();
     directory = await client.directory({ limit: 200 });
-    if (canManage) page = await client.members({ limit: 25, offset: 0 });
+    if (canManage) page = await client.members({ limit: PAGE_SIZE, offset: 0 });
   } catch (err) {
     error = err instanceof Error ? err.message : "Failed to load users";
   }

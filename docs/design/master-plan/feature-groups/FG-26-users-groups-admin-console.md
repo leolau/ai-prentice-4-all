@@ -475,15 +475,18 @@ platform                    15 units active, every one running as `hermes`;
                             no deployment-state drift; no runtime drift
 ```
 
-Two findings left deliberately unchanged, both needing a decision rather than a
-fix:
+Two findings the run raised for a decision, both since resolved by Leo:
 
-- **55 memory rows are owned by `owner_user_id = 'owner'`**, an id with no row in
-  `principals` — unreachable by anybody, and predating this FG. Reassigning or
-  deleting somebody's memory is not a side effect a system test should have.
-- **The management page's first page is 25 rows where §"Users page" says 50.**
-  Left at 25 deliberately: this is the mobile-first `agent-home` surface, and
-  the paginator, search and filters that make the number cheap are all in place.
+- **55 memory rows were owned by `owner_user_id = 'owner'`**, an id with no row
+  in `principals` — unreachable by anybody, and predating this FG. Reassigning or
+  deleting somebody's memory is not a side effect a system test should have, so
+  they were left in place and reported. Leo chose reassignment: all 55 now belong
+  to `leo_owner` (`visibility` moved with the owner, since a `private:owner` tag
+  would have left them unreadable by their new owner), and the profile has no
+  dangling memory owners left.
+- **The first page was 25 rows where §"Users page" says 50.** Now 50, and the
+  server-rendered first page, the client's paging and the API default read one
+  constant each side of the seam instead of three separate literals.
 
 ## Audit log
 
