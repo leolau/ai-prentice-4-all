@@ -17,9 +17,12 @@ import pytest
 
 from hermes_cli.access import Principal
 from hermes_cli.console_scope import (
+    AccountLevelPermissionError,
     OwnerFallbackRefused,
     ProfileScopeError,
     administered_profiles,
+    enrolled_profiles,
+    guard_account_level_op,
     resolve_console_principal,
 )
 from hermes_cli.profile_registry import ProfileRegistryEntry
@@ -181,3 +184,111 @@ def test_resolve_console_principal_refuses_unknown_target(two_profiles) -> None:
                 SUBJECT, "nonexistent", store_factory=factory, registry=entries
             )
         )
+
+
+# -- account-level verb guard (item 8) ------------------------------------
+
+
+@pytest.fixture
+def target_in_two_profiles(
+    tmp_path: Path,
+) -> tuple[list[ProfileRegistryEntry], dict[Path, _FakeStore]]:
+    """Mary is enrolled (member) in engineers AND hr — the cross-profile case.
+
+    CTO administers default + engineers; CFO administers hr. An account-level
+    op on Mary affects both engineers and hr, so neither a lone CTO-admin nor
+    a lone CFO-admin may perform it — only an owner, or an admin of *both*
+    profiles Mary is in (nobody here is). This is the hr-admin-bans-an-
+    engineers-account escalation the guard refuses.
+    """
+    root = tmp_path / "hermes-root"
+    engineers_home = root / "profiles" / "engineers"
+    hr_home = root / "profiles" / "hr"
+    for home in (root, engineers_home, hr_home):
+        home.mkdir(parents=True, exist_ok=True)
+    entries = [
+        _entry("default", root),
+        _entry("engineers", engineers_home),
+        _entry("hr", hr_home),
+    ]
+    per_home = {
+        root: _FakeStore({SUBJECT: Principal(SUBJECT, "CTO", "owner")}),
+        engineers_home: _FakeStore({
+            SUBJECT: Principal(SUBJECT, "CTO", "admin"),
+            "mary": Principal("mary", "Mary", "member"),
+        }),
+        hr_home: _FakeStore({
+            OTHER_SUBJECT: Principal(OTHER_SUBJECT, "CFO", "admin"),
+            "mary": Principal("mary", "Mary", "member"),
+        }),
+    }
+    return entries, per_home
+
+
+def test_enrolled_profiles_lists_every_profile_the_target_is_in(
+    target_in_two_profiles,
+) -> None:
+    entries, per_home = target_in_two_profiles
+    factory = _store_factory(per_home)
+    # Mary is enrolled in engineers + hr (the blast radius of an account op).
+    assert asyncio.run(enrolled_profiles("mary", store_factory=factory, registry=entries)) == [
+        "engineers",
+        "hr",
+    ]
+
+
+def test_guard_allows_owner_for_account_level_op(target_in_two_profiles) -> None:
+    entries, per_home = target_in_two_profiles
+    factory = _store_factory(per_home)
+    # Owner is box-wide authority — the op is allowed regardless of where the
+    # target is enrolled.
+    actor = Principal(SUBJECT, "CTO", "owner")
+    asyncio.run(guard_account_level_op(actor, "mary", store_factory=factory, registry=entries))
+
+
+def test_guard_refuses_admin_when_target_spills_outside_administered_set(
+    target_in_two_profiles,
+) -> None:
+    entries, per_home = target_in_two_profiles
+    factory = _store_factory(per_home)
+    # CTO-admin administers default + engineers, but Mary is also in hr —
+    # banning Mary would revoke her access in hr, a profile CTO cannot
+    # administer. Refused (the cross-profile escalation).
+    actor = Principal(SUBJECT, "CTO", "admin")
+    with pytest.raises(AccountLevelPermissionError) as excinfo:
+        asyncio.run(
+            guard_account_level_op(actor, "mary", store_factory=factory, registry=entries)
+        )
+    assert "hr" in str(excinfo.value)
+
+
+def test_guard_allows_when_target_solely_in_administered_profiles(
+    target_in_two_profiles,
+) -> None:
+    entries, per_home = target_in_two_profiles
+    factory = _store_factory(per_home)
+    # CFO administers hr; a target enrolled ONLY in hr is within that authority.
+    # (Mary is in engineers+hr here, so this must refuse — and a target in hr
+    # alone must allow. Swap Mary out of engineers to get the allow case.)
+    engineers_home = entries[1].hermes_home
+    per_home = dict(per_home)
+    per_home[engineers_home] = _FakeStore({SUBJECT: Principal(SUBJECT, "CTO", "admin")})
+    factory = _store_factory(per_home)
+    actor = Principal(OTHER_SUBJECT, "CFO", "admin")
+    # Now Mary is in hr only; CFO administers hr → allow.
+    asyncio.run(
+        guard_account_level_op(actor, "mary", store_factory=factory, registry=entries)
+    )
+
+
+def test_guard_allows_vacuously_when_target_enrolled_nowhere(
+    target_in_two_profiles,
+) -> None:
+    entries, per_home = target_in_two_profiles
+    factory = _store_factory(per_home)
+    # A target with no enrolments has no blast radius — a rollback/redemption
+    # on such an account must not be blocked by the guard.
+    actor = Principal(SUBJECT, "CTO", "admin")
+    asyncio.run(
+        guard_account_level_op(actor, "ghost", store_factory=factory, registry=entries)
+    )

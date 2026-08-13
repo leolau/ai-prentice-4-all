@@ -12001,7 +12001,7 @@ _BUILTIN_SUBCOMMANDS = frozenset(
         "postinstall", "profile",
         "project", "promote", "proxy",
         "prompt-size",
-        "send", "sessions", "setup",
+        "send", "sessions", "setup", "todos",
         "skills", "slack", "status", "tool", "tools", "uninstall", "update",
         "version", "webhook", "whatsapp", "whatsapp-cloud", "chat", "secrets", "security",
         # Help-ish invocations — plugin commands not being listed in
@@ -12788,6 +12788,15 @@ def main():
 
     register_goal_tree_subparser(subparsers)
     register_promotion_subparser(subparsers)
+
+    # =========================================================================
+    # todos command — the to-do staging layer operator surface (CLI + skill,
+    # rung 2: no core tool, no self-HTTP). Includes the `send` verb that closes
+    # the dangling reference `todo_outbound.command_for()` already writes.
+    # =========================================================================
+    from hermes_cli.todos_cmd import register_todos_subparser
+
+    register_todos_subparser(subparsers)
 
     # =========================================================================
     # datastore command — the profile's resolved (database, schema) binding and

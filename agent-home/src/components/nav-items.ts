@@ -8,6 +8,13 @@ export interface NavItem {
   label: string;
   glyph: string;
   hint?: string;
+  /**
+   * A named badge slot, not a number. The count arrives from the shell
+   * as a prop so this array stays a plain, server-safe constant (the
+   * `filters.ts` boundary incident is the standing reminder of what
+   * happens when a client module crosses into a server component).
+   */
+  badge?: "todos-open";
 }
 
 /**
@@ -22,7 +29,7 @@ export interface NavItem {
  */
 export const PRIMARY_NAV: NavItem[] = [
   { href: "/", label: "Home", glyph: "◉" },
-  { href: "/todos", label: "To-dos", glyph: "◎", hint: "What needs you" },
+  { href: "/todos", label: "To-dos", glyph: "◎", hint: "What needs you", badge: "todos-open" },
   { href: "/chat", label: "Chat", glyph: "✦", hint: "One-brain chat" },
   { href: "/inbox", label: "Inbox", glyph: "✉", hint: "Everything that arrived" },
   { href: "/memory", label: "Memory", glyph: "◇", hint: "What it remembers" },

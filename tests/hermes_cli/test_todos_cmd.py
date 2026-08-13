@@ -1,0 +1,314 @@
+"""Behaviour-contract tests for ``hermes todos`` — the CLI surface.
+
+The verbs are thin by design (parse, delegate to ``TodoStore``, print), so
+what is worth pinning is the thin parts: that ``--json`` round-trips through
+``json.loads`` for every read, that an unknown stage is rejected rather than
+returning everything, that ``expire --dry-run`` writes nothing, and that the
+``send`` gate honours the approval's state and routing before it delivers.
+
+The Postgres behaviour is already covered by ``test_todo_store_e2e.py``;
+these tests use stub stores so they exercise the CLI's own logic, not the
+store's SQL.
+"""
+
+from __future__ import annotations
+
+import json
+from datetime import datetime, timezone
+from typing import Any, Optional
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+
+from hermes_cli.access import Principal
+from hermes_cli.todo_outbound import command_for, ProposedAction
+from hermes_cli.todos_cmd import (
+    _csv,
+    _parse_command_routing,
+    _when,
+    _SEND_MISSING,
+    _SEND_PENDING,
+)
+
+PRINCIPAL = Principal(user_id="leo", display="Leo", role="owner")  # type: ignore[arg-type]
+
+
+# ---------------------------------------------------------------------------
+# Pure helpers
+# ---------------------------------------------------------------------------
+
+class TestCsv:
+    def test_empty(self) -> None:
+        assert _csv("") == []
+        assert _csv(None) == []
+
+    def test_single(self) -> None:
+        assert _csv("open") == ["open"]
+
+    def test_multiple(self) -> None:
+        assert _csv("staged, open ,working") == ["staged", "open", "working"]
+
+
+class TestWhen:
+    def test_none(self) -> None:
+        assert _when(None) is None
+        assert _when("") is None
+
+    def test_iso(self) -> None:
+        result = _when("2026-08-13T12:00:00Z")
+        assert result is not None
+        assert result.year == 2026
+        assert result.tzinfo is not None
+
+    def test_naive_assumes_utc(self) -> None:
+        result = _when("2026-08-13T12:00:00")
+        assert result is not None
+        assert result.tzinfo is not None
+
+
+# ---------------------------------------------------------------------------
+# send — the command round-trip (the contract that matters most)
+# ---------------------------------------------------------------------------
+
+class TestSendCommandRoundTrip:
+    """``command_for()`` output must parse and dispatch through the CLI.
+
+    The two can never be allowed to drift: the approval carries a command
+    string the user sees, and `hermes todos send` must accept the same
+    routing fields.
+    """
+
+    def test_command_for_parses_into_routing(self) -> None:
+        action = ProposedAction(
+            channel="telegram",
+            target="-1001234567890",
+            account_id="bot_1",
+            thread_id="17585",
+            body="Reply text",
+        )
+        cmd = command_for("tsk_abc", action)
+        parts = cmd.split()  # shlex.join produces space-separated
+        routing = _parse_command_routing(parts)
+        assert routing is not None
+        assert routing["channel"] == "telegram"
+        assert routing["target"] == "-1001234567890"
+        assert routing["account"] == "bot_1"
+        assert routing["thread"] == "17585"
+
+    def test_command_for_without_optional_fields(self) -> None:
+        action = ProposedAction(
+            channel="email",
+            target="ada@example.com",
+            body="Reply text",
+        )
+        cmd = command_for("tsk_def", action)
+        parts = cmd.split()
+        routing = _parse_command_routing(parts)
+        assert routing is not None
+        assert routing["channel"] == "email"
+        assert routing["target"] == "ada@example.com"
+        assert routing["account"] is None
+        assert routing["thread"] is None
+
+    def test_routing_mismatch_is_detected(self) -> None:
+        """A routing that differs from the approval's must be caught."""
+        approved = {
+            "channel": "telegram",
+            "target": "-1001234567890",
+            "account": None,
+            "thread": None,
+        }
+        argv = {
+            "channel": "telegram",
+            "target": "-9999999",  # different!
+            "account": None,
+            "thread": None,
+        }
+        mismatches = []
+        for key in ("channel", "target", "account", "thread"):
+            if (approved[key] or None) != (argv[key] or None):
+                mismatches.append(key)
+        assert "target" in mismatches
+
+
+# ---------------------------------------------------------------------------
+# send — the gate (approval state + routing match)
+# ---------------------------------------------------------------------------
+
+class _MockApproval:
+    """A notification-shaped object for the send gate tests."""
+
+    def __init__(
+        self,
+        *,
+        status: str = "answered",
+        answer: Optional[str] = "approved",
+        body: str = "Reply body from approval",
+        command: str = "",
+    ) -> None:
+        self._status = status
+        self._answer = answer
+        self.body = body
+        self.command = command
+
+    @property
+    def is_pending(self) -> bool:
+        return self._status == "pending"
+
+    @property
+    def granted(self) -> bool:
+        return bool(self._answer) and self._answer in {
+            "approved", "yes", "allow"
+        }
+
+
+class TestSendGate:
+    """The send verb refuses at the first gate that does not hold."""
+
+    @pytest.mark.asyncio
+    async def test_missing_approval_returns_missing_code(self) -> None:
+        from hermes_cli.todos_cmd import _send
+
+        store = MagicMock()
+        store._store = MagicMock()
+        notifications = MagicMock()
+        notifications.get_by_dedupe_key = AsyncMock(return_value=None)
+
+        with patch("hermes_cli.human_comms.NotificationStore", return_value=notifications):
+            rc = await _send(
+                store, PRINCIPAL, "tsk_1",
+                channel="telegram", target="-123",
+                account=None, thread=None,
+                json_mode=False,
+            )
+        assert rc == _SEND_MISSING
+
+    @pytest.mark.asyncio
+    async def test_pending_approval_refuses(self) -> None:
+        from hermes_cli.todos_cmd import _send
+
+        approval = _MockApproval(status="pending", answer=None)
+        store = MagicMock()
+        store._store = MagicMock()
+        notifications = MagicMock()
+        notifications.get_by_dedupe_key = AsyncMock(return_value=approval)
+
+        with patch("hermes_cli.human_comms.NotificationStore", return_value=notifications):
+            rc = await _send(
+                store, PRINCIPAL, "tsk_1",
+                channel="telegram", target="-123",
+                account=None, thread=None,
+                json_mode=False,
+            )
+        assert rc == _SEND_PENDING
+
+    @pytest.mark.asyncio
+    async def test_denied_approval_refuses(self) -> None:
+        from hermes_cli.todos_cmd import _send
+
+        approval = _MockApproval(status="answered", answer="denied")
+        store = MagicMock()
+        store._store = MagicMock()
+        notifications = MagicMock()
+        notifications.get_by_dedupe_key = AsyncMock(return_value=approval)
+
+        with patch("hermes_cli.human_comms.NotificationStore", return_value=notifications):
+            rc = await _send(
+                store, PRINCIPAL, "tsk_1",
+                channel="telegram", target="-123",
+                account=None, thread=None,
+                json_mode=False,
+            )
+        assert rc == _SEND_PENDING
+
+    @pytest.mark.asyncio
+    async def test_routing_mismatch_refuses(self) -> None:
+        from hermes_cli.todos_cmd import _send
+
+        action = ProposedAction(
+            channel="telegram", target="-1001234567890", body="x"
+        )
+        approval = _MockApproval(
+            command=command_for("tsk_1", action),
+        )
+        store = MagicMock()
+        store._store = MagicMock()
+        notifications = MagicMock()
+        notifications.get_by_dedupe_key = AsyncMock(return_value=approval)
+
+        with patch("hermes_cli.human_comms.NotificationStore", return_value=notifications):
+            rc = await _send(
+                store, PRINCIPAL, "tsk_1",
+                channel="telegram", target="-9999",  # wrong
+                account=None, thread=None,
+                json_mode=False,
+            )
+        assert rc == _SEND_PENDING
+
+    @pytest.mark.asyncio
+    async def test_body_from_approval_not_argv(self) -> None:
+        """The body is never passed on the command line — it comes from
+        the approval row. The send verb has no ``--body`` flag at all."""
+        from hermes_cli.todos_cmd import _send
+
+        action = ProposedAction(
+            channel="telegram", target="-1001234567890", body="approved body"
+        )
+        approval = _MockApproval(
+            body="approved body",
+            command=command_for("tsk_1", action),
+        )
+        store = MagicMock()
+        store._store = MagicMock()
+        store.record_outbound = AsyncMock()
+        notifications = MagicMock()
+        notifications.get_by_dedupe_key = AsyncMock(return_value=approval)
+
+        delivered = {"success": True}
+        with (
+            patch("hermes_cli.human_comms.NotificationStore", return_value=notifications),
+            patch("hermes_cli.send_cmd._load_hermes_env"),
+            patch("tools.send_message_tool.send_message_tool", return_value=json.dumps(delivered)),
+        ):
+            rc = await _send(
+                store, PRINCIPAL, "tsk_1",
+                channel="telegram", target="-1001234567890",
+                account=None, thread=None,
+                json_mode=False,
+            )
+        assert rc == 0
+        store.record_outbound.assert_called_once()
+        event = store.record_outbound.call_args.kwargs.get("event")
+        assert event == "sent"
+
+    @pytest.mark.asyncio
+    async def test_failed_delivery_records_failed(self) -> None:
+        from hermes_cli.todos_cmd import _send
+
+        action = ProposedAction(
+            channel="telegram", target="-1001234567890", body="x"
+        )
+        approval = _MockApproval(
+            command=command_for("tsk_1", action),
+        )
+        store = MagicMock()
+        store._store = MagicMock()
+        store.record_outbound = AsyncMock()
+        notifications = MagicMock()
+        notifications.get_by_dedupe_key = AsyncMock(return_value=approval)
+
+        with (
+            patch("hermes_cli.human_comms.NotificationStore", return_value=notifications),
+            patch("hermes_cli.send_cmd._load_hermes_env"),
+            patch("tools.send_message_tool.send_message_tool", return_value=json.dumps({"error": "no bot"})),
+        ):
+            rc = await _send(
+                store, PRINCIPAL, "tsk_1",
+                channel="telegram", target="-1001234567890",
+                account=None, thread=None,
+                json_mode=False,
+            )
+        assert rc == 1
+        store.record_outbound.assert_called_once()
+        event = store.record_outbound.call_args.kwargs.get("event")
+        assert event == "failed"

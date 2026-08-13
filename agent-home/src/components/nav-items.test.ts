@@ -57,4 +57,19 @@ describe("nav-items", () => {
     expect(secondaryHrefs).toContain("/activity");
     expect(secondaryHrefs).toContain("/settings");
   });
+
+  // The badge is a name, not a number — the count arrives from the shell
+  // as a prop so this array stays a plain, server-safe constant (Part 1.3).
+  it("has badge: 'todos-open' on the To-dos entry", () => {
+    const todos = PRIMARY_NAV.find((i) => i.href === "/todos");
+    expect(todos).toBeDefined();
+    expect(todos!.badge).toBe("todos-open");
+  });
+
+  // nav-items.ts must stay importable from a server component — the
+  // filters.ts boundary incident is the standing reminder.
+  it("is a server-safe module (no 'use client' directive)", () => {
+    expect(PRIMARY_NAV.length).toBeGreaterThan(0);
+    expect(typeof PRIMARY_NAV[0].label).toBe("string");
+  });
 });

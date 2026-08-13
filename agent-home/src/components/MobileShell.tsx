@@ -2,6 +2,8 @@ import type { ReactNode } from "react";
 
 import { BottomNav } from "@/components/BottomNav";
 import { SideNav } from "@/components/SideNav";
+import { apiClientForRequest } from "@/lib/auth/principal";
+import type { TodosFacets } from "@/types";
 
 /**
  * The adaptive app shell (FG-20 Wave A1, made responsive).
@@ -20,7 +22,7 @@ import { SideNav } from "@/components/SideNav";
  * max width for panels that lay out side-by-side columns (the memory map next
  * to its list) — at `max-w-5xl` both columns are too narrow to be readable.
  */
-export function MobileShell({
+export async function MobileShell({
   title,
   children,
   showNav = true,
@@ -34,10 +36,26 @@ export function MobileShell({
   /** Optional action elements rendered in the header bar, right-aligned next to the title. */
   actions?: ReactNode;
 }) {
+  // The badge count: one facets call per shell render, on a query already
+  // indexed by tasks_owner_stage_idx. Zero renders nothing.
+  let badgeCounts: Record<string, number> = {};
+  if (showNav) {
+    try {
+      const client = await apiClientForRequest();
+      const facets: TodosFacets = await client.todosFacets();
+      const openCount =
+        facets.stages.find((s) => s.value === "open")?.count ?? 0;
+      if (openCount > 0) {
+        badgeCounts = { "todos-open": openCount };
+      }
+    } catch {
+      // Best-effort: a facets failure must not blank the page.
+    }
+  }
   const contentWidth = wide ? "lg:max-w-7xl" : "lg:max-w-5xl";
   return (
     <div data-component="MobileShell" className="min-h-dvh bg-[var(--color-bg)] lg:flex">
-      {showNav ? <SideNav /> : null}
+      {showNav ? <SideNav badgeCounts={badgeCounts} /> : null}
       <div className="mx-auto flex min-h-dvh w-full max-w-md flex-col md:max-w-2xl lg:mx-0 lg:max-w-none lg:flex-1">
         <header
           className="sticky top-0 z-20 border-b border-[var(--color-border)] bg-[var(--color-bg)]/90 px-4 py-3 backdrop-blur lg:px-8"
@@ -63,7 +81,7 @@ export function MobileShell({
             {children}
           </div>
         </main>
-        {showNav ? <BottomNav /> : null}
+        {showNav ? <BottomNav badgeCounts={badgeCounts} /> : null}
       </div>
     </div>
   );

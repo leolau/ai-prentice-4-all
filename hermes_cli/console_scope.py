@@ -66,6 +66,21 @@ class OwnerFallbackRefused(Exception):
     """
 
 
+class AccountLevelPermissionError(Exception):
+    """An account-level verb was attempted without box-wide authority.
+
+    Account-level ops (GoTrue ban / delete / reset-password) affect **every
+    profile the target is enrolled in**, so per-profile admin authority is
+    not enough: the actor must be an ``owner``, or the target must be enrolled
+    *solely* in profiles the actor administers (FG-28 item 8). This guard is
+    the single sanctioned seam those verbs must pass; the GoTrue admin
+    primitives behind it (``set_banned`` / ``delete_user`` / ``set_password``)
+    have no admin-route caller today, so absence — not a check — is what
+    keeps them unreachable, and this guard is what keeps that absence
+    load-bearing the day one is wired.
+    """
+
+
 @contextmanager
 def _scoped_to(profile_home: Path) -> Iterator[Path]:
     """Enter a profile's runtime scope (config + secrets) for the block.
@@ -184,3 +199,81 @@ async def resolve_console_principal(
                 f"{target_profile!r}"
             )
         return principal
+
+
+async def enrolled_profiles(
+    user_id: str,
+    *,
+    store_factory: StoreFactory,
+    registry: Optional[List[ProfileRegistryEntry]] = None,
+) -> List[str]:
+    """Profiles where ``user_id`` holds an active principal row (any role).
+
+    The blast-radius read for account-level verbs (ban/delete/reset): an
+    account-level op affects every profile the target is enrolled in, so the
+    guard needs the full set, not just the acting profile. Complements
+    :func:`administered_profiles` — same iteration, any-role enrolment
+    instead of admin/owner authority.
+    """
+    if not user_id:
+        return []
+    entries = registry if registry is not None else get_profile_registry()
+    out: List[str] = []
+    for entry in entries:
+        if not entry.hermes_home.is_dir():
+            continue
+        with _scoped_to(entry.hermes_home):
+            store = store_factory(entry.hermes_home)
+            principal = await _principal_for_subject(store, user_id)
+            if principal is not None and getattr(principal, "active", True):
+                out.append(entry.name)
+    return out
+
+
+async def guard_account_level_op(
+    actor: Any,
+    target_user_id: str,
+    *,
+    store_factory: StoreFactory,
+    registry: Optional[List[ProfileRegistryEntry]] = None,
+) -> None:
+    """Refuse an account-level verb unless the actor has box-wide authority.
+
+    Two paths to a box-wide account op (FG-28 item 8):
+
+    1. the actor is an ``owner`` (box-wide authority by definition); or
+    2. the target is enrolled *solely* in profiles the actor administers —
+       so the op's blast radius stays inside the actor's authority.
+
+    Anything else is refused: an ``hr`` admin banning an account also
+    enrolled in ``engineers`` would revoke access in a profile they cannot
+    administer, which is exactly the cross-profile escalation the shared
+    account system makes possible. Raise :class:`AccountLevelPermissionError`
+    (403) rather than letting the verb through.
+
+    ``actor`` is the principal :func:`resolve_console_principal` already
+    re-derived in the target profile's scope, so its role is the target
+    profile's own record of the caller — not an asserted identity.
+    """
+    if getattr(actor, "role", "") == "owner":
+        return
+    actor_subject = getattr(actor, "user_id", "")
+    administered = set(
+        await administered_profiles(
+            actor_subject, store_factory=store_factory, registry=registry
+        )
+    )
+    target_in = set(
+        await enrolled_profiles(
+            target_user_id, store_factory=store_factory, registry=registry
+        )
+    )
+    # Vacuous allow: a target enrolled nowhere has no blast radius, so the
+    # guard cannot be the thing that blocks a legitimate rollback/redemption.
+    unadministered = target_in - administered
+    if unadministered:
+        raise AccountLevelPermissionError(
+            f"account-level op refused: target {target_user_id!r} is enrolled "
+            f"in profiles the actor does not administer: "
+            f"{sorted(unadministered)}"
+        )

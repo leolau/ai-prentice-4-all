@@ -199,7 +199,11 @@ async def get_todo(request: Request, todo_id: str) -> dict[str, Any]:
 
     payload = todo.as_dict()
     payload["history"] = await store.history(principal, todo_id)
-    payload["source"] = await _source_item(principal, todo)
+    source = await _source_item(principal, todo)
+    payload["source"] = source
+    memory = await _memory_doc(principal, source)
+    if memory is not None:
+        payload["memory"] = memory
     return payload
 
 
@@ -219,6 +223,165 @@ async def _source_item(principal, todo) -> Optional[dict[str, Any]]:
         logger.debug("todos: source arrival unavailable (%s)", exc)
         return None
     return item.as_dict() if item is not None else None
+
+
+async def _memory_doc(
+    principal, source: Optional[dict[str, Any]]
+) -> Optional[dict[str, Any]]:
+    """The memory document the source arrival produced, when it has one.
+
+    Best-effort, with the same contract as ``_source_item``: returns ``None``
+    on any failure, never raises, never blocks the payload.  When the
+    arrival was never remembered (no ``document_id``) the key is absent and
+    the row is not rendered — a to-do whose provenance is thin renders thin.
+    """
+    if not source or not source.get("document_id"):
+        return None
+    doc_id = str(source["document_id"])
+    try:
+        from hermes_cli.datastore import get_store
+        from hermes_cli.access import scope_filter
+
+        app_store = get_store("supabase-app", "prod")
+        conn = await app_store.connect()
+        try:
+            predicate = scope_filter(
+                principal, start_index=1, id_column="rag_documents.id"
+            )
+            row = await conn.fetchrow(
+                f"SELECT id, title FROM rag_documents "
+                f"WHERE id = $1::uuid AND {predicate.sql}",
+                doc_id,
+                *predicate.params,
+            )
+        finally:
+            await conn.close()
+    except Exception as exc:  # noqa: BLE001 - memory is not the payload
+        logger.debug("todos: memory document unavailable (%s)", exc)
+        return None
+    if row is None:
+        return None
+    return {"id": str(row["id"]), "title": str(row["title"] or "")}
+
+
+@router.post("/{todo_id}/start")
+async def start_todo(request: Request, todo_id: str) -> dict[str, Any]:
+    """Move a to-do to ``working`` and optionally spawn a seeded session.
+
+    The stage change happens first and unconditionally: a to-do the user said
+    they are working on must not stay ``open`` because a spawn failed.  When
+    ``session: true`` the spawn runs on a detached thread and the endpoint
+    returns ``session_id`` at once — the page has somewhere to link.
+    """
+    principal = await _resolve_principal(request)
+    body = await request.json()
+    store = _store()
+    if not await _table_ready(store) or await store.get(principal, todo_id) is None:
+        raise HTTPException(status_code=404, detail="No such to-do")
+
+    # 1. The state change happens first and independently.
+    try:
+        todo = await store.set_stage(
+            principal,
+            todo_id,
+            "working",
+            actor=f"user:{principal.user_id}",
+        )
+    except TodoError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    payload = todo.as_dict()
+    want_session = _flag(str(body.get("session")))
+    if not want_session:
+        payload["session_id"] = None
+        payload["spawned"] = False
+        return payload
+
+    # 2. Resolve the profile for the spawn (FG-28: a to-do raised on
+    #    ``personal`` may be work for ``research``). Default is the caller's
+    #    bound profile; an explicit ``profile`` must be one the caller holds.
+    _principal = principal
+    profile = str(body.get("profile") or "").strip() or None
+    if profile:
+        from hermes_cli.access import PrincipalStore
+
+        _ps = PrincipalStore(store._store)  # noqa: SLF001 - same package
+        _resolved = await _ps.get(profile)
+        if _resolved is None:
+            raise HTTPException(
+                status_code=403,
+                detail=f"you do not hold profile {profile}",
+            )
+        _principal = _resolved
+
+    # 3. Build the seed prompt from the to-do and its source arrival.
+    prompt_parts = [f"# {todo.title}"]
+    if todo.description:
+        prompt_parts.append(todo.description)
+    if todo.source_note:
+        prompt_parts.append(f"(From {todo.source_note})")
+    arrival = await _source_item(_principal, todo)
+    if arrival and arrival.get("body"):
+        prompt_parts.append(f"\n---\nSource message:\n{arrival['body'][:2000]}")
+    prompt = "\n\n".join(prompt_parts)
+
+    _session_id = f"todo_{todo_id}_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}"
+
+    # 3. Spawn on a detached thread; do not block the request.
+    import contextvars
+    import threading
+
+    from hermes_constants import get_hermes_home
+
+    _profile_home = str(get_hermes_home())
+    _ctx = contextvars.copy_context()
+
+    def _spawn():
+        from agent.seeded_session import spawn_seeded_session
+
+        result = spawn_seeded_session(
+            prompt,
+            origin="todo",
+            session_id=_session_id,
+            profile_home=_profile_home,
+            skip_memory=False,  # a to-do session is the user's work
+            context=_ctx,
+        )
+        if result.error:
+            logger.warning(
+                "todos: /start session %s failed (%s)",
+                _session_id,
+                result.error,
+            )
+        try:
+            from hermes_cli.todo_store import TRANSITIONS_TABLE
+            import asyncio as _aio
+
+            async def _record():
+                conn = await store._connect()  # noqa: SLF001
+                try:
+                    await conn.execute(
+                        f"INSERT INTO {TRANSITIONS_TABLE} "
+                        f"(task_id, from_state, to_state, actor) "
+                        f"VALUES ($1, $2, $3, $4)",
+                        todo_id,
+                        "stage:working",
+                        f"session:{_session_id}",
+                        f"user:{principal.user_id}",
+                    )
+                finally:
+                    await conn.close()
+
+            _aio.run(_record())
+        except Exception:
+            pass
+
+    _thread = threading.Thread(target=_spawn, daemon=True)
+    _thread.start()
+
+    payload["session_id"] = _session_id
+    payload["spawned"] = True
+    return payload
 
 
 @router.patch("/{todo_id}")
@@ -361,3 +524,111 @@ async def snooze_todo(request: Request, todo_id: str) -> dict[str, Any]:
         principal, todo_id, until=until, actor=f"user:{principal.user_id}"
     )
     return todo.as_dict()
+
+
+# ---------------------------------------------------------------------------
+# Promotion seam — a to-do becomes a project card (Part 2)
+# ---------------------------------------------------------------------------
+
+#: Map the to-do's four-level priority onto the board's coarser two.
+_PROMOTE_PRIORITY_MAP = {
+    "critical": "high",
+    "high": "high",
+    "normal": "normal",
+    "low": "normal",
+}
+
+
+@router.post("/{todo_id}/promote")
+async def promote_todo(
+    request: Request, todo_id: str
+) -> dict[str, Any]:
+    """Promote a to-do into a project card.
+
+    Only a human promotes — never triage, never the agent. The card is created
+    with ``status='triage'`` (never ``ready``: promotion is not dispatch).
+    The to-do moves to ``working`` (not ``done`` — the work moved, not
+    finished). A ``project_links`` row records the provenance so the project
+    page can show the to-do it came from.
+    """
+    principal = await _resolve_principal(request)
+    body = await request.json()
+    project_slug = str(body.get("project") or body.get("slug") or "").strip()
+    if not project_slug:
+        raise HTTPException(status_code=400, detail="missing field: project")
+    target_profile = str(body.get("profile") or "").strip() or principal.user_id
+
+    store = _store()
+    if not await _table_ready(store):
+        raise HTTPException(status_code=404, detail="No such to-do")
+    todo = await store.get(principal, todo_id)
+    if todo is None:
+        raise HTTPException(status_code=404, detail="No such to-do")
+
+    # 1. Resolve the project.
+    try:
+        from hermes_cli import projects_db
+        from hermes_cli.projects_db import connect_closing
+
+        with connect_closing() as pconn:
+            project = projects_db.get_project(pconn, project_slug)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=404, detail=f"project {project_slug!r} not found"
+        ) from exc
+    if project is None:
+        raise HTTPException(
+            status_code=404, detail=f"project {project_slug!r} not found"
+        )
+
+    # 2. Create the card with project_id, title/body seeded, status='triage'.
+    priority = _PROMOTE_PRIORITY_MAP.get(todo.priority, "normal")
+    card_body = todo.description or ""
+    card_body += f"\n\n(Promoted from to-do {todo_id})"
+
+    try:
+        from hermes_cli.kanban_db import create_task, connect_closing as kconn_closing
+
+        with kconn_closing() as kconn:
+            card_id = create_task(
+                kconn,
+                title=todo.title,
+                body=card_body,
+                priority=priority,
+                project_id=project.id,
+                initial_status="triage",
+                triage=True,
+            )
+    except Exception as exc:
+        logger.warning("todos: promote card creation failed (%s)", exc)
+        raise HTTPException(
+            status_code=500, detail="could not create the project card"
+        ) from exc
+
+    # 3. Write the project_links row.
+    try:
+        with connect_closing() as pconn:
+            projects_db.add_project_link(
+                pconn,
+                project_id=project.id,
+                kind="todo",
+                profile=target_profile,
+                ref=todo_id,
+                label=todo.title,
+                added_by=principal.user_id,
+            )
+    except Exception as exc:
+        logger.warning("todos: project_links write failed (%s)", exc)
+        # The card exists; the link is best-effort but not critical.
+
+    # 4. Move the to-do to working (not done — the work moved).
+    todo = await store.set_stage(
+        principal,
+        todo_id,
+        "working",
+        actor=f"user:{principal.user_id}",
+    )
+    payload = todo.as_dict()
+    payload["card_id"] = card_id
+    payload["project_id"] = project.id
+    return payload
