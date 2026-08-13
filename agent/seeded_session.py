@@ -203,7 +203,7 @@ def _body_inner(
                 _cfg = managed_scope.apply_managed_overlay(_cfg)
             except Exception:
                 pass
-            from cron.scheduler import _expand_env_vars
+            from hermes_cli.config import _expand_env_vars
 
             _cfg = _expand_env_vars(_cfg)
         except Exception as exc:
@@ -326,10 +326,12 @@ def _body_inner(
     )
 
     if workdir:
-        os.environ["TERMINAL_CWD"] = workdir
-
-    # -- inactivity timeout loop (shared concurrency) -------------------
-    _ctx = context or contextvars.copy_context()
+        # Set TERMINAL_CWD in the thread-local context, not process-global
+        # env, so concurrent sessions with different workdirs don't clobber.
+        _ctx = context or contextvars.copy_context()
+        _ctx.run(os.environ.__setitem__, "TERMINAL_CWD", workdir)
+    else:
+        _ctx = context or contextvars.copy_context()
     _pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
     _future = _pool.submit(_ctx.run, agent.run_conversation, prompt)
     _timed_out = False
@@ -346,23 +348,31 @@ def _body_inner(
                 if _done:
                     result = _future.result()
                     break
-                if hasattr(agent, "_last_activity_ts"):
-                    _idle = concurrent.futures.thread._threads_queues  # noqa: SLF001
-                # Check the agent's activity tracker
-                _tracker = getattr(agent, "_activity_tracker", None)
-                if _tracker is not None:
-                    import time as _time
-
-                    _last = getattr(_tracker, "last_activity", 0)
-                    if _last and (_time.time() - _last) > inactivity_limit:
-                        _timed_out = True
-                        _future.cancel()
-                        log.warning(
-                            "seeded_session[%s]: inactivity timeout (%.0fs)",
-                            session_id,
-                            inactivity_limit,
-                        )
-                        break
+                # Check the agent's activity via get_activity_summary (same
+                # path cron uses) — _activity_tracker doesn't exist on AIAgent.
+                _idle_secs = 0.0
+                if hasattr(agent, "get_activity_summary"):
+                    try:
+                        _act = agent.get_activity_summary()
+                        _idle_secs = _act.get("seconds_since_activity", 0.0)
+                    except Exception:
+                        pass
+                if _idle_secs >= inactivity_limit:
+                    _timed_out = True
+                    # Cancel the future (no-op if running) AND interrupt the
+                    # agent so the run actually stops — cron does the same.
+                    _future.cancel()
+                    if hasattr(agent, "interrupt"):
+                        try:
+                            agent.interrupt("inactivity timeout")
+                        except Exception:
+                            pass
+                    log.warning(
+                        "seeded_session[%s]: inactivity timeout (%.0fs)",
+                        session_id,
+                        inactivity_limit,
+                    )
+                    break
     except Exception as exc:
         log.warning("seeded_session[%s]: run failed (%s)", session_id, exc)
         return SeededSession(

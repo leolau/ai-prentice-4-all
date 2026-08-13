@@ -5,6 +5,19 @@ import { SideNav } from "@/components/SideNav";
 import { apiClientForRequest } from "@/lib/auth/principal";
 import type { TodosFacets } from "@/types";
 
+// Cache the facets call for 30s so every page render doesn't hit the backend
+// for a badge count. The query is indexed; the number is not stale-sensitive.
+import { unstable_cache } from "next/cache";
+
+const getCachedFacets = unstable_cache(
+  async () => {
+    const client = await apiClientForRequest();
+    return client.todosFacets();
+  },
+  ["todos-facets-badge"],
+  { revalidate: 30 },
+);
+
 /**
  * The adaptive app shell (FG-20 Wave A1, made responsive).
  *
@@ -36,13 +49,11 @@ export async function MobileShell({
   /** Optional action elements rendered in the header bar, right-aligned next to the title. */
   actions?: ReactNode;
 }) {
-  // The badge count: one facets call per shell render, on a query already
-  // indexed by tasks_owner_stage_idx. Zero renders nothing.
+  // The badge count: one cached facets call per 30s. Zero renders nothing.
   let badgeCounts: Record<string, number> = {};
   if (showNav) {
     try {
-      const client = await apiClientForRequest();
-      const facets: TodosFacets = await client.todosFacets();
+      const facets: TodosFacets = await getCachedFacets();
       const openCount =
         facets.stages.find((s) => s.value === "open")?.count ?? 0;
       if (openCount > 0) {
