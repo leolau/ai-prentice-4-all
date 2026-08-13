@@ -2727,8 +2727,8 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
         # Max iterations
         max_iterations = _cfg.get("agent", {}).get("max_turns") or _cfg.get("max_turns") or 90
 
-        # Provider routing
-        pr = _cfg.get("provider_routing") or {}
+        # Provider routing is read inside spawn_seeded_session from the
+        # config dict we pass — no need to extract it here anymore.
 
         from hermes_cli.runtime_provider import (
             resolve_runtime_provider,
@@ -2833,86 +2833,24 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
                 f"(or pin the original values to keep them). See #44585."
             )
 
-        fallback_model = get_fallback_chain(_cfg) or None
-        credential_pool = None
-        runtime_provider = str(runtime.get("provider") or "").strip().lower()
-        if runtime_provider:
-            try:
-                from agent.credential_pool import load_pool
-                pool = load_pool(runtime_provider)
-                if pool.has_credentials():
-                    credential_pool = pool
-                    logger.info(
-                        "Job '%s': loaded credential pool for provider %s with %d entries",
-                        job_id,
-                        runtime_provider,
-                        len(pool.entries()),
-                    )
-            except Exception as e:
-                logger.debug("Job '%s': failed to load credential pool for %s: %s", job_id, runtime_provider, e)
+        # fallback_model, credential_pool, and MCP discovery are now handled
+        # inside spawn_seeded_session (below) — they were duplicated here
+        # before the cutover.  The drift guard above is cron-specific policy
+        # that stays; the shared helper handles the mechanical resolution.
 
-        # Initialize MCP servers so configured mcp_servers are available to
-        # the agent's tool registry before AIAgent is constructed. Without
-        # this, cron jobs never saw any MCP tools — only the gateway / CLI
-        # paths called discover_mcp_tools() at startup. Idempotent: subsequent
-        # ticks short-circuit on already-connected servers inside
-        # register_mcp_servers(). Non-fatal on failure: a broken MCP server
-        # shouldn't kill an otherwise-working cron job. See #4219.
-        try:
-            from tools.mcp_tool import discover_mcp_tools
-            _mcp_tools = discover_mcp_tools()
-            if _mcp_tools:
-                logger.info(
-                    "Job '%s': %d MCP tool(s) available",
-                    job_id, len(_mcp_tools),
-                )
-        except Exception as _mcp_exc:
-            logger.warning(
-                "Job '%s': MCP initialization failed (non-fatal): %s",
-                job_id, _mcp_exc,
-            )
-
-        agent = AIAgent(
-            model=model,
-            api_key=runtime.get("api_key"),
-            base_url=runtime.get("base_url"),
-            provider=runtime.get("provider"),
-            api_mode=runtime.get("api_mode"),
-            acp_command=runtime.get("command"),
-            acp_args=runtime.get("args"),
-            max_iterations=max_iterations,
-            reasoning_config=reasoning_config,
-            prefill_messages=prefill_messages,
-            fallback_model=fallback_model,
-            credential_pool=credential_pool,
-            providers_allowed=pr.get("only"),
-            providers_ignored=pr.get("ignore"),
-            providers_order=pr.get("order"),
-            provider_sort=pr.get("sort"),
-            openrouter_min_coding_score=(_cfg.get("openrouter") or {}).get("min_coding_score"),
-            enabled_toolsets=_resolve_cron_enabled_toolsets(job, _cfg),
-            disabled_toolsets=_resolve_cron_disabled_toolsets(_cfg),
-            quiet_mode=True,
-            # Cron jobs should always inherit the user's SOUL.md identity from
-            # HERMES_HOME. When a workdir is configured, also inject project
-            # context files (AGENTS.md / CLAUDE.md / .cursorrules) from there.
-            # Without a workdir, keep cwd context discovery disabled.
-            skip_context_files=not bool(_job_workdir),
-            load_soul_identity=True,
-            skip_memory=True,  # Cron system prompts would corrupt user representations
-            platform="cron",
-            session_id=_cron_session_id,
-            session_db=_session_db,
-        )
-        
-        # Run the agent with an *inactivity*-based timeout: the job can run
-        # for hours if it's actively calling tools / receiving stream tokens,
-        # but a hung API call or stuck tool with no activity for the configured
-        # duration is caught and killed.  Default 600s (10 min inactivity);
-        # override via HERMES_CRON_TIMEOUT env var.  0 = unlimited.
+        # -- Spawn the agent through the shared session-spawn path ----------
+        # This replaces the duplicated AIAgent construction + inactivity
+        # timeout loop that previously lived here.  All pre-resolved values
+        # (config, runtime, model, toolsets, reasoning, prefill) are passed
+        # in so spawn_seeded_session doesn't re-resolve them.  The helper
+        # returns a SeededSession with the result, timeout flag, and the
+        # agent (for close() in the finally block below).
         #
-        # Uses the agent's built-in activity tracker (updated by
-        # _touch_activity() on every tool call, API call, and stream delta).
+        # Inactivity timeout: the job can run for hours if it's actively
+        # calling tools / receiving stream tokens, but a hung API call or
+        # stuck tool with no activity for the configured duration is caught
+        # and killed.  Default 600s (10 min inactivity); override via
+        # HERMES_CRON_TIMEOUT env var.  0 = unlimited.
         _raw_cron_timeout = os.getenv("HERMES_CRON_TIMEOUT", "").strip()
         if _raw_cron_timeout:
             try:
@@ -2926,48 +2864,37 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
         else:
             _cron_timeout = 600.0
         _cron_inactivity_limit = _cron_timeout if _cron_timeout > 0 else None
-        _POLL_INTERVAL = 5.0
-        _cron_pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-        # Preserve scheduler-scoped ContextVar state (for example skill-declared
-        # env passthrough registrations) when the cron run hops into the worker
-        # thread used for inactivity timeout monitoring.
-        _cron_context = contextvars.copy_context()
-        _cron_future = _cron_pool.submit(_cron_context.run, agent.run_conversation, prompt)
-        _inactivity_timeout = False
-        try:
-            if _cron_inactivity_limit is None:
-                # Unlimited — just wait for the result.
-                result = _cron_future.result()
-            else:
-                result = None
-                while True:
-                    done, _ = concurrent.futures.wait(
-                        {_cron_future}, timeout=_POLL_INTERVAL,
-                    )
-                    if done:
-                        result = _cron_future.result()
-                        break
-                    # Agent still running — check inactivity.
-                    _idle_secs = 0.0
-                    if hasattr(agent, "get_activity_summary"):
-                        try:
-                            _act = agent.get_activity_summary()
-                            _idle_secs = _act.get("seconds_since_activity", 0.0)
-                        except Exception:
-                            pass
-                    if _idle_secs >= _cron_inactivity_limit:
-                        _inactivity_timeout = True
-                        break
-        except Exception:
-            _cron_pool.shutdown(wait=False, cancel_futures=True)
-            raise
-        finally:
-            _cron_pool.shutdown(wait=False, cancel_futures=True)
 
-        if _inactivity_timeout:
+        from agent.seeded_session import spawn_seeded_session
+
+        # Preserve scheduler-scoped ContextVar state (for example skill-
+        # declared env passthrough registrations) when the cron run hops into
+        # the worker thread used for inactivity timeout monitoring.
+        _cron_context = contextvars.copy_context()
+        _session = spawn_seeded_session(
+            prompt,
+            origin="cron",
+            session_id=_cron_session_id,
+            config=_cfg,
+            session_db=_session_db,
+            model=model,
+            runtime=runtime,
+            enabled_toolsets=_resolve_cron_enabled_toolsets(job, _cfg),
+            disabled_toolsets=_resolve_cron_disabled_toolsets(_cfg),
+            max_iterations=max_iterations,
+            reasoning_config=reasoning_config,
+            prefill_messages=prefill_messages,
+            workdir=_job_workdir,
+            skip_memory=True,  # Cron system prompts would corrupt user representations
+            inactivity_limit=_cron_inactivity_limit,
+            context=_cron_context,
+        )
+        agent = _session.agent
+
+        if _session.timed_out:
             # Build diagnostic summary from the agent's activity tracker.
             _activity = {}
-            if hasattr(agent, "get_activity_summary"):
+            if agent and hasattr(agent, "get_activity_summary"):
                 try:
                     _activity = agent.get_activity_summary()
                 except Exception:
@@ -2985,13 +2912,18 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
                 _last_desc, _iter_n, _iter_max,
                 _cur_tool or "none",
             )
-            if hasattr(agent, "interrupt"):
-                agent.interrupt("Cron job timed out (inactivity)")
+            # spawn_seeded_session already called agent.interrupt();
+            # no need to repeat here.
             raise TimeoutError(
                 f"Cron job '{job_name}' idle for "
                 f"{int(_secs_ago)}s (limit {int(_cron_inactivity_limit)}s) "
                 f"— last activity: {_last_desc}"
             )
+
+        if _session.error:
+            raise RuntimeError(_session.error)
+
+        result = _session.result
 
         # Guard against non-dict returns from run_conversation under error conditions
         if not isinstance(result, dict):

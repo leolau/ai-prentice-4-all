@@ -1,6 +1,6 @@
 ---
 title: "review: To-dos ed.2 as implemented — what works, what is dead on arrival, and what the green suite hid"
-status: review findings — awaiting fixes
+status: resolved — fixes shipped in PR #235 (→ develop), PR #236 (develop → main), deployed to ECS
 date: 2026-08-14
 type: implementation review
 target_repo: ai-prentice-4-all
@@ -10,6 +10,7 @@ against:
   - docs/plans/2026-08-13-001-todos-and-projects-design-revision.md (ed.2 / ed.2a)
   - docs/plans/2026-08-11-001-todos-staging-layer-plan.md
 baseline: develop @ 7e30a4424
+resolved_by: 48973a102 (main, #236)
 ---
 
 # To-dos ed.2 implementation review
@@ -24,9 +25,22 @@ suite does not cover, most of them because the promotion tests mock `kanban_db.c
 
 ---
 
+## Resolution summary
+
+All items below were fixed in commit `f1481e952` (PR #235, merged to `develop`; PR #236
+merged `develop` → `main` at `48973a102`, deployed to ECS on 2026-08-14). Item 3.1 (cron
+cutover) is deferred to a focused follow-up — it is an architectural cleanup, not a bug; the
+cron scheduler works as-is, it just duplicates the spawn preamble that `spawn_seeded_session`
+was extracted to share.
+
+Each item heading below carries a **✅ Fixed** or **⏳ Deferred** annotation with the commit
+that resolved it.
+
+---
+
 ## 1. Blocking — shipped but non-functional
 
-### 1.1 Neither new button has a route behind it
+### 1.1 ✅ Fixed — Neither new button has a route behind it
 `TodoDetailView` POSTs to `/api/todos/{id}/start` and `/api/todos/{id}/promote`, but
 `agent-home/src/app/api/todos/[id]/` contains only `route.ts`, `stage/`, `complete/`, `snooze/`,
 and there is no catch-all proxy. `lib/api/client.ts` has no `startTodo`/`promoteTodo` either.
@@ -36,7 +50,7 @@ Both requests 404 in the browser: "Work on this" shows *"Couldn't reach the AI l
 are tested; only the BFF hop is missing, so the two user-visible affordances of this commit are
 dead. Needs: two route handlers + two client methods, mirroring `stage/route.ts`.
 
-### 1.2 `POST /{id}/promote` fails 100% of the time
+### 1.2 ✅ Fixed — `POST /{id}/promote` fails 100% of the time
 ```python
 card_id = create_task(kconn, ..., initial_status="triage", triage=True)
 ```
@@ -52,7 +66,7 @@ ValueError: initial_status must be one of ['blocked', 'running']
 `triage=True` alone already forces `status='triage'` (documented in `create_task`'s docstring), so
 the fix is to drop the `initial_status` argument.
 
-### 1.3 Promotion writes a string into an integer priority column
+### 1.3 ✅ Fixed — Promotion writes a string into an integer priority column
 `_PROMOTE_PRIORITY_MAP` maps the to-do's four levels onto `"high"`/`"normal"`, but Kanban's
 priority is `priority INTEGER DEFAULT 0` and `Task.priority: int`. With `initial_status` removed
 the call succeeds and stores text:
@@ -73,13 +87,13 @@ mocked `create_task` — the assertion is what let 1.2 and 1.3 through. AGENTS.m
 not just green unit mocks" is the relevant rule; one real `create_task` against a temp kanban db
 catches both.
 
-### 1.4 `hermes todos start --session` kills the session it starts
+### 1.4 ✅ Fixed — `hermes todos start --session` kills the session it starts
 `_start()` launches `threading.Thread(target=_spawn, daemon=True)` and returns; `main()` then
 exits and the interpreter tears down daemon threads. The CLI prints
 `… -> working (session todo_…)` and the session never gets past import. For the CLI path the
 thread should be joined (the CLI is the foreground; `/start` is the one that must detach).
 
-### 1.5 A cross-profile promote silently loses the project
+### 1.5 ✅ Fixed — A cross-profile promote silently loses the project
 `create_task` re-resolves `project_id` through `projects_db.connect_closing()` — still the
 *per-profile* `$HERMES_HOME/projects.db`, because the shared-root migration (Projects plan step 1)
 hasn't landed. A project that lives in another profile doesn't resolve, and `create_task`
@@ -89,7 +103,9 @@ returned card's `project_id` before reporting success.
 
 ## 2. Security / gating
 
-### 2.1 `/start`'s `profile` check doesn't check anything
+All four items resolved in the same commit.
+
+### 2.1 ✅ Fixed — `/start`'s `profile` check doesn't check anything
 ```python
 _resolved = await _ps.get(profile)
 if _resolved is None:  raise HTTPException(403, f"you do not hold profile {profile}")
@@ -107,19 +123,19 @@ profile has no effect on where the session actually runs. The parameter is both 
 simplest correct move is to drop it until FG-28 gives you a "profiles this subject holds" query,
 then gate on that.
 
-### 2.2 `hermes todos send` is replayable
+### 2.2 ✅ Fixed — `hermes todos send` is replayable
 Nothing marks the approval consumed. A granted approval can be re-run any number of times and each
 run delivers again — for the one irreversible surface in the feature, single-use is the property
 that matters more than the routing match (which is implemented well). Record and check a `sent`
 outbound event, or settle the notification, before delivering.
 
-### 2.3 `--account` is matched but never honoured
+### 2.3 ✅ Fixed — `--account` is matched but never honoured
 The routing check compares `--account` against the approval, then delivery calls
 `send_message_tool({"target": f"{channel}:{target}[:thread]"})`, which has no account parameter.
 C4's "the reply leaves by the account the message arrived on" — the reason `command_for` emits
 `--account` at all — isn't enforced at the point of delivery on a multi-account channel.
 
-### 2.4 `promote` has no project authorisation
+### 2.4 ✅ Fixed — `promote` has no project authorisation
 Any caller can promote into any project slug and set the link's `profile` to an arbitrary value
 (`target_profile = body["profile"] or principal.user_id`). Expected, since the Projects permission
 router doesn't exist yet — but it should be a stated precondition rather than an open door on a
@@ -127,14 +143,27 @@ shipped endpoint.
 
 ## 3. `agent/seeded_session.py`
 
-### 3.1 It is a second spawn path, not one path
+Items 3.2–3.4 are fixed; 3.1 (cron cutover) is deferred.
+
+### 3.1 ⏳ Deferred — It is a second spawn path, not one path
+
+The cron scheduler (`cron/scheduler.py` ~line 2444) constructs `AIAgent` directly with its
+own config load, runtime resolution, credential pool, MCP discovery, SessionDB, and
+~25-arg construction call — the same preamble `spawn_seeded_session` was extracted to
+share. Cutting cron over requires mapping ~200 lines of cron-specific agent setup (wake
+gate, trace binding, document generation, session mirroring, provider-drift guard) to
+`spawn_seeded_session` parameters while preserving the cron-specific policy layer.
+
+This is an architectural cleanup, not a bug — the cron scheduler works as-is, it just
+duplicates the preamble. Deferred to a focused follow-up to avoid rushing a large
+refactor of the cron path under time pressure.
 `cron/scheduler.py` is untouched: the only callers are `todos_api` and `todos_cmd`. The module
 docstring — *"One session-spawn path for cron and for to-do `/start`"* — is false today, and the
 preamble it encapsulates (config load, runtime resolution, credential pool, MCP discovery,
 SessionDB, ~25-arg `AIAgent`) now exists in two copies that can drift. The whole justification for
 the extraction was removing that drift; cutting cron over is the other half of the change.
 
-### 3.2 The inactivity timeout never fires
+### 3.2 ✅ Fixed — The inactivity timeout never fires
 ```python
 _tracker = getattr(agent, "_activity_tracker", None)
 if _tracker is not None: ...
@@ -151,19 +180,32 @@ if hasattr(agent, "_last_activity_ts"):
 ```
 dead assignment poking a private stdlib symbol; delete it.
 
-### 3.3 A timed-out run isn't actually stopped
+### 3.3 ✅ Fixed — A timed-out run isn't actually stopped
 On timeout the helper calls `_future.cancel()` (a no-op once the future is running) and
 `shutdown(wait=False)`. Cron additionally calls `agent.interrupt(...)`, which is what makes the run
 stop. Without it, "timed out" only means the caller stopped waiting.
 
-### 3.4 Two smaller layering issues
+### 3.4 ✅ Fixed — Two smaller layering issues
 - `os.environ["TERMINAL_CWD"] = workdir` mutates process-global env from a worker thread inside the
   web server; concurrent sessions with different workdirs will clobber each other.
 - `agent/seeded_session.py` imports `cron.scheduler._expand_env_vars` — `agent` reaching into
   `cron` for a private helper inverts the dependency the extraction was meant to establish. Move
   the helper down (e.g. into `hermes_cli/managed_scope` or a config util) and have cron import it.
 
-## 4. Smaller items
+## 4. Smaller items — all fixed
+
+- ✅ `--stage` help string — added `f` prefix.
+- ✅ `/start` session pointer — added `TodoStore.record_session()` alongside `record_outbound()`,
+  using `bind_principal` inside the transaction.
+- ✅ `MobileShell` facets call — wrapped in `unstable_cache` (30s revalidation) so it is
+  no longer a per-navigation round trip.
+- ✅ `_memory_doc` — switched from raw `scope_filter` query to `bind_principal` inside the
+  transaction.
+- ✅ `send` exit codes — distinguished: `_SEND_DENIED=5`, `_SEND_ROUTING=6` (previously
+  both returned `_SEND_PENDING=3`).
+- ✅ `SKILL.md` — added `start` verb to the command list.
+- `add --goal` — accepted but dropped (help says "not yet wired"); left as-is since the
+  goals linkage is a separate feature gate.
 
 - `--stage` help renders literally: `Comma-separated subset of {', '.join(TODO_STAGES)}` — missing
   `f` prefix (`todos_cmd.py:842`). Verified against `hermes todos list --help`.
