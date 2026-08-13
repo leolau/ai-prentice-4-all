@@ -21,6 +21,13 @@ depends_on:
 
 # To-dos ed.2 + Projects ed.2
 
+> **Projects note:** the Projects half of this document (Part 2, and the Projects
+> rows of Part 3/4) is carried forward into
+> `docs/design/projects-feature-design.md` (ed.3), the standalone
+> implementation spec that also designs cadence, autonomy, guidance, runs and the
+> learning loop. Implement Projects from that document. The To-dos half of this
+> document is unaffected and remains authoritative.
+
 Two plans are already written and one of them is built. This document does not
 restate either. It does three things they cannot do from where they sit:
 
