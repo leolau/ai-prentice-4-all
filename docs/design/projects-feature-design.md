@@ -2,7 +2,7 @@
 title: "design: Projects — the durable record of a piece of work that can be reviewed, repeated and learnt from"
 status: draft — spec for review, then implementation
 date: 2026-08-13
-revised: 2026-08-14 (ed.3.1 — rebuilt around the owner's 15-field list; see §1.1)
+revised: 2026-08-14 (ed.3.2 — owner's 15-field list; goal split from name, samples/references optional; see §1.1)
 type: feature design (implementation-ready, standalone)
 target_repo: ai-prentice-4-all
 audience: an implementing agent with no other context than this file and the tree
@@ -134,14 +134,14 @@ column, table or section that implements it.
 
 | # | field | M/O | where it lives | notes |
 |---|---|---|---|---|
-| 1 | **Goal** (short title) | **M** | `projects.name` (short, ≤80 chars) + `project_links(kind='goal')` to the FG-29 goal tree | The name *is* the goal, phrased as an outcome ("Land the Acme rollout"), not a category ("Acme"). A linked goal is optional; a goal *sentence* is not. §10 |
+| 1 | **Goal** (short title) | **M** | `projects.goal` (short, ≤160 chars) — **separate from `projects.name`** — + optional `project_links(kind='goal')` to the FG-29 goal tree | The outcome, as one sentence: *"Acme is live on prod with the team trained."* `name` is the short **label** ("Acme rollout") that fits a list row, a board title and a slug; `goal` is what success *is*, and it is what runs are told (§5.2). Owner decision, 2026-08-14: these are two fields. A linked goal *object* stays optional. §10 |
 | 2 | **Requirements / Description** (long) | **M** | `projects.description` (long markdown) | The brief. Compiled into every run prompt (§5.2), so it is written *for the agent as much as for a human*. Empty-string creates are refused. |
 | 3 | **Outputs** | **M** | `project_outputs` (§2.2) — one row per expected deliverable, each optionally satisfied by a link, card or file | The deliverables, declared before the work. At least one required. This is what makes progress and "done" mean something (§9.1). |
 | 4 | **Participants** | **M** | `project_members` (people) + `project_profiles` (profiles/instruments, one flagged `host`) | Two lists, one field, because on this box a participant may be a person *or* an agent profile. Minimum: the owner + one profile. §2.2, §11 |
 | 5 | **Progress** | **M** | **derived on read**, never stored — the ladder in §9.1 | Mandatory to *show*, impossible to *store* correctly: it is computed from outputs delivered, the primary goal's metric, and the card rollup, in that order. |
 | 6 | **Target audience** | O | `projects.target_audience` (short text) | Who the outputs are *for*. Compiled into the run prompt because it is the field that most changes tone, format and depth of an output — and the one a user most resents re-stating each run. |
 | 7 | **Score** | O | `project_runs.score_user` / `score_self` + `projects.score_rubric`; project score is **derived** (mean of the last 5 `score_user`) | How well it went, 1–5. `score_user` is the human's; `score_self` is the run's own claim in its retro. Divergence between them is the single most useful learning signal (§8). |
-| 8 | **Samples / References** | O | `project_links(kind='sample'\|'reference')` | A *sample* is "make it look like this" (an exemplar output); a *reference* is "this is the source material". Both are pointers (files, URLs, arrivals, past outputs). Samples are named in the run prompt; references are listed for the run to open on demand. |
+| 8 | **Samples / References** | **O** (owner-confirmed, 2026-08-14) | `project_links(kind='sample'\|'reference')` | A *sample* is "make it look like this" (an exemplar output); a *reference* is "this is the source material". Both are pointers (files, URLs, arrivals, past outputs). Samples are named in the run prompt; references are listed for the run to open on demand. |
 | 9 | **Plan** | O | `project_playbook` (§7) — `body` (prose plan) and/or `steps` (ordered card templates) | The plan and the playbook are the same object: prose for a one-off, steps when it should be executable or repeatable. A `repeatable` project's plan is mandatory *for it* (§3.1) — that is a cadence rule, not a field rule. |
 | 10 | **Contacts** | O | `project_contacts` (§2.2) | People the work involves who are **not** users of this box: a client, a reviewer, a mailing list. Distinct from participants because a contact has no principal, no permissions, and may be an outbound address. |
 | 11 | **Files** | O | `project_links(kind='file')` + `task_attachments` on the project's cards, presented as one grid (§13) | Links, never copies. A file that arrived on WhatsApp and a file a worker attached are the same thing to whoever is looking. |
@@ -153,7 +153,8 @@ column, table or section that implements it.
 Fields this design adds beyond the list, each because a behaviour needs it (none
 mandatory, all defaulted): `cadence`, `schedule`, `review_every`, `autonomy`,
 `max_in_progress`, `budget_usd_per_run`, `definition_of_done`, `due_at`,
-`status`, `visibility`, `host_profile`, `summary`, `health`. Cadence and autonomy
+`status`, `visibility`, `host_profile`, `summary`, `health`, and `name` (the short
+label that field [1] is *not*). Cadence and autonomy
 are the two that carry the rest of the owner's brief ("long lasting, repeatable
 or one-time only… fully automatic or… requires guidance"), so they are
 first-class (§3, §4).
@@ -369,6 +370,8 @@ CREATE TABLE IF NOT EXISTS project_run_cards (
 );
 
 -- ── additive columns on `projects` ───────────────────────────────────────
+ALTER TABLE projects ADD COLUMN goal                  TEXT;    -- [1] the outcome sentence, ≤160 (§2.2)
+                                  -- NOT the existing `name`, which is the short label
 ALTER TABLE projects ADD COLUMN visibility            TEXT NOT NULL DEFAULT 'shared';
 ALTER TABLE projects ADD COLUMN owner_user_id         TEXT;
 ALTER TABLE projects ADD COLUMN status                TEXT NOT NULL DEFAULT 'active';
@@ -403,8 +406,13 @@ is always safe.
 **Constraints the store enforces** (not just the router, so the CLI cannot
 bypass them):
 
-- `name` non-empty, ≤80 chars — it is field [1], a goal *sentence*, and a list
-  page cannot render a paragraph.
+- `goal` non-empty, ≤160 chars — field [1]. One sentence: a store that accepts a
+  paragraph here has re-invented `description`, and a page cannot render it.
+- `name` non-empty, ≤60 chars — the label, not field [1]. It is what a list row, a
+  board title, a to-do and a slug show, so it must be short and stable even when
+  the goal is re-worded. `POST /` **defaults it** to the goal's leading clause
+  (first `—`, `:` or `.`, else the first six words, truncated) so a caller never
+  has to invent two strings; it is separately editable afterwards.
 - `description` non-empty — field [2]. A project with no brief is a folder.
 - At least one `project_outputs` row before `status` may leave `planning`, and
   before a schedule may be set — field [3]. Declaring the deliverable after
@@ -613,7 +621,8 @@ The block is assembled in this fixed order, and every optional field is omitted
 **with its heading** when empty (never rendered as "None"):
 
 ```
-## Project: <name>                                   ← [1] the goal, as a sentence
+## Project: <name>                                   ← the short label
+Goal: <goal>                                        ← [1] the outcome, one sentence
 Run 14 · repeatable, every Monday 09:00 · autonomy: supervised
 Definition of done: <definition_of_done or "all required outputs accepted">
 
@@ -956,8 +965,9 @@ is **rung 2** of the progress ladder (§9.1): it is the headline when the projec
 has declared outputs but delivered none of them yet. A project with no linked
 goal shows the outputs count, or — failing that — a card ratio *explicitly
 labelled as one*; never a bare `0%`, and never a card ratio quietly standing in
-for an outcome. Field [1] (the goal *sentence*) is mandatory; a linked goal
-*object* is not, because most projects serve a goal nobody has modelled yet.
+for an outcome. Field [1] (`projects.goal`, the sentence) is mandatory; a linked
+goal *object* in the FG-29 tree is not, because most projects serve a goal nobody
+has modelled yet — and the sentence is what a run is told either way.
 
 ---
 
@@ -1013,9 +1023,9 @@ auth and is not reachable from `agent-home`).
 | endpoint | purpose |
 |---|---|
 | `GET /` | readable projects: filters `status`, `cadence`, `health`, `q`, `archived`; keyset `cursor` → `{items, next_cursor}`. Each item: goal progress, card rollup, member count, `cadence`, `next_run_at`, `health`, `due_at` |
-| `POST /` | create: **name [1], description [2], at least one output [3], host profile + creator as lead [4]** — refused without them (§2.2) — plus slug?, icon/colour, `cadence`, `target_audience`, `definition_of_done`, `board_slug` (bind or create), folders, first goal link |
+| `POST /` | create: **goal [1], description [2], at least one output [3], host profile + creator as lead [4]** — refused without them (§2.2) — plus `name` (defaults from `goal`, §2.2), slug?, icon/colour, `cadence`, `target_audience`, `definition_of_done`, `board_slug` (bind or create), folders, first goal link |
 | `GET /{slug}` | the whole record in one read: fields 1–15 — outputs + their deliveries, members + profiles, contacts (members only), active playbook, active directives, tools/skills (with the host-profile intersection applied so the UI shows what would *actually* run), derived progress + score + health, board rollup, links grouped by kind, last N `task_events`, last 5 runs |
-| `PATCH /{slug}` | name, description, status, cadence, `due_at`, `review_every`, `target_audience`, `score_rubric`, icon/colour, visibility, `board_slug`, `definition_of_done`, `max_in_progress`, `budget_usd_per_run` |
+| `PATCH /{slug}` | `goal`, `name` (independently — re-wording the goal never silently renames the project, and renaming never rewrites the goal), description, status, cadence, `due_at`, `review_every`, `target_audience`, `score_rubric`, icon/colour, visibility, `board_slug`, `definition_of_done`, `max_in_progress`, `budget_usd_per_run` |
 | `PATCH /{slug}/tools` | `toolsets` [13] + `skills` [14]; validates names and returns the resolved intersection, so an impossible request is refused loudly (§4.1) |
 | `GET /{slug}/outputs`, `POST /{slug}/outputs`, `PATCH /{slug}/outputs/{id}`, `DELETE /{slug}/outputs/{id}` | the deliverables [3]; delete refuses on the last required output |
 | `POST /{slug}/outputs/{id}/deliver` | record a delivery (run, card, or a hand-attached artefact) |
@@ -1064,7 +1074,8 @@ boundary bug that already bit `/todos`; the boundary test in
 ### `/projects` — the list
 
 ```
-▣  Land the Acme rollout    one-off · due Fri   2 of 3 outputs accepted   ok
+▣  Acme rollout             one-off · due Fri   2 of 3 outputs accepted   ok
+   Acme is live on prod with the team trained            ← [1], one line, dimmed
    4 members · 2 profiles · 3 running, 1 blocked · goal: Land Q3 revenue
    ───────────────────────────────────────────────────────────────────────
 ↻  Send the Monday digest   repeatable · next Mon 09:00 · run 14  supervised
@@ -1076,7 +1087,9 @@ boundary bug that already bit `/todos`; the boundary test in
 Chips: Active · Repeatable · Standing · Attention · Paused · Done · All. The
 cadence glyph (`▣` one-off, `↻` repeatable, `∞` standing) is the one piece of
 information that changes what a user expects from a row, so it is the first
-thing on it.
+thing on it. The bold line is `name`; the dimmed line under it is `goal` [1],
+truncated to one line — the reason the two are separate fields is visible here:
+one has to fit a row, the other has to say what success means.
 
 ### `/projects/[slug]` — the one place
 
@@ -1093,7 +1106,8 @@ the requirement, and a tab is a place to hide a panel.
 [Brief] [Outputs] [Progress] [Board] [Runs] [Plan] [Guidance] [People] [Files]
 [References] [Memories] [Tools] [Conversations]
 
-Brief   [1][2][6]  the goal sentence, the requirements/description as markdown
+Brief   [1][2][6]  the goal sentence — shown *under* the project's label in the
+              header, since they are two fields — then the requirements as markdown
               (collapsed past ~12 lines), the target audience as a chip. First
               panel, because it is the only one that says what this project is;
               editable in place by a lead.
@@ -1146,7 +1160,8 @@ than disappearing — a missing panel is indistinguishable from a feature that d
 not exist — except References and Memories, which hide entirely when empty
 because they are the two most often genuinely irrelevant.
 
-**Creation is a two-step form, not a wizard**: step 1 is [1], [2] and one [3]
+**Creation is a two-step form, not a wizard**: step 1 is [1] (the goal; the label is
+prefilled from it and editable inline, so the split costs the user nothing), [2] and one [3]
 output (everything mandatory except participants, which default to you + the
 current profile); step 2 is "how should this run" — cadence, autonomy, host
 profile — and is skippable into a `manual` `one_off`. Ten optional fields on a
@@ -1213,7 +1228,8 @@ hermes projects [--actor <user>] <verb> …          # --actor, the goal_tree_cm
 
 hermes projects list      [--status s] [--cadence c] [--health h] [--json]
 hermes projects show      <slug> [--json]
-hermes projects create    "<goal title>" --description <file.md|-> --output "<title>"
+hermes projects create    "<goal sentence>" [--name "<short label>"]
+                                 --description <file.md|-> --output "<title>"
                                  [--cadence …] [--goal <id>] [--host-profile p]
                                  [--audience "…"]          # 1,2,3,4,6 — first three required
 hermes projects link      <slug> --kind file|arrival|todo|goal|memory|session|url|
@@ -1320,13 +1336,15 @@ No new core model tool.
 Behaviour contracts, not change detectors (`AGENTS.md`).
 
 **Fields (the §1.1 contract)**
-- Create is refused without name [1], description [2], ≥1 output [3], or a host
+- Create is refused without goal [1], description [2], ≥1 output [3], or a host
   profile [4]; each rejection names the missing field.
+- `name` is derived from `goal` when omitted, is ≤60 chars, and is **not** rewritten
+  by a later `PATCH` of `goal`; patching `name` alone leaves `goal` untouched.
 - A project with fields 6–15 all empty renders every page and compiles a run
   prompt containing **no empty headings** and no literal "None" (the optionality
   regression that would be least visible).
-- `name` >80 chars and empty `description` are refused at the store, not only the
-  router (the CLI path).
+- `goal` >160 chars, `name` >60 chars and an empty `goal`/`description` are refused
+  at the store, not only the router (the CLI path).
 - Deleting the last required output is refused; deleting an optional one is not.
 - Progress uses rung 1 when a delivery exists even if cards are 0/19, and falls
   to rung 3 with the label "cards" when no goal and no delivery exist (§9.1).
@@ -1456,6 +1474,10 @@ worked for Incomings and To-dos.
 - **Adds** `host_profile` as a required field for a repeatable project, and the
   `project_members` / `project_playbook` / `project_directives` / `project_runs` /
   `project_run_cards` tables.
+- **ed.3.2 (this edition) resolves two field questions with the owner:**
+  Samples/References are **optional**, and **Goal is its own field** — a new
+  `projects.goal` (the mandatory outcome sentence) beside the existing
+  `projects.name` (the short label), which now defaults from it at create.
 - **ed.3.1 adds, from the owner's field list:** mandatory outputs
   (`project_outputs` + `project_output_deliveries`, and `no_output` as a run
   outcome), contacts (`project_contacts`), target audience, score
@@ -1501,17 +1523,20 @@ worked for Incomings and To-dos.
    notification system.
 10. **Projects depends on the board, to-dos and goals; none of them learn about
     Projects.** No `run_id` on `tasks`, no `project_id` on to-dos.
-11. **Outputs are mandatory and declared up front**, and a run is judged against
+11. **The goal and the name are two fields** (owner decision, 2026-08-14): `goal`
+    is the mandatory outcome sentence, `name` is the short label every list, board
+    and slug uses. `name` defaults from `goal` at create and never tracks it after.
+12. **Outputs are mandatory and declared up front**, and a run is judged against
     them (`delivered | partial | no_output`) rather than against its cards. Only
     a human accepts an output.
-12. **Progress is an ordered ladder — outputs, then goal metric, then cards —
+13. **Progress is an ordered ladder — outputs, then goal metric, then cards —
     labelled with the rung it used.** The cards ratio is the last resort, never
     silently the headline.
-13. **A project's tools and skills narrow, never widen, the host profile's**, and
+14. **A project's tools and skills narrow, never widen, the host profile's**, and
     are applied at spawn.
-14. **Score is 1–5, human-written, with the run's self-score kept beside it.** No
+15. **Score is 1–5, human-written, with the run's self-score kept beside it.** No
     automation reacts to a score in v1; the divergence is the signal.
-15. **Contacts are project-scoped rows, not an address book**, and their
+16. **Contacts are project-scoped rows, not an address book**, and their
     addresses are member-only PII.
 
 ---
@@ -1530,10 +1555,10 @@ of changing it later. None blocks implementation.
 | 5 | **One project → one board?** | **One board per project**, created with the project's slug; `board_slug` stays settable so an existing board can be adopted, and `tasks.project_id` keeps sharing technically fine. | Free — a default in the create path plus a sentence of copy. |
 | 6 | **Does a repeatable run keep its cards, or archive them?** After run 14 closes, run 15 creates fresh cards from the same steps; do run 14's cards stay on the board? | **Archive run N's `done` cards when run N+1 opens**, keeping them queryable through `project_run_cards` and the run page. A board that accumulates 52 copies of "Draft the summary" is unreadable. | Cheap; it is one sweep at run open. |
 | 7 | **Do you want a fourth autonomy level** — "agent may also *propose* new steps mid-run" (self-extending playbook)? | **No, not in v1.** A run that can add its own work is a different risk class and the retro path already gives you the same capability with a human in it. | Additive later; the retro loop is the seam it would use. |
-| 8 | **“Samples / References” carried no M/O marker** in your list — the only field that didn't. | **Optional, and split in two**: a *sample* ("match this") is named in the run prompt; a *reference* ("read this") is listed for the run to open. If you meant it as mandatory, say so — but a mandatory exemplar would block creating a project for work nobody has done before. | Free while it is one link kind pair; the M/O choice is one check. |
-| 9 | **Is “Goal” the project's name, or a separate field?** I mapped [1] onto `projects.name` (≤80 chars, phrased as an outcome) rather than adding `goal_title` beside it. | **Same field.** Two short titles on one object always diverge, and the list page can only show one. The linked FG-29 goal stays separate and optional. | A split later is a column plus a backfill — cheap but visible in the UI. |
+| 8 | ~~Samples / References carried no M/O marker.~~ **Answered 2026-08-14: optional.** | Kept split in two — a *sample* ("match this") is named in the run prompt, a *reference* ("read this") is listed for the run to open. Both optional, both pointers. **Closed.** | — |
+| 9 | ~~Is “Goal” the project's name, or a separate field?~~ **Answered 2026-08-14: separate.** | `projects.goal` (≤160, the outcome sentence, mandatory) is now distinct from `projects.name` (≤60, the label). The one risk this creates is the two drifting apart — handled by defaulting `name` from `goal` at create, editing them independently, and showing both in the list row and the page header so a stale label is visible rather than hidden. **Closed.** | — |
 | 10 | **Score: whose, and on what?** I made it per-*run*, 1–5, human-written, with the run's own `score_self` beside it, and the project score derived from the last five. | **Per run, 1–5, human-only, plus self-score.** Scoring a *project* directly gives you a number nobody updates; scoring runs gives you a trend for free. | Adding a project-level manual score later is additive. |
 | 11 | **Outputs on a repeatable project.** I made recurring outputs one row with many deliveries ("delivered 11 of the last 12 Mondays") rather than a fresh output row per run. | **One row, many deliveries.** 52 output rows a year is the same unreadability problem as 52 cards named "Draft the summary". | Cheap: it is a flag plus which table the delivery lands in. |
 | 12 | **Should `progress` ever be manual?** A percentage the owner types is honest about judgement and dishonest about staleness. | **No manual override in v1** — the ladder plus the rolling `summary` covers "where this really stands" in words, which is what a human actually reads. | Additive: a nullable `progress_override` column. |
 | 13 | **Memories [12]: curated pointers, or a project memory namespace?** I made them pointers into a profile's memory documents. | **Pointers.** A project-owned memory store would be a second memory tier competing with the shipped one and FG-29's promotion path. | A namespace later would be a real design; say now if you want it. |
-| 14 | **The field list is now §1.1 verbatim** (this replaces my earlier reconstruction). | **Confirm §1.1 before step 1 lands** — the store PR is the cheapest place to add a column and the most expensive place to have missed a concept. | A column is cheap; a *concept* added after the API and the panels exist is not. |
+| 14 | **§1.1 is now the owner's list verbatim, with fields 8 and 9 settled (ed.3.2).** Nothing in it is my reconstruction any more. | **Treat §1.1 as frozen for step 1** — the store PR is the cheapest place to add a column and the most expensive place to have missed a concept. | A column is cheap; a *concept* added after the API and the panels exist is not. |
