@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import Link from "next/link";
 
 import { BusyRegion } from "@/components/ui/BusyRegion";
 import type {
@@ -339,6 +340,14 @@ export function FileDetail({
             >
               See what it remembers
             </a>
+          ) : null}
+          {file.inbound_item_id ? (
+            <Link
+              href={`/todos?source_ref=${encodeURIComponent(file.inbound_item_id)}&stage=staged,open,working,done,dismissed`}
+              className="rounded-lg border border-[var(--color-border)] px-3 py-1.5"
+            >
+              To-dos from this
+            </Link>
           ) : null}
         </div>
       </div>

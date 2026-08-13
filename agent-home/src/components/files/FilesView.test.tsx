@@ -154,4 +154,21 @@ describe("formatting helpers", () => {
   it("falls back to the sender id when no display name arrived", () => {
     expect(provenanceLine(asset({ sender_name: null }))).toContain("tg-1");
   });
+
+  // /files back-link (Part 1.3): the link appears only when the asset's
+  // arrival raised a to-do — i.e. when inbound_item_id is set.
+  it("renders 'To-dos from this' link when inbound_item_id is set", () => {
+    const html = renderToStaticMarkup(
+      <FileDetail file={asset({ inbound_item_id: "arr-123" })} onClose={() => {}} />,
+    );
+    expect(html).toContain("To-dos from this");
+    expect(html).toContain("source_ref=arr-123");
+  });
+
+  it("omits the back-link when inbound_item_id is absent", () => {
+    const html = renderToStaticMarkup(
+      <FileDetail file={asset({ inbound_item_id: null })} onClose={() => {}} />,
+    );
+    expect(html).not.toContain("To-dos from this");
+  });
 });

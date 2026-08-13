@@ -61,6 +61,17 @@ GOALS_TABLE = "goals"
 GOAL_STATUSES: Tuple[str, ...] = ("active", "paused", "done", "cleared")
 _ACTIVE_STATUS = "active"
 
+#: FG-29 goal **lifetime** tiers, longest-lived first. Lifetime is a
+#: commitment about mutability, not a label: see
+#: :mod:`hermes_cli.goal_tree` for the placement rules it decides.
+GOAL_TIERS: Tuple[str, ...] = ("entity", "profile", "participant", "operational")
+
+#: The default tier. Every goal that exists today keeps its current
+#: behaviour — tool-appended, never in a prompt.
+DEFAULT_GOAL_TIER = "operational"
+
+_TIERS_SQL = ", ".join(f"'{tier}'" for tier in GOAL_TIERS)
+
 _SCHEMA_SQL = f"""
 CREATE TABLE IF NOT EXISTS {GOALS_TABLE} (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -78,6 +89,49 @@ CREATE INDEX IF NOT EXISTS {GOALS_TABLE}_visibility_idx
     ON {GOALS_TABLE} (visibility);
 CREATE INDEX IF NOT EXISTS {GOALS_TABLE}_status_idx
     ON {GOALS_TABLE} (status);
+
+-- FG-29: the goal tree, the lifetime tier, the designated primary metric and
+-- the provenance of a published parent copy. Added as ALTERs rather than in
+-- the CREATE above so a deployment that already has the FG-04 table gets the
+-- same shape as a fresh install (and existing rows land on 'operational',
+-- which keeps their behaviour byte-identical).
+ALTER TABLE {GOALS_TABLE}
+    ADD COLUMN IF NOT EXISTS parent_goal_id UUID NULL
+        REFERENCES {GOALS_TABLE}(id) ON DELETE SET NULL,
+    ADD COLUMN IF NOT EXISTS tier TEXT NOT NULL
+        DEFAULT '{DEFAULT_GOAL_TIER}',
+    ADD COLUMN IF NOT EXISTS primary_metric TEXT NULL,
+    ADD COLUMN IF NOT EXISTS source_rev INTEGER NOT NULL DEFAULT 1,
+    ADD COLUMN IF NOT EXISTS published_from_profile TEXT NULL,
+    ADD COLUMN IF NOT EXISTS published_from_goal_id TEXT NULL,
+    ADD COLUMN IF NOT EXISTS published_rev INTEGER NULL,
+    ADD COLUMN IF NOT EXISTS published_at TIMESTAMPTZ NULL,
+    ADD COLUMN IF NOT EXISTS stale BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE {GOALS_TABLE} DROP CONSTRAINT IF EXISTS {GOALS_TABLE}_tier_check;
+ALTER TABLE {GOALS_TABLE}
+    ADD CONSTRAINT {GOALS_TABLE}_tier_check CHECK (tier IN ({_TIERS_SQL}));
+-- A goal may not be its own parent. Deeper cycles need the whole chain and
+-- are validated on write (hermes_cli.goal_tree.set_parent).
+ALTER TABLE {GOALS_TABLE}
+    DROP CONSTRAINT IF EXISTS {GOALS_TABLE}_parent_not_self;
+ALTER TABLE {GOALS_TABLE}
+    ADD CONSTRAINT {GOALS_TABLE}_parent_not_self
+    CHECK (parent_goal_id IS NULL OR parent_goal_id <> id);
+CREATE INDEX IF NOT EXISTS {GOALS_TABLE}_parent_idx
+    ON {GOALS_TABLE} (parent_goal_id);
+CREATE INDEX IF NOT EXISTS {GOALS_TABLE}_tier_idx
+    ON {GOALS_TABLE} (tier, status);
+-- Exactly one *locally authored* active entity goal: an entity has one root,
+-- and two would make "what is this for?" unanswerable. Scoped to local rows
+-- because a published copy is not a second root — it is the same root, seen
+-- from another profile — and one copy per source goal is enforced separately.
+CREATE UNIQUE INDEX IF NOT EXISTS {GOALS_TABLE}_single_active_entity
+    ON {GOALS_TABLE} (tier)
+    WHERE tier = 'entity' AND status = 'active'
+      AND published_from_profile IS NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS {GOALS_TABLE}_one_copy_per_source
+    ON {GOALS_TABLE} (published_from_goal_id)
+    WHERE published_from_goal_id IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS goal_metrics (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -104,6 +158,26 @@ CREATE TABLE IF NOT EXISTS goal_progress (
 );
 CREATE INDEX IF NOT EXISTS goal_progress_goal_idx ON goal_progress (goal_id);
 
+-- FG-29: who published which revision of the entity goal into which profile.
+-- Append-only and separate from goal_progress on purpose: a progress note is
+-- narrative about the goal, and "the owner copied rev 4 of this into the
+-- school profile at 09:12" is an authorisation record. Answering "who put this
+-- in my prompt?" must not depend on nobody having pruned the notes.
+CREATE TABLE IF NOT EXISTS goal_publish_audit (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    source_goal_id UUID NOT NULL,
+    source_profile TEXT NOT NULL,
+    target_profile TEXT NOT NULL,
+    target_goal_id TEXT NOT NULL DEFAULT '',
+    revision INTEGER NOT NULL,
+    action TEXT NOT NULL,
+    actor_user_id TEXT NOT NULL,
+    detail TEXT NOT NULL DEFAULT '',
+    at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS goal_publish_audit_source_idx
+    ON goal_publish_audit (source_goal_id, at);
+
 CREATE TABLE IF NOT EXISTS goal_asks (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     goal_id UUID NOT NULL REFERENCES {GOALS_TABLE}(id) ON DELETE CASCADE,
@@ -120,9 +194,25 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+#: Every ``goals`` column the store reads, in one place: the registry selects
+#: the same shape from six statements and FG-29 added nine columns to it.
+GOAL_COLUMNS = (
+    "id, owner_user_id, visibility, title, description, priority, status, "
+    "created_at, updated_at, deadline, parent_goal_id, tier, primary_metric, "
+    "source_rev, published_from_profile, published_from_goal_id, "
+    "published_rev, published_at, stale"
+)
+
+
 @dataclass(frozen=True)
 class GoalRecord:
-    """One prioritised registry goal (metrics fetched separately)."""
+    """One prioritised registry goal (metrics fetched separately).
+
+    The FG-29 fields carry defaults so a caller that only cares about the
+    FG-04 shape (the monitor, the metric renderer) constructs one unchanged:
+    ``tier`` defaults to ``operational``, which is the tier that behaves
+    exactly as goals did before the tree existed.
+    """
 
     id: str
     owner_user_id: str
@@ -134,6 +224,20 @@ class GoalRecord:
     created_at: Optional[datetime]
     updated_at: Optional[datetime]
     deadline: Optional[datetime]
+    parent_goal_id: Optional[str] = None
+    tier: str = DEFAULT_GOAL_TIER
+    primary_metric: Optional[str] = None
+    source_rev: int = 1
+    published_from_profile: Optional[str] = None
+    published_from_goal_id: Optional[str] = None
+    published_rev: Optional[int] = None
+    published_at: Optional[datetime] = None
+    stale: bool = False
+
+    @property
+    def is_published_copy(self) -> bool:
+        """Whether this row is a copy of another profile's goal (read-only)."""
+        return self.published_from_profile is not None
 
     def as_dict(self) -> dict:
         return {
@@ -145,6 +249,16 @@ class GoalRecord:
             "priority": self.priority,
             "status": self.status,
             "deadline": self.deadline.isoformat() if self.deadline else None,
+            "parent_goal_id": self.parent_goal_id,
+            "tier": self.tier,
+            "primary_metric": self.primary_metric,
+            "source_rev": self.source_rev,
+            "published_from_profile": self.published_from_profile,
+            "published_rev": self.published_rev,
+            "published_at": (
+                self.published_at.isoformat() if self.published_at else None
+            ),
+            "stale": self.stale,
         }
 
 
@@ -155,6 +269,21 @@ class MeasurementGap:
     goal: GoalRecord
     reason: str  # "no_metric" | "unmeasured_target" | "stale"
     metric_name: Optional[str] = None
+
+
+def normalize_tier(tier: Optional[str]) -> str:
+    """Validate a lifetime tier, defaulting an empty one to ``operational``.
+
+    Unlike priority (where an unknown band degrades harmlessly), an unknown
+    tier is refused: the tier decides whether a goal may enter the system
+    prompt, so silently coercing it would be coercing a security property.
+    """
+    text = (tier or "").strip().lower() or DEFAULT_GOAL_TIER
+    if text not in GOAL_TIERS:
+        raise ValueError(
+            f"Unknown goal tier: {tier!r} (expected one of {', '.join(GOAL_TIERS)})"
+        )
+    return text
 
 
 def _resolve_visibility(principal: Principal, visibility: Optional[str]) -> str:
@@ -272,26 +401,44 @@ class GoalRegistryStore:
         priority: str = DEFAULT_GOAL_PRIORITY,
         visibility: Optional[str] = None,
         deadline: Optional[datetime] = None,
+        tier: str = DEFAULT_GOAL_TIER,
+        parent_goal_id: Optional[str] = None,
         connection: Optional["asyncpg.Connection"] = None,
     ) -> GoalRecord:
-        """Create a goal owned by ``principal`` and return it."""
+        """Create a goal owned by ``principal`` and return it.
+
+        ``tier`` defaults to ``operational`` (FG-29): a goal created by any
+        pre-existing caller keeps its old behaviour and stays out of every
+        prompt. A declared ``parent_goal_id`` is validated against the tier
+        ladder before the insert, so a chain that could not resolve upward is
+        refused at write time rather than discovered at prompt-build time.
+        """
         clean_title = (title or "").strip()
         if not clean_title:
             raise ValueError("Cannot create a goal with an empty title")
         resolved_visibility = _resolve_visibility(principal, visibility)
         resolved_priority = normalize_priority(priority)
+        resolved_tier = normalize_tier(tier)
 
         own = connection is None
         conn = connection or await self._connect()
         try:
+            if parent_goal_id is not None:
+                from hermes_cli.goal_tree import validate_parent
+
+                await validate_parent(
+                    conn,
+                    child_id=None,
+                    child_tier=resolved_tier,
+                    parent_goal_id=parent_goal_id,
+                )
             row = await conn.fetchrow(
                 f"""
                 INSERT INTO {GOALS_TABLE}
                     (owner_user_id, visibility, title, description, priority,
-                     deadline)
-                VALUES ($1, $2, $3, $4, $5, $6)
-                RETURNING id, owner_user_id, visibility, title, description,
-                          priority, status, created_at, updated_at, deadline
+                     deadline, tier, parent_goal_id)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                RETURNING {GOAL_COLUMNS}
                 """,
                 principal.user_id,
                 resolved_visibility,
@@ -299,6 +446,8 @@ class GoalRegistryStore:
                 description or "",
                 resolved_priority,
                 deadline,
+                resolved_tier,
+                parent_goal_id,
             )
             return _row_to_goal(row)
         finally:
@@ -319,8 +468,7 @@ class GoalRegistryStore:
         try:
             row = await conn.fetchrow(
                 f"""
-                SELECT id, owner_user_id, visibility, title, description,
-                       priority, status, created_at, updated_at, deadline
+                SELECT {GOAL_COLUMNS}
                 FROM {GOALS_TABLE}
                 WHERE id = $1 AND {predicate.sql}
                 """,
@@ -361,8 +509,7 @@ class GoalRegistryStore:
         try:
             rows = await conn.fetch(
                 f"""
-                SELECT id, owner_user_id, visibility, title, description,
-                       priority, status, created_at, updated_at, deadline
+                SELECT {GOAL_COLUMNS}
                 FROM {GOALS_TABLE}
                 WHERE {where}
                 """,
@@ -415,19 +562,31 @@ class GoalRegistryStore:
         own = connection is None
         conn = connection or await self._connect()
         try:
+            # A published parent copy is read-only in the profile that received
+            # it (FG-29 §3): a profile may read its parent goal and may not
+            # write it. ``published_from_profile IS NULL`` in the predicate is
+            # what makes that a database-level refusal rather than a UI rule,
+            # so every front-end inherits it.
             row = await conn.fetchrow(
                 f"""
                 UPDATE {GOALS_TABLE}
                 SET {column} = $2, updated_at = NOW()
-                WHERE id = $1 AND {predicate.sql}
-                RETURNING id, owner_user_id, visibility, title, description,
-                          priority, status, created_at, updated_at, deadline
+                WHERE id = $1 AND published_from_profile IS NULL
+                      AND {predicate.sql}
+                RETURNING {GOAL_COLUMNS}
                 """,
                 goal_id,
                 value,
                 *predicate.params,
             )
             if row is None:
+                existing = await self.get_goal(principal, goal_id, connection=conn)
+                if existing is not None and existing.is_published_copy:
+                    raise PermissionError(
+                        f"Goal {goal_id} is a copy published from profile "
+                        f"{existing.published_from_profile!r} and is read-only "
+                        f"here; edit it in its origin profile and re-publish"
+                    )
                 raise PermissionError(
                     f"Goal {goal_id} not found or not writable by "
                     f"{principal.user_id}"
@@ -819,6 +978,7 @@ def _is_stale(
 
 
 def _row_to_goal(row: "asyncpg.Record") -> GoalRecord:
+    parent = row["parent_goal_id"]
     return GoalRecord(
         id=str(row["id"]),
         owner_user_id=str(row["owner_user_id"]),
@@ -830,6 +990,31 @@ def _row_to_goal(row: "asyncpg.Record") -> GoalRecord:
         created_at=row["created_at"],
         updated_at=row["updated_at"],
         deadline=row["deadline"],
+        parent_goal_id=str(parent) if parent is not None else None,
+        tier=str(row["tier"]),
+        primary_metric=(
+            str(row["primary_metric"])
+            if row["primary_metric"] is not None
+            else None
+        ),
+        source_rev=int(row["source_rev"] or 1),
+        published_from_profile=(
+            str(row["published_from_profile"])
+            if row["published_from_profile"] is not None
+            else None
+        ),
+        published_from_goal_id=(
+            str(row["published_from_goal_id"])
+            if row["published_from_goal_id"] is not None
+            else None
+        ),
+        published_rev=(
+            int(row["published_rev"])
+            if row["published_rev"] is not None
+            else None
+        ),
+        published_at=row["published_at"],
+        stale=bool(row["stale"]),
     )
 
 
@@ -847,12 +1032,16 @@ def _row_to_metric(row: "asyncpg.Record") -> GoalMetric:
 
 
 __all__ = [
+    "DEFAULT_GOAL_TIER",
     "GOALS_TABLE",
+    "GOAL_COLUMNS",
     "GOAL_STATUSES",
+    "GOAL_TIERS",
     "GoalRecord",
     "GoalRegistryStore",
     "MeasurementGap",
     "SHARED",
+    "normalize_tier",
     "order_goals",
     "parse_cadence",
     "schedule_turn_budget",

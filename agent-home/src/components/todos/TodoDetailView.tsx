@@ -47,6 +47,7 @@ export function TodoDetailView({ todo }: { todo: TodoDetail }) {
   const [current, setCurrent] = useState<TodoDetail>(todo);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [sessionLink, setSessionLink] = useState<string | null>(null);
 
   async function post(path: string, body: unknown) {
     setBusy(true);
@@ -128,6 +129,109 @@ export function TodoDetailView({ todo }: { todo: TodoDetail }) {
             ))}
         </div>
 
+        {/* “Work on this” moves to working AND spawns a seeded session.
+            The stage change happens first; the spawn is best-effort and
+            reports itself.  Sits beside the stage buttons rather than
+            replacing “Work on it”, so the user can move the stage without
+            spawning if they prefer. */}
+        {current.stage === "staged" || current.stage === "open" ? (
+          <div className="mt-2">
+            <button
+              type="button"
+              disabled={busy}
+              onClick={async () => {
+                setBusy(true);
+                setError(null);
+                setSessionLink(null);
+                try {
+                  const res = await fetch(
+                    `/api/todos/${encodeURIComponent(current.id)}/start`,
+                    {
+                      method: "POST",
+                      headers: { "content-type": "application/json" },
+                      body: JSON.stringify({ session: true }),
+                    },
+                  );
+                  const payload = (await res.json()) as Todo & {
+                    session_id?: string | null;
+                    spawned?: boolean;
+                    detail?: string;
+                  };
+                  if (!res.ok) {
+                    setError(payload.detail ?? "That didn’t stick — try again.");
+                  } else {
+                    setCurrent({ ...current, ...payload });
+                    if (payload.session_id) {
+                      setSessionLink(payload.session_id);
+                    }
+                  }
+                } catch {
+                  setError("Couldn’t reach the AI layer.");
+                } finally {
+                  setBusy(false);
+                }
+              }}
+              className="rounded-lg border border-[var(--color-accent)] bg-[var(--color-accent)] px-3 py-1.5 text-[11px] font-medium text-[var(--color-surface)] transition hover:opacity-90 disabled:opacity-50"
+            >
+              {busy ? "Starting…" : "Work on this"}
+            </button>
+            {sessionLink ? (
+              <Link
+                href={`/chat?session=${encodeURIComponent(sessionLink)}`}
+                className="ml-2 inline-block text-[11px] text-[var(--color-accent)]"
+              >
+                Session started →
+              </Link>
+            ) : null}
+          </div>
+        ) : null}
+
+        {/* Promote to a project card (Part 2). Only a human promotes —
+            the card lands in `triage`, not `ready`, and the to-do moves to
+            `working`, not `done`. The link-vs-promote difference: link keeps
+            it a to-do; promote makes it a card. */}
+        {current.stage === "staged" || current.stage === "open" ? (
+          <div className="mt-2">
+            <button
+              type="button"
+              disabled={busy}
+              onClick={async () => {
+                const project = window.prompt("Project slug:");
+                if (!project) return;
+                setBusy(true);
+                setError(null);
+                try {
+                  const res = await fetch(
+                    `/api/todos/${encodeURIComponent(current.id)}/promote`,
+                    {
+                      method: "POST",
+                      headers: { "content-type": "application/json" },
+                      body: JSON.stringify({ project }),
+                    },
+                  );
+                  const payload = (await res.json()) as Todo & {
+                    card_id?: string;
+                    project_id?: string;
+                    detail?: string;
+                  };
+                  if (!res.ok) {
+                    setError(payload.detail ?? "Promotion failed — try again.");
+                  } else {
+                    setCurrent({ ...current, ...payload });
+                  }
+                } catch {
+                  setError("Couldn’t reach the AI layer.");
+                } finally {
+                  setBusy(false);
+                }
+              }}
+              className="rounded-lg border border-[var(--color-border)] px-3 py-1.5 text-[11px] text-[var(--color-muted)] transition hover:border-[var(--color-accent)] hover:text-[var(--color-accent)] disabled:opacity-50"
+            >
+              Promote to a project card
+            </button>
+          </div>
+        ) : null}
+
         {current.stage !== "done" && current.stage !== "dismissed" ? (
           <div className="mt-2 flex">
             <TodoCompleteForm
@@ -195,6 +299,18 @@ export function TodoDetailView({ todo }: { todo: TodoDetail }) {
               {source.body.slice(0, 400)}
               {source.body.length > 400 ? "…" : ""}
             </blockquote>
+          ) : null}
+          {/* The memory document the arrival produced, when it has one.
+              Absent when the arrival was never remembered — a to-do whose
+              provenance is thin renders thin. */}
+          {current.memory ? (
+            <Link
+              href={`/memory?document=${encodeURIComponent(current.memory.id)}`}
+              className="mt-2 inline-block text-xs text-[var(--color-muted)]"
+            >
+              ◇ remembered as{" "}
+              <em>{current.memory.title || "untitled"}</em>
+            </Link>
           ) : null}
           <Link
             href={`/todos?source_ref=${encodeURIComponent(source.id)}&stage=staged,open,working,done,dismissed`}

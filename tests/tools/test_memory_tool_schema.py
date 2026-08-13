@@ -19,7 +19,7 @@ backends reject.
 
 import json
 
-from tools.memory_tool import MEMORY_SCHEMA
+from tools.memory_tool import MEMORY_SCHEMA, TARGETS
 
 
 _FORBIDDEN_TOP_LEVEL_KEYS = ("allOf", "anyOf", "oneOf", "enum", "not")
@@ -44,7 +44,9 @@ def test_memory_schema_is_well_formed():
     assert params["required"] == ["target"]
     # Nested ``enum`` on property values is fine — only top-level is forbidden.
     assert params["properties"]["action"]["enum"] == ["add", "replace", "remove"]
-    assert params["properties"]["target"]["enum"] == ["memory", "user"]
+    # The advertised targets are exactly the ones the runtime accepts (FG-24
+    # added 'shared'); asserting the relation instead of a frozen list.
+    assert params["properties"]["target"]["enum"] == list(TARGETS)
     # Batch shape is exposed and its items reuse the same actions.
     assert params["properties"]["operations"]["type"] == "array"
     assert params["properties"]["operations"]["items"]["properties"]["action"]["enum"] == ["add", "replace", "remove"]

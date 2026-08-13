@@ -22,16 +22,24 @@ import type {
   ChatMessagesResponse,
   ChatSendResponse,
   CoreManifestResponse,
+  DirectoryResponse,
+  EntityGoalResponse,
   FileAsset,
   FileAssetsResponse,
   FileLinkResponse,
   FileSurfacesResponse,
   GtsGraphResponse,
+  IdentityActivityResponse,
   IncomingDetail,
   IncomingItem,
   IncomingsFacets,
   IncomingsResponse,
+  MemberChannelsResponse,
   MemberCreateResponse,
+  MemberDeleteResponse,
+  MemberDisplayResponse,
+  MemberImportResponse,
+  MemberInvitationResponse,
   MemberOkResponse,
   MemberRoleResponse,
   MembersResponse,
@@ -584,24 +592,169 @@ export class HermesApiClient {
     );
   }
 
-  // --- Member management (PR-4 e-frontend, owner/admin only) --------------
+  // --- User management (FG-26, owner/admin unless noted) -------------------
   // The Python layer is the authority: it independently enforces the
   // owner/admin guard and drives GoTrue + the principal store. These methods
-  // just forward; the service-role key never leaves the box.
+  // just forward; the service-role key never leaves the box, and **no password
+  // crosses this seam in either direction** — a new account is created banned
+  // with a server-side random password and activated from an invitation.
 
-  /** List enrolled members joined with GoTrue account state (owner/admin). */
-  async members(): Promise<MembersResponse> {
-    return this.request("/api/comms/members");
+  /** One page of this profile's roster, searched/filtered in Postgres. */
+  async members(
+    opts: {
+      limit?: number;
+      offset?: number;
+      q?: string;
+      role?: Role;
+      /** `true` = enrolled here, `false` = suspended here, omitted = both. */
+      active?: boolean;
+    } = {},
+  ): Promise<MembersResponse> {
+    const query = new URLSearchParams();
+    if (opts.limit !== undefined) query.set("limit", String(opts.limit));
+    if (opts.offset !== undefined) query.set("offset", String(opts.offset));
+    if (opts.q) query.set("q", opts.q);
+    if (opts.role) query.set("role", opts.role);
+    if (opts.active !== undefined) query.set("active", String(opts.active));
+    const suffix = query.toString();
+    return this.request(`/api/comms/members${suffix ? `?${suffix}` : ""}`);
   }
 
-  /** Create a Supabase account + enrol it as a principal (owner/admin). */
+  /**
+   * The colleague directory — readable by **every enrolled principal**, not
+   * just admins. Built from this profile's principals, never from the box-wide
+   * account table.
+   */
+  async directory(
+    opts: { limit?: number; offset?: number; q?: string } = {},
+  ): Promise<DirectoryResponse> {
+    const query = new URLSearchParams();
+    if (opts.limit !== undefined) query.set("limit", String(opts.limit));
+    if (opts.offset !== undefined) query.set("offset", String(opts.offset));
+    if (opts.q) query.set("q", opts.q);
+    const suffix = query.toString();
+    return this.request(`/api/comms/directory${suffix ? `?${suffix}` : ""}`);
+  }
+
+  /**
+   * Enrol somebody into `profile` (owner/admin). `profile` is **required** and
+   * travels to the server, which refuses a foreign profile with 409 before any
+   * account is created (cross-profile assignment is FG-28's).
+   */
   async createMember(input: {
     email: string;
-    password: string;
+    profile: string;
     display?: string;
     role?: Role;
   }): Promise<MemberCreateResponse> {
     return this.request("/api/comms/members", { method: "POST", json: input });
+  }
+
+  /** Preview (or apply) a `email,display,role` CSV bulk enrolment. */
+  async importMembers(input: {
+    csv: string;
+    profile: string;
+    dry_run: boolean;
+  }): Promise<MemberImportResponse> {
+    return this.request("/api/comms/members/import", {
+      method: "POST",
+      json: input,
+    });
+  }
+
+  /** Mint (or regenerate) a one-time activation link — shown exactly once. */
+  async issueMemberInvitation(
+    userId: string,
+  ): Promise<MemberInvitationResponse> {
+    return this.request(
+      `/api/comms/members/${encodeURIComponent(userId)}/invitation`,
+      { method: "POST" },
+    );
+  }
+
+  /** Revoke every open invitation for a user (a mis-sent link, killed). */
+  async revokeMemberInvitation(
+    userId: string,
+  ): Promise<{ ok: boolean; revoked: number }> {
+    return this.request(
+      `/api/comms/members/${encodeURIComponent(userId)}/invitation`,
+      { method: "DELETE" },
+    );
+  }
+
+  /** Rename a member within this profile (owner/admin). */
+  async setMemberDisplay(
+    userId: string,
+    display: string,
+  ): Promise<MemberDisplayResponse> {
+    return this.request(
+      `/api/comms/members/${encodeURIComponent(userId)}/display`,
+      { method: "PUT", json: { display } },
+    );
+  }
+
+  /** Map an inbound channel handle onto an enrolled member (owner/admin). */
+  async linkMemberChannel(
+    userId: string,
+    input: { platform: string; channel_user_id: string },
+  ): Promise<MemberChannelsResponse> {
+    return this.request(
+      `/api/comms/members/${encodeURIComponent(userId)}/channels`,
+      { method: "POST", json: input },
+    );
+  }
+
+  /** Recent identity-administration events from the C5 log (owner/admin). */
+  async memberActivity(limit = 50): Promise<IdentityActivityResponse> {
+    return this.request(`/api/comms/members/activity?limit=${limit}`);
+  }
+
+  /**
+   * Remove an enrolment (**owner only**), stating what happens to the rows it
+   * owns: `transfer` needs `transferTo`, `purge` deletes the private ones.
+   * Nothing cascades to memories, files or GTS items, hence the requirement.
+   */
+  async deleteMember(
+    userId: string,
+    opts: { strategy: "transfer" | "purge"; transferTo?: string },
+  ): Promise<MemberDeleteResponse> {
+    const query = new URLSearchParams({ strategy: opts.strategy });
+    if (opts.transferTo) query.set("transfer_to", opts.transferTo);
+    return this.request(
+      `/api/comms/members/${encodeURIComponent(userId)}?${query.toString()}`,
+      { method: "DELETE" },
+    );
+  }
+
+  /**
+   * Redeem an invitation: set the password and lift the ban. **Unauthenticated**
+   * upstream (the invitee has no session yet), and every failure mode answers
+   * identically so this cannot be used to discover whether a token was real.
+   */
+  async redeemInvitation(
+    input: {
+      token: string;
+      password: string;
+    },
+    clientIp = "",
+  ): Promise<{ ok: boolean }> {
+    return this.request("/api/auth/invitations/redeem", {
+      method: "POST",
+      json: input,
+      headers: forwardedFor(clientIp),
+    });
+  }
+
+  /** Ask an administrator for a reset link. Always answers `{ok: true}`. */
+  async requestInvitation(
+    email: string,
+    clientIp = "",
+  ): Promise<{ ok: boolean }> {
+    return this.request("/api/auth/invitations/request", {
+      method: "POST",
+      json: { email },
+      headers: forwardedFor(clientIp),
+    });
   }
 
   /** Change a member's role (never the owner; never to owner). */
@@ -612,18 +765,7 @@ export class HermesApiClient {
     );
   }
 
-  /** Reset a member's temporary password (owner/admin). */
-  async setMemberPassword(
-    userId: string,
-    password: string,
-  ): Promise<MemberOkResponse> {
-    return this.request(
-      `/api/comms/members/${encodeURIComponent(userId)}/password`,
-      { method: "POST", json: { password } },
-    );
-  }
-
-  /** Deactivate (ban) a member's login without deleting the account. */
+  /** Suspend a member's enrolment in this profile (the account survives). */
   async deactivateMember(userId: string): Promise<MemberOkResponse> {
     return this.request(
       `/api/comms/members/${encodeURIComponent(userId)}/deactivate`,
@@ -631,7 +773,7 @@ export class HermesApiClient {
     );
   }
 
-  /** Reactivate (unban) a previously-deactivated member's login. */
+  /** Restore a suspended enrolment in this profile. */
   async activateMember(userId: string): Promise<MemberOkResponse> {
     return this.request(
       `/api/comms/members/${encodeURIComponent(userId)}/activate`,
@@ -923,6 +1065,39 @@ export class HermesApiClient {
       json: { until },
     });
   }
+
+  /**
+   * The entity goal — what every sub-goal ladders into.
+   *
+   * Creates the default first goal for an owner who has none, so settings is
+   * never an empty box with no explanation of what belongs in it.
+   */
+  async entityGoal(): Promise<EntityGoalResponse> {
+    return this.request("/api/registry/goals/entity");
+  }
+
+  /** Edit the entity goal. Owner only, and effective in the next session. */
+  async updateEntityGoal(payload: {
+    title?: string;
+    description?: string;
+  }): Promise<EntityGoalResponse> {
+    return this.request("/api/registry/goals/entity", {
+      method: "PATCH",
+      json: payload,
+    });
+  }
+}
+
+/**
+ * `X-Forwarded-For` carrying the invitee's own address, or no header at all.
+ *
+ * The unauthenticated invitation endpoints throttle per IP, and every one of
+ * their requests reaches Python from *this* server — so without this the whole
+ * internet shares one bucket. Python only trusts the header from a loopback
+ * peer, which this call is.
+ */
+function forwardedFor(clientIp: string): Record<string, string> {
+  return clientIp ? { "X-Forwarded-For": clientIp } : {};
 }
 
 function safeJson(text: string): unknown {

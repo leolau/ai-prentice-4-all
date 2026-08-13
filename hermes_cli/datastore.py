@@ -43,6 +43,10 @@ _VALID_SCHEMA = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _MAX_IDENTIFIER = 63
 _DEFAULT_PROFILE = "default"
 
+#: The modes an app datastore exists in.  Both schemas belong to the profile,
+#: so anything reasoning about a profile's binding must consider both.
+MODES: tuple[StoreMode, ...] = ("prod", "dev")
+
 logger = logging.getLogger(__name__)
 
 
@@ -154,6 +158,17 @@ def _profile_slug(profile: str) -> str:
     if safe != profile or not safe or safe[0].isdigit():
         safe = f"{safe}_{_short_hash(profile)}"
     return safe
+
+
+def profile_schema_slug(profile: str) -> str:
+    """Return the schema slug a *named* profile resolves to.
+
+    The default profile keeps its own name (its schemas are the unsuffixed
+    historical ones), every other name is made identifier-safe.
+    """
+    if profile == _DEFAULT_PROFILE:
+        return _DEFAULT_PROFILE
+    return _profile_slug(profile)
 
 
 def active_profile_slug() -> str:
@@ -397,6 +412,66 @@ async def claim_schema_owner(
         str(get_hermes_home().resolve()),
     )
     _verified_schemas.clear()
+
+
+async def connect_for_publish(
+    store: SupabaseAppStore,
+    *,
+    profile: str,
+) -> asyncpg.Connection:
+    """Open a connection into *another* profile's schema, for publishing only.
+
+    Every other datastore path is deliberately unable to do this: profiles are
+    isolated, and :func:`verify_schema_owner` fails closed precisely so one
+    profile cannot end up writing into another's tables. FG-29's downward
+    publish is the one sanctioned crossing — the owner copying the entity goal
+    into each profile so a sub-goal can ladder into it — so it gets one
+    narrow, explicitly named door rather than a general escape hatch.
+
+    The ownership check is not skipped here, it is *inverted*: instead of
+    "this schema must belong to me", the requirement is "this schema must
+    belong to the profile I was asked to publish into". A typo in a profile
+    name therefore fails with a mismatch instead of silently seeding a fresh
+    schema that no profile will ever read.
+    """
+    target = app_schema(store.mode, profile=profile)
+    if not _VALID_SCHEMA.fullmatch(target):
+        raise ValueError(f"Invalid Supabase schema name: {target!r}")
+    if not store.dsn:
+        raise RuntimeError(
+            "Supabase app datastore is not configured; set "
+            "datastore.supabase_app.dsn in config.yaml."
+        )
+
+    from tools.lazy_deps import ensure
+
+    ensure("datastore.supabase")
+
+    import asyncpg as _asyncpg
+
+    connection = await _asyncpg.connect(
+        store.dsn, server_settings={"search_path": target}
+    )
+    try:
+        marker = await connection.fetchval(
+            "SELECT to_regclass($1)", f"{target}.schema_owner"
+        )
+        if marker is not None:
+            row = await connection.fetchrow(
+                f"SELECT profile_slug FROM {target}.schema_owner LIMIT 1"
+            )
+            expected = _profile_slug(profile) if profile != _DEFAULT_PROFILE else profile
+            if row is not None and str(row["profile_slug"]) != expected:
+                raise SchemaOwnershipError(
+                    f"Schema {target!r} is claimed by profile "
+                    f"{row['profile_slug']!r}, not by {profile!r}. Refusing to "
+                    f"publish into it: the copy would land where no profile "
+                    f"reads it, or on top of another profile's rows."
+                )
+    except BaseException:
+        await connection.close()
+        raise
+    return connection
 
 
 async def verify_schema_owner(

@@ -1,10 +1,16 @@
 """``hermes member`` — owner/admin management of additional brain members (C1).
 
 Create a member (GoTrue account → enrolled principal), list members, change a
-member's role, reset a temporary password, and deactivate/reactivate login.
-Runs on the box as the operator, acting as the enrolled **owner** — the
-member-management authority (owner or admin) that :func:`require_member_admin`
-requires. Ownership itself is managed separately by ``hermes owner``.
+member's role, hand out an activation/reset link, and deactivate/reactivate an
+enrolment. Runs on the box as the operator, acting as the enrolled **owner** —
+the member-management authority (owner or admin) that
+:func:`require_member_admin` requires. Ownership itself is managed separately by
+``hermes owner``.
+
+FG-26 moved password issuance off this surface: ``member add`` creates a banned
+account with a random password and prints a one-time activation link the person
+redeems themselves, and ``member invite`` regenerates that link when the short
+window lapses. The operator never sees or relays a password.
 
 The GoTrue base url comes from ``dashboard.supabase_auth`` / the ``SUPABASE_*``
 env vars; the service-role key is read from the environment only (a credential).
@@ -14,16 +20,18 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import getpass
 import sys
 
 from hermes_cli.access import Principal, PrincipalStore, Role
 from hermes_cli.datastore import get_store
+from hermes_cli.invitations import activation_path
 from hermes_cli.members import (
     ADMIN_UNCONFIGURED_MESSAGE,
     ASSIGNABLE_ROLES,
+    DELETE_STRATEGIES,
     MemberError,
     MemberService,
+    administered_profile,
     link_member_channel,
     load_admin_client,
 )
@@ -47,41 +55,51 @@ def _actor() -> Principal:
 
 
 def _service() -> MemberService:
+    from hermes_cli.config import load_config
+
     admin = load_admin_client()
     if admin is None:
         print(ADMIN_UNCONFIGURED_MESSAGE, file=sys.stderr)
         raise SystemExit(1)
-    return MemberService(_prod_store(), admin)
+    return MemberService(_prod_store(), admin, config=load_config() or {})
 
 
-def _prompt_password(provided: str | None) -> str:
-    if provided:
-        return provided
-    first = getpass.getpass("Temporary password: ")
-    second = getpass.getpass("Confirm password: ")
-    if first != second:
-        print("Passwords did not match.", file=sys.stderr)
-        raise SystemExit(1)
-    if not first:
-        print("Password cannot be empty.", file=sys.stderr)
-        raise SystemExit(1)
-    return first
+def _print_activation_link(token: str, *, expires_at: str) -> None:
+    """Print the one-time link, with the two facts that make it usable.
+
+    Shown once (it is not recoverable — only its hash is stored) and with its
+    expiry, because a link whose five minutes elapsed silently looks identical
+    to a broken one.
+    """
+    print(f"Activation link (valid until {expires_at}, single use):")
+    print(f"  {activation_path(token)}")
+    print(
+        "Prefix it with your agent-home origin, e.g. "
+        f"https://<your-agent-home>{activation_path(token)}"
+    )
 
 
 def member_list_command(args: argparse.Namespace) -> int:
     """Run ``hermes member list``."""
     try:
         service = _service()
-        members = asyncio.run(service.list_members(_actor()))
+        page = asyncio.run(
+            service.list_members(
+                _actor(), limit=args.limit, offset=args.offset, query=args.query
+            )
+        )
     except (MemberError, PermissionError, RuntimeError, ValueError) as error:
         print(f"Could not list members: {error}", file=sys.stderr)
         raise SystemExit(1) from error
 
+    members = page.members
     if not members:
         print("No members enrolled.")
         return 0
     for m in members:
-        status = "active" if m.active else "DEACTIVATED"
+        status = "active" if m.enrolled else "SUSPENDED HERE"
+        if m.enrolled and not m.active:
+            status = "not activated"
         email = m.email or "(no email)"
         # Channels are the reason a member's inbound traffic resolves to this
         # principal at all, so show them: a member with none is one whose
@@ -92,20 +110,25 @@ def member_list_command(args: argparse.Namespace) -> int:
             f"[{status}]  {m.display or ''}".rstrip()
         )
         print(f"       {channels}")
+    shown = page.offset + len(members)
+    if page.total > shown or page.offset:
+        print(
+            f"\nShowing {page.offset + 1}-{shown} of {page.total}. "
+            f"Next page: --offset {shown}"
+        )
     return 0
 
 
 def member_add_command(args: argparse.Namespace) -> int:
-    """Run ``hermes member add`` — create a GoTrue account + enrol principal."""
-    password = _prompt_password(args.password)
+    """Run ``hermes member add`` — enrol somebody into the active profile."""
     try:
         service = _service()
         role: Role = args.role
-        principal = asyncio.run(
+        created = asyncio.run(
             service.create_member(
                 _actor(),
                 email=args.email,
-                password=password,
+                profile=args.profile or administered_profile(),
                 display=args.display,
                 role=role,
             )
@@ -114,9 +137,67 @@ def member_add_command(args: argparse.Namespace) -> int:
         print(f"Could not create member: {error}", file=sys.stderr)
         raise SystemExit(1) from error
 
+    if created.enrolled_existing:
+        print(
+            f"{created.email} already had an account; enrolled "
+            f"{created.principal.user_id} into "
+            f"{administered_profile()!r} as {created.principal.role}. "
+            "Their existing password is unchanged."
+        )
+        return 0
     print(
-        f"Created member {principal.user_id} ({args.email}) as "
-        f"{principal.role}. Hand them the temporary password to log in."
+        f"Created member {created.principal.user_id} ({created.email}) as "
+        f"{created.principal.role}, banned until activation."
+    )
+    if created.invitation_token and created.invitation:
+        _print_activation_link(
+            created.invitation_token,
+            expires_at=created.invitation.expires_at.isoformat(),
+        )
+    return 0
+
+
+def member_invite_command(args: argparse.Namespace) -> int:
+    """Run ``hermes member invite`` — mint a fresh one-time activation link."""
+    try:
+        service = _service()
+        invitation, token = asyncio.run(
+            service.issue_invitation(_actor(), user_id=args.user_id)
+        )
+    except (MemberError, PermissionError, RuntimeError, ValueError) as error:
+        print(f"Could not issue an invitation: {error}", file=sys.stderr)
+        raise SystemExit(1) from error
+
+    print(f"Issued an invitation for {args.user_id} (earlier links revoked).")
+    _print_activation_link(token, expires_at=invitation.expires_at.isoformat())
+    return 0
+
+
+def member_delete_command(args: argparse.Namespace) -> int:
+    """Run ``hermes member delete`` — un-enrol and resolve owned rows."""
+    try:
+        service = _service()
+        deleted = asyncio.run(
+            service.delete_member(
+                _actor(),
+                user_id=args.user_id,
+                strategy=args.strategy,
+                transfer_to=args.transfer_to,
+            )
+        )
+    except (MemberError, PermissionError, RuntimeError, ValueError) as error:
+        print(f"Could not delete member: {error}", file=sys.stderr)
+        raise SystemExit(1) from error
+
+    outcome = deleted.ownership
+    print(
+        f"Removed {deleted.user_id} from this profile "
+        f"(strategy={outcome.strategy}): {outcome.rows_transferred} rows "
+        f"transferred, {outcome.rows_deleted} deleted."
+    )
+    print(
+        "Their box-wide account still exists — accounts are shared across "
+        "profiles, so removing it here does not sign them out elsewhere."
     )
     return 0
 
@@ -161,31 +242,13 @@ def member_link_channel_command(args: argparse.Namespace) -> int:
     return 0
 
 
-def member_set_password_command(args: argparse.Namespace) -> int:
-    """Run ``hermes member set-password`` — reset a temporary password."""
-    password = _prompt_password(args.password)
-    try:
-        service = _service()
-        asyncio.run(
-            service.set_member_password(
-                _actor(), user_id=args.user_id, password=password
-            )
-        )
-    except (MemberError, PermissionError, RuntimeError, ValueError) as error:
-        print(f"Could not reset password: {error}", file=sys.stderr)
-        raise SystemExit(1) from error
-
-    print(f"Reset the password for {args.user_id}.")
-    return 0
-
-
 def member_deactivate_command(args: argparse.Namespace) -> int:
-    """Run ``hermes member deactivate`` — block a member's login (ban)."""
+    """Run ``hermes member deactivate`` — suspend the enrolment in this profile."""
     return _set_active(args.user_id, active=False)
 
 
 def member_activate_command(args: argparse.Namespace) -> int:
-    """Run ``hermes member activate`` — restore a member's login (unban)."""
+    """Run ``hermes member activate`` — restore a suspended enrolment."""
     return _set_active(args.user_id, active=True)
 
 
@@ -204,6 +267,63 @@ def _set_active(user_id: str, *, active: bool) -> int:
     return 0
 
 
+def member_local_principal_command(args: argparse.Namespace) -> int:
+    """Run ``hermes member local-principal`` — whose memory local sessions write.
+
+    Sessions that arrive without a channel identity (the CLI, cron jobs, the
+    digest, the pollers) have no sender for C1 to resolve, so FG-24 resolves the
+    person they act as: a remembered binding, else the login subject, else the
+    only enrolled principal, else this command.
+    """
+    from hermes_cli.principal_binding import (
+        binding_path,
+        forget_binding,
+        read_binding,
+        remember_binding,
+    )
+
+    if args.clear:
+        if forget_binding():
+            print("Cleared the local principal binding.")
+        else:
+            print("No local principal binding was set.")
+        return 0
+
+    if args.set:
+        try:
+            store = _prod_store()
+            principal = asyncio.run(store.get(args.set))
+        except (RuntimeError, ValueError) as error:
+            print(f"Could not read the principal: {error}", file=sys.stderr)
+            raise SystemExit(1) from error
+        if principal is None:
+            print(
+                f"No enrolled principal {args.set!r}; 'hermes member list' "
+                "shows who is enrolled.",
+                file=sys.stderr,
+            )
+            raise SystemExit(1)
+        binding = remember_binding(principal.user_id, principal.role, "asked")
+        print(
+            f"Local sessions in this profile now act as {binding.user_id} "
+            f"({binding.role})."
+        )
+        return 0
+
+    binding = read_binding()
+    if binding is None:
+        print(
+            "No local principal binding is set. Hermes resolves one per "
+            "session (login subject, else the only enrolled principal, else it "
+            "asks); set one explicitly with --set <user_id>."
+        )
+        return 0
+    print(f"Local sessions act as {binding.user_id} ({binding.role})")
+    print(f"Resolved by: {binding.source}")
+    print(f"Stored in:   {binding_path()}")
+    return 0
+
+
 def register_member_subparser(subparsers: argparse._SubParsersAction) -> None:
     """Register ``hermes member`` and its sub-actions."""
     parser = subparsers.add_parser(
@@ -212,14 +332,23 @@ def register_member_subparser(subparsers: argparse._SubParsersAction) -> None:
         description=(
             "Owner/admin management of additional members of the shared "
             "Hermes brain: create a Supabase account and enrol it as a "
-            "principal, list members, change roles, reset temporary "
-            "passwords, and deactivate/reactivate login. Ownership itself is "
-            "managed with 'hermes owner'."
+            "principal, list members, change roles, issue one-time "
+            "activation links, and suspend/restore an enrolment. Ownership "
+            "itself is managed with 'hermes owner'."
         ),
     )
     member_sub = parser.add_subparsers(dest="member_command", required=True)
 
     lst = member_sub.add_parser("list", help="List enrolled members")
+    lst.add_argument(
+        "--limit", type=int, default=25, help="Page size (default: 25)"
+    )
+    lst.add_argument("--offset", type=int, default=0, help="Rows to skip")
+    lst.add_argument(
+        "--query",
+        default=None,
+        help="Filter by display name or principal id (case-insensitive)",
+    )
     lst.set_defaults(func=member_list_command)
 
     add = member_sub.add_parser(
@@ -235,14 +364,50 @@ def register_member_subparser(subparsers: argparse._SubParsersAction) -> None:
     )
     add.add_argument("--display", default="", help="Display name")
     add.add_argument(
-        "--password",
+        "--profile",
         default=None,
         help=(
-            "Temporary password (omit to be prompted; prompting avoids the "
-            "password landing in shell history)"
+            "Profile to enrol into (defaults to the active profile; naming "
+            "another profile is refused — cross-profile assignment is FG-28)"
         ),
     )
     add.set_defaults(func=member_add_command)
+
+    invite = member_sub.add_parser(
+        "invite",
+        help="Issue a fresh one-time activation link (revokes earlier links)",
+        description=(
+            "Mint a single-use, short-lived activation link for an enrolled "
+            "member and print it once. Use this when the previous link "
+            "expired: minting a new one revokes the old one, so a link that "
+            "leaked cannot be redeemed afterwards."
+        ),
+    )
+    invite.add_argument("user_id", help="The member's principal id")
+    invite.set_defaults(func=member_invite_command)
+
+    delete = member_sub.add_parser(
+        "delete",
+        help="Remove an enrolment, transferring or purging the rows it owns",
+        description=(
+            "Un-enrol a member from this profile. Nothing cascades to "
+            "memories, files or GTS items, so a strategy is required: "
+            "'transfer' moves their rows to another principal, 'purge' "
+            "deletes their private rows and moves the shared ones to you. "
+            "Their box-wide account is left alone."
+        ),
+    )
+    delete.add_argument("user_id", help="The member's principal id")
+    delete.add_argument(
+        "--strategy", required=True, choices=list(DELETE_STRATEGIES)
+    )
+    delete.add_argument(
+        "--transfer-to",
+        dest="transfer_to",
+        default=None,
+        help="Principal inheriting the rows (required with --strategy transfer)",
+    )
+    delete.set_defaults(func=member_delete_command)
 
     set_role = member_sub.add_parser(
         "set-role",
@@ -273,24 +438,47 @@ def register_member_subparser(subparsers: argparse._SubParsersAction) -> None:
     )
     link_channel.set_defaults(func=member_link_channel_command)
 
-    set_password = member_sub.add_parser(
-        "set-password",
-        help="Reset a member's temporary password",
-    )
-    set_password.add_argument("user_id", help="The member's principal id")
-    set_password.add_argument("--password", default=None)
-    set_password.set_defaults(func=member_set_password_command)
-
     deactivate = member_sub.add_parser(
         "deactivate",
-        help="Block a member's login without deleting the account",
+        help="Suspend a member's enrolment in this profile",
+        description=(
+            "Suspend the enrolment, not the account: the person keeps their "
+            "login and their access to any other profile they belong to, and "
+            "their rows keep a resolvable owner. Reversible with 'activate'."
+        ),
     )
     deactivate.add_argument("user_id", help="The member's principal id")
     deactivate.set_defaults(func=member_deactivate_command)
 
     activate = member_sub.add_parser(
         "activate",
-        help="Restore a deactivated member's login",
+        help="Restore a suspended enrolment",
     )
     activate.add_argument("user_id", help="The member's principal id")
     activate.set_defaults(func=member_activate_command)
+
+    local_principal = member_sub.add_parser(
+        "local-principal",
+        help="Show/set which person channel-less sessions act as (FG-24)",
+        description=(
+            "Sessions with no channel identity — the local CLI, cron jobs, the "
+            "digest, the email poller — have no sender to resolve, so Hermes "
+            "resolves the person they act as: a remembered binding, else the "
+            "login subject, else the only enrolled principal, else it asks "
+            "once and remembers. Use this to see, set or clear that answer. "
+            "With several people enrolled and no binding, memory writes are "
+            "refused rather than landing in the profile's shared block."
+        ),
+    )
+    local_principal.add_argument(
+        "--set",
+        metavar="USER_ID",
+        default=None,
+        help="Bind local sessions to this enrolled principal",
+    )
+    local_principal.add_argument(
+        "--clear",
+        action="store_true",
+        help="Forget the binding (it will be resolved again next session)",
+    )
+    local_principal.set_defaults(func=member_local_principal_command)

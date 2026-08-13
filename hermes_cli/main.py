@@ -357,6 +357,22 @@ def _apply_profile_override() -> None:
             return False
         return True
 
+    def _inside_goal_publish(index: int) -> bool:
+        """True once argv reaches `hermes goal publish ...`.
+
+        There a profile name is a publish *target*, not the profile to run in:
+        reading it as the global selector silently ran the command inside the
+        target profile and published that profile's goal everywhere else. The
+        flag is spelled ``--into`` now, so this only makes the old spelling fail
+        loudly at argparse instead of doing the opposite of what it says.
+        """
+        try:
+            goal_index = argv.index("goal", 0, index)
+            argv.index("publish", goal_index + 1, index)
+        except ValueError:
+            return False
+        return True
+
     def _resolve_sudo_user_profile_env(name: str) -> str | None:
         """Resolve `sudo hermes -p <name>` against the invoking user's home.
 
@@ -406,6 +422,8 @@ def _apply_profile_override() -> None:
         if arg == "--":
             break
         if arg == "--args" and _inside_mcp_add_args(i):
+            break
+        if (arg.startswith("--profile") or arg == "-p") and _inside_goal_publish(i):
             break
         if arg in {"--profile", "-p"} and i + 1 < len(argv):
             profile_name = argv[i + 1]
@@ -10806,6 +10824,7 @@ def cmd_profile(args):
         _is_wrapper_dir_in_path,
         _get_wrapper_dir,
     )
+    from hermes_cli.datastore import SchemaOwnershipError
     from hermes_constants import display_hermes_home
 
     action = getattr(args, "profile_action", None)
@@ -10905,6 +10924,7 @@ def cmd_profile(args):
                 no_alias=no_alias,
                 no_skills=no_skills,
                 description=getattr(args, "description", None),
+                report=print,
             )
             print(f"\nProfile '{name}' created at {profile_dir}")
 
@@ -10994,6 +11014,9 @@ def cmd_profile(args):
                 print(f"  Edit {profile_dir_display}/SOUL.md to customize personality")
             print()
 
+        except SchemaOwnershipError as e:
+            print(f"Error: {e}")
+            sys.exit(1)
         except (ValueError, FileExistsError, FileNotFoundError) as e:
             print(f"Error: {e}")
             sys.exit(1)
@@ -11219,7 +11242,9 @@ def cmd_profile(args):
 
         try:
             profile_dir = import_profile(
-                args.archive, name=getattr(args, "import_name", None)
+                args.archive,
+                name=getattr(args, "import_name", None),
+                report=print,
             )
             name = profile_dir.name
             print(f"✓ Imported profile '{name}' at {profile_dir}")
@@ -11231,6 +11256,9 @@ def cmd_profile(args):
                 if wrapper_path:
                     print(f"  Wrapper created: {wrapper_path}")
             print()
+        except SchemaOwnershipError as e:
+            print(f"Error: {e}")
+            sys.exit(1)
         except (ValueError, FileExistsError, FileNotFoundError) as e:
             print(f"Error: {e}")
             sys.exit(1)
@@ -11373,6 +11401,44 @@ def cmd_profile(args):
                 print(line)
                 if er.get("default") is not None:
                     print(f"      default: {er['default']}")
+        print()
+
+    elif action == "registry":
+        from hermes_cli.profile_registry import (
+            get_profile_registry,
+            probe_registry,
+        )
+
+        sub = getattr(args, "registry_action", None) or "list"
+        entries = get_profile_registry()
+        if sub == "health":
+            entries = probe_registry(entries)
+
+        if not entries:
+            print("No profiles found.")
+            return
+
+        # FG-28 control-plane view: no authority data, just routing + schema
+        # + a health badge the switcher can show before routing an admin turn.
+        print(
+            f"\n {'Profile':<16} {'Served':<8} {'Base URL':<14} "
+            f"{'Schema':<22} Health"
+        )
+        print(
+            f" {'\u2500' * 15} {'\u2500' * 7} {'\u2500' * 13} "
+            f"{'\u2500' * 21} {'\u2500' * 18}"
+        )
+        for e in entries:
+            marker = " \u25c6" if e.is_default else "  "
+            served = "yes" if e.served else "\u2014"
+            base = e.base_url or "\u2014"
+            health = e.health
+            if e.health_detail:
+                health = f"{e.health} ({e.health_detail})"
+            print(
+                f"{marker}{e.name:<15} {served:<8} {base:<14} "
+                f"{e.schema:<22} {health}"
+            )
         print()
 
 
@@ -11927,14 +11993,15 @@ _BUILTIN_SUBCOMMANDS = frozenset(
         "computer-use",
         "changes", "config", "cron", "curator", "dashboard", "serve", "debug", "doctor",
         "incomings",
-        "dump", "fallback", "gateway", "hooks", "import", "insights",
+        "dump", "fallback", "gateway", "goal", "hooks", "import", "insights",
+        "promotion",
         "gui", "desktop", "kanban", "login", "logout", "logs", "lsp", "mcp", "memory", "migrate", "moa",
         "journey", "memory-graph", "learning",
         "member", "model", "oss", "owner", "pairing", "pets", "plugins", "portal",
         "postinstall", "profile",
         "project", "promote", "proxy",
         "prompt-size",
-        "send", "sessions", "setup",
+        "send", "sessions", "setup", "todos",
         "skills", "slack", "status", "tool", "tools", "uninstall", "update",
         "version", "webhook", "whatsapp", "whatsapp-cloud", "chat", "secrets", "security",
         # Help-ish invocations — plugin commands not being listed in
@@ -12709,6 +12776,35 @@ def main():
     from hermes_cli.incomings_backfill import register_incomings_subparser
 
     register_incomings_subparser(subparsers)
+
+    # =========================================================================
+    # goal / promotion commands — the entity goal tree and the audited skill
+    # promotion path (FG-29)
+    # =========================================================================
+    from hermes_cli.goal_tree_cmd import (
+        register_goal_tree_subparser,
+        register_promotion_subparser,
+    )
+
+    register_goal_tree_subparser(subparsers)
+    register_promotion_subparser(subparsers)
+
+    # =========================================================================
+    # todos command — the to-do staging layer operator surface (CLI + skill,
+    # rung 2: no core tool, no self-HTTP). Includes the `send` verb that closes
+    # the dangling reference `todo_outbound.command_for()` already writes.
+    # =========================================================================
+    from hermes_cli.todos_cmd import register_todos_subparser
+
+    register_todos_subparser(subparsers)
+
+    # =========================================================================
+    # datastore command — the profile's resolved (database, schema) binding and
+    # the whole-schema migration between profile names (FG-27)
+    # =========================================================================
+    from hermes_cli.datastore_cmd import register_datastore_subparser
+
+    register_datastore_subparser(subparsers)
 
     # =========================================================================
     # login command  (parser built in hermes_cli/subcommands/login.py)

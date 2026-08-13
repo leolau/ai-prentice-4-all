@@ -17,6 +17,9 @@ def _make_agent(**overrides):
         _kanban_worker_guidance="",
         _memory_store=None,
         _memory_manager=None,
+        # Set on every real agent by agent_init; the volatile tier asks who is
+        # talking so a participant's own long-lived goal can be included.
+        _internal_user_id=None,
         model="",
         provider="",
         platform="",

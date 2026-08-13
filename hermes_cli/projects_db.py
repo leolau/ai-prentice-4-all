@@ -93,6 +93,32 @@ CREATE TABLE IF NOT EXISTS discovered_repos (
     label         TEXT,
     last_seen     INTEGER NOT NULL
 );
+
+-- Projects page (2026-08-12 plan): cross-profile membership and link table.
+-- A project_links row is a pointer, never a copy — the authority stays in
+-- the profile that owns it, and `profile` is what makes the pointer resolvable.
+CREATE TABLE IF NOT EXISTS project_profiles (
+    project_id  TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    profile     TEXT NOT NULL,
+    role        TEXT NOT NULL DEFAULT 'member',
+    added_by    TEXT,
+    added_at    INTEGER NOT NULL,
+    PRIMARY KEY (project_id, profile)
+);
+
+CREATE TABLE IF NOT EXISTS project_links (
+    project_id  TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    kind        TEXT NOT NULL,
+    profile     TEXT NOT NULL,
+    ref         TEXT NOT NULL,
+    label       TEXT,
+    added_by    TEXT,
+    added_at    INTEGER NOT NULL,
+    PRIMARY KEY (project_id, kind, profile, ref)
+);
+
+CREATE INDEX IF NOT EXISTS idx_project_links_kind
+    ON project_links(project_id, kind, added_at DESC);
 """
 
 
@@ -725,3 +751,83 @@ def branch_name_for(project: Project, task_id: str, *, title: str = "") -> str:
         if tslug:
             base = f"{base}-{tslug}"
     return base
+
+
+# ---------------------------------------------------------------------------
+# project_links + project_profiles (the Projects page link table)
+# ---------------------------------------------------------------------------
+
+def add_project_link(
+    conn: sqlite3.Connection,
+    *,
+    project_id: str,
+    kind: str,
+    profile: str,
+    ref: str,
+    label: Optional[str] = None,
+    added_by: Optional[str] = None,
+) -> bool:
+    """Write a ``project_links`` row. Returns False on PK conflict (already linked).
+
+    A link is a pointer, never a copy — the authority stays in the profile
+    that owns the referenced object. Re-inserting the same link is a no-op.
+    """
+    now = int(time.time())
+    with write_txn(conn):
+        cur = conn.execute(
+            """INSERT OR IGNORE INTO project_links
+               (project_id, kind, profile, ref, label, added_by, added_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (project_id, kind, profile, ref, label, added_by, now),
+        )
+    return cur.rowcount > 0
+
+
+def get_project_links(
+    conn: sqlite3.Connection,
+    project_id: str,
+    *,
+    kind: Optional[str] = None,
+) -> List[dict]:
+    """Read ``project_links`` rows, newest first."""
+    sql = "SELECT * FROM project_links WHERE project_id = ?"
+    params: list = [project_id]
+    if kind:
+        sql += " AND kind = ?"
+        params.append(kind)
+    sql += " ORDER BY added_at DESC"
+    return [dict(r) for r in conn.execute(sql, params).fetchall()]
+
+
+def add_project_profile(
+    conn: sqlite3.Connection,
+    *,
+    project_id: str,
+    profile: str,
+    role: str = "member",
+    added_by: Optional[str] = None,
+) -> bool:
+    """Add a profile to a project. Returns False if already a member."""
+    now = int(time.time())
+    with write_txn(conn):
+        cur = conn.execute(
+            """INSERT OR IGNORE INTO project_profiles
+               (project_id, profile, role, added_by, added_at)
+               VALUES (?, ?, ?, ?, ?)""",
+            (project_id, profile, role, added_by, now),
+        )
+    return cur.rowcount > 0
+
+
+def get_project_profiles(
+    conn: sqlite3.Connection,
+    project_id: str,
+) -> List[dict]:
+    """Read ``project_profiles`` rows."""
+    return [
+        dict(r)
+        for r in conn.execute(
+            "SELECT * FROM project_profiles WHERE project_id = ?",
+            (project_id,),
+        ).fetchall()
+    ]

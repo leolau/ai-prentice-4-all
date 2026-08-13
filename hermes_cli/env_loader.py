@@ -2,12 +2,25 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import sys
 from pathlib import Path
 
 from dotenv import load_dotenv
 from utils import atomic_replace, fast_safe_load
+
+logger = logging.getLogger(__name__)
+
+
+def _multiplex_active() -> bool:
+    """Whether this process serves several profiles (gateway multiplexing)."""
+    try:
+        from agent.secret_scope import is_multiplex_active
+
+        return is_multiplex_active()
+    except Exception:
+        return False
 
 
 # Env var name suffixes that indicate credential values.  These are the
@@ -143,11 +156,31 @@ def _sanitize_loaded_credentials() -> None:
         )
 
 
+def _note_env_file_keys(path: Path) -> None:
+    """Tell ``agent.secret_scope`` which names came from an env file.
+
+    A multiplexing gateway has to be able to tell a profile-owned value in
+    ``os.environ`` (this file's) from a deployment-level one the operator
+    exported, so it can correct a spawned child's environment to the profile
+    whose turn is running. Once both are strings in ``os.environ`` nothing
+    distinguishes them, so the provenance is recorded here, at load time.
+    """
+    try:
+        from dotenv import dotenv_values
+
+        from agent.secret_scope import note_env_file_keys
+
+        note_env_file_keys(k for k in dotenv_values(dotenv_path=path) if k)
+    except Exception:  # noqa: BLE001 — provenance is best-effort, never blocks startup
+        logger.debug("could not record env-file provenance for %s", path, exc_info=True)
+
+
 def _load_dotenv_with_fallback(path: Path, *, override: bool) -> None:
     try:
         load_dotenv(dotenv_path=path, override=override, encoding="utf-8")
     except UnicodeDecodeError:
         load_dotenv(dotenv_path=path, override=override, encoding="latin-1")
+    _note_env_file_keys(path)
     # Strip non-ASCII characters from credential env vars that were just
     # loaded.  API keys must be pure ASCII since they're sent as HTTP
     # header values (httpx encodes headers as ASCII).  Non-ASCII chars
@@ -222,6 +255,18 @@ def load_hermes_dotenv(
       the user env exists.
     - if no user env exists, the project `.env` also overrides stale shell vars.
     """
+    if _multiplex_active():
+        # A multiplexing gateway serves several profiles from one process and
+        # gives each turn its own secret scope. Loading any profile's .env here
+        # would write those secrets into the *process* environment with
+        # override=True, so the last profile to reach this line would become the
+        # value every unscoped read and every spawned subprocess sees — the exact
+        # cross-profile leak the scope exists to prevent. Per-turn callers that
+        # only wanted "make sure secrets are available" are already served by
+        # agent.secret_scope; there is nothing left for this call to do.
+        logger.debug("multiplex active: refusing to load .env into os.environ")
+        return []
+
     loaded: list[Path] = []
 
     home_path = Path(hermes_home or os.getenv("HERMES_HOME", Path.home() / ".hermes"))

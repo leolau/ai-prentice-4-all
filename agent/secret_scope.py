@@ -22,10 +22,11 @@ Design rationale lives in ``docs/design/multiplexing-gateway.md`` (Workstream A)
 """
 from __future__ import annotations
 
+import hashlib
 import os
 from contextvars import ContextVar, Token
 from pathlib import Path
-from typing import Dict, Mapping, Optional
+from typing import Dict, FrozenSet, Iterable, Mapping, MutableMapping, Optional
 
 
 # ── multiplex-active flag ────────────────────────────────────────────────
@@ -49,6 +50,11 @@ def set_multiplex_active(active: bool) -> None:
 def is_multiplex_active() -> bool:
     """Return whether the process is running as a profile multiplexer."""
     return _MULTIPLEX_ACTIVE
+
+
+# Names that reached os.environ from an env file in this process. See
+# note_env_file_keys() for why the provenance has to be remembered.
+_ENV_FILE_KEYS: set[str] = set()
 
 
 # ── the secret scope contextvar ──────────────────────────────────────────
@@ -158,6 +164,107 @@ def get_secret(name: str, default: Optional[str] = None) -> Optional[str]:
 
     val = os.environ.get(name)
     return val if val is not None else default
+
+
+def scope_fingerprint() -> str:
+    """A short, stable id for the active scope's *contents* — "" when unscoped.
+
+    Callers that cache a value derived from secrets (``load_config`` caches the
+    ``${VAR}``-expanded config) must key that cache on the scope as well as on
+    the file, or profile A's turn serves profile B a config expanded with A's
+    credentials. Content-based rather than ``id(mapping)`` so the same profile
+    entering a second turn — a fresh dict with identical values — still hits its
+    cache instead of re-parsing the file every turn.
+
+    The digest is not reversible and is never logged with a value beside it, so
+    it does not widen exposure of the secrets it summarises.
+    """
+    scope = _SECRET_SCOPE.get()
+    if scope is None:
+        return ""
+    digest = hashlib.blake2b(digest_size=8)
+    for key in sorted(scope):
+        digest.update(key.encode("utf-8", "replace"))
+        digest.update(b"\x00")
+        digest.update(str(scope[key]).encode("utf-8", "replace"))
+        digest.update(b"\x00")
+    return digest.hexdigest()
+
+
+def expand_env_ref(name: str) -> Optional[str]:
+    """Resolve a ``${NAME}`` config reference against the active profile.
+
+    Deliberately *not* ``get_secret``: config expansion runs on paths that
+    legitimately have no scope installed — the CLI, and the multiplexer's own
+    startup before any turn — so failing closed here would abort the process
+    rather than catch a missed migration. Under a scope the scope is
+    authoritative (no ``os.environ`` fallback, which is the leak this exists to
+    close); with no scope it reads ``os.environ`` exactly as before.
+    """
+    if _is_global_env(name):
+        return os.environ.get(name)
+    scope = _SECRET_SCOPE.get()
+    if scope is not None:
+        return scope.get(name)
+    return os.environ.get(name)
+
+
+def note_env_file_keys(keys: Iterable[str]) -> None:
+    """Record that ``keys`` were written into ``os.environ`` from an env file.
+
+    ``load_hermes_dotenv`` calls this. The set is what lets a spawned child be
+    corrected per profile: a value in ``os.environ`` that came from *a* profile's
+    ``.env`` is by definition profile-owned, so under another profile's scope it
+    is wrong, whereas a value the operator exported in the unit file or the shell
+    is deployment-level and must survive untouched. Nothing distinguishes the two
+    once they are both strings in ``os.environ``, so the provenance has to be
+    remembered at load time.
+
+    Process-global and append-only, like ``_MULTIPLEX_ACTIVE``: it describes what
+    this process has done to its own environment, not a per-task value.
+    """
+    _ENV_FILE_KEYS.update(keys)
+
+
+def env_file_keys() -> FrozenSet[str]:
+    """Names ``os.environ`` received from an env file in this process."""
+    return frozenset(_ENV_FILE_KEYS)
+
+
+def apply_scope_to_subprocess_env(env: MutableMapping[str, str]) -> None:
+    """Correct an already-filtered child environment to the active profile.
+
+    A child process cannot see a contextvar, so a spawn inside profile B's turn
+    inherits whatever ``os.environ`` holds — and in a multiplexer that is the
+    default profile's ``.env``, loaded at import time before any turn. A
+    ``claude``/``codex`` executor spawned for B then authenticates as A, and a
+    terminal command with a skill-registered passthrough key reads A's value.
+
+    Two rules, applied to the dict the caller has *already* filtered:
+
+    - a key the scope defines and that survived filtering takes the scope's
+      value;
+    - a key that came from an env file but is absent from the scope is dropped,
+      because inheriting another profile's value is worse than the child finding
+      nothing.
+
+    It deliberately never *adds* a key. The blocklists in
+    ``tools/environments/local.py`` decide what a child may see at all; this only
+    corrects *whose* value it is, so a profile scope can never re-admit a
+    credential a spawn surface had stripped on purpose.
+
+    No-op when nothing is scoped, which is every single-profile deployment.
+    """
+    scope = _SECRET_SCOPE.get()
+    if scope is None:
+        return
+    for key in list(env):
+        if _is_global_env(key):
+            continue
+        if key in scope:
+            env[key] = str(scope[key])
+        elif key in _ENV_FILE_KEYS:
+            del env[key]
 
 
 def load_env_file(env_path: Path) -> Dict[str, str]:

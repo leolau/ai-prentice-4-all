@@ -12,6 +12,23 @@ const nextConfig = {
   eslint: { ignoreDuringBuilds: true },
   // `pg` is a server-only dependency; never bundle it into client chunks.
   serverExternalPackages: ["pg"],
+  // An activation URL *is* the credential until it is redeemed, so the browser
+  // must not hand it to the next site in a `Referer` header (a single click on
+  // an outbound link would otherwise disclose a live token), and crawlers must
+  // not index it. `robots` is also set as page metadata; the header covers the
+  // fetch of the page itself.
+  async headers() {
+    return [
+      {
+        source: "/activate/:path*",
+        headers: [
+          { key: "Referrer-Policy", value: "no-referrer" },
+          { key: "X-Robots-Tag", value: "noindex, nofollow, noarchive" },
+          { key: "Cache-Control", value: "no-store, max-age=0" },
+        ],
+      },
+    ];
+  },
 };
 
 export default nextConfig;

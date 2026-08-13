@@ -912,6 +912,16 @@ DEFAULT_CONFIG = {
             "prod": {"supabase_app": {"dsn": ""}},
         },
     },
+    # FG-26 invitation activation. Behavioural, so it lives here rather than in
+    # an env var. The activation window is short on purpose: an admin hands the
+    # link over live (or regenerates it), and a link that outlives the
+    # conversation is a standing credential.
+    "invitations": {
+        "ttl_seconds": 300,
+        # Self-service password recovery is not handed over live, so it gets a
+        # longer — still bounded — window.
+        "recovery_ttl_seconds": 3600,
+    },
     # C8 interaction tracing is an append-only application-datastore side
     # channel. Sampling applies only to tool_call/tool_result spans.
     "action_tracking": {
@@ -2088,6 +2098,12 @@ DEFAULT_CONFIG = {
         "write_approval": False,
         "memory_char_limit": 2200,   # ~800 tokens at 2.75 chars/token
         "user_char_limit": 1375,     # ~500 tokens at 2.75 chars/token
+        # FG-24: budget for the profile-wide shared block, independent of the
+        # per-participation and per-person budgets above — one principal
+        # filling their own memory can never squeeze another's or the shared
+        # one. Only used once a principal is resolved (multi-principal
+        # deployments); a single-principal session has no separate shared block.
+        "shared_memory_char_limit": 2200,
         # External memory provider plugin (empty = built-in only).
         # Set to a provider name to activate: "openviking", "mem0",
         # "hindsight", "holographic", "retaindb", "byterover".
@@ -2176,6 +2192,48 @@ DEFAULT_CONFIG = {
         # negatives (goal actually done but judge says continue) and
         # unbounded model spend on fuzzy / unachievable goals.
         "max_turns": 20,
+
+        # FG-29 — the [PURPOSE] prompt block. Only entity/profile goals
+        # (years/quarters) reach the stable tier and only participant goals
+        # reach the volatile one; operational goals never enter a prompt.
+        # Both caps are paid for on EVERY api call of every session, which is
+        # why an over-budget block is refused rather than truncated.
+        # Both numbers are UNCALIBRATED GUESSES — a pilot should retune them.
+        "prompt": {
+            # Whole-block budget, characters.
+            "max_chars": 1200,
+            # Per-goal budget, characters. A goal longer than this is a
+            # document and belongs in SOUL.md or a skill.
+            "max_goal_chars": 400,
+        },
+        "measure": {
+            # A long-lived goal with no designated primary metric is REPORTED
+            # after this many days rather than scored as 0% — an unmeasured
+            # goal has not failed, and a fake zero would roll into its parent
+            # and lie. UNCALIBRATED GUESS.
+            "unmeasured_after_days": 14,
+        },
+        # FG-29 — promoting a distilled skill out of one profile into the
+        # shared library that every profile reads. Scored, capped and
+        # competitive: shared skills are listed in the stable prompt of every
+        # profile, so unbounded growth would tax every turn everywhere.
+        "promotion": {
+            # Minimum score (0..1) for a candidate to appear in the weekly
+            # digest at all. Below this the proposal is stored but never
+            # shown. UNCALIBRATED GUESS — see hermes_cli.skill_promotion for
+            # what the score is made of.
+            "threshold": 0.55,
+            # Hard cap on the shared library. At the cap a new skill is
+            # promoted ONLY by displacing a strictly weaker resident.
+            # UNCALIBRATED GUESS.
+            "max_shared_skills": 24,
+            # A promoted skill with no recorded use for this long is a
+            # demotion candidate in the next digest (it keeps costing every
+            # profile prompt space). UNCALIBRATED GUESS.
+            "demote_unused_after_days": 90,
+            # Activity count that saturates the usage component of the score.
+            "usage_target": 10,
+        },
     },
 
     # Mixture of Agents — named presets used by /moa. A preset is an execution
@@ -5950,19 +6008,47 @@ def _strip_dotted_keys(cfg: dict, dotted_keys: set) -> Tuple[dict, set]:
     return cfg, stripped
 
 
+def _active_scope_fingerprint() -> str:
+    """The active profile secret scope's fingerprint, or "" when unscoped."""
+    try:
+        from agent.secret_scope import scope_fingerprint
+
+        return scope_fingerprint()
+    except Exception:
+        return ""
+
+
+def _expand_env_ref(name: str) -> Optional[str]:
+    """Resolve one ``${NAME}`` reference, honoring an active profile scope.
+
+    A multi-profile process gives each profile its own ``config.yaml`` *and* its
+    own ``.env``; resolving the former's ``${DATABASE_URL}`` against the shared
+    ``os.environ`` would hand every profile whichever ``.env`` was loaded last.
+    Falls back to ``os.environ`` when nothing is scoped, which is every
+    single-profile caller.
+    """
+    try:
+        from agent.secret_scope import expand_env_ref
+
+        return expand_env_ref(name)
+    except Exception:
+        return os.environ.get(name)
+
+
 def _expand_env_vars(obj):
     """Recursively expand ``${VAR}`` references in config values.
 
     Only string values are processed; dict keys, numbers, booleans, and
-    None are left untouched.  Unresolved references (variable not in
-    ``os.environ``) are kept verbatim so callers can detect them.
+    None are left untouched.  Unresolved references (variable not in the
+    active profile's secrets, nor in ``os.environ``) are kept verbatim so
+    callers can detect them.
     """
+    def _sub(match: "re.Match[str]") -> str:
+        resolved = _expand_env_ref(match.group(1))
+        return match.group(0) if resolved is None else resolved
+
     if isinstance(obj, str):
-        return re.sub(
-            r"\${([^}]+)}",
-            lambda m: os.environ.get(m.group(1), m.group(0)),
-            obj,
-        )
+        return re.sub(r"\${([^}]+)}", _sub, obj)
     if isinstance(obj, dict):
         return {k: _expand_env_vars(v) for k, v in obj.items()}
     if isinstance(obj, list):
@@ -6483,6 +6569,12 @@ def _load_config_impl(*, want_deepcopy: bool) -> Dict[str, Any]:
         ensure_hermes_home()
         config_path = get_config_path()
         path_key = str(config_path)
+        # The cached value is ${VAR}-expanded, so it belongs to the secrets it
+        # was expanded against as much as to the file. In a multi-profile
+        # process the same path can be loaded under different scopes (a turn,
+        # then an unscoped status read), and a single key would serve one
+        # profile a config expanded with another's credentials.
+        cache_key = path_key + "\x00" + _active_scope_fingerprint()
 
         try:
             st = config_path.stat()
@@ -6517,7 +6609,7 @@ def _load_config_impl(*, want_deepcopy: bool) -> Dict[str, Any]:
         else:
             cache_sig = None
 
-        cached = _LOAD_CONFIG_CACHE.get(path_key)
+        cached = _LOAD_CONFIG_CACHE.get(cache_key)
         if cached is not None and cache_sig is not None and cached[:4] == cache_sig:
             return copy.deepcopy(cached[4]) if want_deepcopy else cached[4]
 
@@ -6558,14 +6650,14 @@ def _load_config_impl(*, want_deepcopy: bool) -> Dict[str, Any]:
             # callers all see the same stable cached object. The cached tuple is
             # (user_mtime, user_size, managed_mtime, managed_size, value).
             cached_copy = copy.deepcopy(expanded)
-            _LOAD_CONFIG_CACHE[path_key] = (*cache_sig, cached_copy)
+            _LOAD_CONFIG_CACHE[cache_key] = (*cache_sig, cached_copy)
             # On the readonly path return the same cached object subsequent
             # calls will see — keeps "two readonly calls return the same
             # object" invariant that callers may rely on for identity checks.
             if not want_deepcopy:
                 return cached_copy
         else:
-            _LOAD_CONFIG_CACHE.pop(path_key, None)
+            _LOAD_CONFIG_CACHE.pop(cache_key, None)
         # First-load result is a fresh dict (not aliased to the cache); safe
         # to return directly. For the deepcopy=True path this is the
         # canonical "freshly-built mutable result" the function has always

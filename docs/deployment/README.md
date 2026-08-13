@@ -5,7 +5,9 @@ It states what exists, what is verified, what is *not*, and where the detail
 lives. The per-topic documents are authoritative for procedure; this file is
 authoritative for **what is currently true of the live box**.
 
-Last verified: 2026-08-11, application at `4d67f892e`.
+Last verified: 2026-08-12, application at `e18b223e1` (what the box runs; the
+repo moves ahead of it — the box is deployed by whoever merges, not by this
+document).
 
 That line is **checked**, not a promise: `deploy_state.py handover` reports this
 document as stale once anything it describes — `deploy/`, `deploy_state.py`,
@@ -73,7 +75,8 @@ cannot be scoped to a subdirectory.
 
 ## What runs
 
-14 long-running services, all as `hermes`:
+15 long-running services, all as `hermes` — which was untrue for a day, see
+below:
 
 ```
 hermes-gateway        hermes-dashboard      hermes-digest        hermes-escalation
@@ -82,6 +85,16 @@ hermes-email-poller   hermes-email-batcher  hermes-email-triage  hermes-embed
 hermes-calendar-poller       hermes-calendar-triage
 agent-home            (the phone PWA — note the name, see below)
 ```
+
+`hermes-calendar-triage` ran as **root** from 2026-08-11 to 2026-08-12: it was
+installed by hand, its unit was in no repository, and the 2026-07-31
+de-privileging drop-ins could not cover a unit that did not exist yet. Nothing
+reported it — `deploy_state.py check` compares units against the snapshot, and
+the snapshot had never seen this unit either. Both calendar units and a
+`10-unprivileged.conf` for the triage agent are now captured state, and
+`deploy/hermes-calendar-triage.service` exists so a rebuild does not repeat it.
+The lesson is the general one: *a unit installed by hand starts life outside
+every check we have.*
 
 `hermes-calendar-poller` was installed on 2026-08-11. Before that only the
 triage half of the calendar pipeline had a unit, so nothing fetched events:
@@ -136,7 +149,10 @@ captured base unit stays byte-identical:
    the deployed revision
 
 Confirm the drop-in set with `systemctl cat hermes-drift-check.service`; the
-fourth line was added on 2026-08-05 and, like the others, is captured state.
+fourth line is captured state like the others. It was written on 2026-08-05 but
+only *installed* on 2026-08-12 — for a week this document described a check the
+box was not running, which is the same failure one level up. A drop-in is
+installed when it appears in `systemctl cat`, not when it is merged.
 
 `SuccessExitStatus=0 1` matters: drift is signalled by exit 1, and without it
 drift in the first check would stop the other two from running. Silence means
@@ -195,11 +211,25 @@ Verified on the live box, not in a fixture:
   200 (37 memories, 20 never recalled), `/api/memory/{rows,projection,query}`
   200, query placement returning 5 neighbours; every route 401 without a cookie
   and 401 with a one-byte-tampered one. Hermes tokens stay server-side.
-- The deploy prints `deploy OK (<sha>)` and reports all 12 long-running units.
-  Until 2026-08-05 it exited **3 on every successful deploy** and reported 2 of
-  them: `hermes-*` matched the timer-invoked oneshots, and `is-active` on a
-  finished oneshot exits 3 under `set -e` (#113). A deploy also no longer *runs*
-  those oneshots — check their `ExecMainStartTimestamp` across a deploy.
+- The deploy prints `deploy OK (<sha>)` and reports all 14 long-running units
+  plus `agent-home`. Until 2026-08-05 it exited **3 on every successful deploy**
+  and reported 2 of them: `hermes-*` matched the timer-invoked oneshots, and
+  `is-active` on a finished oneshot exits 3 under `set -e` (#113). A deploy also
+  no longer *runs* those oneshots — check their `ExecMainStartTimestamp` across a
+  deploy.
+- The `git fetch` is retried three times, and a persistent failure prints
+  `FETCH FAILED after 3 attempts — nothing deployed, box unchanged at <sha>`
+  (#210). One `github.com:22` connect timeout from `cn-hongkong` used to abort
+  the deploy amid otherwise ordinary output, so a caller reading the tail could
+  conclude a deploy had happened while the box never moved.
+- Profile→schema isolation holds live (FG-27, 2026-08-12): a `--clone` reports
+  the **shared** database with **distinct** schemas, three profiles query that
+  one Postgres concurrently with disjoint `principals`, a profile pointed at
+  another's schema is refused on connect, and `hermes datastore split-profile`
+  moves a whole schema with verified row counts. Every box `hermes` invocation
+  must pass `HERMES_HOME=/opt/data/hermes-home-staging`: unset, it resolves
+  `$HOME/.hermes` — a real, empty, core-only home — and answers coherently about
+  a deployment nobody uses (`datastore show` → "not configured").
 - The map **renders** in a real browser (confirmed by Leo on the live phone URL,
   2026-08-05). This needed a human: `MemoryMap` fetches client-side, so server
   HTML contains no `<circle>` and `curl` cannot see a single dot — and the bug
@@ -217,7 +247,9 @@ hermes owner alias admin      # links the login subject to the owner principal
 
 Identity lives in `app_prod` (`principals`, `principal_aliases`) regardless of
 the datastore mode, because channels and the web surface share one identity
-space; memories live in the *configured* mode's schema (`app_dev` here). Both
+space; memories live in the *configured* mode's schema — `app_prod` since the
+2026-08 prod-schema move (`datastore.mode: prod`, and `app_dev` still holds 109
+older rows that the prod schema does not see). Both
 facts are easy to trip over and neither is obvious from an error message.
 
 **Not verified: nobody has decrypted a bundle.** The box holds only the public
@@ -258,8 +290,22 @@ compares, "we have backups" is a belief. Do this periodically, not once.
 ```bash
 PY=/opt/data/hermes-agent/.venv/bin/python
 STATE=/opt/data/hermes-deploy-state
-sudo $PY scripts/deploy_state.py --state-root $STATE capture --deployment hermes-systest ...
+cd /opt/data/hermes-agent
+sudo $PY scripts/deploy_state.py --state-root $STATE capture \
+  --deployment hermes-systest \
+  --hermes-home /opt/data/hermes-home-staging \
+  --deploy-script /opt/data/deploy-hermes.sh \
+  --secrets-out /opt/data/deploy/state-secrets.env \
+  --credential-glob 'google-workspace/credentials/*.json' \
+  --credential-glob 'whatsapp/session-*/creds.json' \
+  --credential-glob 'mcp-tokens/*.json'
 ```
+
+Every argument is required: `capture` with a missing `--hermes-home` exits 2 and
+writes nothing, so a state trail can quietly stop being updated. It did — no
+capture ran between 2026-08-05 and 2026-08-12, and the weekly check answered
+with 16 findings that were all just "nobody captured", which is exactly the
+noise that gets a real finding ignored.
 
 Then commit the diff in the state repo **from a session, not from the box** — the
 box's key is read-only. The `git diff` there is the review: it names the MCP
@@ -334,7 +380,8 @@ for r in results:
 
 1. Checks for unexpected local modifications (aborts if any exist — a hotfix
    must never be silently clobbered).
-2. Fetches `origin/develop` and fast-forwards.
+2. Fetches `origin/develop` (three attempts, backing off) and fast-forwards; a
+   fetch that never succeeds aborts with `nothing deployed, box unchanged`.
 3. `pip install -e .` (reinstalls the package).
 4. Rebuilds the dashboard bundle (`web/`) only when `web/` changed.
 5. Rebuilds the agent-home bundle only when `agent-home/` or `package-lock.json`
@@ -346,7 +393,8 @@ for r in results:
 9. Prints `deploy OK (<sha>)` or exits 1 on any inactive unit.
 10. Runs `deploy_state.py handover` (reports doc staleness, never blocks).
 
-A successful deploy ends with `deploy OK (<sha>)` and all 13 services `active`.
+A successful deploy ends with `deploy OK (<sha>)` and all 15 services `active`
+(14 `hermes-*` plus `agent-home`).
 
 ### Common pitfalls
 

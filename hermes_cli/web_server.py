@@ -275,12 +275,14 @@ from hermes_cli.memory_explorer import router as _memory_explorer_router  # noqa
 from hermes_cli.files_api import router as _files_router  # noqa: E402
 from hermes_cli.incomings_api import router as _incomings_router  # noqa: E402
 from hermes_cli.todos_api import router as _todos_router  # noqa: E402
+from hermes_cli.goals_api import router as _goals_router  # noqa: E402
 
 app.include_router(_memory_oauth_router)
 app.include_router(_memory_explorer_router)
 app.include_router(_files_router)
 app.include_router(_incomings_router)
 app.include_router(_todos_router)
+app.include_router(_goals_router)
 
 # ---------------------------------------------------------------------------
 # Session token for protecting sensitive endpoints (reveal).
@@ -3138,6 +3140,17 @@ async def _comms_resolve_principal(request: "Request", *, allow_as: bool = False
                         "user."
                     ),
                 )
+            if not actor.active:
+                # FG-26 §3.5: suspension is profile-local, so the shared
+                # account still logs in — the profile's own surfaces are where
+                # it has to bite, for reads as well as writes.
+                raise HTTPException(
+                    status_code=403,
+                    detail=(
+                        "This enrolment has been suspended in the current "
+                        "profile."
+                    ),
+                )
         else:
             actor = await principals.get_owner()
             if actor is None:
@@ -3191,83 +3204,181 @@ async def comms_whoami(request: Request):
     }
 
 
-async def _comms_member_service(request: "Request"):
-    """Resolve (actor, MemberService) for an owner/admin member-mgmt request.
+def _comms_user_service(actor=None):
+    """Build a :class:`MemberService` over this profile's store + GoTrue.
 
-    Reuses :func:`_comms_resolve_principal` to bind the acting principal, then
-    enforces the owner/admin gate and builds a :class:`MemberService` over the
-    GoTrue admin client. Raises ``HTTPException`` 403 for a non-admin actor and
-    503 when member management isn't configured (no service-role key / url).
+    Raises 503 when user management isn't configured (no service-role key or
+    url), which is a deployment state the console renders rather than an error.
     """
-    from hermes_cli.members import (
-        MemberService,
-        load_admin_client,
-        require_member_admin,
+    from hermes_cli.access import PrincipalStore
+    from hermes_cli.members import MemberService, load_admin_client
+
+    admin = load_admin_client()
+    if admin is None:
+        raise HTTPException(
+            status_code=503,
+            detail="User management is not configured on this server.",
+        )
+    config = load_config() or {}
+    return MemberService(
+        PrincipalStore(_comms_app_store()), admin, config=config
     )
+
+
+async def _comms_member_service(request: "Request"):
+    """Resolve (actor, MemberService) for an owner/admin user-management request.
+
+    Binds the acting principal with ``allow_as=False`` — the default — so an
+    ``?as=`` narrowing can never make an admin the *author* of a management
+    write; that is the bug class fixed in #205. The role gate itself lives in
+    :class:`MemberService`, which every surface shares; this seam only maps its
+    refusal onto 403 so an unauthorised call never reaches GoTrue.
+    """
+    from hermes_cli.members import require_member_admin
 
     actor = await _comms_resolve_principal(request)
     try:
         require_member_admin(actor)
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
-    admin = load_admin_client()
-    if admin is None:
-        raise HTTPException(
-            status_code=503,
-            detail="Member management is not configured on this server.",
-        )
-    from hermes_cli.access import PrincipalStore
-
-    service = MemberService(PrincipalStore(_comms_app_store()), admin)
-    return actor, service
+    return actor, _comms_user_service(actor)
 
 
 def _comms_member_error(exc: Exception) -> "HTTPException":
-    """Map a member-service error onto the right HTTP status."""
-    from hermes_cli.members import MemberConflictError, MemberError
+    """Map a user-service error onto the right HTTP status."""
+    from hermes_cli.invitations import InvitationError
+    from hermes_cli.members import (
+        MemberConflictError,
+        MemberError,
+        MemberProfileMismatchError,
+    )
 
+    if isinstance(exc, MemberProfileMismatchError):
+        return HTTPException(status_code=409, detail=str(exc))
     if isinstance(exc, MemberConflictError):
         return HTTPException(status_code=409, detail=str(exc))
     if isinstance(exc, PermissionError):
         return HTTPException(status_code=403, detail=str(exc))
-    if isinstance(exc, MemberError):
+    if isinstance(exc, (MemberError, InvitationError)):
         return HTTPException(status_code=400, detail=str(exc))
     return HTTPException(status_code=400, detail=str(exc))
 
 
+def _comms_bool_param(raw: str | None) -> bool | None:
+    """Parse a tri-state query flag: ``true``/``false``, else "no filter"."""
+    value = (raw or "").strip().lower()
+    if value in ("1", "true", "yes"):
+        return True
+    if value in ("0", "false", "no"):
+        return False
+    return None
+
+
+def _comms_int_param(raw: str | None, default: int) -> int:
+    try:
+        return int(str(raw))
+    except (TypeError, ValueError):
+        return default
+
+
 @app.get("/api/comms/members")
 async def comms_list_members(request: Request):
-    """List enrolled members (owner/admin only)."""
+    """One page of this profile's roster (owner/admin only).
+
+    Paging, search and role/activity filters are query parameters resolved in
+    Postgres, so the console's cost does not grow with the roster.
+    """
+    params = request.query_params
+    role = (params.get("role") or "").strip() or None
     try:
-        _actor, service = await _comms_member_service(request)
-        members = await service.list_members(_actor)
+        actor, service = await _comms_member_service(request)
+        page = await service.list_members(
+            actor,
+            limit=_comms_int_param(params.get("limit"), 25),
+            offset=_comms_int_param(params.get("offset"), 0),
+            query=(params.get("q") or "").strip() or None,
+            role=role,
+            active=_comms_bool_param(params.get("active")),
+        )
     except _CommsNotConfigured:
-        return {"configured": False, "members": []}
+        return {"configured": False, "members": [], "total": 0}
     except HTTPException:
         raise
     except Exception as exc:  # noqa: BLE001 — mapped to a clean HTTP status
         raise _comms_member_error(exc)
-    return {"configured": True, "members": [m.as_dict() for m in members]}
+    payload = page.as_dict()
+    payload["configured"] = True
+    payload["profile"] = _comms_administered_profile()
+    return payload
+
+
+@app.get("/api/comms/directory")
+async def comms_directory(request: Request):
+    """The colleague directory — every **enrolled** principal may read it.
+
+    Deliberately not gated on owner/admin: a member who cannot see who else is
+    in the profile cannot address or delegate to them. The rows come from this
+    profile's ``principals``, never ``auth.users`` — accounts are box-wide, so
+    listing accounts would expose people enrolled in other profiles entirely.
+    """
+    params = request.query_params
+    try:
+        principal = await _comms_resolve_principal(request, allow_as=True)
+        service = _comms_user_service(principal)
+        entries, total = await service.directory(
+            principal,
+            limit=_comms_int_param(params.get("limit"), 200),
+            offset=_comms_int_param(params.get("offset"), 0),
+            query=(params.get("q") or "").strip() or None,
+        )
+    except _CommsNotConfigured:
+        return {"configured": False, "entries": [], "total": 0}
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001 — mapped to a clean HTTP status
+        raise _comms_member_error(exc)
+    return {
+        "configured": True,
+        "entries": [e.as_dict() for e in entries],
+        "total": total,
+        "profile": _comms_administered_profile(),
+    }
+
+
+def _comms_administered_profile() -> str:
+    from hermes_cli.members import administered_profile
+
+    return administered_profile()
 
 
 @app.post("/api/comms/members")
 async def comms_create_member(request: Request):
-    """Create a Supabase account and enrol it as a principal (owner/admin)."""
+    """Enrol somebody into this profile (owner/admin only).
+
+    ``profile`` is required and is compared to the administered profile before
+    anything is created: a foreign profile is a 409 pointing at FG-28, refused
+    *before* any GoTrue account exists so a refusal cannot leave an orphan
+    account behind on the box-wide account system.
+
+    No password crosses this boundary in either direction. A new account is made
+    banned with a server-side random password, and the response carries the
+    one-time activation link the invitee redeems.
+    """
     try:
         body = await request.json()
     except Exception:
         body = {}
     body = body if isinstance(body, dict) else {}
     email = str(body.get("email", "")).strip()
-    password = str(body.get("password", ""))
+    profile = str(body.get("profile", "")).strip()
     display = str(body.get("display", "")).strip()
     role = str(body.get("role", "member")).strip() or "member"
     try:
         actor, service = await _comms_member_service(request)
-        principal = await service.create_member(
+        created = await service.create_member(
             actor,
             email=email,
-            password=password,
+            profile=profile,
             display=display,
             role=role,
         )
@@ -3275,14 +3386,75 @@ async def comms_create_member(request: Request):
         raise
     except Exception as exc:  # noqa: BLE001 — mapped to a clean HTTP status
         raise _comms_member_error(exc)
+    return {"ok": True, **created.as_dict()}
+
+
+@app.post("/api/comms/members/import")
+async def comms_import_members(request: Request):
+    """Bulk-enrol from CSV (owner/admin only). Previews unless told to apply.
+
+    ``dry_run`` defaults to true: the caller sees what each row would do before
+    a single account exists, which is the difference between a mis-ordered
+    column being a warning and it being forty invitations to the wrong people.
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    body = body if isinstance(body, dict) else {}
+    csv_text = str(body.get("csv", "") or "")
+    profile = str(body.get("profile", "") or "").strip()
+    dry_run = body.get("dry_run", True) is not False
+    try:
+        actor, service = await _comms_member_service(request)
+        outcome = await service.import_members(
+            actor, csv_text=csv_text, profile=profile, dry_run=dry_run
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001 — mapped to a clean HTTP status
+        raise _comms_member_error(exc)
+    return {"ok": True, **outcome.as_dict()}
+
+
+@app.post("/api/comms/members/{user_id}/invitation")
+async def comms_issue_invitation(user_id: str, request: Request):
+    """Mint (or regenerate) a one-time activation link (owner/admin only).
+
+    Returns the raw token exactly once — it is stored only as a hash, so a lost
+    link is regenerated rather than recovered, and regenerating revokes the
+    previous one.
+    """
+    try:
+        actor, service = await _comms_member_service(request)
+        invitation, token = await service.issue_invitation(
+            actor, user_id=user_id
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001 — mapped to a clean HTTP status
+        raise _comms_member_error(exc)
+    from hermes_cli.invitations import activation_path
+
     return {
         "ok": True,
-        "member": {
-            "user_id": principal.user_id,
-            "display": principal.display,
-            "role": principal.role,
-        },
+        "invitation": invitation.as_dict(),
+        "invitation_token": token,
+        "activation_path": activation_path(token),
     }
+
+
+@app.delete("/api/comms/members/{user_id}/invitation")
+async def comms_revoke_invitation(user_id: str, request: Request):
+    """Revoke every open invitation for a user (owner/admin only)."""
+    try:
+        actor, service = await _comms_member_service(request)
+        revoked = await service.revoke_invitation(actor, user_id=user_id)
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001 — mapped to a clean HTTP status
+        raise _comms_member_error(exc)
+    return {"ok": True, "revoked": revoked}
 
 
 @app.put("/api/comms/members/{user_id}/role")
@@ -3307,37 +3479,134 @@ async def comms_set_member_role(user_id: str, request: Request):
     return {"ok": True, "member": {"user_id": principal.user_id, "role": principal.role}}
 
 
-@app.post("/api/comms/members/{user_id}/password")
-async def comms_set_member_password(user_id: str, request: Request):
-    """Reset a member's temporary password (owner/admin only)."""
+@app.put("/api/comms/members/{user_id}/display")
+async def comms_set_member_display(user_id: str, request: Request):
+    """Rename a member within this profile (owner/admin only)."""
     try:
         body = await request.json()
     except Exception:
         body = {}
-    password = str((body or {}).get("password", ""))
-    if not password:
-        raise HTTPException(status_code=400, detail="password is required")
+    display = str((body or {}).get("display", "")).strip()
+    if not display:
+        raise HTTPException(status_code=400, detail="display is required")
     try:
         actor, service = await _comms_member_service(request)
-        await service.set_member_password(
-            actor, user_id=user_id, password=password
+        principal = await service.set_member_display(
+            actor, user_id=user_id, display=display
         )
     except HTTPException:
         raise
     except Exception as exc:  # noqa: BLE001 — mapped to a clean HTTP status
         raise _comms_member_error(exc)
-    return {"ok": True}
+    return {
+        "ok": True,
+        "member": {"user_id": principal.user_id, "display": principal.display},
+    }
+
+
+@app.post("/api/comms/members/{user_id}/channels")
+async def comms_link_member_channel(user_id: str, request: Request):
+    """Map an inbound channel handle onto an enrolled member (owner/admin)."""
+    from hermes_cli.access import PrincipalStore
+    from hermes_cli.members import link_member_channel
+
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    body = body if isinstance(body, dict) else {}
+    platform = str(body.get("platform", "")).strip()
+    channel_user_id = str(body.get("channel_user_id", "")).strip()
+    if not platform or not channel_user_id:
+        raise HTTPException(
+            status_code=400,
+            detail="platform and channel_user_id are required",
+        )
+    try:
+        actor = await _comms_resolve_principal(request)
+        principal = await link_member_channel(
+            PrincipalStore(_comms_app_store()),
+            actor,
+            user_id=user_id,
+            platform=platform,
+            channel_user_id=channel_user_id,
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001 — mapped to a clean HTTP status
+        raise _comms_member_error(exc)
+    return {
+        "ok": True,
+        "member": {
+            "user_id": principal.user_id,
+            "channels": list(principal.channels),
+        },
+    }
+
+
+@app.get("/api/comms/members/activity")
+async def comms_member_activity(request: Request):
+    """Recent identity administration events (owner/admin only).
+
+    Reads the C5 change log rather than a private table, so the console's
+    activity view and ``hermes changes`` agree on what happened, and no raw
+    invitation token is ever part of the record.
+    """
+    from hermes_cli.identity_audit import list_identity_events
+
+    try:
+        actor, _service = await _comms_member_service(request)
+        events = await list_identity_events(
+            store=_comms_app_store(),
+            principal=actor,
+            limit=_comms_int_param(request.query_params.get("limit"), 50),
+            config=load_config() or {},
+        )
+    except _CommsNotConfigured:
+        return {"configured": False, "events": []}
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001 — mapped to a clean HTTP status
+        raise _comms_member_error(exc)
+    return {"configured": True, "events": events}
+
+
+@app.delete("/api/comms/members/{user_id}")
+async def comms_delete_member(user_id: str, request: Request):
+    """Remove an enrolment, resolving the rows it owns (**owner only**).
+
+    ``strategy=transfer|purge`` is required, because nothing cascades to
+    memories, files or GTS items: without an answer their rows would keep a
+    dangling ``owner_user_id`` that no principal resolves.
+    """
+    params = request.query_params
+    strategy = (params.get("strategy") or "").strip()
+    transfer_to = (params.get("transfer_to") or "").strip() or None
+    try:
+        actor = await _comms_resolve_principal(request)
+        service = _comms_user_service(actor)
+        deleted = await service.delete_member(
+            actor,
+            user_id=user_id,
+            strategy=strategy,
+            transfer_to=transfer_to,
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001 — mapped to a clean HTTP status
+        raise _comms_member_error(exc)
+    return {"ok": True, **deleted.as_dict()}
 
 
 @app.post("/api/comms/members/{user_id}/deactivate")
 async def comms_deactivate_member(user_id: str, request: Request):
-    """Block a member's login without deleting the account (owner/admin)."""
+    """Suspend a member's enrolment in this profile (owner/admin)."""
     return await _comms_set_member_active(user_id, request, active=False)
 
 
 @app.post("/api/comms/members/{user_id}/activate")
 async def comms_activate_member(user_id: str, request: Request):
-    """Restore a deactivated member's login (owner/admin only)."""
+    """Restore a suspended enrolment (owner/admin only)."""
     return await _comms_set_member_active(user_id, request, active=True)
 
 
@@ -3350,6 +3619,128 @@ async def _comms_set_member_active(user_id: str, request: "Request", *, active: 
     except Exception as exc:  # noqa: BLE001 — mapped to a clean HTTP status
         raise _comms_member_error(exc)
     return {"ok": True, "active": active}
+
+
+# --- unauthenticated invitation activation ---------------------------------
+#
+# The two endpoints below are the only user-management routes reachable without
+# a session, because somebody activating an account has no credentials yet. Both
+# answer **identically** whatever happens, so neither can be used to discover
+# whether an email has an account or whether a token was ever valid.
+
+_REDEEM_THROTTLE = None
+
+
+def _redeem_throttle():
+    global _REDEEM_THROTTLE
+    if _REDEEM_THROTTLE is None:
+        from hermes_cli.invitations import (
+            REDEEM_MAX_ATTEMPTS,
+            REDEEM_WINDOW_SECONDS,
+            RedeemThrottle,
+        )
+
+        _REDEEM_THROTTLE = RedeemThrottle(
+            max_attempts=REDEEM_MAX_ATTEMPTS,
+            window_seconds=REDEEM_WINDOW_SECONDS,
+        )
+    return _REDEEM_THROTTLE
+
+
+_NEUTRAL_REDEEM_DETAIL = (
+    "This link cannot be used. Activation links are single-use and expire "
+    "quickly — ask an administrator for a new one."
+)
+
+
+@app.post("/api/auth/invitations/redeem")
+async def auth_redeem_invitation(request: Request):
+    """Activate an account from an invitation token. **Unauthenticated.**
+
+    Every failure — unknown, tampered, expired, already used, revoked,
+    not enrolled, rate-limited — returns the same 400 and the same body. The
+    only distinguishable outcome is a password the policy rejects, which the
+    caller already knows (they typed it) and which does not consume the link.
+    """
+    from hermes_cli.invitations import InvitationError
+
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    body = body if isinstance(body, dict) else {}
+    token = str(body.get("token", "") or "")
+    password = str(body.get("password", "") or "")
+    client_ip = _forwarded_client_ip(request)
+    if not token or not _redeem_throttle().allow(ip=client_ip, token=token):
+        # Indistinguishable from a bad token on purpose: a 429 would tell an
+        # attacker their guess reached a real rate limiter for a real token.
+        raise HTTPException(status_code=400, detail=_NEUTRAL_REDEEM_DETAIL)
+    try:
+        service = _comms_user_service()
+        redeemed = await service.redeem_invitation(
+            token=token, password=password
+        )
+    except InvitationError as exc:
+        # The password policy is the one thing worth saying out loud.
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001 — never leak the reason
+        logger.warning("invitation redeem failed: %s", exc)
+        raise HTTPException(
+            status_code=400, detail=_NEUTRAL_REDEEM_DETAIL
+        ) from exc
+    if not redeemed:
+        raise HTTPException(status_code=400, detail=_NEUTRAL_REDEEM_DETAIL)
+    return {"ok": True}
+
+
+def _forwarded_client_ip(request: "Request") -> str:
+    """The invitee's own IP for the unauthenticated invitation endpoints.
+
+    Every activation arrives through the agent-home BFF, so ``request.client``
+    is the BFF — one address for the whole internet. Per-IP throttling keyed on
+    it is not a control at all: it is a single shared bucket that a CSV import's
+    invitees exhaust for each other, while an attacker gets the same allowance
+    as everybody else combined. So the first ``X-Forwarded-For`` hop is used
+    instead, and **only** when the peer is loopback (the BFF and Caddy are
+    on-box); a header from anywhere else is ignored, because a spoofable key is
+    worse than a coarse one.
+    """
+    peer = (request.client.host if request.client else "").lower()
+    if peer in _LOOPBACK_HOSTS:
+        forwarded = (request.headers.get("X-Forwarded-For") or "").split(",")
+        candidate = forwarded[0].strip()
+        if candidate:
+            return candidate
+    return peer
+
+
+@app.post("/api/auth/invitations/request")
+async def auth_request_invitation(request: Request):
+    """Ask an administrator for a reset link. **Unauthenticated.**
+
+    Always answers ``{"ok": true}``: the honest answers ("no such account",
+    "not enrolled in this profile") are precisely the enumeration oracle a
+    sign-in page must not offer. The link itself is never returned to the
+    requester — it is minted for an admin to hand over — so this cannot be used
+    to take over an account.
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    body = body if isinstance(body, dict) else {}
+    email = str(body.get("email", "") or "")
+    client_ip = _forwarded_client_ip(request)
+    if email and _redeem_throttle().allow(ip=client_ip, token=email):
+        try:
+            service = _comms_user_service()
+            await service.request_password_reset(email=email)
+        except Exception as exc:  # noqa: BLE001 — never leak the reason
+            logger.warning("password reset request failed: %s", exc)
+    return {"ok": True}
 
 
 @app.get("/api/comms/notifications")
@@ -13308,6 +13699,7 @@ async def list_profiles_endpoint():
 @app.post("/api/profiles")
 async def create_profile_endpoint(body: ProfileCreate):
     from hermes_cli import profiles as profiles_mod
+    from hermes_cli.datastore import SchemaOwnershipError
     explicit_source = (body.clone_from or "").strip()
     if explicit_source:
         # Duplicating a specific profile: clone its config/skills/SOUL (or full
@@ -13347,6 +13739,11 @@ async def create_profile_endpoint(body: ProfileCreate):
         collision = profiles_mod.check_alias_collision(body.name)
         if not collision:
             profiles_mod.create_wrapper_script(body.name)
+    except SchemaOwnershipError as e:
+        # FG-27 Layer 2: the name would land on another profile's app schema.
+        # 409 rather than 400 — the request is well-formed, the conflict is
+        # with existing state.
+        raise HTTPException(status_code=409, detail=str(e))
     except (ValueError, FileExistsError, FileNotFoundError) as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:

@@ -151,6 +151,7 @@ class FileAsset:
     document_id: Optional[str]
     remembered_at: Optional[datetime]
     remembered_by: Optional[str]
+    inbound_item_id: Optional[str] = None
 
     @property
     def remembered(self) -> bool:
@@ -181,6 +182,7 @@ class FileAsset:
             ),
             "remembered_by": self.remembered_by,
             "remembered": self.remembered,
+            "inbound_item_id": self.inbound_item_id,
         }
 
 
@@ -205,6 +207,9 @@ def _row_to_asset(row: Any) -> FileAsset:
         document_id=str(row["document_id"]) if row["document_id"] else None,
         remembered_at=row["remembered_at"],
         remembered_by=row["remembered_by"],
+        inbound_item_id=(
+            str(row["inbound_item_id"]) if row["inbound_item_id"] else None
+        ),
     )
 
 

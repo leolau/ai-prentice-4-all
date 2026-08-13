@@ -8,6 +8,17 @@ Provides bounded, file-backed memory that persists across sessions. Two stores:
   - USER.md: what the agent knows about the user (preferences, communication style,
     expectations, workflow habits)
 
+FG-24 splits those by *what the fact is about* once a principal is resolved,
+because one person may participate in several profiles (a founder who is CEO,
+CTO and CFO at once):
+
+  - shared      $HERMES_HOME/memories/MEMORY.md            profile-wide, owner/admin writes
+  - memory      $HERMES_HOME/memories/users/<uid>/MEMORY.md participation (person x profile)
+  - user        <root>/persons/<uid>/USER.md                person, shared across profiles
+
+With no principal (local CLI) the two original files are used exactly as
+before and no shared block is rendered, so the prompt is byte-identical.
+
 Both are injected into the system prompt as a frozen snapshot at session start.
 Mid-session writes update files on disk immediately (durable) but do NOT change
 the system prompt -- this preserves the prefix cache for the entire session.
@@ -28,6 +39,7 @@ import logging
 import os
 import tempfile
 import time
+import uuid
 from contextlib import contextmanager
 from pathlib import Path
 from hermes_constants import get_hermes_home
@@ -52,11 +64,73 @@ logger = logging.getLogger(__name__)
 # (HERMES_HOME env var changes) are always respected.  The old module-level
 # constant was cached at import time and could go stale if a profile switch
 # happened after the first import.
-def get_memory_dir() -> Path:
-    """Return the profile-scoped memories directory."""
-    return get_hermes_home() / "memories"
+def get_memory_dir(user_id: Optional[str] = None) -> Path:
+    """Return a memories directory (FG-24).
+
+    ``user_id=None`` → the profile-scoped shared directory
+    (``$HERMES_HOME/memories``), i.e. exactly the pre-FG-24 path, so every
+    existing caller keeps its behaviour.
+
+    A ``user_id`` → that principal's **participation** directory
+    (``$HERMES_HOME/memories/users/<user_id>``): working memory for this
+    person in *this* profile only.  Because ``$HERMES_HOME`` is
+    profile-scoped, the participation (person × profile) is the unit of
+    isolation with no further keying.
+
+    ``user_id`` is validated with the C1 charset guard (no separators, no
+    traversal) and the resolved path is asserted to stay under
+    ``memories/users/`` — fail-closed defence in depth.
+    """
+    base = get_hermes_home() / "memories"
+    if user_id is None:
+        return base
+    return _contained_user_dir(base / "users", user_id)
+
+
+def get_person_memory_dir(user_id: str) -> Path:
+    """Return a person's **instance-level** identity directory (FG-24).
+
+    Person-level identity ("who they are, how they prefer to work") is shared
+    across every participation of that person on this instance: in a one-person
+    company the founder participates in several profiles, and storing their
+    identity once per profile would produce N copies that drift apart.
+
+    The directory is derived from the *effective* Hermes home (so a multiplexed
+    gateway turn scoped with ``set_hermes_home_override()`` resolves it too):
+    for ``<root>/profiles/<name>`` it is ``<root>/persons/<user_id>``, and for
+    a non-profile home ``<home>/persons/<user_id>``.
+    """
+    home = get_hermes_home()
+    root = home.parent.parent if home.parent.name == "profiles" else home
+    return _contained_user_dir(root / "persons", user_id)
+
+
+def _contained_user_dir(parent: Path, user_id: str) -> Path:
+    """Return ``parent/<user_id>``, refusing anything that escapes ``parent``."""
+    from hermes_cli.access import validate_user_id
+
+    candidate = parent / validate_user_id(user_id)
+    # Belt-and-braces over the charset guard: a resolved path must still be a
+    # direct child of ``parent``.  ``resolve()`` collapses ``..`` and symlinks.
+    resolved = candidate.resolve()
+    parent_resolved = parent.resolve()
+    if resolved.parent != parent_resolved or resolved == parent_resolved:
+        raise ValueError(
+            f"Refusing memory path for user_id {user_id!r}: {resolved} escapes {parent_resolved}"
+        )
+    return candidate
 
 ENTRY_DELIMITER = "\n§\n"
+
+#: Write targets. ``memory``/``user`` are the principal's own tiers;
+#: ``shared`` is the profile-wide block, writable by owner/admin only.
+TARGETS = ("memory", "user", "shared")
+
+#: Roles allowed to write the profile-wide shared block (FG-24 §4).
+SHARED_WRITE_ROLES = ("owner", "admin")
+
+#: Local audit log for refused shared-block writes (C5-shaped rows).
+MEMORY_AUDIT_LOG = "memory_authority.jsonl"
 
 
 # ---------------------------------------------------------------------------
@@ -110,6 +184,82 @@ def _drift_error(path: "Path", bak_path: str) -> Dict[str, Any]:
     }
 
 
+def record_unresolved_write_denied(target: str) -> Dict[str, Any]:
+    """Audit a write refused because nobody could be attributed (FG-24).
+
+    Shaped like the shared-write refusal so both land in one ledger: an
+    operator asking "who has been refused memory writes?" gets one answer.
+    """
+    return _record_memory_refusal(
+        kind="memory_unresolved_write_denied",
+        target=target,
+        actor_user_id="unresolved",
+        actor_role=None,
+        summary=(
+            f"Refused {target!r} memory write from a session with no resolved "
+            f"principal while several people are enrolled"
+        ),
+    )
+
+
+def record_shared_write_denied(
+    *,
+    actor_user_id: str,
+    actor_role: Optional[str],
+) -> Dict[str, Any]:
+    """Audit a refused shared-block write, C5-shaped (FG-24 §4).
+
+    Reuses the durable-JSONL + pluggable-sink emitter the C7 Core write-guard
+    already uses, so the refusal is recorded with no DB requirement and is
+    forwarded to the FG-12 change log / FG-16 trace when those sinks are
+    registered. Never raises into the write path.
+    """
+    return _record_memory_refusal(
+        kind="memory_shared_write_denied",
+        target="shared",
+        actor_user_id=actor_user_id,
+        actor_role=actor_role,
+        summary=(
+            f"Refused shared-memory write by {actor_user_id} "
+            f"(role {actor_role!r}; owner/admin only)"
+        ),
+    )
+
+
+def _record_memory_refusal(
+    *,
+    kind: str,
+    target: str,
+    actor_user_id: str,
+    actor_role: Optional[str],
+    summary: str,
+) -> Dict[str, Any]:
+    event = {
+        "id": f"chg_{uuid.uuid4().hex}",
+        "ts": time.time(),
+        "actor_user_id": actor_user_id,
+        "target_kind": "data",
+        "op": {
+            "kind": kind,
+            "target": target,
+            "actor_role": actor_role,
+        },
+        "inverse_op": None,
+        "reversible": False,
+        "approval_ref": None,
+        "backup_ref": None,
+        "kind": kind,
+        "summary": summary,
+    }
+    try:
+        from agent.core_boundary import emit_audit_event
+
+        return emit_audit_event(event, log_name=MEMORY_AUDIT_LOG)
+    except Exception:  # pragma: no cover - audit must never break a refusal
+        logger.warning("Shared-memory refusal audit could not be written")
+        return event
+
+
 class MemoryStore:
     """
     Bounded curated memory with file persistence. One instance per AIAgent.
@@ -127,13 +277,46 @@ class MemoryStore:
     # turn to budget exhaustion and suppress the user's reply (issue #42405).
     _MAX_CONSOLIDATION_FAILURES_PER_TURN = 3
 
-    def __init__(self, memory_char_limit: int = 2200, user_char_limit: int = 1375):
+    def __init__(
+        self,
+        memory_char_limit: int = 2200,
+        user_char_limit: int = 1375,
+        shared_memory_char_limit: int = 2200,
+        user_id: Optional[str] = None,
+        role: Optional[str] = None,
+        unresolved_principal: bool = False,
+    ):
         self.memory_entries: List[str] = []
         self.user_entries: List[str] = []
+        self.shared_entries: List[str] = []
         self.memory_char_limit = memory_char_limit
         self.user_char_limit = user_char_limit
+        self.shared_memory_char_limit = shared_memory_char_limit
+        # FG-24 scope. ``user_id is None`` → the pre-FG-24 single-principal
+        # store: ``memory``/``user`` are the profile's own files and there is
+        # no separate shared block.  With a principal bound, ``memory`` is that
+        # participation's working memory, ``user`` is the person's identity
+        # (instance-level), and ``shared`` is the profile-wide block.
+        self._user_id: Optional[str] = None
+        self._role: Optional[str] = None
+        # Set when the caller tried to resolve a principal for this session,
+        # failed, and *several* people are enrolled.  Then the unscoped files
+        # are not "this user's" — they are the profile-wide shared block plus a
+        # person block belonging to nobody, so writing them is refused rather
+        # than attributed to whoever happens to be reading later.  Reads still
+        # work: the session sees what the profile shares, which is correct.
+        self._unresolved_principal = bool(unresolved_principal) and not user_id
+        if user_id:
+            from hermes_cli.access import normalize_role, validate_user_id
+
+            self._user_id = validate_user_id(user_id)
+            self._role = normalize_role(role)
         # Frozen snapshot for system prompt -- set once at load_from_disk()
-        self._system_prompt_snapshot: Dict[str, str] = {"memory": "", "user": ""}
+        self._system_prompt_snapshot: Dict[str, str] = {
+            "memory": "",
+            "user": "",
+            "shared": "",
+        }
         # Per-turn counter of failed at-capacity consolidation attempts; reset
         # at each turn boundary by reset_consolidation_failures() (#42405).
         self._consolidation_failures = 0
@@ -185,24 +368,72 @@ class MemoryStore:
         mem_dir = get_memory_dir()
         mem_dir.mkdir(parents=True, exist_ok=True)
 
-        self.memory_entries = self._read_file(mem_dir / "MEMORY.md")
-        self.user_entries = self._read_file(mem_dir / "USER.md")
+        if self._user_id is not None:
+            self._migrate_owner_profile()
+
+        self.memory_entries = self._read_file(self._path_for("memory"))
+        self.user_entries = self._read_file(self._path_for("user"))
+        self.shared_entries = (
+            self._read_file(self._path_for("shared")) if self._user_id else []
+        )
 
         # Deduplicate entries (preserves order, keeps first occurrence)
         self.memory_entries = list(dict.fromkeys(self.memory_entries))
         self.user_entries = list(dict.fromkeys(self.user_entries))
+        self.shared_entries = list(dict.fromkeys(self.shared_entries))
 
         # Sanitize entries for the system-prompt snapshot only.  Live state
         # (memory_entries / user_entries) keeps the raw text so the user
         # can see + remove poisoned entries via the memory tool.
         sanitized_memory = self._sanitize_entries_for_snapshot(self.memory_entries, "MEMORY.md")
         sanitized_user = self._sanitize_entries_for_snapshot(self.user_entries, "USER.md")
+        sanitized_shared = self._sanitize_entries_for_snapshot(
+            self.shared_entries, "MEMORY.md (shared)"
+        )
 
-        # Capture frozen snapshot for system prompt injection
+        # Capture frozen snapshot for system prompt injection.  ``shared`` is
+        # empty for an unscoped store, so the rendered prompt is byte-identical
+        # to the pre-FG-24 output.
         self._system_prompt_snapshot = {
             "memory": self._render_block("memory", sanitized_memory),
             "user": self._render_block("user", sanitized_user),
+            "shared": self._render_block("shared", sanitized_shared),
         }
+
+    def _migrate_owner_profile(self) -> None:
+        """One-shot, idempotent move of the owner's instance ``USER.md`` (FG-24).
+
+        Before FG-24 the profile-scoped ``memories/USER.md`` described *the
+        owner*.  Person-level identity now lives at
+        ``<root>/persons/<user_id>/USER.md``, so the first owner-scoped session
+        copies the file there and keeps the original as
+        ``USER.md.pre-fg24``.  Idempotent: the rename means the source no
+        longer exists on the second run, and an existing person file is never
+        overwritten.  Runs only for the owner — a member's session must never
+        adopt the owner's profile as its own.
+        """
+        if self._role != "owner":
+            return
+        legacy = get_memory_dir() / "USER.md"
+        if not legacy.exists():
+            return
+        person_file = self._path_for("user")
+        try:
+            if person_file.exists() and person_file.read_text(encoding="utf-8").strip():
+                return
+            entries = self._read_file(legacy)
+            if not entries:
+                return
+            person_file.parent.mkdir(parents=True, exist_ok=True)
+            self._write_file(person_file, entries)
+            legacy.rename(legacy.with_suffix(legacy.suffix + ".pre-fg24"))
+        except (OSError, RuntimeError, UnicodeDecodeError) as err:
+            logger.warning("FG-24 owner USER.md migration skipped: %s", err)
+            return
+        logger.info(
+            "FG-24: migrated owner USER.md to %s (original kept as %s)",
+            person_file, legacy.name + ".pre-fg24",
+        )
 
     @staticmethod
     def _sanitize_entries_for_snapshot(entries: List[str], filename: str) -> List[str]:
@@ -277,12 +508,33 @@ class MemoryStore:
                     pass
             fd.close()
 
-    @staticmethod
-    def _path_for(target: str) -> Path:
-        mem_dir = get_memory_dir()
+    @property
+    def user_id(self) -> Optional[str]:
+        """The bound C1 principal, or ``None`` for an unscoped store (FG-24)."""
+        return self._user_id
+
+    @property
+    def role(self) -> Optional[str]:
+        """The bound principal's C2 role, or ``None`` when unscoped."""
+        return self._role
+
+    def _path_for(self, target: str) -> Path:
+        """Resolve the file backing ``target`` for this store's scope (FG-24).
+
+        Unscoped (``user_id is None``) the two files are the profile's own, as
+        before.  Scoped to a principal:
+
+        * ``memory`` → ``memories/users/<user_id>/MEMORY.md`` (participation)
+        * ``user``   → ``<root>/persons/<user_id>/USER.md`` (person)
+        * ``shared`` → ``memories/MEMORY.md`` (profile-wide)
+        """
+        if target == "shared":
+            return get_memory_dir() / "MEMORY.md"
+        if self._user_id is None:
+            return get_memory_dir() / ("USER.md" if target == "user" else "MEMORY.md")
         if target == "user":
-            return mem_dir / "USER.md"
-        return mem_dir / "MEMORY.md"
+            return get_person_memory_dir(self._user_id) / "USER.md"
+        return get_memory_dir(self._user_id) / "MEMORY.md"
 
     def _reload_target(self, target: str, *, skip_drift: bool = False) -> Optional[str]:
         """Re-read entries from disk into in-memory state.
@@ -308,17 +560,22 @@ class MemoryStore:
 
     def save_to_disk(self, target: str):
         """Persist entries to the appropriate file. Called after every mutation."""
-        get_memory_dir().mkdir(parents=True, exist_ok=True)
-        self._write_file(self._path_for(target), self._entries_for(target))
+        path = self._path_for(target)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self._write_file(path, self._entries_for(target))
 
     def _entries_for(self, target: str) -> List[str]:
         if target == "user":
             return self.user_entries
+        if target == "shared":
+            return self.shared_entries
         return self.memory_entries
 
     def _set_entries(self, target: str, entries: List[str]):
         if target == "user":
             self.user_entries = entries
+        elif target == "shared":
+            self.shared_entries = entries
         else:
             self.memory_entries = entries
 
@@ -331,10 +588,69 @@ class MemoryStore:
     def _char_limit(self, target: str) -> int:
         if target == "user":
             return self.user_char_limit
+        if target == "shared":
+            return self.shared_memory_char_limit
         return self.memory_char_limit
+
+    def authorize_write(self, target: str) -> Optional[Dict[str, Any]]:
+        """Return a refusal dict when this store may not write ``target``.
+
+        Only the profile-wide ``shared`` block is restricted: it is the one
+        block that lands in *other* principals' prompts, so a member or viewer
+        must not be able to talk the agent into writing it on their behalf.
+        The refusal is explicit (never a silent redirect to the principal's own
+        block) and is audited C5-shaped.
+        """
+        if self._unresolved_principal:
+            record_unresolved_write_denied(target)
+            return {
+                "success": False,
+                "done": True,
+                "error": (
+                    "Write denied: this session has no resolved principal and "
+                    "several people are enrolled, so there is no memory that is "
+                    "yours to write — the unscoped files are the profile's "
+                    "shared block, which every enrolled person reads. Tell the "
+                    "user to run 'hermes member local-principal --set "
+                    "<user_id>' once (or to message through their linked "
+                    "channel) and the fact can be saved to the right person. "
+                    "This attempt has been audited."
+                ),
+            }
+        if target != "shared":
+            return None
+        if self._user_id is None:
+            return {
+                "success": False,
+                "done": True,
+                "error": (
+                    "target='shared' needs a resolved principal, and this session "
+                    "has none. In a single-principal session target='memory' IS "
+                    "the profile's shared block — write there instead."
+                ),
+            }
+        if self._role in SHARED_WRITE_ROLES:
+            return None
+        record_shared_write_denied(actor_user_id=self._user_id, actor_role=self._role)
+        return {
+            "success": False,
+            "done": True,
+            "error": (
+                f"Write denied: the shared memory block is writable by "
+                f"{' or '.join(SHARED_WRITE_ROLES)} only, and you are "
+                f"'{self._role}'. Your own curated facts go to target='memory' "
+                f"(this profile) or target='user' (who you are); ask the owner "
+                f"to record anything the whole profile must know. This attempt "
+                f"has been audited."
+            ),
+        }
 
     def add(self, target: str, content: str) -> Dict[str, Any]:
         """Append a new entry. Returns error if it would exceed the char limit."""
+        refusal = self.authorize_write(target)
+        if refusal:
+            return refusal
+
         content = content.strip()
         if not content:
             return {"success": False, "error": "Content cannot be empty."}
@@ -387,6 +703,10 @@ class MemoryStore:
 
     def replace(self, target: str, old_text: str, new_content: str) -> Dict[str, Any]:
         """Find entry containing old_text substring, replace it with new_content."""
+        refusal = self.authorize_write(target)
+        if refusal:
+            return refusal
+
         old_text = old_text.strip()
         new_content = new_content.strip()
         if not old_text:
@@ -456,6 +776,10 @@ class MemoryStore:
 
     def remove(self, target: str, old_text: str) -> Dict[str, Any]:
         """Remove the entry containing old_text substring."""
+        refusal = self.authorize_write(target)
+        if refusal:
+            return refusal
+
         old_text = old_text.strip()
         if not old_text:
             return {"success": False, "error": "old_text cannot be empty."}
@@ -507,6 +831,10 @@ class MemoryStore:
         the net result would exceed the char limit, NOTHING is written and an
         error is returned describing the first failure plus the live state.
         """
+        refusal = self.authorize_write(target)
+        if refusal:
+            return refusal
+
         if not operations:
             return {"success": False, "error": "operations list is empty."}
 
@@ -620,6 +948,8 @@ class MemoryStore:
         state. Mid-session writes do not affect this. This keeps the system
         prompt stable across all turns, preserving the prefix cache.
 
+        ``target`` is a snapshot key: ``shared``, ``memory`` or ``user``.
+
         Returns None if the snapshot is empty (no entries at load time).
         """
         block = self._system_prompt_snapshot.get(target, "")
@@ -673,6 +1003,11 @@ class MemoryStore:
 
         if target == "user":
             header = f"USER PROFILE (who the user is) [{pct}% — {current:,}/{limit:,} chars]"
+        elif target == "shared":
+            header = (
+                f"SHARED MEMORY (known by everyone in this profile) "
+                f"[{pct}% — {current:,}/{limit:,} chars]"
+            )
         else:
             header = f"MEMORY (your personal notes) [{pct}% — {current:,}/{limit:,} chars]"
 
@@ -788,7 +1123,10 @@ class MemoryStore:
             raise RuntimeError(f"Failed to write memory file {path}: {e}")
 
 
-def load_on_disk_store() -> "MemoryStore":
+def load_on_disk_store(
+    user_id: Optional[str] = None,
+    role: Optional[str] = None,
+) -> "MemoryStore":
     """Build a fresh on-disk :class:`MemoryStore`, honoring configured char limits.
 
     Use this from any context that has no live agent (the messaging gateway, the
@@ -803,25 +1141,41 @@ def load_on_disk_store() -> "MemoryStore":
     """
     memory_char_limit = 2200
     user_char_limit = 1375
+    shared_memory_char_limit = 2200
     try:
         from hermes_cli.config import load_config
 
         mem_cfg = (load_config() or {}).get("memory", {}) or {}
         memory_char_limit = int(mem_cfg.get("memory_char_limit", memory_char_limit))
         user_char_limit = int(mem_cfg.get("user_char_limit", user_char_limit))
+        shared_memory_char_limit = int(
+            mem_cfg.get("shared_memory_char_limit", shared_memory_char_limit)
+        )
     except Exception:
         pass  # config optional — fall back to defaults rather than break /memory
 
     store = MemoryStore(
         memory_char_limit=memory_char_limit,
         user_char_limit=user_char_limit,
+        shared_memory_char_limit=shared_memory_char_limit,
+        user_id=user_id,
+        role=role,
     )
     store.load_from_disk()
     return store
 
 
+def _write_gate_label(target: str) -> str:
+    """Human-readable name of ``target`` for approval prompts."""
+    return {
+        "user": "user profile",
+        "shared": "shared memory",
+    }.get(target, "memory")
+
+
 def _apply_write_gate(action: str, target: str, content: Optional[str],
-                      old_text: Optional[str]) -> Optional[str]:
+                      old_text: Optional[str],
+                      store: "MemoryStore") -> Optional[str]:
     """Evaluate the memory write gate. Returns a JSON tool-result string when
     the write should NOT proceed normally (blocked or staged), or None when the
     caller should perform the real write.
@@ -839,7 +1193,7 @@ def _apply_write_gate(action: str, target: str, content: Optional[str],
         return None
 
     # Build a small inline summary/detail for the foreground approval prompt.
-    label = "user profile" if target == "user" else "memory"
+    label = _write_gate_label(target)
     if action == "add":
         summary = f"add to {label}"
         detail = content or ""
@@ -859,11 +1213,17 @@ def _apply_write_gate(action: str, target: str, content: Optional[str],
         return tool_error(decision.message, success=False)
 
     # stage
+    # The staged payload carries the scope it was authored in: approval can
+    # happen later from a context with no principal (Desktop GUI, gateway
+    # slash command), and a participation write must not land in the
+    # profile-wide files just because the applier is unscoped.
     payload = {
         "action": action,
         "target": target,
         "content": content,
         "old_text": old_text,
+        "user_id": store.user_id,
+        "role": store.role,
     }
     record = wa.stage_write(
         wa.MEMORY, payload,
@@ -877,7 +1237,8 @@ def _apply_write_gate(action: str, target: str, content: Optional[str],
     )
 
 
-def _apply_batch_write_gate(target: str, operations: List[Dict[str, Any]]) -> Optional[str]:
+def _apply_batch_write_gate(target: str, operations: List[Dict[str, Any]],
+                            store: "MemoryStore") -> Optional[str]:
     """Evaluate the write gate for a batch of memory operations.
 
     Returns a JSON tool-result string when the batch should NOT proceed
@@ -889,7 +1250,7 @@ def _apply_batch_write_gate(target: str, operations: List[Dict[str, Any]]) -> Op
     except Exception:
         return None
 
-    label = "user profile" if target == "user" else "memory"
+    label = _write_gate_label(target)
     summary = f"apply {len(operations)} op(s) to {label}"
     detail_lines = []
     for op in operations:
@@ -911,7 +1272,13 @@ def _apply_batch_write_gate(target: str, operations: List[Dict[str, Any]]) -> Op
     if decision.blocked:
         return tool_error(decision.message, success=False)
 
-    payload = {"action": "batch", "target": target, "operations": operations}
+    payload = {
+        "action": "batch",
+        "target": target,
+        "operations": operations,
+        "user_id": store.user_id,
+        "role": store.role,
+    }
     record = wa.stage_write(
         wa.MEMORY, payload,
         summary=f"{summary}: {detail[:120]}",
@@ -977,14 +1344,23 @@ def memory_tool(
     if store is None:
         return tool_error("Memory is not available. It may be disabled in config or this environment.", success=False)
 
-    if target not in {"memory", "user"}:
-        return tool_error(f"Invalid target '{target}'. Use 'memory' or 'user'.", success=False)
+    if target not in TARGETS:
+        return tool_error(
+            f"Invalid target '{target}'. Use {', '.join(repr(t) for t in TARGETS)}.",
+            success=False,
+        )
+
+    # Authority BEFORE the approval gate: a refused shared write must be
+    # refused outright and audited now, not staged and rejected at approve time.
+    refusal = store.authorize_write(target)
+    if refusal:
+        return json.dumps(refusal, ensure_ascii=False)
 
     # --- Batch path -------------------------------------------------------
     if operations:
         if not isinstance(operations, list):
             return tool_error("operations must be a list of {action, content?, old_text?} objects.", success=False)
-        gate_result = _apply_batch_write_gate(target, operations)
+        gate_result = _apply_batch_write_gate(target, operations, store)
         if gate_result is not None:
             return gate_result
         result = store.apply_batch(target, operations)
@@ -1009,7 +1385,7 @@ def memory_tool(
 
     # Approval gate: when on, stages the write (background/gateway) or prompts
     # inline (interactive CLI); when off (default) passes straight through.
-    gate_result = _apply_write_gate(action, target, content, old_text)
+    gate_result = _apply_write_gate(action, target, content, old_text, store)
     if gate_result is not None:
         return gate_result
 
@@ -1037,8 +1413,19 @@ def apply_memory_pending(payload: Dict[str, Any], store: "MemoryStore") -> Dict[
     """Replay a staged memory write directly against the store, bypassing the
     write gate. Called by the /memory approve handler.
 
+    The write gate is bypassed; the FG-24 *scope* is not.  A payload staged by
+    a principal-scoped session is re-applied against a store rebuilt for that
+    same principal, so approving from an unscoped context (Desktop GUI, gateway
+    slash command) can neither leak a participation fact into the profile-wide
+    files nor lose an owner's shared write.  Authority still holds: a member's
+    ``target='shared'`` write is refused at staging time, so no such payload
+    can exist.
+
     Returns the store's result dict.
     """
+    staged_user_id = payload.get("user_id") or None
+    if staged_user_id != store.user_id:
+        store = load_on_disk_store(staged_user_id, payload.get("role"))
     action = payload.get("action")
     target = payload.get("target", "memory")
     content = payload.get("content") or ""
@@ -1073,8 +1460,11 @@ MEMORY_SCHEMA = {
         "memory stops the user repeating themselves.\n\n"
         "IF FULL: an add is rejected with the current entries shown. Reissue as ONE batch that "
         "removes or shortens enough stale entries and adds the new one together.\n\n"
-        "TARGETS: 'user' = who the user is (name, role, preferences, style). 'memory' = your "
-        "notes (environment, conventions, tool quirks, lessons).\n\n"
+        "TARGETS: 'user' = who the user is (name, role, preferences, style) — follows them "
+        "across every profile they work in. 'memory' = your notes for THIS job/profile "
+        "(environment, conventions, tool quirks, lessons); never visible in another "
+        "profile. 'shared' = what everyone in this profile knows (org/class knowledge) — "
+        "owner/admin only, refused for anyone else.\n\n"
         "SKIP: trivial/obvious info, easily re-discovered facts, raw data dumps, task progress, "
         "completed-work logs, temporary TODO state (use session_search for those). Reusable "
         "procedures belong in a skill, not memory."
@@ -1089,8 +1479,13 @@ MEMORY_SCHEMA = {
             },
             "target": {
                 "type": "string",
-                "enum": ["memory", "user"],
-                "description": "Which memory store: 'memory' for personal notes, 'user' for user profile."
+                "enum": ["memory", "user", "shared"],
+                "description": (
+                    "Which memory store: 'memory' for your notes about this "
+                    "profile's work, 'user' for who the user is (shared across "
+                    "their profiles), 'shared' for profile-wide knowledge "
+                    "(owner/admin only)."
+                ),
             },
             "content": {
                 "type": "string",

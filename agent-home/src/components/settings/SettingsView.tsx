@@ -2,9 +2,10 @@
 
 import { useEffect, useState } from "react";
 
+import { EntityGoalSection } from "@/components/settings/EntityGoalSection";
 import { BusyRegion } from "@/components/ui/BusyRegion";
 import { Spinner } from "@/components/ui/Spinner";
-import type { SessionTag } from "@/types";
+import type { EntityGoal, SessionTag } from "@/types";
 import {
   applyTheme,
   DEFAULT_THEME,
@@ -37,9 +38,16 @@ const TAG_DOT: Record<string, string> = {
 /**
  * The Settings page body. Currently provides:
  * - A UI theme selector (applies immediately, persists in localStorage).
+ * - The entity goal — what the whole system is for (owner-editable).
  * - A Tags management section (create / list / delete tags).
  */
-export function SettingsView() {
+export function SettingsView({
+  entityGoal = null,
+  entityGoalReadOnly = false,
+}: {
+  entityGoal?: EntityGoal | null;
+  entityGoalReadOnly?: boolean;
+} = {}) {
   const [theme, setTheme] = usePersistentState<ThemeId>(
     THEME_STORAGE_KEY,
     DEFAULT_THEME,
@@ -99,6 +107,8 @@ export function SettingsView() {
           })}
         </div>
       </section>
+
+      <EntityGoalSection goal={entityGoal} readOnly={entityGoalReadOnly} />
 
       <TagsSection />
     </div>

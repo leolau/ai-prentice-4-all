@@ -9,14 +9,17 @@ fork inherits the cached prompt verbatim.
 
 Three tiers are joined with ``\\n\\n``:
 
-* ``stable``   — identity (SOUL.md or DEFAULT_AGENT_IDENTITY), tool
-  guidance, computer-use guidance, nous subscription block, tool-use
-  enforcement guidance + per-model operational guidance, skills prompt,
-  alibaba model-name workaround, environment hints, platform hints.
+* ``stable``   — identity (SOUL.md or DEFAULT_AGENT_IDENTITY), the
+  ``[PURPOSE]`` block (FG-29: entity/profile goals only — see
+  ``agent/purpose_prompt.py`` for why short-lived goals may never appear
+  here), tool guidance, computer-use guidance, nous subscription block,
+  tool-use enforcement guidance + per-model operational guidance, skills
+  prompt, alibaba model-name workaround, environment hints, platform hints.
 * ``context``  — caller-supplied ``system_message`` plus context files
   (AGENTS.md / .cursorrules / etc.) discovered under ``TERMINAL_CWD``.
-* ``volatile`` — memory snapshot, USER.md profile, external memory
-  provider block, timestamp/session/model/provider line.
+* ``volatile`` — memory snapshot, USER.md profile, the participant's
+  own long-lived goal, external memory provider block,
+  timestamp/session/model/provider line.
 
 Pure helpers that read the agent's state.  AIAgent keeps thin forwarders.
 """
@@ -26,6 +29,7 @@ from __future__ import annotations
 import json
 from typing import Any, Dict, List, Optional
 
+from agent import purpose_prompt
 from agent.prompt_builder import (
     DEFAULT_AGENT_IDENTITY,
     GOOGLE_MODEL_OPERATIONAL_GUIDANCE,
@@ -160,6 +164,16 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
     if not _soul_loaded:
         # Fallback to hardcoded identity
         stable_parts.append(DEFAULT_AGENT_IDENTITY)
+
+    # Purpose (FG-29) — the entity goal and this profile's sub-goal, straight
+    # after identity: what the agent is for belongs beside what it is. Only
+    # tiers measured in quarters and years reach this block, and it is read
+    # from a once-per-session snapshot on disk rather than from the registry,
+    # so a goal edited mid-conversation cannot change these bytes and cannot
+    # cost the user a cache miss. Operational goals stay tool-appended.
+    _purpose_block = purpose_prompt.stable_prompt_block()
+    if _purpose_block:
+        stable_parts.append(_purpose_block)
 
     # Pointer to the hermes-agent skill + docs for user questions about Hermes itself.
     stable_parts.append(HERMES_AGENT_HELP_GUIDANCE)
@@ -425,14 +439,27 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
 
     if agent._memory_store:
         if agent._memory_enabled:
-            mem_block = agent._memory_store.format_for_system_prompt("memory")
-            if mem_block:
-                volatile_parts.append(mem_block)
+            # FG-24 order: what everyone in the profile knows, then what this
+            # participation knows.  ``shared`` is empty unless a principal is
+            # bound, so an unscoped session renders exactly as before.
+            for key in ("shared", "memory"):
+                mem_block = agent._memory_store.format_for_system_prompt(key)
+                if mem_block:
+                    volatile_parts.append(mem_block)
         # USER.md is always included when enabled.
         if agent._user_profile_enabled:
             user_block = agent._memory_store.format_for_system_prompt("user")
             if user_block:
                 volatile_parts.append(user_block)
+
+    # The participant's own long-lived goal sits beside USER.md rather than in
+    # the stable tier: it lives for months, but it belongs to whoever is
+    # talking, and the volatile tier is already the per-participant one.
+    _participant_block = purpose_prompt.participant_prompt_block(
+        agent._internal_user_id
+    )
+    if _participant_block:
+        volatile_parts.append(_participant_block)
 
     # External memory provider system prompt block (additive to built-in)
     if agent._memory_manager:

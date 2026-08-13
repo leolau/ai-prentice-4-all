@@ -20,10 +20,12 @@ function SideLink({
   item,
   active,
   collapsed,
+  badgeCount,
 }: {
   item: NavItem;
   active: boolean;
   collapsed: boolean;
+  badgeCount?: number;
 }) {
   return (
     <li>
@@ -45,11 +47,18 @@ function SideLink({
         {collapsed ? (
           <span className="sr-only">{item.label}</span>
         ) : (
-          <span className="flex min-w-0 flex-col">
-            <span className="truncate">{item.label}</span>
-            {item.hint ? (
-              <span className="truncate text-xs text-[var(--color-muted)]">
-                {item.hint}
+          <span className="flex min-w-0 flex-1 items-center justify-between gap-2">
+            <span className="flex min-w-0 flex-col">
+              <span className="truncate">{item.label}</span>
+              {item.hint ? (
+                <span className="truncate text-xs text-[var(--color-muted)]">
+                  {item.hint}
+                </span>
+              ) : null}
+            </span>
+            {badgeCount ? (
+              <span className="shrink-0 rounded-full bg-[var(--color-accent)] px-1.5 text-[10px] leading-4 text-[var(--color-surface)]">
+                {badgeCount}
               </span>
             ) : null}
           </span>
@@ -59,7 +68,7 @@ function SideLink({
   );
 }
 
-export function SideNav() {
+export function SideNav({ badgeCounts = {} }: { badgeCounts?: Record<string, number> }) {
   const pathname = usePathname();
   const [collapsed, setCollapsed] = usePersistentState<boolean>(
     COLLAPSE_STORAGE_KEY,
@@ -111,6 +120,7 @@ export function SideNav() {
               item={item}
               active={isActive(pathname, item.href)}
               collapsed={collapsed}
+              badgeCount={item.badge ? badgeCounts[item.badge] : undefined}
             />
           ))}
         </ul>

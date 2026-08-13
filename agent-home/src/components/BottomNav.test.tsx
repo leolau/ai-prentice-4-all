@@ -30,8 +30,31 @@ describe("BottomNav", () => {
 
   it("has 6 flex-1 list items (5 primary + 1 More)", () => {
     const html = renderToStaticMarkup(<BottomNav />);
-    // Count occurrences of "flex-1" in list items
     const count = (html.match(/<li class="flex-1">/g) || []).length;
     expect(count).toBe(6);
+  });
+
+  // Badge tests (Part 5): zero open renders no badge; a count renders it.
+  it("renders no badge when badgeCounts is empty (zero open)", () => {
+    const html = renderToStaticMarkup(<BottomNav badgeCounts={{}} />);
+    // The To-dos label is present, but no count bubble.
+    expect(html).toContain("To-dos");
+    // No rounded-full badge span with a number.
+    expect(html).not.toMatch(/rounded-full[^>]*>\d+/);
+  });
+
+  it("renders the badge count when open to-dos exist", () => {
+    const html = renderToStaticMarkup(
+      <BottomNav badgeCounts={{ "todos-open": 3 }} />,
+    );
+    expect(html).toContain("To-dos");
+    expect(html).toContain("3");
+  });
+
+  it("renders no badge when count is zero", () => {
+    const html = renderToStaticMarkup(
+      <BottomNav badgeCounts={{ "todos-open": 0 }} />,
+    );
+    expect(html).not.toMatch(/rounded-full[^>]*>0</);
   });
 });

@@ -150,6 +150,21 @@ sudo -u hermes -H HERMES_HOME=/opt/data/hermes-home-staging ./.venv/bin/hermes m
 Note `hermes config get <key>` does **not** exist — use `hermes config path` and read the YAML,
 or grep `/opt/data/hermes-home-staging/config.yaml` directly.
 
+**Omitting `HERMES_HOME` does not fail — it answers about the wrong deployment.**
+With the variable unset, `get_hermes_home()` falls back to `$HOME/.hermes`, which for
+`hermes` is `/opt/data/hermes-user/.hermes`: a real, empty, core-only home. So
+`sudo -u hermes -H ./.venv/bin/hermes profile list` shows only `default` (the live
+`maintenance` profile invisible) and `hermes datastore show` reports "not configured —
+this profile is core-only" on a box that is plainly running on Postgres. Every answer is
+internally consistent and about a home nobody uses. `sudo -u hermes -H env
+HERMES_HOME=/opt/data/hermes-home-staging ...` is not optional, including inside
+`sh -lc`, which does not inherit it either.
+
+Per-profile commands take `--profile <name>` **before** the subcommand
+(`hermes --profile maintenance datastore show`) — it is the global profile selector, eaten
+before the subparser sees argv, so a trailing `--profile` silently selects rather than
+targets (this is what made `hermes goal publish --profile X` publish *from* X; see #207).
+
 Root `git` commands against the live checkout need
 `-c safe.directory=/opt/data/hermes-agent` (differing owner), and the same for
 `/opt/data/hermes-deploy-state`.
@@ -582,7 +597,25 @@ git -C /opt/data/hermes-deploy-state -c safe.directory=... \
 ```
 
 Verify with `git -C ... log --oneline origin/main..main` on the box: empty means
-the trail is actually published.
+the trail is actually published. The off-box `git am` produces a *different* sha
+for the same tree, so afterwards point the box's `main` at `origin/main` (keep the
+local commit on a branch, and only after `git diff main origin/main` is empty) —
+otherwise the box reports one unpushed commit forever and the check that proves
+publication stops meaning anything.
+
+`capture` needs every one of its arguments (`--hermes-home`, `--deploy-script`,
+`--secrets-out`, the three `--credential-glob`s — see
+`docs/deployment/deployment-path.md`). Called short it exits **2** and writes
+nothing, which is how a week passed with no capture: the weekly check then answers
+with a dozen findings that all mean "nobody captured", and a real finding hides
+among them.
+
+**A unit installed by hand starts life outside every check we have.** The
+snapshot is the baseline, so `deploy_state.py check` cannot report a unit it has
+never seen: `hermes-calendar-triage.service` was installed on 2026-08-11 without
+`User=` and ran as the only root process on the box for a day, silently. After
+adding a unit: give it the `10-unprivileged.conf` drop-in, commit the unit under
+`deploy/`, and capture.
 
 ### The handover document is checked state too
 

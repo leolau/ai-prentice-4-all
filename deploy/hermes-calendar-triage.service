@@ -1,0 +1,25 @@
+[Unit]
+# The triage half of the calendar pipeline: reads what hermes-calendar-poller
+# fetched and writes importance/escalation decisions back. Its unit lived only
+# on the box until 2026-08-12 — installed by hand, unrecorded in the repo, and
+# without User=, which made it the one process here still running as root.
+Description=Hermes calendar triage agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Every hermes-* unit was de-privileged on 2026-07-31 so a prompt injection
+# cannot reach the host; a unit added afterwards has to carry this itself.
+User=hermes
+Group=hermes
+WorkingDirectory=/opt/data/hermes-agent/custom/calendar
+EnvironmentFile=/opt/data/hermes-messaging.env
+ExecStart=/opt/data/hermes-agent/.venv/bin/python /opt/data/hermes-agent/custom/calendar/calendar_triage_agent.py
+Restart=always
+RestartSec=5
+StandardOutput=append:/var/log/hermes-calendar-triage.log
+StandardError=append:/var/log/hermes-calendar-triage.log
+
+[Install]
+WantedBy=multi-user.target

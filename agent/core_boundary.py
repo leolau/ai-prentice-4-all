@@ -262,9 +262,46 @@ def _audit_home() -> Path:
         return Path(os.path.expanduser("~/.hermes"))
 
 
+def audit_log_path(log_name: str) -> Path:
+    """Path of a durable, append-only local audit log (JSONL) under HERMES_HOME."""
+    return _audit_home() / "audit" / log_name
+
+
 def core_audit_log_path() -> Path:
     """Path of the durable, append-only local Core-denial audit log (JSONL)."""
-    return _audit_home() / "audit" / "core_boundary.jsonl"
+    return audit_log_path("core_boundary.jsonl")
+
+
+def emit_audit_event(event: dict, *, log_name: str) -> dict:
+    """Persist a C5-shaped ``event`` and fan it out to the registered sinks.
+
+    Writes the row to ``$HERMES_HOME/audit/<log_name>`` (always — no DB
+    required), then best-effort forwards it to a registered C5 change recorder
+    and C8 trace emitter. Never raises into the calling write path.
+    """
+    try:
+        log_path = audit_log_path(log_name)
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(log_path, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(event, sort_keys=True) + "\n")
+    except Exception:
+        pass
+
+    with _sink_lock:
+        recorder = _change_recorder
+        emitter = _trace_emitter
+    if recorder is not None:
+        try:
+            recorder(event)
+        except Exception:
+            pass
+    if emitter is not None:
+        try:
+            emitter(event)
+        except Exception:
+            pass
+
+    return event
 
 
 def _resolve_mode() -> str:
@@ -312,31 +349,9 @@ def record_core_denied(
         "summary": f"Refused agent {op} to Core path {path} (matched {matched_glob!r})",
     }
 
-    # 1) Durable local audit — the guarantee. Best-effort; never raise.
-    try:
-        log_path = core_audit_log_path()
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(log_path, "a", encoding="utf-8") as fh:
-            fh.write(json.dumps(event, sort_keys=True) + "\n")
-    except Exception:
-        pass
-
-    # 2) Best-effort forward to richer sinks (FG-12 C5, FG-16 C8) when present.
-    with _sink_lock:
-        recorder = _change_recorder
-        emitter = _trace_emitter
-    if recorder is not None:
-        try:
-            recorder(event)
-        except Exception:
-            pass
-    if emitter is not None:
-        try:
-            emitter(event)
-        except Exception:
-            pass
-
-    return event
+    # Durable local audit (the guarantee) plus best-effort forwarding to the
+    # richer sinks (FG-12 C5, FG-16 C8) when they are registered.
+    return emit_audit_event(event, log_name="core_boundary.jsonl")
 
 
 # ---------------------------------------------------------------------------

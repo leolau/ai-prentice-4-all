@@ -1271,6 +1271,19 @@ def _resolve_anthropic_pool_token() -> Optional[str]:
     return None
 
 
+def _credential(name: str) -> Optional[str]:
+    """Read one Anthropic credential through the active profile's secret scope.
+
+    A multiplexing gateway serves several profiles from one process, each with
+    its own ``.env``; ``os.getenv`` here would answer with whichever profile's
+    values reached ``os.environ`` and send one profile's turn out under
+    another's token. Identical to ``os.getenv`` when multiplexing is off.
+    """
+    from agent.secret_scope import get_secret
+
+    return get_secret(name, "")
+
+
 def resolve_anthropic_token() -> Optional[str]:
     """Resolve an Anthropic token from all available sources.
 
@@ -1287,7 +1300,7 @@ def resolve_anthropic_token() -> Optional[str]:
     creds = read_claude_code_credentials()
 
     # 1. Hermes-managed OAuth/setup token env var
-    token = os.getenv("ANTHROPIC_TOKEN", "").strip()
+    token = (_credential("ANTHROPIC_TOKEN") or "").strip()
     if token:
         preferred = _prefer_refreshable_claude_code_token(token, creds)
         if preferred:
@@ -1295,7 +1308,7 @@ def resolve_anthropic_token() -> Optional[str]:
         return token
 
     # 2. CLAUDE_CODE_OAUTH_TOKEN (used by Claude Code for setup-tokens)
-    cc_token = os.getenv("CLAUDE_CODE_OAUTH_TOKEN", "").strip()
+    cc_token = (_credential("CLAUDE_CODE_OAUTH_TOKEN") or "").strip()
     if cc_token:
         preferred = _prefer_refreshable_claude_code_token(cc_token, creds)
         if preferred:
@@ -1314,7 +1327,7 @@ def resolve_anthropic_token() -> Optional[str]:
 
     # 5. Regular API key, or a legacy OAuth token saved in ANTHROPIC_API_KEY.
     # This remains as a compatibility fallback for pre-migration Hermes configs.
-    api_key = os.getenv("ANTHROPIC_API_KEY", "").strip()
+    api_key = (_credential("ANTHROPIC_API_KEY") or "").strip()
     if api_key:
         return api_key
 
