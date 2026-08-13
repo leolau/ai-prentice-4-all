@@ -200,4 +200,25 @@ def build_profile_parser(subparsers, *, cmd_profile: Callable) -> None:
     )
     profile_info.add_argument("profile_name", help="Profile to inspect")
 
+    # ---------- FG-28: multi-profile control-plane registry ----------
+    profile_registry = profile_subparsers.add_parser(
+        "registry",
+        help="Control-plane list of profiles this box serves and how to reach each "
+             "one (FG-28 multi-profile console). Holds no authority data — "
+             "enrolment stays in each profile's principals table.",
+    )
+    profile_registry_sub = profile_registry.add_subparsers(
+        dest="registry_action", metavar="{list,health}"
+    )
+    profile_registry_sub.add_parser(
+        "list",
+        help="List every profile with its served flag, routing prefix, and "
+             "derived schema (no database calls).",
+    )
+    profile_registry_sub.add_parser(
+        "health",
+        help="Probe each profile's app-datastore binding (schema_owner claim) "
+             "and badge it ok / unclaimed / claimed-by-other / unreachable.",
+    )
+
     profile_parser.set_defaults(func=cmd_profile)
