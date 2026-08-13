@@ -207,7 +207,6 @@ async def _add(
     priority: str,
     due_at: Optional[datetime],
     stage: str,
-    goal_id: Optional[str],
     json_mode: bool,
 ) -> int:
     todo = await store.create(
@@ -417,8 +416,11 @@ async def _start(
             context=_ctx,
         )
 
-    _thread = threading.Thread(target=_spawn, daemon=True)
+    # The CLI is the foreground — join the thread so the interpreter
+    # doesn't tear it down on exit. Only the HTTP /start endpoint detaches.
+    _thread = threading.Thread(target=_spawn)
     _thread.start()
+    _thread.join()
 
     payload["session_id"] = _session_id
     payload["spawned"] = True
@@ -436,6 +438,8 @@ async def _start(
 #: Exit codes for the send gate (distinct from 0/1/2 so a script can tell).
 _SEND_PENDING = 3
 _SEND_MISSING = 4
+_SEND_DENIED = 5
+_SEND_ROUTING = 6
 
 
 async def _send(
@@ -480,7 +484,7 @@ async def _send(
             _print_json({"error": msg})
         else:
             print(msg, file=sys.stderr)
-        return _SEND_PENDING
+        return _SEND_DENIED
 
     # Require the routing in argv to match the approval's command.
     cmd_parts = shlex.split(approval.command)
@@ -511,7 +515,18 @@ async def _send(
             _print_json({"error": msg, "approved": cmd_routing})
         else:
             print(msg, file=sys.stderr)
-        return _SEND_PENDING
+        return _SEND_ROUTING
+
+    # Replay guard: a granted approval must be single-use.  If we already
+    # recorded a 'sent' outbound event for this to-do, refuse to deliver again.
+    existing = await store.list_outbound(principal, todo_id)
+    if any(e.get("event") == "sent" for e in existing):
+        msg = f"To-do {todo_id} was already sent."
+        if json_mode:
+            _print_json({"error": msg})
+        else:
+            print(msg, file=sys.stderr)
+        return _SEND_MISSING
 
     # The body comes from the approval row.
     body = approval.body
@@ -535,9 +550,11 @@ async def _send(
     if thread:
         send_target += f":{thread}"
 
-    result_json = send_message_tool(
-        {"action": "send", "target": send_target, "message": body}
-    )
+    _send_args: dict = {"action": "send", "target": send_target, "message": body}
+    if account:
+        _send_args["account"] = account
+
+    result_json = send_message_tool(_send_args)
     result_payload = (
         json.loads(result_json) if result_json else {}
     )
@@ -738,7 +755,6 @@ async def _dispatch(args: argparse.Namespace) -> int:
             priority=args.priority,
             due_at=_when(args.due, field="due"),
             stage=args.stage,
-            goal_id=args.goal,
             json_mode=args.json,
         )
     if action == "stage":
@@ -839,7 +855,7 @@ def register_todos_subparser(
     listing.add_argument(
         "--stage",
         default="",
-        help="Comma-separated subset of {\', \'.join(TODO_STAGES)}",
+        help=f"Comma-separated subset of {', '.join(TODO_STAGES)}",
     )
     listing.add_argument(
         "--priority", default="", help="Comma-separated priority filter"
@@ -874,7 +890,6 @@ def register_todos_subparser(
     add.add_argument(
         "--stage", default="open", choices=["staged", "open"]
     )
-    add.add_argument("--goal", default=None, help="Goal id (not yet wired)")
     add.add_argument("--json", action="store_true")
 
     stage = sub.add_parser("stage", help="Move a to-do along its lifecycle")

@@ -48,6 +48,12 @@ class _MockProject:
         self.name = name
 
 
+class _MockCard:
+    """A kanban card returned by ``get_task`` after creation."""
+    def __init__(self, project_id="proj_1"):
+        self.project_id = project_id
+
+
 class TestPromoteCreatesCard:
     """Promoting creates a card with ``status='triage'`` and moves to ``working``."""
 
@@ -76,6 +82,7 @@ class TestPromoteCreatesCard:
             patch("hermes_cli.projects_db.get_project", return_value=_MockProject()),
             patch("hermes_cli.projects_db.connect_closing") as mock_conn_ctx,
             patch("hermes_cli.kanban_db.create_task", side_effect=_mock_create_task),
+            patch("hermes_cli.kanban_db.get_task", return_value=_MockCard()),
             patch("hermes_cli.kanban_db.connect_closing") as mock_kconn_ctx,
         ):
             mock_conn_ctx.return_value.__enter__ = MagicMock(return_value=MagicMock())
@@ -88,8 +95,8 @@ class TestPromoteCreatesCard:
         assert captured.get("triage") is True
         assert captured.get("project_id") == "proj_1"
         assert captured.get("title") == "Send Ada the signed quote"
-        # Priority mapped: high → high.
-        assert captured.get("priority") == "high"
+        # Priority mapped: high → 2 (int, not a string label).
+        assert captured.get("priority") == 2
         # To-do moved to working, not done.
         assert result["stage"] == "working"
         store.set_stage.assert_called_once()
@@ -123,6 +130,7 @@ class TestPromoteCreatesCard:
             patch("hermes_cli.projects_db.get_project", return_value=_MockProject()),
             patch("hermes_cli.projects_db.connect_closing") as mock_conn_ctx,
             patch("hermes_cli.kanban_db.create_task", side_effect=_mock_create_task),
+            patch("hermes_cli.kanban_db.get_task", return_value=_MockCard()),
             patch("hermes_cli.kanban_db.connect_closing") as mock_kconn_ctx,
         ):
             mock_conn_ctx.return_value.__enter__ = MagicMock(return_value=MagicMock())
@@ -137,19 +145,19 @@ class TestPromoteCreatesCard:
 
 
 class TestPromotePriorityMap:
-    """``critical|high → high``, ``normal|low → normal``."""
+    """``critical|high → 2``, ``normal → 1``, ``low → 0`` (board ints)."""
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
         "todo_priority,expected",
         [
-            ("critical", "high"),
-            ("high", "high"),
-            ("normal", "normal"),
-            ("low", "normal"),
+            ("critical", 2),
+            ("high", 2),
+            ("normal", 1),
+            ("low", 0),
         ],
     )
-    async def test_priority_mapped(self, todo_priority: str, expected: str) -> None:
+    async def test_priority_mapped(self, todo_priority: str, expected: int) -> None:
         from hermes_cli.todos_api import _PROMOTE_PRIORITY_MAP
 
         assert _PROMOTE_PRIORITY_MAP.get(todo_priority) == expected

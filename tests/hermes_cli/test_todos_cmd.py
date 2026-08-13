@@ -28,6 +28,8 @@ from hermes_cli.todos_cmd import (
     _when,
     _SEND_MISSING,
     _SEND_PENDING,
+    _SEND_DENIED,
+    _SEND_ROUTING,
 )
 
 PRINCIPAL = Principal(user_id="leo", display="Leo", role="owner")  # type: ignore[arg-type]
@@ -219,7 +221,7 @@ class TestSendGate:
                 account=None, thread=None,
                 json_mode=False,
             )
-        assert rc == _SEND_PENDING
+        assert rc == _SEND_DENIED
 
     @pytest.mark.asyncio
     async def test_routing_mismatch_refuses(self) -> None:
@@ -243,7 +245,7 @@ class TestSendGate:
                 account=None, thread=None,
                 json_mode=False,
             )
-        assert rc == _SEND_PENDING
+        assert rc == _SEND_ROUTING
 
     @pytest.mark.asyncio
     async def test_body_from_approval_not_argv(self) -> None:
@@ -261,6 +263,7 @@ class TestSendGate:
         store = MagicMock()
         store._store = MagicMock()
         store.record_outbound = AsyncMock()
+        store.list_outbound = AsyncMock(return_value=[])
         notifications = MagicMock()
         notifications.get_by_dedupe_key = AsyncMock(return_value=approval)
 
@@ -294,6 +297,7 @@ class TestSendGate:
         store = MagicMock()
         store._store = MagicMock()
         store.record_outbound = AsyncMock()
+        store.list_outbound = AsyncMock(return_value=[])
         notifications = MagicMock()
         notifications.get_by_dedupe_key = AsyncMock(return_value=approval)
 

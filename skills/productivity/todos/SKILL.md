@@ -26,6 +26,7 @@ hermes todos list    [--stage staged,open,working] [--priority high] [--q TEXT] 
 hermes todos show    <id>                    # + history + the source arrival
 hermes todos add     "<title>" [--why TEXT] [--priority p] [--due YYYY-MM-DD] [--stage staged|open] [--json]
 hermes todos stage   <id> <stage> [--outcome TEXT] [--json]
+hermes todos start   <id> [--session] [--actor <user>] [--json]  # move to working, optionally spawn
 hermes todos done    <id> [--outcome TEXT] [--propose-reply] [--json]
 hermes todos snooze  <id> --until <when> [--json]
 hermes todos facets  [--json]

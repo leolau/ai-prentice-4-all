@@ -1066,6 +1066,28 @@ export class HermesApiClient {
     });
   }
 
+  /** Move a to-do to `working` and optionally spawn a seeded session. */
+  async startTodo(
+    id: string,
+    payload: { session?: boolean } = {},
+  ): Promise<Todo & { session_id?: string | null; spawned?: boolean }> {
+    return this.request(`/api/registry/todos/${encodeURIComponent(id)}/start`, {
+      method: "POST",
+      json: payload,
+    });
+  }
+
+  /** Promote a to-do into a project card (card lands in `triage`). */
+  async promoteTodo(
+    id: string,
+    payload: { project: string },
+  ): Promise<Todo & { card_id?: string; project_id?: string }> {
+    return this.request(`/api/registry/todos/${encodeURIComponent(id)}/promote`, {
+      method: "POST",
+      json: payload,
+    });
+  }
+
   /**
    * The entity goal — what every sub-goal ladders into.
    *
