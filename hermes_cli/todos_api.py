@@ -240,19 +240,16 @@ async def _memory_doc(
     doc_id = str(source["document_id"])
     try:
         from hermes_cli.datastore import get_store
-        from hermes_cli.access import scope_filter
+        from hermes_cli.access import bind_principal
 
         app_store = get_store("supabase-app", "prod")
         conn = await app_store.connect()
         try:
-            predicate = scope_filter(
-                principal, start_index=1, id_column="rag_documents.id"
-            )
+            await bind_principal(conn, principal)
             row = await conn.fetchrow(
-                f"SELECT id, title FROM rag_documents "
-                f"WHERE id = $1::uuid AND {predicate.sql}",
+                "SELECT id, title FROM rag_documents "
+                "WHERE id = $1::uuid",
                 doc_id,
-                *predicate.params,
             )
         finally:
             await conn.close()
@@ -297,30 +294,17 @@ async def start_todo(request: Request, todo_id: str) -> dict[str, Any]:
         payload["spawned"] = False
         return payload
 
-    # 2. Resolve the profile for the spawn (FG-28: a to-do raised on
-    #    ``personal`` may be work for ``research``). Default is the caller's
-    #    bound profile; an explicit ``profile`` must be one the caller holds.
-    _principal = principal
-    profile = str(body.get("profile") or "").strip() or None
-    if profile:
-        from hermes_cli.access import PrincipalStore
-
-        _ps = PrincipalStore(store._store)  # noqa: SLF001 - same package
-        _resolved = await _ps.get(profile)
-        if _resolved is None:
-            raise HTTPException(
-                status_code=403,
-                detail=f"you do not hold profile {profile}",
-            )
-        _principal = _resolved
-
-    # 3. Build the seed prompt from the to-do and its source arrival.
+    # 2. Build the seed prompt from the to-do and its source arrival.
+    #    Profile targeting is dropped until FG-28 provides a "profiles this
+    #    subject holds" query — the previous check was inert (profile_home
+    #    was always get_hermes_home()) and unsafe (PrincipalStore.get()
+    #    returns any enrolled principal, not one the caller holds).
     prompt_parts = [f"# {todo.title}"]
     if todo.description:
         prompt_parts.append(todo.description)
     if todo.source_note:
         prompt_parts.append(f"(From {todo.source_note})")
-    arrival = await _source_item(_principal, todo)
+    arrival = await _source_item(principal, todo)
     if arrival and arrival.get("body"):
         prompt_parts.append(f"\n---\nSource message:\n{arrival['body'][:2000]}")
     prompt = "\n\n".join(prompt_parts)
@@ -354,25 +338,14 @@ async def start_todo(request: Request, todo_id: str) -> dict[str, Any]:
                 result.error,
             )
         try:
-            from hermes_cli.todo_store import TRANSITIONS_TABLE
             import asyncio as _aio
 
-            async def _record():
-                conn = await store._connect()  # noqa: SLF001
-                try:
-                    await conn.execute(
-                        f"INSERT INTO {TRANSITIONS_TABLE} "
-                        f"(task_id, from_state, to_state, actor) "
-                        f"VALUES ($1, $2, $3, $4)",
-                        todo_id,
-                        "stage:working",
-                        f"session:{_session_id}",
-                        f"user:{principal.user_id}",
-                    )
-                finally:
-                    await conn.close()
-
-            _aio.run(_record())
+            _aio.run(store.record_session(
+                principal,
+                todo_id,
+                session_id=_session_id,
+                actor=f"user:{principal.user_id}",
+            ))
         except Exception:
             pass
 
@@ -531,11 +504,11 @@ async def snooze_todo(request: Request, todo_id: str) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 #: Map the to-do's four-level priority onto the board's coarser two.
-_PROMOTE_PRIORITY_MAP = {
-    "critical": "high",
-    "high": "high",
-    "normal": "normal",
-    "low": "normal",
+_PROMOTE_PRIORITY_MAP: dict[str, int] = {
+    "critical": 2,
+    "high": 2,
+    "normal": 1,
+    "low": 0,
 }
 
 
@@ -550,6 +523,12 @@ async def promote_todo(
     The to-do moves to ``working`` (not ``done`` — the work moved, not
     finished). A ``project_links`` row records the provenance so the project
     page can show the to-do it came from.
+
+    .. note::
+        Promotion has **no project authorisation** yet — any caller can
+        promote into any project slug.  This is a stated precondition of the
+        current seam, not a gap; the Projects permission router (when it
+        lands) will gate this endpoint.
     """
     principal = await _resolve_principal(request)
     body = await request.json()
@@ -582,7 +561,7 @@ async def promote_todo(
         )
 
     # 2. Create the card with project_id, title/body seeded, status='triage'.
-    priority = _PROMOTE_PRIORITY_MAP.get(todo.priority, "normal")
+    priority = _PROMOTE_PRIORITY_MAP.get(todo.priority, 1)
     card_body = todo.description or ""
     card_body += f"\n\n(Promoted from to-do {todo_id})"
 
@@ -596,14 +575,23 @@ async def promote_todo(
                 body=card_body,
                 priority=priority,
                 project_id=project.id,
-                initial_status="triage",
                 triage=True,
             )
+            # Verify the card actually carries the project_id (cross-profile
+            # projects may not resolve through the per-profile store yet).
+            from hermes_cli.kanban_db import get_task
+            _card = get_task(kconn, card_id)
+            _card_ok = _card is not None and bool(_card.project_id)
     except Exception as exc:
         logger.warning("todos: promote card creation failed (%s)", exc)
         raise HTTPException(
             status_code=500, detail="could not create the project card"
         ) from exc
+    if not _card_ok:
+        raise HTTPException(
+            status_code=500,
+            detail="project did not resolve on the target board",
+        )
 
     # 3. Write the project_links row.
     try:

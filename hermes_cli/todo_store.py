@@ -838,6 +838,74 @@ class TodoStore:
             if own:
                 await conn.close()
 
+    async def list_outbound(
+        self,
+        principal: Principal,
+        todo_id: str,
+        *,
+        connection: Optional["asyncpg.Connection"] = None,
+    ) -> list[dict]:
+        """Return outbound-action events for *todo_id*, newest first.
+
+        Used by the ``send`` verb's replay guard: a to-do that already has a
+        ``action:sent:*`` transition has been delivered and must not be sent
+        again.
+        """
+        predicate = scope_filter(
+            principal,
+            start_index=2,
+            grant_item_kind=GRANT_ITEM_KIND,
+            id_column=GRANT_ID_COLUMN,
+        )
+        own = connection is None
+        conn = connection or await self._connect()
+        try:
+            visible = await conn.fetchval(
+                f"SELECT 1 FROM {TASKS_TABLE} WHERE id = $1 AND {predicate.sql}",
+                todo_id,
+                *predicate.params,
+            )
+            if visible is None:
+                return []
+            rows = await conn.fetch(
+                f"SELECT to_state, actor, created_at "
+                f"FROM {TRANSITIONS_TABLE} "
+                f"WHERE task_id = $1 AND to_state LIKE 'action:%' "
+                f"ORDER BY created_at DESC",
+                todo_id,
+            )
+            return [
+                {"event": r["to_state"], "actor": r["actor"], "at": r["created_at"]}
+                for r in rows
+            ]
+        finally:
+            if own:
+                await conn.close()
+
+    async def record_session(
+        self,
+        principal: Principal,
+        todo_id: str,
+        *,
+        session_id: str,
+        actor: str,
+        connection: Optional["asyncpg.Connection"] = None,
+    ) -> None:
+        """Record a spawned session pointer in the to-do's transition history.
+
+        Unlike the raw-SQL insert in ``/start``, this goes through the same
+        scope-checked path as every other transition, so an RLS-enabled tier
+        enforces visibility correctly.
+        """
+        await self.record_outbound(
+            principal,
+            todo_id,
+            event=f"session:{session_id}",
+            channel="spawn",
+            actor=actor,
+            connection=connection,
+        )
+
     async def _record_transition(
         self,
         conn: "asyncpg.Connection",
