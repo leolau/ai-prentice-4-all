@@ -16,7 +16,7 @@ import { NavGlyph } from "@/components/NavGlyph";
  * the secondary surfaces (Files, Activity, Settings, …) that only fit in the
  * desktop sidebar otherwise.
  */
-export function BottomNav() {
+export function BottomNav({ badgeCounts = {} }: { badgeCounts?: Record<string, number> }) {
   const pathname = usePathname();
   const [moreOpen, setMoreOpen] = useState(false);
   const moreActive = SECONDARY_NAV.some((i) => isActive(pathname, i.href));
@@ -44,6 +44,11 @@ export function BottomNav() {
                     <NavGlyph glyph={tab.glyph} />
                   </span>
                   {tab.label}
+                  {tab.badge && badgeCounts[tab.badge] ? (
+                    <span className="ml-1 rounded-full bg-[var(--color-accent)] px-1.5 text-[10px] leading-4 text-[var(--color-surface)]">
+                      {badgeCounts[tab.badge]}
+                    </span>
+                  ) : null}
                 </Link>
               </li>
             );

@@ -459,6 +459,35 @@ class NotificationStore:
             return False
         return True
 
+    async def get_by_dedupe_key(
+        self,
+        dedupe_key: str,
+        principal: "Principal",
+        *,
+        connection: "Optional[asyncpg.Connection]" = None,
+    ) -> "Optional[Notification]":
+        """Fetch the most recent notification with this dedupe key, or ``None``.
+
+        The dedupe unique index only covers ``pending`` rows, so an answered
+        approval no longer matches it. This query scans all rows regardless of
+        status, newest first — the caller decides what to do with what it finds.
+        """
+        predicate = scope_filter(
+            principal, column="visibility", start_index=2
+        )
+
+        async def _read(conn: "asyncpg.Connection") -> "Optional[Notification]":
+            row = await conn.fetchrow(
+                f"SELECT {_SELECT_COLUMNS} FROM {NOTIFICATIONS_TABLE} "
+                f"WHERE dedupe_key = $1 AND {predicate.sql} "
+                f"ORDER BY created_at DESC LIMIT 1",
+                dedupe_key,
+                *predicate.params,
+            )
+            return Notification._from_row(row) if row else None
+
+        return await self._with_connection(_read, connection)
+
     # -- reading -----------------------------------------------------------
 
     async def list_pending(

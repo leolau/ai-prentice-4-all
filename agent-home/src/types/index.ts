@@ -903,6 +903,8 @@ export interface FileAsset {
   remembered_at: string | null;
   remembered_by: string | null;
   remembered: boolean;
+  /** The inbound item this file arrived with (for the /todos back-link). */
+  inbound_item_id?: string | null;
 }
 
 /** Paginated registry listing. */
@@ -1033,6 +1035,8 @@ export interface TodoTransition {
 export interface TodoDetail extends Todo {
   history: TodoTransition[];
   source: IncomingItem | null;
+  /** The memory document the source arrival produced (absent when not remembered). */
+  memory?: { id: string; title: string };
 }
 
 /** A keyset page of to-dos. `next_cursor` is null at the end. */
