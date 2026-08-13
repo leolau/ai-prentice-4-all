@@ -46,12 +46,17 @@ class SeededSession:
     ``error`` is set instead of raising: a caller decides what a failed
     spawn means for its own state machine (cron logs and delivers; ``/start``
     returns ``spawned: False`` alongside the already-moved stage).
+
+    ``agent`` is the constructed ``AIAgent`` instance, exposed so a caller
+    that owns resource cleanup (cron) can call ``agent.close()`` in its
+    ``finally`` block.  ``None`` when construction itself failed.
     """
 
     session_id: str
     result: Any | None
     timed_out: bool
     error: str | None
+    agent: Any | None = None
 
 
 def spawn_seeded_session(
@@ -61,6 +66,9 @@ def spawn_seeded_session(
     session_id: str,
     profile_home: Union[Path, str, None] = None,
     runtime: Mapping[str, Any] | None = None,
+    config: Mapping[str, Any] | None = None,
+    session_db: Any | None = None,
+    model: str | None = None,
     enabled_toolsets: Sequence[str] | None = None,
     disabled_toolsets: Sequence[str] | None = None,
     max_iterations: int | None = None,
@@ -86,6 +94,9 @@ def spawn_seeded_session(
             session_id=session_id,
             profile_home=profile_home,
             runtime=runtime,
+            config=config,
+            session_db=session_db,
+            model=model,
             enabled_toolsets=enabled_toolsets,
             disabled_toolsets=disabled_toolsets,
             max_iterations=max_iterations,
@@ -115,6 +126,9 @@ def _run(
     session_id: str,
     profile_home: Union[Path, str, None],
     runtime: Mapping[str, Any] | None,
+    config: Mapping[str, Any] | None,
+    session_db: Any | None,
+    model: str | None,
     enabled_toolsets: Sequence[str] | None,
     disabled_toolsets: Sequence[str] | None,
     max_iterations: int | None,
@@ -140,6 +154,9 @@ def _run(
             origin=origin,
             session_id=session_id,
             runtime=runtime,
+            config=config,
+            session_db=session_db,
+            model=model,
             enabled_toolsets=enabled_toolsets,
             disabled_toolsets=disabled_toolsets,
             max_iterations=max_iterations,
@@ -173,6 +190,9 @@ def _body_inner(
     origin: str,
     session_id: str,
     runtime: Mapping[str, Any] | None,
+    config: Mapping[str, Any] | None,
+    session_db: Any | None,
+    model: str | None,
     enabled_toolsets: Sequence[str] | None,
     disabled_toolsets: Sequence[str] | None,
     max_iterations: int | None,
@@ -187,27 +207,32 @@ def _body_inner(
 ) -> SeededSession:
     import yaml
 
+    agent = None  # tracked for SeededSession.agent (cron closes it)
+
     # -- config load ----------------------------------------------------
-    _cfg: dict[str, Any] = {}
-    from hermes_constants import get_hermes_home
+    # When a caller (cron) passes a pre-resolved config, use it directly
+    # — the caller already applied managed_scope, _expand_env_vars, etc.
+    _cfg: dict[str, Any] = dict(config) if config else {}
+    if config is None:
+        from hermes_constants import get_hermes_home
 
-    _home = get_hermes_home()
-    _cfg_path = str(Path(_home) / "config.yaml")
-    if os.path.exists(_cfg_path):
-        try:
-            with open(_cfg_path, encoding="utf-8") as _f:
-                _cfg = yaml.safe_load(_f) or {}
+        _home = get_hermes_home()
+        _cfg_path = str(Path(_home) / "config.yaml")
+        if os.path.exists(_cfg_path):
             try:
-                from hermes_cli import managed_scope
+                with open(_cfg_path, encoding="utf-8") as _f:
+                    _cfg = yaml.safe_load(_f) or {}
+                try:
+                    from hermes_cli import managed_scope
 
-                _cfg = managed_scope.apply_managed_overlay(_cfg)
-            except Exception:
-                pass
-            from hermes_cli.config import _expand_env_vars
+                    _cfg = managed_scope.apply_managed_overlay(_cfg)
+                except Exception:
+                    pass
+                from hermes_cli.config import _expand_env_vars
 
-            _cfg = _expand_env_vars(_cfg)
-        except Exception as exc:
-            log.warning("seeded_session[%s]: config load failed (%s)", session_id, exc)
+                _cfg = _expand_env_vars(_cfg)
+            except Exception as exc:
+                log.warning("seeded_session[%s]: config load failed (%s)", session_id, exc)
 
     # -- runtime resolution ---------------------------------------------
     resolved_runtime = runtime
@@ -219,21 +244,27 @@ def _body_inner(
             result=None,
             timed_out=False,
             error="could not resolve runtime provider",
+            agent=agent,
         )
 
-    model = _cfg.get("model") or {}
-    if isinstance(model, str):
+    # -- model resolution (caller can pass a pre-resolved model) --------
+    if model:
         _model = model
-    elif isinstance(model, dict):
-        _model = model.get("default") or model.get("model") or os.getenv("HERMES_MODEL", "")
     else:
-        _model = os.getenv("HERMES_MODEL", "")
+        _model_cfg = _cfg.get("model") or {}
+        if isinstance(_model_cfg, str):
+            _model = _model_cfg
+        elif isinstance(_model_cfg, dict):
+            _model = _model_cfg.get("default") or _model_cfg.get("model") or os.getenv("HERMES_MODEL", "")
+        else:
+            _model = os.getenv("HERMES_MODEL", "")
     if not _model:
         return SeededSession(
             session_id=session_id,
             result=None,
             timed_out=False,
             error="no model configured",
+            agent=agent,
         )
 
     # -- fallback chain + credential pool -------------------------------
@@ -288,10 +319,14 @@ def _body_inner(
     # -- provider routing -----------------------------------------------
     _pr = _cfg.get("provider_routing") or {}
 
-    # -- SessionDB ------------------------------------------------------
-    from hermes_state import SessionDB
+    # -- SessionDB (caller can pass its own) ---------------------------
+    _session_db = session_db
+    _close_session_db = False  # only close one we created
+    if _session_db is None:
+        from hermes_state import SessionDB
 
-    _session_db = SessionDB()
+        _session_db = SessionDB()
+        _close_session_db = True
 
     # -- AIAgent construction -------------------------------------------
     from run_agent import AIAgent
@@ -380,10 +415,11 @@ def _body_inner(
             result=None,
             timed_out=False,
             error=str(exc),
+            agent=agent,
         )
     finally:
-        _pool.shutdown(wait=False)
-        if _session_db:
+        _pool.shutdown(wait=False, cancel_futures=True)
+        if _close_session_db and _session_db:
             try:
                 _session_db.close()
             except Exception:
@@ -394,6 +430,7 @@ def _body_inner(
         result=result,
         timed_out=_timed_out,
         error=None,
+        agent=agent,
     )
 
 

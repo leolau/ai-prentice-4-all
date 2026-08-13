@@ -151,13 +151,19 @@ class TestStartSessionTrue:
         assert result["session_id"] is not None
 
 
-class TestStartProfileRefusal:
-    """A ``profile`` the caller does not hold is refused."""
+class TestStartProfileIgnored:
+    """``profile`` in the request body is silently ignored.
+
+    Profile targeting was dropped until FG-28 provides a "profiles this
+    subject holds" query — the previous check was inert (profile_home
+    was always ``get_hermes_home()``) and unsafe (``PrincipalStore.get()``
+    returns any enrolled principal, not one the caller holds).  A
+    ``profile`` key in the body is accepted but has no effect.
+    """
 
     @pytest.mark.asyncio
-    async def test_profile_not_held_is_refused(self) -> None:
+    async def test_profile_silently_ignored(self) -> None:
         from hermes_cli import todos_api
-        from fastapi import HTTPException
 
         store = MagicMock()
         store._store = MagicMock()
@@ -167,21 +173,25 @@ class TestStartProfileRefusal:
             return_value=_todo(stage="working", status="in_progress")
         )
 
-        # PrincipalStore.get returns None for the unknown profile.
-        ps_mock = MagicMock()
-        ps_mock.get = AsyncMock(return_value=None)
-
         request = _mock_request({"session": True, "profile": "research"})
         with (
             patch.object(todos_api, "_store", return_value=store),
             patch.object(todos_api, "_table_ready", return_value=True),
             patch.object(todos_api, "_resolve_principal", return_value=PRINCIPAL),
-            patch("hermes_cli.access.PrincipalStore", return_value=ps_mock),
-            pytest.raises(HTTPException) as exc_info,
+            patch("agent.seeded_session.spawn_seeded_session") as mock_spawn,
         ):
-            await todos_api.start_todo(request, "tsk_1")
+            mock_spawn.return_value = MagicMock(
+                session_id="todo_tsk_1_profile_ignored",
+                result="done",
+                timed_out=False,
+                error=None,
+            )
+            result = await todos_api.start_todo(request, "tsk_1")
 
-        assert exc_info.value.status_code == 403
+        # The profile key was silently ignored — no 403, the stage moved
+        # and the session spawned as normal.
+        assert result["stage"] == "working"
+        assert result["spawned"] is True
 
 
 class TestStartSeededPrompt:
@@ -290,9 +300,8 @@ class TestMemoryDocContract:
 
         with (
             patch("hermes_cli.datastore.get_store", return_value=mock_store),
-            patch("hermes_cli.access.scope_filter") as mock_scope,
+            patch("hermes_cli.access.bind_principal", new=AsyncMock()),
         ):
-            mock_scope.return_value = MagicMock(sql="TRUE", params=[])
             result = await _memory_doc(PRINCIPAL, source)
 
         assert result is not None
@@ -309,9 +318,8 @@ class TestMemoryDocContract:
 
         with (
             patch("hermes_cli.datastore.get_store", return_value=mock_store),
-            patch("hermes_cli.access.scope_filter") as mock_scope,
+            patch("hermes_cli.access.bind_principal", new=AsyncMock()),
         ):
-            mock_scope.return_value = MagicMock(sql="TRUE", params=[])
             result = await _memory_doc(PRINCIPAL, source)
 
         assert result is None
@@ -329,9 +337,8 @@ class TestMemoryDocContract:
 
         with (
             patch("hermes_cli.datastore.get_store", return_value=mock_store),
-            patch("hermes_cli.access.scope_filter") as mock_scope,
+            patch("hermes_cli.access.bind_principal", new=AsyncMock()),
         ):
-            mock_scope.return_value = MagicMock(sql="TRUE", params=[])
             result = await _memory_doc(PRINCIPAL, source)
 
         assert result is None
