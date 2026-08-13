@@ -102,7 +102,7 @@ from utils import env_var_enabled
 
 try:
     from fastapi import (
-        FastAPI, File, Form, HTTPException, Request, UploadFile,
+        Depends, FastAPI, File, Form, HTTPException, Request, UploadFile,
         WebSocket, WebSocketDisconnect,
     )
     from fastapi.middleware.cors import CORSMiddleware
@@ -119,7 +119,7 @@ except ImportError:
         from tools.lazy_deps import ensure as _lazy_ensure
         _lazy_ensure("tool.dashboard", prompt=False)
         from fastapi import (
-            FastAPI, File, Form, HTTPException, Request, UploadFile,
+            Depends, FastAPI, File, Form, HTTPException, Request, UploadFile,
             WebSocket, WebSocketDisconnect,
         )
         from fastapi.middleware.cors import CORSMiddleware
@@ -3225,6 +3225,32 @@ def _comms_user_service(actor=None):
     )
 
 
+async def require_console_scope(request: "Request"):
+    """FG-28: enter the target profile's scope for a console admin request.
+
+    Reads ``?profile=<name>`` (absent → no scope, single-profile byte-identical),
+    validates the target profile, and enters its runtime scope
+    (HERMES_HOME + secret scope) for the *whole* handler via ``yield`` — so the
+    MemberService's store AND the credential reads a GoTrue call resolves
+    through ``get_secret`` both land in the target profile. This dependency
+    only establishes the scope; it never resolves or asserts an identity.
+    """
+    from hermes_cli.console_scope import _scoped_to
+    from hermes_cli.profile_registry import get_profile_registry
+
+    target = (request.query_params.get("profile") or "").strip()
+    if not target:
+        yield None
+        return
+    entry = next((e for e in get_profile_registry() if e.name == target), None)
+    if entry is None or not entry.hermes_home.is_dir():
+        raise HTTPException(
+            status_code=403, detail=f"unknown target profile: {target!r}"
+        )
+    with _scoped_to(entry.hermes_home):
+        yield entry
+
+
 async def _comms_member_service(request: "Request"):
     """Resolve (actor, MemberService) for an owner/admin user-management request.
 
@@ -3233,10 +3259,44 @@ async def _comms_member_service(request: "Request"):
     write; that is the bug class fixed in #205. The role gate itself lives in
     :class:`MemberService`, which every surface shares; this seam only maps its
     refusal onto 403 so an unauthorised call never reaches GoTrue.
+
+    FG-28: when ``?profile=<name>`` is present the scope was entered by
+    :func:`require_console_scope`, and the caller's principal is re-resolved in
+    the target profile's own ``principals`` here, with owner-fallback refused
+    (401). The picker is a routing hint, never a grant: not-enrolled/suspended is
+    403. Absent ``?profile=``, the legacy path runs byte-identically. The subject
+    check runs *before* :func:`resolve_console_principal` so a 401 never depends
+    on a live datastore connection.
     """
+    from hermes_cli.console_scope import (
+        OwnerFallbackRefused,
+        ProfileScopeError,
+        resolve_console_principal,
+    )
     from hermes_cli.members import require_member_admin
 
-    actor = await _comms_resolve_principal(request)
+    target = (request.query_params.get("profile") or "").strip()
+    if target:
+        from hermes_cli.access import PrincipalStore
+
+        subject = _comms_session_subject(request)
+        if not subject:
+            raise HTTPException(
+                status_code=401,
+                detail="console-routed request carried no verified subject; "
+                "owner-fallback is refused on these routes",
+            )
+        store_factory = lambda home: PrincipalStore(_comms_app_store())  # noqa: E731 — scope held by require_console_scope
+        try:
+            actor = await resolve_console_principal(
+                subject, target, store_factory=store_factory
+            )
+        except OwnerFallbackRefused as exc:
+            raise HTTPException(status_code=401, detail=str(exc)) from exc
+        except ProfileScopeError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+    else:
+        actor = await _comms_resolve_principal(request)
     try:
         require_member_admin(actor)
     except PermissionError as exc:
@@ -3282,7 +3342,7 @@ def _comms_int_param(raw: str | None, default: int) -> int:
 
 
 @app.get("/api/comms/members")
-async def comms_list_members(request: Request):
+async def comms_list_members(request: Request, _console_scope=Depends(require_console_scope)):
     """One page of this profile's roster (owner/admin only).
 
     Paging, search and role/activity filters are query parameters resolved in
@@ -3352,7 +3412,7 @@ def _comms_administered_profile() -> str:
 
 
 @app.post("/api/comms/members")
-async def comms_create_member(request: Request):
+async def comms_create_member(request: Request, _console_scope=Depends(require_console_scope)):
     """Enrol somebody into this profile (owner/admin only).
 
     ``profile`` is required and is compared to the administered profile before
@@ -3390,7 +3450,7 @@ async def comms_create_member(request: Request):
 
 
 @app.post("/api/comms/members/import")
-async def comms_import_members(request: Request):
+async def comms_import_members(request: Request, _console_scope=Depends(require_console_scope)):
     """Bulk-enrol from CSV (owner/admin only). Previews unless told to apply.
 
     ``dry_run`` defaults to true: the caller sees what each row would do before
@@ -3418,7 +3478,7 @@ async def comms_import_members(request: Request):
 
 
 @app.post("/api/comms/members/{user_id}/invitation")
-async def comms_issue_invitation(user_id: str, request: Request):
+async def comms_issue_invitation(user_id: str, request: Request, _console_scope=Depends(require_console_scope)):
     """Mint (or regenerate) a one-time activation link (owner/admin only).
 
     Returns the raw token exactly once — it is stored only as a hash, so a lost
@@ -3445,7 +3505,7 @@ async def comms_issue_invitation(user_id: str, request: Request):
 
 
 @app.delete("/api/comms/members/{user_id}/invitation")
-async def comms_revoke_invitation(user_id: str, request: Request):
+async def comms_revoke_invitation(user_id: str, request: Request, _console_scope=Depends(require_console_scope)):
     """Revoke every open invitation for a user (owner/admin only)."""
     try:
         actor, service = await _comms_member_service(request)
@@ -3458,7 +3518,7 @@ async def comms_revoke_invitation(user_id: str, request: Request):
 
 
 @app.put("/api/comms/members/{user_id}/role")
-async def comms_set_member_role(user_id: str, request: Request):
+async def comms_set_member_role(user_id: str, request: Request, _console_scope=Depends(require_console_scope)):
     """Change a member's role (owner/admin; never the owner, never to owner)."""
     try:
         body = await request.json()
@@ -3480,7 +3540,7 @@ async def comms_set_member_role(user_id: str, request: Request):
 
 
 @app.put("/api/comms/members/{user_id}/display")
-async def comms_set_member_display(user_id: str, request: Request):
+async def comms_set_member_display(user_id: str, request: Request, _console_scope=Depends(require_console_scope)):
     """Rename a member within this profile (owner/admin only)."""
     try:
         body = await request.json()
@@ -3545,7 +3605,7 @@ async def comms_link_member_channel(user_id: str, request: Request):
 
 
 @app.get("/api/comms/members/activity")
-async def comms_member_activity(request: Request):
+async def comms_member_activity(request: Request, _console_scope=Depends(require_console_scope)):
     """Recent identity administration events (owner/admin only).
 
     Reads the C5 change log rather than a private table, so the console's
@@ -3572,7 +3632,7 @@ async def comms_member_activity(request: Request):
 
 
 @app.delete("/api/comms/members/{user_id}")
-async def comms_delete_member(user_id: str, request: Request):
+async def comms_delete_member(user_id: str, request: Request, _console_scope=Depends(require_console_scope)):
     """Remove an enrolment, resolving the rows it owns (**owner only**).
 
     ``strategy=transfer|purge`` is required, because nothing cascades to
