@@ -712,6 +712,56 @@ something enforces it.
   extend the scope dependency across `/api/comms` or make the parameter opt-in
   per method.
 
+## Live system test (2026-08-14) — `scripts/fg28_systest.py`
+
+Run on `hermes-systest` against `main` `48973a102` (which carries the review
+fixes above), as `hermes` with `HERMES_HOME=/opt/data/hermes-home-staging`, over
+the box's real Postgres and the two profiles it actually has (`default`,
+`maintenance`). Re-run independently on review; **6/6 both times**:
+
+```
+T1  member enrolled only in default, resolved in maintenance   REFUSED, not enrolled
+T2  no subject, resolved in maintenance                        REFUSED, owner-fallback
+T3  unknown profile                                            REFUSED
+T4  member -> default                                          role=member   active=True
+T5  leo_owner -> maintenance                                   role=owner    active=True
+T6  administered_profiles(leo_owner)                           ['default', 'maintenance']
+```
+
+**What this genuinely closes.** T4 and T5 are the same process resolving the
+*same* subject against two different `principals` tables (`app_prod` and
+`app_prod_maintenance`) and getting two different rows, and T1 is a real
+cross-schema refusal on real Postgres. The "everything is synthetic" gap is
+closed for the chokepoint's identity path — this is the first FG-28 evidence that
+is not a Protocol stub.
+
+**What it cannot prove, and must not be read as proving.** The script calls
+`resolve_console_principal` directly with its own `store_factory`. It never
+crosses the HTTP layer, so **all three defects found in the implementation review
+above would have passed it** — each lived in a route's pairing of scope and
+identity, not in the function the script calls. Nor does it call
+`guard_account_level_op`. Specifically still unexercised live:
+
+- **Secret isolation with credentials that differ.** T5 proves the *schema*
+  derivation is scoped; it says nothing about credentials, because the box's two
+  profiles carry the same Supabase URL and service-role key (verified by digest).
+  The load-bearing test — two profiles, **distinct** credentials, one process —
+  needs `maintenance` to be given its own credential first, and remains the one
+  test that would catch an unmigrated `os.getenv` on a console path.
+- **The route path under a real session.** The box's gate answers 401 before the
+  dependency runs, so nothing authenticated has driven `?profile=` through the
+  handlers. `tests/hermes_cli/test_fg28_console_scope_wiring.py` covers the
+  403-unknown-profile and 401-no-subject mappings over a `TestClient`, but not an
+  authenticated cross-profile success or the 403-suspended path.
+- **The account-verb guard**, which still has no call site and no negative test
+  proving a bare `require_member_admin` route cannot reach the GoTrue admin
+  client.
+
+The script reads only; it creates no rows and needs no cleanup. It depends on the
+box's live roster (a `leo_owner` in both profiles and a member enrolled only in
+`default`), so it is a box script rather than a portable test — which is why it
+lives in `scripts/` and not `tests/`.
+
 ## Related finding
 
 The shared kanban board carries `owner_user_id` and `visibility` while
@@ -740,12 +790,13 @@ secret-isolation tests green on real Postgres; `scripts/run_tests.sh`, `ruff`,
 - [~] Account-level verbs behind one guarded chokepoint (owner, or target enrolled solely in administered profiles) + a test that a bare `require_member_admin` route cannot reach the GoTrue admin client — `guard_account_level_op` shipped with 7 tests (profile-local `owner` refused, suspended enrolment counted as blast radius); no call site yet, and **the negative test is not written**
 - [~] Cross-profile audit in the target profile's ledger — follows from the scope, since `MemberService` is constructed inside it; not asserted by any test
 - [ ] Negative matrix + secret-isolation tests on real Postgres — still synthetic (Protocol store + monkeypatched registry); the two-profiles-one-process isolation run is the load-bearing one
-- [ ] System test on `hermes-systest` passed — **the box is already running this code** (`main` at `9ad78e74e`) untested; the console gate answers 401 before the dependency, so nothing cross-profile has been exercised live
+- [~] System test on `hermes-systest` passed — the **principal-resolution** half passed live, 6/6, reproduced independently at `main` `48973a102` (see §"Live system test"); the secret-isolation half, the account-verb guard and the HTTP route path are still unexercised on the box
 
 ## Audit log
 
 | Date | Edition | Author | Change | Rationale |
 |------|---------|--------|--------|-----------|
+| 2026-08-14 | 8 | devin (for Leo) | Live system test recorded, with its blind spot stated; the systest script and the HTTP wiring test landed on `develop` | Leo said FG-28 was tested and asked for the results to be reviewed. They were real and they were good — 6/6 on the box against `main` `48973a102`, reproduced independently on review, and the first FG-28 evidence that runs on real Postgres rather than a stub: one process resolving the same subject to two different `principals` rows in `app_prod` and `app_prod_maintenance`, and a genuine cross-schema refusal. But the script calls `resolve_console_principal` directly and never crosses HTTP, so **all three defects edition 7 fixed would have passed it** — every one of them lived in a route's pairing of scope and identity, not in the function under test. That is the same shape as FG-26's activation bug, where a green suite could not see a gate it never instantiated, so the checklist item is marked partial rather than done and the three things still unexercised live are named: secret isolation with credentials that actually differ (the box's two profiles share one Supabase key, so nothing there can catch an unmigrated `os.getenv`), the route path under a real session, and the account-verb guard. Also a process finding worth more than the test result: both artifacts were stranded on `fg-28/profile-admin`, whose PR was closed, so neither the systest nor the HTTP wiring test was on `develop` or `main` and the box had no copy — the evidence for the checklist item existed nowhere the repo could see it. |
 | 2026-08-14 | 7 | devin (for Leo) | Implementation reviewed: three wiring defects fixed, three runtime findings recorded, checklist marked per item | Leo said the to-dos were implemented and asked for a review. The chokepoint core was sound; all three defects were in the **pairing** of scope and identity at the routes, which is exactly the risk the one-process decision moved from a process boundary onto discipline — `deactivate`/`activate` re-derived the caller in the target profile and then built the service after the scope had closed (authority in one profile, effect in another), `delete_member` declared the scope but bound its actor through the legacy owner-fallback resolver (a sessionless `DELETE …?profile=hr` would have run as `hr`'s owner), and `guard_account_level_op` short-circuited on `role == "owner"` — a role read from the *target* profile, so an `hr` owner could ban an account enrolled in `engineers`, the very escalation the guard exists to refuse. Fixed and asserted structurally over the route table rather than route by route, so the next console route cannot reintroduce either defect silently. Reading the deployed box alongside the code added three things nothing in the repo states: the fail-closed credential mode is armed only by `gateway/run.py`, so in the dashboard's own process the strict branch is unreachable; a secret scope is a profile's `.env` and nothing else, so a profile without the Supabase admin credential answers 503 on every console route, and the box only works because all three env sources carry identical values (verified by digest); and agent-home appends `?profile=` to every path while only the user-management routes honour it, so a switcher built on that client would render one profile's goals and traces under another's name. Checklist now marks partial items as partial rather than open, because "open" hid that the security core has in fact landed. |
 | 2026-08-13 | 6 | devin (for Leo) | Account-level verb relocation ruled **out of scope**; replaced with a chokepoint requirement | Leo noticed this section's “decide before FG-26 ships” condition had expired — FG-26 shipped in #217 — and asked whether moving ban/delete/reset behind the control plane was still in scope. Re-read the shipped code instead of the doc's intent, and the premise turned out stale: `set_member_active` is an un-enrol with no GoTrue call, `delete_member` is owner-only and deliberately leaves the box-wide account alone, `set_password` is only the token-redemption path, `delete_user` is only enrolment rollback, and `set_banned` has **no production caller as an admin verb**. So no admin-reachable account-level verb exists to relocate, and the one-process decision already puts the service-role key in one place — relocation is moot, not deferred, and FG-26's UI does not need rebuilding. What replaces it is smaller and stronger: the escalation is currently prevented by *absence*, so any future account-level verb must pass one guarded seam requiring owner or “enrolled solely in profiles the actor administers”, asserted by a test that a bare `require_member_admin` route cannot reach the GoTrue admin client. That check is only computable once FG-28 can read across profiles, which is why FG-26 was right to refuse it. |
 | 2026-08-13 | 5 | devin (for Leo) | Architecture resolved: **one process, profile-scoped per request**; fan-out demoted to a recorded rejected alternative | Leo read the doc and found the contradiction edition 4 introduced: the body recommended fan-out because “the process boundary is what keeps secrets apart” while the new pickup prompt said in-process multiplexing was the direction. Resolved in favour of one process, on three grounds. **(1)** Fan-out's argument was load-bearing on a premise that is no longer true — `set_secret_scope` is context-local and `get_secret` fails closed, and #219/#220 extended that to a spawned child's environment. **(2)** Fan-out is *incompatible* with the one-gateway consolidation this same FG carries: with `multiplex_profiles` on, port-binding platforms are a hard startup error for a secondary profile and the default profile serves the rest under `/p/<profile>/`, so the per-profile HTTP endpoints a console would fan out to stop existing. The doc was asking for two mutually exclusive runtimes. **(3)** “Keep one process per profile, exactly as today” was factually wrong for this tier — the box runs exactly one `hermes-dashboard` unit on one `HERMES_HOME`, which is precisely why FG-26's picker can only see the current profile; fan-out would have been N new units at ~225 MB, not the status quo. Recorded what the decision *costs*, because fan-out's real prize was never the secrets: authority re-derived at the destination stops being a process boundary and becomes a discipline, so the doc now requires a single scoping chokepoint, the principal re-resolved from the target profile's own `principals`, owner-fallback refused there, FG-27's schema-ownership guard as the loud backstop, and the credential migration done *before* a second profile is served — with the two-profiles-one-process secret-isolation test promoted to load-bearing. |
