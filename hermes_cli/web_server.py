@@ -3185,11 +3185,57 @@ def _comms_unconfigured_payload(key: str) -> dict:
     return {"configured": False, key: [], "principal": None}
 
 
+#: The one refusal FG-28 turns on: a console-routed request with no verified
+#: subject is 401, never the target profile's owner.
+_CONSOLE_NO_SUBJECT = (
+    "console-routed request carried no verified subject; "
+    "owner-fallback is refused on these routes"
+)
+
+
+async def require_console_scope(request: "Request"):
+    """FG-28: enter the target profile's scope for a console request.
+
+    Reads ``?profile=<name>`` (absent → no scope, single-profile byte-identical),
+    validates the target profile, and enters its runtime scope
+    (HERMES_HOME + secret scope) for the *whole* handler via ``yield`` — so the
+    MemberService's store AND the credential reads a GoTrue call resolves
+    through ``get_secret`` both land in the target profile. This dependency
+    only establishes the scope; it never resolves or asserts an identity.
+
+    Every route that reads or writes profile-local rows on the console path must
+    declare it. Without it the identity is re-derived in the target profile
+    while the store still resolves to the *acting* profile — authority checked
+    in one profile, effect in another — which is why
+    ``test_fg28_console_routes.py`` asserts the pairing structurally rather than
+    route by route.
+    """
+    from hermes_cli.console_scope import _scoped_to
+    from hermes_cli.profile_registry import get_profile_registry
+
+    target = (request.query_params.get("profile") or "").strip()
+    if not target:
+        yield None
+        return
+    entry = next((e for e in get_profile_registry() if e.name == target), None)
+    if entry is None or not entry.hermes_home.is_dir():
+        raise HTTPException(
+            status_code=403, detail=f"unknown target profile: {target!r}"
+        )
+    with _scoped_to(entry.hermes_home):
+        yield entry
+
+
 @app.get("/api/comms/whoami")
-async def comms_whoami(request: Request):
-    """Return the resolved C1 principal + role for the current web request."""
+async def comms_whoami(request: Request, _console_scope=Depends(require_console_scope)):
+    """Return the resolved C1 principal + role for the current web request.
+
+    Honours ``?profile=``: the role a switcher renders has to be the role the
+    *target* profile records, since that is the authority every write there
+    will be re-derived against.
+    """
     try:
-        principal = await _comms_resolve_principal(request, allow_as=True)
+        principal = await _comms_console_actor(request)
     except _CommsNotConfigured:
         return {"configured": False, "principal": None}
     return {
@@ -3225,30 +3271,42 @@ def _comms_user_service(actor=None):
     )
 
 
-async def require_console_scope(request: "Request"):
-    """FG-28: enter the target profile's scope for a console admin request.
+async def _comms_console_actor(request: "Request"):
+    """Resolve the acting principal for a **read** route, honouring ``?profile=``.
 
-    Reads ``?profile=<name>`` (absent → no scope, single-profile byte-identical),
-    validates the target profile, and enters its runtime scope
-    (HERMES_HOME + secret scope) for the *whole* handler via ``yield`` — so the
-    MemberService's store AND the credential reads a GoTrue call resolves
-    through ``get_secret`` both land in the target profile. This dependency
-    only establishes the scope; it never resolves or asserts an identity.
+    The read counterpart of :func:`_comms_member_service`: no admin gate, the
+    same identity discipline. With ``?profile=`` present the subject is
+    re-resolved in the target profile's own ``principals`` and owner-fallback is
+    refused (401), so a switcher can never render one profile's rows under
+    another profile's name. Absent it, the legacy resolver runs byte-identically,
+    ``?as=`` narrowing included — that aid is not offered on the cross-profile
+    path, because the authority it rests on would have to be re-derived per
+    profile to mean anything.
     """
-    from hermes_cli.console_scope import _scoped_to
-    from hermes_cli.profile_registry import get_profile_registry
+    from hermes_cli.console_scope import (
+        OwnerFallbackRefused,
+        ProfileScopeError,
+        resolve_console_principal,
+    )
 
     target = (request.query_params.get("profile") or "").strip()
     if not target:
-        yield None
-        return
-    entry = next((e for e in get_profile_registry() if e.name == target), None)
-    if entry is None or not entry.hermes_home.is_dir():
-        raise HTTPException(
-            status_code=403, detail=f"unknown target profile: {target!r}"
+        return await _comms_resolve_principal(request, allow_as=True)
+
+    from hermes_cli.access import PrincipalStore
+
+    subject = _comms_session_subject(request)
+    if not subject:
+        raise HTTPException(status_code=401, detail=_CONSOLE_NO_SUBJECT)
+    store_factory = lambda home: PrincipalStore(_comms_app_store())  # noqa: E731 — scope held by require_console_scope
+    try:
+        return await resolve_console_principal(
+            subject, target, store_factory=store_factory
         )
-    with _scoped_to(entry.hermes_home):
-        yield entry
+    except OwnerFallbackRefused as exc:
+        raise HTTPException(status_code=401, detail=str(exc)) from exc
+    except ProfileScopeError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
 
 
 async def _comms_member_service(request: "Request"):
@@ -3268,33 +3326,10 @@ async def _comms_member_service(request: "Request"):
     check runs *before* :func:`resolve_console_principal` so a 401 never depends
     on a live datastore connection.
     """
-    from hermes_cli.console_scope import (
-        OwnerFallbackRefused,
-        ProfileScopeError,
-        resolve_console_principal,
-    )
     from hermes_cli.members import require_member_admin
 
-    target = (request.query_params.get("profile") or "").strip()
-    if target:
-        from hermes_cli.access import PrincipalStore
-
-        subject = _comms_session_subject(request)
-        if not subject:
-            raise HTTPException(
-                status_code=401,
-                detail="console-routed request carried no verified subject; "
-                "owner-fallback is refused on these routes",
-            )
-        store_factory = lambda home: PrincipalStore(_comms_app_store())  # noqa: E731 — scope held by require_console_scope
-        try:
-            actor = await resolve_console_principal(
-                subject, target, store_factory=store_factory
-            )
-        except OwnerFallbackRefused as exc:
-            raise HTTPException(status_code=401, detail=str(exc)) from exc
-        except ProfileScopeError as exc:
-            raise HTTPException(status_code=403, detail=str(exc)) from exc
+    if (request.query_params.get("profile") or "").strip():
+        actor = await _comms_console_actor(request)
     else:
         actor = await _comms_resolve_principal(request)
     try:
@@ -3373,7 +3408,9 @@ async def comms_list_members(request: Request, _console_scope=Depends(require_co
 
 
 @app.get("/api/comms/directory")
-async def comms_directory(request: Request):
+async def comms_directory(
+    request: Request, _console_scope=Depends(require_console_scope)
+):
     """The colleague directory — every **enrolled** principal may read it.
 
     Deliberately not gated on owner/admin: a member who cannot see who else is
@@ -3383,7 +3420,7 @@ async def comms_directory(request: Request):
     """
     params = request.query_params
     try:
-        principal = await _comms_resolve_principal(request, allow_as=True)
+        principal = await _comms_console_actor(request)
         service = _comms_user_service(principal)
         entries, total = await service.directory(
             principal,
@@ -3565,7 +3602,9 @@ async def comms_set_member_display(user_id: str, request: Request, _console_scop
 
 
 @app.post("/api/comms/members/{user_id}/channels")
-async def comms_link_member_channel(user_id: str, request: Request):
+async def comms_link_member_channel(
+    user_id: str, request: Request, _console_scope=Depends(require_console_scope)
+):
     """Map an inbound channel handle onto an enrolled member (owner/admin)."""
     from hermes_cli.access import PrincipalStore
     from hermes_cli.members import link_member_channel
@@ -3583,7 +3622,7 @@ async def comms_link_member_channel(user_id: str, request: Request):
             detail="platform and channel_user_id are required",
         )
     try:
-        actor = await _comms_resolve_principal(request)
+        actor, _service = await _comms_member_service(request)
         principal = await link_member_channel(
             PrincipalStore(_comms_app_store()),
             actor,
@@ -3643,8 +3682,10 @@ async def comms_delete_member(user_id: str, request: Request, _console_scope=Dep
     strategy = (params.get("strategy") or "").strip()
     transfer_to = (params.get("transfer_to") or "").strip() or None
     try:
-        actor = await _comms_resolve_principal(request)
-        service = _comms_user_service(actor)
+        # The owner gate is delete_member's own (require_owner); this seam is
+        # here for the identity, which on a ?profile= request has to be the
+        # target profile's record of the caller and never its owner by default.
+        actor, service = await _comms_member_service(request)
         deleted = await service.delete_member(
             actor,
             user_id=user_id,
@@ -3659,13 +3700,17 @@ async def comms_delete_member(user_id: str, request: Request, _console_scope=Dep
 
 
 @app.post("/api/comms/members/{user_id}/deactivate")
-async def comms_deactivate_member(user_id: str, request: Request):
+async def comms_deactivate_member(
+    user_id: str, request: Request, _console_scope=Depends(require_console_scope)
+):
     """Suspend a member's enrolment in this profile (owner/admin)."""
     return await _comms_set_member_active(user_id, request, active=False)
 
 
 @app.post("/api/comms/members/{user_id}/activate")
-async def comms_activate_member(user_id: str, request: Request):
+async def comms_activate_member(
+    user_id: str, request: Request, _console_scope=Depends(require_console_scope)
+):
     """Restore a suspended enrolment (owner/admin only)."""
     return await _comms_set_member_active(user_id, request, active=True)
 

@@ -207,13 +207,18 @@ async def enrolled_profiles(
     store_factory: StoreFactory,
     registry: Optional[List[ProfileRegistryEntry]] = None,
 ) -> List[str]:
-    """Profiles where ``user_id`` holds an active principal row (any role).
+    """Profiles where ``user_id`` holds a principal row, **suspended included**.
 
     The blast-radius read for account-level verbs (ban/delete/reset): an
     account-level op affects every profile the target is enrolled in, so the
     guard needs the full set, not just the acting profile. Complements
-    :func:`administered_profiles` — same iteration, any-role enrolment
-    instead of admin/owner authority.
+    :func:`administered_profiles` — same iteration, any-role enrolment instead
+    of admin/owner authority.
+
+    A suspended row counts. Suspension is a profile-local, reversible un-enrol
+    (FG-26 §3.5) that another profile's admin can lift; banning the box-wide
+    account takes that decision away from them, so a suspended enrolment is
+    blast radius rather than an absence of it.
     """
     if not user_id:
         return []
@@ -224,8 +229,7 @@ async def enrolled_profiles(
             continue
         with _scoped_to(entry.hermes_home):
             store = store_factory(entry.hermes_home)
-            principal = await _principal_for_subject(store, user_id)
-            if principal is not None and getattr(principal, "active", True):
+            if await _principal_for_subject(store, user_id) is not None:
                 out.append(entry.name)
     return out
 
@@ -239,24 +243,24 @@ async def guard_account_level_op(
 ) -> None:
     """Refuse an account-level verb unless the actor has box-wide authority.
 
-    Two paths to a box-wide account op (FG-28 item 8):
+    One condition, applied to every actor: the target must be enrolled *solely*
+    in profiles the actor administers, so the op's blast radius stays inside the
+    actor's own authority. Otherwise it is refused — an ``hr`` admin banning an
+    account also enrolled in ``engineers`` would revoke access in a profile they
+    cannot administer, which is exactly the cross-profile escalation a shared
+    account system makes possible.
 
-    1. the actor is an ``owner`` (box-wide authority by definition); or
-    2. the target is enrolled *solely* in profiles the actor administers —
-       so the op's blast radius stays inside the actor's authority.
-
-    Anything else is refused: an ``hr`` admin banning an account also
-    enrolled in ``engineers`` would revoke access in a profile they cannot
-    administer, which is exactly the cross-profile escalation the shared
-    account system makes possible. Raise :class:`AccountLevelPermissionError`
-    (403) rather than letting the verb through.
+    ``owner`` is deliberately **not** a shortcut. ``role`` here is the *target
+    profile's* record of the caller, and every profile has its own owner: an
+    ``hr`` owner is not a box-wide principal, so exempting them would reopen the
+    hole through the role most likely to hold it. A genuine box-wide owner still
+    passes, on the same condition — they administer every profile the target is
+    in, so nothing is left outside their authority.
 
     ``actor`` is the principal :func:`resolve_console_principal` already
-    re-derived in the target profile's scope, so its role is the target
-    profile's own record of the caller — not an asserted identity.
+    re-derived in the target profile's scope, so its authority is that profile's
+    own record of the caller rather than an asserted identity.
     """
-    if getattr(actor, "role", "") == "owner":
-        return
     actor_subject = getattr(actor, "user_id", "")
     administered = set(
         await administered_profiles(

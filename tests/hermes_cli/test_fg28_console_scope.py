@@ -237,13 +237,42 @@ def test_enrolled_profiles_lists_every_profile_the_target_is_in(
     ]
 
 
-def test_guard_allows_owner_for_account_level_op(target_in_two_profiles) -> None:
+def test_guard_refuses_an_owner_whose_ownership_is_profile_local(
+    target_in_two_profiles,
+) -> None:
     entries, per_home = target_in_two_profiles
     factory = _store_factory(per_home)
-    # Owner is box-wide authority — the op is allowed regardless of where the
-    # target is enrolled.
+    # ``owner`` is a per-profile role: every profile has one. CTO owns default
+    # and administers engineers but holds nothing in hr, so banning Mary — who
+    # is in hr too — reaches past their authority. The role must not exempt
+    # them from the blast-radius check, or the hole reopens through the role
+    # most likely to hold it.
     actor = Principal(SUBJECT, "CTO", "owner")
-    asyncio.run(guard_account_level_op(actor, "mary", store_factory=factory, registry=entries))
+    with pytest.raises(AccountLevelPermissionError) as excinfo:
+        asyncio.run(
+            guard_account_level_op(actor, "mary", store_factory=factory, registry=entries)
+        )
+    assert "hr" in str(excinfo.value)
+
+
+def test_guard_allows_an_owner_enrolled_everywhere_the_target_is(
+    target_in_two_profiles,
+) -> None:
+    entries, per_home = target_in_two_profiles
+    per_home = dict(per_home)
+    hr_home = entries[2].hermes_home
+    # A box-wide owner: enrolled with authority in hr as well, so nothing Mary
+    # is in falls outside it. Passes on the same condition as any other actor.
+    per_home[hr_home] = _FakeStore({
+        SUBJECT: Principal(SUBJECT, "CTO", "owner"),
+        "mary": Principal("mary", "Mary", "member"),
+    })
+    actor = Principal(SUBJECT, "CTO", "owner")
+    asyncio.run(
+        guard_account_level_op(
+            actor, "mary", store_factory=_store_factory(per_home), registry=entries
+        )
+    )
 
 
 def test_guard_refuses_admin_when_target_spills_outside_administered_set(
@@ -279,6 +308,29 @@ def test_guard_allows_when_target_solely_in_administered_profiles(
     asyncio.run(
         guard_account_level_op(actor, "mary", store_factory=factory, registry=entries)
     )
+
+
+def test_guard_counts_a_suspended_enrolment_as_blast_radius(
+    target_in_two_profiles,
+) -> None:
+    entries, per_home = target_in_two_profiles
+    per_home = dict(per_home)
+    hr_home = entries[2].hermes_home
+    # Mary is suspended in hr — a reversible, profile-local un-enrol hr's own
+    # admin can lift. Banning the box-wide account takes that decision away
+    # from them, so the suspended row still counts against the actor's reach.
+    per_home[hr_home] = _FakeStore({
+        OTHER_SUBJECT: Principal(OTHER_SUBJECT, "CFO", "admin"),
+        "mary": Principal("mary", "Mary", "member", active=False),
+    })
+    actor = Principal(SUBJECT, "CTO", "admin")
+    with pytest.raises(AccountLevelPermissionError) as excinfo:
+        asyncio.run(
+            guard_account_level_op(
+                actor, "mary", store_factory=_store_factory(per_home), registry=entries
+            )
+        )
+    assert "hr" in str(excinfo.value)
 
 
 def test_guard_allows_vacuously_when_target_enrolled_nowhere(
