@@ -2,6 +2,7 @@
 title: "design: Projects — the durable record of a piece of work that can be reviewed, repeated and learnt from"
 status: draft — spec for review, then implementation
 date: 2026-08-13
+revised: 2026-08-14 (ed.3.1 — rebuilt around the owner's 15-field list; see §1.1)
 type: feature design (implementation-ready, standalone)
 target_repo: ai-prentice-4-all
 audience: an implementing agent with no other context than this file and the tree
@@ -11,6 +12,14 @@ origin: |
   automatic or it can require user to provide instructions, feedback and
   guidance over time. Everything is tracked properly in Project so that it can
   be reviewed, repeated and learnt from over time."
+
+  Leo, 2026-08-14 — the fifteen fields a project holds, M = mandatory,
+  O = optional: 1 Goal (short title) M · 2 Requirements/Description (long) M ·
+  3 Outputs M · 4 Participants M · 5 Progress M · 6 Target audience O ·
+  7 Score O · 8 Samples/References · 9 Plan O · 10 Contacts O · 11 Files O ·
+  12 Memories O · 13 Tools O · 14 Skills O · 15 Conversation Histories O.
+  §1.1 is that list, verbatim, mapped to storage; every other section is
+  written to serve it.
 consolidates:
   - docs/plans/2026-08-12-001-projects-page-plan.md (ed.1 — the substrate review, the record, the page)
   - docs/plans/2026-08-13-001-todos-and-projects-design-revision.md (ed.2 — Projects' six open questions answered; the to-do → card seam)
@@ -42,6 +51,14 @@ dimensions those documents do not cover (cadence, autonomy, guidance, runs and
 learning). Where it disagrees with ed.1/ed.2, **this document wins** — the
 diffs are listed in §17.
 
+**Read §1.1 first.** It is the owner's fifteen-field list mapped to storage, and
+it is the acceptance criterion for this feature: a Project that cannot hold all
+fifteen is not this Project. Every later section exists to make one of those
+fields work — the five mandatory ones especially (Goal, Requirements, Outputs,
+Participants, Progress), because they are what a project *is*, and the ten
+optional ones must each be genuinely omittable without breaking a page, a run or
+a prompt.
+
 Ground truth as of `develop` @ 2026-08-13:
 
 | piece | state |
@@ -71,54 +88,87 @@ To-dos answer *what needs me next*. A **Project** answers **what are we trying
 to finish, how does it get done, who and what is involved, and what did we learn
 last time?**
 
-A Project is four things at once, and the design keeps them separate on purpose:
+A Project is five things at once, and the design keeps them separate on purpose.
+`[n]` is the owner's field number from §1.1:
 
 ```
-  ┌─ the commitment ──────────────────────────────────────────────────────────┐
-  │ purpose (goal links) · cadence (one-off | repeatable | standing)          │
-  │ definition of done · autonomy · caps and budget                          │
-  └──────────────────────────────────────────────────────────────────────────┘
-  ┌─ the method ─────────────────────────────────────────────────────────────┐
-  │ the playbook (ordered card templates, versioned) + the guidance the user  │
-  │ has given over time (durable directives, run feedback)                    │
-  └──────────────────────────────────────────────────────────────────────────┘
-  ┌─ the work ───────────────────────────────────────────────────────────────┐
-  │ kanban cards (already shipped: statuses, parent links, runs, comments,    │
-  │ attachments, events, circuit breaker) grouped by tasks.project_id         │
-  └──────────────────────────────────────────────────────────────────────────┘
-  ┌─ the record ─────────────────────────────────────────────────────────────┐
-  │ runs (one row per occurrence) · retros · linked files, arrivals, to-dos,  │
-  │ memory docs, conversations, URLs · members and profiles · C8 traces       │
-  └──────────────────────────────────────────────────────────────────────────┘
+  ┌─ the commitment ────────────────────────────────────────────────────────┐
+  │ [1] goal · [2] requirements · [3] outputs · [6] target audience         │
+  │ cadence (one-off | repeatable | standing) · autonomy · caps and budget   │
+  └─────────────────────────────────────────────────────────────────────────┘
+  ┌─ the method ────────────────────────────────────────────────────────────┐
+  │ [9] plan (the versioned playbook) · [13] tools · [14] skills ·           │
+  │ [8] samples/references · the guidance given over time (directives,      │
+  │ run feedback)                                                           │
+  └─────────────────────────────────────────────────────────────────────────┘
+  ┌─ the cast ──────────────────────────────────────────────────────────────┐
+  │ [4] participants — people (members) AND profiles (instruments) ·        │
+  │ [10] contacts — people the work involves who do not use this box        │
+  └─────────────────────────────────────────────────────────────────────────┘
+  ┌─ the work ──────────────────────────────────────────────────────────────┐
+  │ kanban cards (shipped: statuses, parent links, runs, comments,          │
+  │ attachments, events, circuit breaker) grouped by tasks.project_id       │
+  └─────────────────────────────────────────────────────────────────────────┘
+  ┌─ the record ────────────────────────────────────────────────────────────┐
+  │ [5] progress · [7] score · runs (one row per occurrence) · retros ·     │
+  │ [11] files · [12] memories · [15] conversation histories · C8 traces    │
+  └─────────────────────────────────────────────────────────────────────────┘
 ```
+
+Reading those five groups in order is also the order of the detail page (§13)
+and of the compiled run prompt (§5.2). That is not a coincidence: *what are we
+doing, how, with whom, what happened, how well* is both what a human opens the
+page to find out and what a run needs told before it starts.
 
 **The method is the part that makes a project repeatable, and the record is the
 part that makes it learnable.** Everything under "the work" already exists and
 is already tested; this design adds no execution engine, no second board, no
 second scheduler and no second status vocabulary.
 
-### 1.1 The key information a Project holds
+### 1.1 The key information a Project holds — the owner's field list
 
-This is the field-level answer to "what does a project store". Every row is
-either shipped, or specified in this document at the section named.
+This is the authoritative field inventory. **M = mandatory** (the API refuses to
+create or activate a project without it), **O = optional** (must be genuinely
+absent-able: no page, run or prompt may assume it exists). "Where" names the
+column, table or section that implements it.
 
-| group | information | where it lives |
-|---|---|---|
-| identity | `id`, `slug`, `name`, `description`, `icon`, `color` | `projects` (shipped) |
-| purpose | linked goals (`project_links.kind='goal'`), `definition_of_done` | shipped table / §2.2 |
-| commitment | `cadence`, `schedule`, `review_every`, `due_at`, `status` | §2.2, §3 |
-| autonomy | `autonomy`, `max_in_progress`, `budget_usd_per_run`, `require_approval` | §2.2, §4 |
-| ownership | `owner_user_id`, `visibility`, members + roles, profiles + roles (incl. the **host** profile) | §2.2, `project_members` (§2.2), `project_profiles` (shipped) |
-| method | the playbook (versioned card templates), the guidance log | `project_playbook` / `project_directives` (§2.2, §5, §7) |
-| place | `primary_path`, folders, bound board (`board_slug`) | `projects` / `project_folders` (shipped) |
-| work | cards, their runs, comments, attachments, events, blocked reasons | `kanban_db` (shipped), joined by `tasks.project_id` |
-| context | linked files, arrivals, to-dos, memory documents, conversations, URLs | `project_links` (shipped) |
-| history | runs, per-run outcome + retro, C8 traces, cost | `project_runs` (§2.2, §6, §8) |
-| state | `status`, rolling `summary` + `summary_at`, `next_run_at`, health, `last_reviewed_at` | §2.2, §9 |
+| # | field | M/O | where it lives | notes |
+|---|---|---|---|---|
+| 1 | **Goal** (short title) | **M** | `projects.name` (short, ≤80 chars) + `project_links(kind='goal')` to the FG-29 goal tree | The name *is* the goal, phrased as an outcome ("Land the Acme rollout"), not a category ("Acme"). A linked goal is optional; a goal *sentence* is not. §10 |
+| 2 | **Requirements / Description** (long) | **M** | `projects.description` (long markdown) | The brief. Compiled into every run prompt (§5.2), so it is written *for the agent as much as for a human*. Empty-string creates are refused. |
+| 3 | **Outputs** | **M** | `project_outputs` (§2.2) — one row per expected deliverable, each optionally satisfied by a link, card or file | The deliverables, declared before the work. At least one required. This is what makes progress and "done" mean something (§9.1). |
+| 4 | **Participants** | **M** | `project_members` (people) + `project_profiles` (profiles/instruments, one flagged `host`) | Two lists, one field, because on this box a participant may be a person *or* an agent profile. Minimum: the owner + one profile. §2.2, §11 |
+| 5 | **Progress** | **M** | **derived on read**, never stored — the ladder in §9.1 | Mandatory to *show*, impossible to *store* correctly: it is computed from outputs delivered, the primary goal's metric, and the card rollup, in that order. |
+| 6 | **Target audience** | O | `projects.target_audience` (short text) | Who the outputs are *for*. Compiled into the run prompt because it is the field that most changes tone, format and depth of an output — and the one a user most resents re-stating each run. |
+| 7 | **Score** | O | `project_runs.score_user` / `score_self` + `projects.score_rubric`; project score is **derived** (mean of the last 5 `score_user`) | How well it went, 1–5. `score_user` is the human's; `score_self` is the run's own claim in its retro. Divergence between them is the single most useful learning signal (§8). |
+| 8 | **Samples / References** | O | `project_links(kind='sample'\|'reference')` | A *sample* is "make it look like this" (an exemplar output); a *reference* is "this is the source material". Both are pointers (files, URLs, arrivals, past outputs). Samples are named in the run prompt; references are listed for the run to open on demand. |
+| 9 | **Plan** | O | `project_playbook` (§7) — `body` (prose plan) and/or `steps` (ordered card templates) | The plan and the playbook are the same object: prose for a one-off, steps when it should be executable or repeatable. A `repeatable` project's plan is mandatory *for it* (§3.1) — that is a cadence rule, not a field rule. |
+| 10 | **Contacts** | O | `project_contacts` (§2.2) | People the work involves who are **not** users of this box: a client, a reviewer, a mailing list. Distinct from participants because a contact has no principal, no permissions, and may be an outbound address. |
+| 11 | **Files** | O | `project_links(kind='file')` + `task_attachments` on the project's cards, presented as one grid (§13) | Links, never copies. A file that arrived on WhatsApp and a file a worker attached are the same thing to whoever is looking. |
+| 12 | **Memories** | O | `project_links(kind='memory')` → a memory document in a named profile | Pointer + `profile`; resolved under the caller's principal (§11 rule 5). A project curates *which* memories matter to it; it never owns them. |
+| 13 | **Tools** | O | `projects.toolsets` (JSON list) | The toolsets a run is started with. **A subset filter, never a grant** — it can only narrow what the host profile already allows (§4.1). Applied at spawn, so it is frozen for the run's conversation. |
+| 14 | **Skills** | O | `projects.skills` (JSON list of skill names) | Skills preloaded into the run's seed. Same subset rule, plus a count cap, because skills are prompt bytes on every turn (§4.1). |
+| 15 | **Conversation Histories** | O | `project_links(kind='session')` + derived: sessions of the project's cards (`tasks.session_id`) and of its runs (`project_runs.session_id`) | Mostly *automatic* — you should not have to link the conversation that did the work. Explicit links exist for the chat that *started* it, before the project did. |
 
-Derived numbers (progress, card counts, cost, "3 running · 1 blocked") are
-**never stored** — they are computed on read from the board, the goal tree and
-the C8 ledger. A stored count is how two surfaces start disagreeing.
+Fields this design adds beyond the list, each because a behaviour needs it (none
+mandatory, all defaulted): `cadence`, `schedule`, `review_every`, `autonomy`,
+`max_in_progress`, `budget_usd_per_run`, `definition_of_done`, `due_at`,
+`status`, `visibility`, `host_profile`, `summary`, `health`. Cadence and autonomy
+are the two that carry the rest of the owner's brief ("long lasting, repeatable
+or one-time only… fully automatic or… requires guidance"), so they are
+first-class (§3, §4).
+
+Three rules an implementer must not soften:
+
+- **Derived numbers are never stored.** Progress, score, card counts, cost,
+  health, "3 running · 1 blocked" — all computed on read from the outputs table,
+  the goal tree, the board and the C8 ledger. A stored count is how two surfaces
+  start disagreeing about the same project.
+- **Optional means optional.** Every panel, every prompt section and every list
+  row must render correctly with fields 6–15 empty. The commonest way to break
+  this is a run prompt that says "Target audience: None".
+- **Mandatory is checked at the API, not just the UI**, and for fields 1–4 at
+  *create*; field 5 is derived so it cannot be missing.
 
 ### 1.2 What a Project is not
 
@@ -129,6 +179,10 @@ the C8 ledger. A stored count is how two surfaces start disagreeing.
   job in its host profile (§3.2).
 - **Not a chat log.** A conversation is linked, not owned; guidance the user
   wants to persist is a directive (§5), not a message in scrollback.
+- **Not an address book.** `project_contacts` holds the people *this* project
+  deals with. There is no global contacts store behind it and this design does
+  not start one; a contact is a row on a project, and the same person appearing
+  on two projects is two rows (§2.2).
 
 ---
 
@@ -175,6 +229,69 @@ CREATE TABLE IF NOT EXISTS project_members (
     added_at    INTEGER NOT NULL,
     PRIMARY KEY (project_id, user_id)
 );
+
+-- ── [10] contacts: people involved who are not users of this box ─────────
+-- No principal, no permissions, no global address book. `address` may be an
+-- outbound destination (email, handle) and is therefore treated as PII: it is
+-- returned to members only, never to a `viewer`, and never compiled into a run
+-- prompt unless the step needs it.
+CREATE TABLE IF NOT EXISTS project_contacts (
+    id          TEXT PRIMARY KEY,
+    project_id  TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    name        TEXT NOT NULL,
+    role        TEXT,                       -- 'client', 'reviewer', 'the list' …
+    org         TEXT,
+    platform    TEXT,                       -- email | telegram | slack | phone | …
+    address     TEXT,                       -- PII; see the note above
+    user_id     TEXT,                       -- set when the contact also has a principal
+    notes       TEXT,
+    created_by  TEXT,
+    created_at  INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_project_contacts_project
+    ON project_contacts(project_id);
+
+-- ── [3] outputs: the deliverables, declared before the work ──────────────
+-- Mandatory: a project has at least one row. This table is what gives progress
+-- (§9.1) a denominator that means something, and it is the reason a project can
+-- be "80% of cards done" and still honestly show 0% delivered.
+CREATE TABLE IF NOT EXISTS project_outputs (
+    id            TEXT PRIMARY KEY,
+    project_id    TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    seq           INTEGER NOT NULL,          -- display order
+    title         TEXT NOT NULL,             -- "The Monday digest email"
+    spec          TEXT,                      -- what "good" looks like; free text
+    kind          TEXT NOT NULL DEFAULT 'artifact',
+                                             -- artifact | file | message | decision | report | code
+    required      INTEGER NOT NULL DEFAULT 1,
+    recurring     INTEGER NOT NULL DEFAULT 0, -- delivered once per run (repeatable projects)
+    status        TEXT NOT NULL DEFAULT 'pending',
+                                             -- pending | in_progress | delivered | accepted | dropped
+    delivered_at  INTEGER,
+    accepted_at   INTEGER,                   -- a human accepted it; only a human may
+    accepted_by   TEXT,
+    created_at    INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_project_outputs_project
+    ON project_outputs(project_id, seq);
+
+-- One row per *delivery* of an output: which run produced it and what the
+-- artefact is. `recurring` outputs accumulate one row per run, which is exactly
+-- the "did last Monday's digest actually go out?" question.
+CREATE TABLE IF NOT EXISTS project_output_deliveries (
+    id           TEXT PRIMARY KEY,
+    output_id    TEXT NOT NULL REFERENCES project_outputs(id) ON DELETE CASCADE,
+    run_id       TEXT,                       -- project_runs.id, when a run produced it
+    task_id      TEXT,                       -- the card that produced it, when any
+    link_kind    TEXT,                       -- file | url | attachment | session | memory
+    link_ref     TEXT,                       -- the pointer, resolved per §11 rule 5
+    profile      TEXT,                       -- which profile owns the referent
+    label        TEXT,                       -- cached display label (link rot, §15)
+    note         TEXT,
+    delivered_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_project_output_deliveries_output
+    ON project_output_deliveries(output_id, delivered_at DESC);
 
 -- ── the method: a versioned playbook ─────────────────────────────────────
 -- One row per revision. `steps` is a JSON array of card templates (§7).
@@ -231,6 +348,11 @@ CREATE TABLE IF NOT EXISTS project_runs (
     summary       TEXT,              -- the agent's account of the run
     retro         TEXT,              -- the retrospective (§8); NULL until written
     retro_at      INTEGER,
+    score_self    INTEGER,           -- [7] 1–5, the run's own claim, written with the retro
+    score_user    INTEGER,           -- [7] 1–5, the human's; only a human may write it
+    score_note    TEXT,              -- why that score (the part worth reading)
+    scored_by     TEXT,
+    scored_at     INTEGER,
     error         TEXT,
     UNIQUE (project_id, run_no)
 );
@@ -259,7 +381,11 @@ ALTER TABLE projects ADD COLUMN autonomy              TEXT NOT NULL DEFAULT 'sup
                                   -- manual | supervised | autonomous           (§4)
 ALTER TABLE projects ADD COLUMN max_in_progress       INTEGER NOT NULL DEFAULT 1;
 ALTER TABLE projects ADD COLUMN budget_usd_per_run    REAL;    -- NULL = no cap
-ALTER TABLE projects ADD COLUMN definition_of_done    TEXT;
+ALTER TABLE projects ADD COLUMN definition_of_done    TEXT;    -- prose; defaults to "all required outputs accepted"
+ALTER TABLE projects ADD COLUMN target_audience       TEXT;    -- [6]                            (§5.2)
+ALTER TABLE projects ADD COLUMN score_rubric          TEXT;    -- [7] what 5 means here          (§8.4)
+ALTER TABLE projects ADD COLUMN toolsets              TEXT;    -- [13] JSON list; a NARROWING filter (§4.1)
+ALTER TABLE projects ADD COLUMN skills                TEXT;    -- [14] JSON list of skill names     (§4.1)
 ALTER TABLE projects ADD COLUMN due_at                INTEGER;
 ALTER TABLE projects ADD COLUMN host_profile          TEXT;    -- where runs execute and the cron job lives
 ALTER TABLE projects ADD COLUMN cron_job_id           TEXT;    -- the shipped scheduler's job id (§3.2)
@@ -273,6 +399,26 @@ ALTER TABLE projects ADD COLUMN imported_from_profile TEXT;
 Column additions go through `hermes_cli/sqlite_util.add_column_if_missing`, as
 `projects_db._migrate_add_optional_columns` already does, so opening an old DB
 is always safe.
+
+**Constraints the store enforces** (not just the router, so the CLI cannot
+bypass them):
+
+- `name` non-empty, ≤80 chars — it is field [1], a goal *sentence*, and a list
+  page cannot render a paragraph.
+- `description` non-empty — field [2]. A project with no brief is a folder.
+- At least one `project_outputs` row before `status` may leave `planning`, and
+  before a schedule may be set — field [3]. Declaring the deliverable after
+  automating its production is how you get a run that succeeds at nothing.
+- At least one `project_members` row (the creator, as `lead`) and one
+  `project_profiles` row (flagged `host`) — field [4].
+- `toolsets` / `skills`, when present, are JSON arrays of strings; unknown names
+  are rejected at write time with the unknown name quoted (§4.1), because a
+  typo'd toolset that silently does nothing is worse than an error.
+
+`project_links.kind` gains `sample`, `reference` and `memory` to the existing
+`file | arrival | todo | goal | session | url` set (fields [8], [12], [15]);
+`kind` stays a plain string column, and an unknown kind is refused by the router
+rather than by a CHECK constraint, so adding one later is not a migration.
 
 ### 2.3 Two small, additive changes to `kanban_db`
 
@@ -351,7 +497,7 @@ Two consequences to implement deliberately:
    project record is root-anchored. So the job lives in `host_profile`, and
    `host_profile` is therefore **required** for a repeatable project and must be
    a row in `project_profiles`. If the host profile is removed from the project,
-   the schedule is paused and the project's health turns amber (§9) — it is not
+   the schedule is paused and the project's health turns amber (§9.2) — it is not
    silently re-homed.
 2. `cron_job_id` on the project and `project_id` in the job's metadata are two
    halves of one link. `hermes projects doctor` (§12) reports a project whose
@@ -401,6 +547,33 @@ project is then a place where everything about the work lives, and the human
 does the work. Do not build any path that silently promotes a `manual` project's
 cards.
 
+### 4.1 Tools [13] and skills [14] — a narrowing filter, never a grant
+
+A project may say *which* toolsets its runs start with and *which* skills are
+preloaded. Both are applied by `hermes projects run` when it spawns the run, and
+both are therefore frozen for that run's conversation — the same
+prompt-cache-shaped rule as guidance (§5.1).
+
+Two properties are load-bearing, and inverting either turns a convenience into a
+privilege-escalation path:
+
+1. **Intersection, not union.** The effective toolset is
+   `host_profile's enabled toolsets ∩ projects.toolsets`. A project can say
+   "this run only needs `research`" — it can **never** say "this run also gets
+   `terminal`" on a profile where terminal is off. A name in `projects.toolsets`
+   that the host profile does not enable is dropped, and the drop is recorded on
+   the run (`project_runs.summary` prelude + a `task_events`-style line), because
+   a silently narrower run looks like a broken agent.
+2. **Skills are prompt bytes.** Preloaded skills are capped
+   (`projects.max_skills`, default 5, in `config.yaml` under `projects:` — not an
+   env var) and resolved through the shipped skills loader in the host profile,
+   including `skills.external_dirs`. A project may not define a skill inline;
+   that is what `skills/` and the promotion loop in §8.2 are for.
+
+Leaving both empty is the normal case and means "whatever the host profile
+normally does". This is why they are field [13]/[14] optional: a project that
+does not care about its instruments should not have to describe them.
+
 ---
 
 ## 5. Guidance — instructions, feedback and asks over time
@@ -436,21 +609,42 @@ this attempt.
 
 ### 5.2 The compiled guidance block
 
-```
-## Project: <name> (<slug>)
-Purpose: <primary goal title> — <definition_of_done or "standing">
-Cadence: repeatable, every Monday 09:00   ·   Run 14 of this project.
+The block is assembled in this fixed order, and every optional field is omitted
+**with its heading** when empty (never rendered as "None"):
 
-### Standing instructions (from <user>, newest first)
-1. <directive body>            [added 2026-08-02]
+```
+## Project: <name>                                   ← [1] the goal, as a sentence
+Run 14 · repeatable, every Monday 09:00 · autonomy: supervised
+Definition of done: <definition_of_done or "all required outputs accepted">
+
+### Brief                                            ← [2] requirements/description
+<description, verbatim; truncated at PROJECT_BRIEF_MAX_CHARS with a pointer to
+ `hermes projects show <slug>` for the rest>
+
+### Audience                                         ← [6] omitted when unset
+<target_audience>
+
+### Outputs expected of this run                     ← [3]
+- [ ] The Monday digest email — <spec>               (required, recurring)
+- [x] Distribution list confirmed                    (delivered run 11)
+
+### Samples to match                                 ← [8] samples only; references
+- <label> → <path/url>                                 are listed, not inlined
+
+### Standing instructions (newest first)             ← §5 directives
+1. <body>                        [<author>, 2026-08-02]
 2. …
 
-### What we learnt last run
-<the previous run's retro, or the most recent feedback with rating='bad'>
+### What we learnt last run                          ← §8
+<run 13's retro, plus its score: user 3/5 — "too formal">
 ```
 
 Hard rules, because this block is prompt bytes on every run:
 
+- **Outputs come before instructions.** A run that has read its deliverables and
+  nothing else can still do the right work; a run that has read twenty
+  instructions and no deliverable cannot. Truncation therefore eats the brief and
+  the directives, never the outputs list.
 - **Capped.** At most `PROJECT_GUIDANCE_MAX_DIRECTIVES` (default 20) active
   directives and `PROJECT_GUIDANCE_MAX_CHARS` (default 4000) compiled
   characters, both in `config.yaml` under `projects:` — **not** env vars
@@ -496,8 +690,12 @@ trigger (schedule | manual | event | review)
    │  autonomy (§4) and max_in_progress
    ├─ optionally spawn ONE seeded session for the run itself (see below)
    ├─ the shipped kanban dispatcher executes the cards under host_profile
+   ├─ record deliveries: every output the run produced gets a
+   │  project_output_deliveries row pointing at the card, file or message that
+   │  is the artefact (§6.1)
    └─ close: when every step card is done|archived, or a checkpoint waits, or
-      the budget/ask stops it → status, outcome, summary, then the retro (§8)
+      the budget/ask stops it → status, outcome, summary, then the retro +
+      score_self (§8)
 ```
 
 **Who does the work: cards, or a session?** Both are supported and the
@@ -523,6 +721,34 @@ occurrence. Cards keep their nine statuses. Do not merge the two.
 the run's `trace_id`. If the ledger is unconfigured, cost renders as "not
 recorded" — the C8 contract is fail-open and a run must never fail because
 observability is off.
+
+---
+
+### 6.1 A run closes against its outputs, not against its cards
+
+Closing a run asks one question the board cannot answer: **did the deliverables
+arrive?** So on close the run writes a `project_output_deliveries` row for each
+output it produced, and its `outcome` is derived from the required ones:
+
+| required outputs of this run | run outcome |
+|---|---|
+| all delivered | `delivered` |
+| some delivered | `partial` — and the missing titles are named in `outcome` |
+| none delivered, cards done | `no_output` — the outcome a review must see |
+
+`no_output` exists because it is the most expensive failure this feature can
+have: every card green, twenty minutes of tokens spent, and nothing produced. A
+board can only tell you the cards finished.
+
+**Only a human accepts an output.** A run may set an output `delivered`; moving
+it to `accepted` is a member action (`POST /{slug}/outputs/{id}/accept`), which
+is also what closes a `one_off` project (§9.1). The agent produces; the human
+accepts. Same posture as playbook activation (§7.2) and skill promotion (§8.2):
+the crossing is what needs a person.
+
+For a `recurring` output on a repeatable project, the output row stays `pending`
+forever and its *deliveries* accumulate — one per run. "Delivered last Monday,
+missed the Monday before" is then a query, not an archaeology exercise.
 
 ---
 
@@ -597,8 +823,10 @@ reviewed, repeated and learnt from over time."* Tracking is §6; repetition is
 ### 8.1 The per-run retrospective
 
 When a run closes, the run's session (or a short `spawn_seeded_session` call for
-card-only runs) writes `project_runs.retro`: what was done, what deviated from
-the playbook, what blocked, what it cost, and **at most three concrete proposals**.
+card-only runs) writes `project_runs.retro`: what was done, which outputs it
+delivered, what deviated from the plan, what blocked, what it cost, its own
+`score_self` (1–5 against `score_rubric`), and **at most three concrete
+proposals**.
 Human-editable on the run page. A run with no retro is shown as such — it is a
 gap in the record, not a blank.
 
@@ -623,7 +851,8 @@ candidate records the project and run it came from.
 ### 8.3 Comparing occurrences
 
 `GET /{slug}/runs` returns run N, N-1, N-2 … with duration, card count, blocked
-count, cost and outcome, and the project page renders them as one small table.
+count, cost, outcome, **outputs delivered** and **score**, and the project page
+renders them as one small table.
 This is the cheapest possible "learnt from over time" and the one a user will
 actually look at: *run 14 took twice as long and cost twice as much as run 13.*
 
@@ -631,14 +860,72 @@ Do not build charts in v1. A table of the last ten runs answers the question.
 
 ---
 
-## 9. Health, and what a project owes the user
+### 8.4 Score [7] — the cheapest learning signal there is
+
+`score_user` is one tap on a run: **1–5, optional, human-only**, with an optional
+one-line note. `score_self` is the run's own claim, written unprompted with the
+retro. The project's score is **derived** — the mean of the last five
+`score_user` values — and shown as "4.2 (last 5 runs)", never as an all-time
+average, because an all-time average is unmoved by exactly the thing you want to
+see: that it got better.
+
+`projects.score_rubric` is free text ("5 = I sent it without editing"). It is
+optional, but when set it is given to the run alongside the request for
+`score_self`, which is what makes self-scores comparable to human ones at all.
+
+Two uses, and no others in v1:
+
+1. **A `score_user ≤ 2` run raises the retro to the top of the project page** and
+   pre-fills the "add feedback" field, because a bad score with no stated reason
+   teaches nothing (§5).
+2. **`score_self` − `score_user` is reported on the runs table** when they differ
+   by ≥2. A run that thought it did well and did not is the highest-value thing
+   in this record: it is the case where the *method* is wrong rather than the
+   execution, and it is the natural input to a playbook revision proposal (§8.2).
+
+No score-driven automation. Nothing decides to re-run, escalate or change
+autonomy based on a score — that is a human's call and a low-scored run is
+exactly the situation where an automatic reaction is least welcome.
+
+---
+
+## 9. Progress [5] and health
+
+### 9.1 Progress is derived, and the ladder is ordered
+
+Progress is mandatory to show (field [5]) and impossible to store honestly, so
+the API computes one `progress` object on read using the **first rung that
+applies**:
+
+| rung | when | headline |
+|---|---|---|
+| 1 | required outputs exist and any are `accepted`/`delivered` | **outputs accepted / required** — "2 of 3 outputs accepted" |
+| 2 | no delivery yet, but a primary goal is linked | the goal's metric progress (FG-29 rollup) |
+| 3 | neither | the card rollup as a *ratio*, labelled as such — "8 of 19 cards done" |
+| 4 | a `standing` project | never a percentage — "reviewed 21d ago", plus this period's deliveries |
+
+Rung 1 outranks rung 3 deliberately. Cards-done is the number that is always
+available and always slightly dishonest: it counts the work, not the result, and
+a project can be 18/19 cards with nothing delivered. Whatever rung is used, the
+UI states which one — the label is part of the number.
+
+The card rollup (`3 running · 1 blocked · 8/19 done`) is shown *beside* the
+headline at every rung, because it is what tells you whether progress is
+currently moving.
+
+For a repeatable project, "progress" of the project as a whole is meaningless;
+the page shows **this run's** progress plus the delivery streak of its recurring
+outputs ("delivered 11 of the last 12 Mondays"). Do not render a lifetime
+percentage for something that never ends.
+
+### 9.2 Health
 
 One derived `health` value per project, computed on read, never stored:
 
 | health | when |
 |---|---|
 | `ok` | nothing below applies |
-| `attention` | a card is `blocked`; a run is `waiting` on an ask or budget; a `standing` project is past `review_every`; a `one_off` project is past `due_at` |
+| `attention` | a card is `blocked`; a run is `waiting` on an ask or budget; a `standing` project is past `review_every`; a `one_off` project is past `due_at`; a run closed `no_output` or `partial` (§6.1); the last run scored ≤2 |
 | `stalled` | a `repeatable` project whose last run is older than two schedule periods; a project whose `cron_job_id` does not resolve; a project whose `host_profile` left `project_profiles` |
 
 `stalled` exists because the failure mode of an automated project is **silence**,
@@ -664,11 +951,13 @@ records provenance, and the to-do moves to `working` with a transition note
 naming the card. **Human-only, one-way, no reverse sync, no `project_id` on
 to-dos.**
 
-**Goals.** `project_links(kind='goal')` is the join to FG-29. The project's
-headline number is the **primary goal's metric progress**, with the card rollup
-shown beside it (`3 running · 1 blocked · 8/19 done`) but never as the headline.
-A project with no linked goal shows *"no goal set"* — not `0%`, and not a card
-ratio quietly standing in for one.
+**Goals.** `project_links(kind='goal')` is the join to FG-29, and a linked goal
+is **rung 2** of the progress ladder (§9.1): it is the headline when the project
+has declared outputs but delivered none of them yet. A project with no linked
+goal shows the outputs count, or — failing that — a card ratio *explicitly
+labelled as one*; never a bare `0%`, and never a card ratio quietly standing in
+for an outcome. Field [1] (the goal *sentence*) is mandatory; a linked goal
+*object* is not, because most projects serve a goal nobody has modelled yet.
 
 ---
 
@@ -686,10 +975,14 @@ negative matrix:
    Anything else is **404, not 403** — the existence of a project is itself
    information.
 3. **Writes** need `lead` or an instance `admin`/`owner`; `viewer` never writes.
-   Additionally: any member may create a project and add *links*; only
-   `lead`/`admin` may add a **profile**, activate a **playbook**, change
-   **autonomy**, or set a **schedule** — those four are the acts that spend
-   tokens or change what the system will do unattended.
+   Additionally: any member may create a project, add *links*, add a **contact**,
+   propose an **output** and **accept** one, and **score** a run — those are
+   judgements about the work, which is what membership is for. Only `lead`/`admin`
+   may add a **profile**, activate a **playbook**, change **autonomy**, set
+   **tools/skills**, or set a **schedule** — the five acts that spend tokens or
+   change what the system will do unattended.
+   A `viewer` additionally never sees `project_contacts.address` (§2.2): the field
+   is dropped from the response, not blanked, so a client cannot leak it back.
 4. **Board reads stay principal-filtered.** Always pass
    `kanban_db.list_tasks(principal=…)`, never `None`. A project view must not
    become the way to read another user's `private:` card.
@@ -720,17 +1013,23 @@ auth and is not reachable from `agent-home`).
 | endpoint | purpose |
 |---|---|
 | `GET /` | readable projects: filters `status`, `cadence`, `health`, `q`, `archived`; keyset `cursor` → `{items, next_cursor}`. Each item: goal progress, card rollup, member count, `cadence`, `next_run_at`, `health`, `due_at` |
-| `POST /` | create: name, slug?, description, icon/colour, `cadence`, `definition_of_done`, `board_slug` (bind or create), `host_profile`, folders, first goal link |
-| `GET /{slug}` | record + members + profiles + active playbook + active directives + board rollup + links grouped by kind + last N `task_events` + last 5 runs |
-| `PATCH /{slug}` | name, description, status, cadence, `due_at`, `review_every`, icon/colour, visibility, `board_slug`, `definition_of_done`, `max_in_progress`, `budget_usd_per_run` |
+| `POST /` | create: **name [1], description [2], at least one output [3], host profile + creator as lead [4]** — refused without them (§2.2) — plus slug?, icon/colour, `cadence`, `target_audience`, `definition_of_done`, `board_slug` (bind or create), folders, first goal link |
+| `GET /{slug}` | the whole record in one read: fields 1–15 — outputs + their deliveries, members + profiles, contacts (members only), active playbook, active directives, tools/skills (with the host-profile intersection applied so the UI shows what would *actually* run), derived progress + score + health, board rollup, links grouped by kind, last N `task_events`, last 5 runs |
+| `PATCH /{slug}` | name, description, status, cadence, `due_at`, `review_every`, `target_audience`, `score_rubric`, icon/colour, visibility, `board_slug`, `definition_of_done`, `max_in_progress`, `budget_usd_per_run` |
+| `PATCH /{slug}/tools` | `toolsets` [13] + `skills` [14]; validates names and returns the resolved intersection, so an impossible request is refused loudly (§4.1) |
+| `GET /{slug}/outputs`, `POST /{slug}/outputs`, `PATCH /{slug}/outputs/{id}`, `DELETE /{slug}/outputs/{id}` | the deliverables [3]; delete refuses on the last required output |
+| `POST /{slug}/outputs/{id}/deliver` | record a delivery (run, card, or a hand-attached artefact) |
+| `POST /{slug}/outputs/{id}/accept` | **human-only** acceptance (§6.1); accepting the last required output offers to close a `one_off` project |
+| `GET /{slug}/contacts`, `POST /{slug}/contacts`, `PATCH /{slug}/contacts/{id}`, `DELETE /{slug}/contacts/{id}` | contacts [10]; `address` is omitted from every response to a `viewer` |
+| `POST /{slug}/runs/{n}/score` | `score_user` + `score_note` [7]; human-only, editable, never agent-writable |
 | `PATCH /{slug}/autonomy` | `autonomy` + `require_approval` (separate route so the audit line and the permission check are unmistakable) |
 | `PUT /{slug}/schedule`, `DELETE /{slug}/schedule` | create/update/pause the host profile's cron job; refuses without an active playbook |
 | `POST /{slug}/members`, `DELETE /{slug}/members/{user_id}` | membership + role |
 | `POST /{slug}/profiles`, `DELETE /{slug}/profiles/{profile}` | which instruments the project runs on |
-| `POST /{slug}/links`, `DELETE /{slug}/links` | attach/detach a file, arrival, to-do, goal, memory doc, conversation or URL |
+| `POST /{slug}/links`, `DELETE /{slug}/links` | attach/detach a file [11], arrival, to-do, goal, memory document [12], conversation [15], sample or reference [8], or plain URL — `kind` is validated against the known set |
 | `GET /{slug}/playbook`, `POST /{slug}/playbook`, `POST /{slug}/playbook/{rev}/activate` | the method and its revisions (cycle-checked on save) |
 | `GET /{slug}/directives`, `POST /{slug}/directives`, `POST /{slug}/directives/{id}/retire` | guidance and feedback |
-| `GET /{slug}/runs`, `GET /{slug}/runs/{n}` | the record; detail includes cards, cost from C8, retro |
+| `GET /{slug}/runs`, `GET /{slug}/runs/{n}` | the record; the list carries duration, cost, outcome, outputs delivered and both scores (§8.3); detail adds cards, the directives the run actually carried, cost from C8, deliveries and the retro |
 | `POST /{slug}/runs` | start a run now (`trigger='manual'`, optional `playbook_rev` to repeat an old method) |
 | `POST /{slug}/runs/{n}/continue` | pass a checkpoint / answer a budget stop |
 | `POST /{slug}/runs/{n}/cancel` | stop promoting; archive this run's un-started cards; never kills a running worker |
@@ -739,7 +1038,7 @@ auth and is not reachable from `agent-home`).
 | `POST /{slug}/cards` | create a card carrying `project_id` (optionally `from_todo`, §10) |
 | `PATCH /{slug}/cards/{task_id}`, `GET /{slug}/cards/{task_id}`, `POST /{slug}/cards/{task_id}/comments` | the shipped card behaviours, through `kanban_db` transitions (which still refuse a direct `running`) |
 | `GET /{slug}/activity` | merged tail: `task_events` for the project's cards + C8 traces for its runs and linked sessions |
-| `GET /{slug}/conversations` | sessions whose cards carry `project_id` (`tasks.session_id`) + run sessions + explicitly linked ones |
+| `GET /{slug}/conversations` | [15] sessions whose cards carry `project_id` (`tasks.session_id`) + run sessions + explicitly linked ones, merged and de-duplicated — automatic first, so linking a conversation is the exception |
 | `GET /{slug}/events?since=<event_id>` | the tail for live updates (long-poll/SSE via the BFF; `latest_event_id` comes from `/board`) |
 | `POST /{slug}/summarise` | the rolling "where this stands"; writes `summary`/`summary_at` |
 
@@ -765,13 +1064,13 @@ boundary bug that already bit `/todos`; the boundary test in
 ### `/projects` — the list
 
 ```
-▣  Acme rollout            one-off · due Fri        ●●●○○ 62%   ok
+▣  Land the Acme rollout    one-off · due Fri   2 of 3 outputs accepted   ok
    4 members · 2 profiles · 3 running, 1 blocked · goal: Land Q3 revenue
    ───────────────────────────────────────────────────────────────────────
-↻  Weekly research digest  repeatable · next Mon 09:00 · run 14  supervised
-   last run 6d ago · 20 min · $0.42 · ok
+↻  Send the Monday digest   repeatable · next Mon 09:00 · run 14  supervised
+   last run 6d ago · 20 min · $0.42 · 4.2/5 · delivered 11 of last 12 · ok
    ───────────────────────────────────────────────────────────────────────
-∞  Inbox hygiene           standing · reviewed 21d ago          attention
+∞  Keep the inbox clean     standing · reviewed 21d ago          attention
 ```
 
 Chips: Active · Repeatable · Standing · Attention · Paused · Done · All. The
@@ -791,36 +1090,67 @@ the requirement, and a tab is a place to hide a panel.
 │ "Where this stands: run 14 waiting on your answer about the tone." (agent)│
 │ [ Run now ]  [ Continue ]  ← only when a run is waiting                   │
 └──────────────────────────────────────────────────────────────────────────┘
-[Progress] [Board] [Runs] [Method] [Guidance] [People] [Files] [Resources] [Conversations]
+[Brief] [Outputs] [Progress] [Board] [Runs] [Plan] [Guidance] [People] [Files]
+[References] [Memories] [Tools] [Conversations]
 
-Progress      primary goal + metric trend (FG-29 rollup); card rollup per
-              column; blocked cards FIRST — a blocked card is the only thing
+Brief   [1][2][6]  the goal sentence, the requirements/description as markdown
+              (collapsed past ~12 lines), the target audience as a chip. First
+              panel, because it is the only one that says what this project is;
+              editable in place by a lead.
+Outputs [3]   the deliverables: spec, required/optional, status, and each
+              delivery ("delivered run 14 → digest.md"). Undelivered required
+              ones first. "Accept" is a button here and nowhere else (§6.1).
+              A recurring output gets a 12-cell streak strip.
+Progress [5]  the ladder's headline WITH its label (§9.1) and the card rollup
+              beside it; then blocked cards — a blocked card is the only thing
               on this page asking for a human right now.
 Board         the project's cards; one column per screen on a phone with ‹ ›.
               Each card: assignee profile, run state, comments, child N/M,
               diagnostics badge. Tap → /projects/[slug]/cards/[id].
-Runs          the last ten runs: no, trigger, when, duration, cost, outcome,
-              retro present?; tap → the run page (its cards, its trace, its
-              retro, "repeat this run").
-Method        the active playbook: prose + the step DAG (an indented list, not
-              a graph widget), its revision and who activated it; proposed
-              revisions awaiting activation, with a diff against the active one.
+Runs [7]      the last ten runs: no, trigger, when, duration, cost, outputs
+              delivered, score (user, and self when they differ by ≥2),
+              outcome, retro present?; tap → the run page (its cards, its
+              trace, its deliveries, its retro, score-it, "repeat this run").
+Plan [9]      the active playbook: the prose plan + the step DAG (an indented
+              list, not a graph widget), its revision and who activated it;
+              proposed revisions awaiting activation, with a diff against the
+              active one. Labelled "Plan" — "playbook" is our word, not the
+              user's.
 Guidance      standing instructions newest-first with author and date, an
               "Add instruction" field that says "applies from the next run",
               retired instructions behind a disclosure, and the open ask when
               a run is waiting.
-People        members (avatar, role) and participating profiles (name, what it
-              is running now, which one is the host) in one list — "who is on
-              this" means both.
-Files         linked /files assets + every task_attachments blob on the
+People [4][10] participants — members (avatar, role) and profiles (name, what
+              it is running now, which is the host) in one list, because "who
+              is on this" means both — then contacts below a rule, marked
+              external, with `address` hidden from a viewer.
+Files [11]    linked /files assets + every task_attachments blob on the
               project's cards, one grid. A file that arrived on WhatsApp and a
               file a worker attached are the same thing to whoever is looking.
-Resources     linked arrivals (quoted, → /inbox/<id>), memory documents, linked
-              to-dos with their stages, plain URLs; each row shows its profile.
-Conversations run sessions + sessions that produced the project's cards +
+References [8] samples ("match this") kept separate from references ("read
+              this"), plus linked arrivals (quoted, → /inbox/<id>), linked
+              to-dos with their stages, and plain URLs; each row shows its
+              profile.
+Memories [12] linked memory documents with their profile and a preview;
+              unresolvable ones greyed with "you don't have access".
+Tools [13][14] the toolsets and skills a run starts with, showing the resolved
+              intersection with the host profile and, explicitly, anything the
+              project asked for that the profile does not allow (§4.1).
+Conversations [15] run sessions + sessions that produced the project's cards +
               linked ones: title, when, message count, → /chat/<id>, plus the
               C8 trace tail.
 ```
+
+Panels for empty optional fields collapse to a single "Add …" affordance rather
+than disappearing — a missing panel is indistinguishable from a feature that does
+not exist — except References and Memories, which hide entirely when empty
+because they are the two most often genuinely irrelevant.
+
+**Creation is a two-step form, not a wizard**: step 1 is [1], [2] and one [3]
+output (everything mandatory except participants, which default to you + the
+current profile); step 2 is "how should this run" — cadence, autonomy, host
+profile — and is skippable into a `manual` `one_off`. Ten optional fields on a
+create form would guarantee nobody fills in the four that matter.
 
 **Adding to a project is a link, from both ends.** The detail page has an "Add"
 sheet (search across files, arrivals, to-dos, goals, conversations), and
@@ -842,7 +1172,9 @@ src/app/projects/[slug]/cards/[id]/page.tsx    one card
 src/app/api/projects/**                        BFF mirror, one route per endpoint
 src/components/projects/ProjectsList.tsx       + ProjectCard, ProjectsFilters
 src/components/projects/ProjectDetailView.tsx  orchestrates the panels
-src/components/projects/panels/{Progress,Board,Runs,Method,Guidance,People,Files,Resources,Conversations}Panel.tsx
+src/components/projects/panels/{Brief,Outputs,Progress,Board,Runs,Plan,Guidance,People,Files,References,Memories,Tools,Conversations}Panel.tsx
+src/components/projects/OutputsEditor.tsx      + OutputDeliveries, AcceptButton
+src/components/projects/ScoreControl.tsx       1–5 + note, on the run page
 src/components/projects/BoardColumn.tsx        + BoardCard, CardDetailView
 src/components/projects/RunView.tsx            + RetroEditor
 src/components/projects/PlaybookEditor.tsx     steps as a list; cycle errors inline
@@ -857,6 +1189,9 @@ Client methods on `HermesApiClient`: `projects()`, `project()`, `createProject()
 `continueProjectRun()`, `cancelProjectRun()`, `writeProjectRetro()`,
 `projectPlaybook()`, `saveProjectPlaybook()`, `activateProjectPlaybook()`,
 `projectDirectives()`, `addProjectDirective()`, `retireProjectDirective()`,
+`projectOutputs()`, `addProjectOutput()`, `updateProjectOutput()`,
+`deliverProjectOutput()`, `acceptProjectOutput()`, `scoreProjectRun()`,
+`projectContacts()`, `addProjectContact()`, `setProjectTools()`,
 `projectMembers()`, `addProjectMember()`, `addProjectProfile()`,
 `linkToProject()`, `unlinkFromProject()`, `projectActivity()`,
 `projectConversations()`, `projectEvents()`; types in `src/types/index.ts`.
@@ -878,9 +1213,18 @@ hermes projects [--actor <user>] <verb> …          # --actor, the goal_tree_cm
 
 hermes projects list      [--status s] [--cadence c] [--health h] [--json]
 hermes projects show      <slug> [--json]
-hermes projects create    "<name>" [--cadence …] [--goal <id>] [--host-profile p]
-hermes projects link      <slug> --kind file|arrival|todo|goal|memory|session|url
+hermes projects create    "<goal title>" --description <file.md|-> --output "<title>"
+                                 [--cadence …] [--goal <id>] [--host-profile p]
+                                 [--audience "…"]          # 1,2,3,4,6 — first three required
+hermes projects link      <slug> --kind file|arrival|todo|goal|memory|session|url|
+                                        sample|reference
                                  --profile <p> --ref <id>
+hermes projects outputs   <slug> [list|add "<title>" [--spec s] [--optional]
+                                 |deliver <id> --ref <r> |accept <id>]
+hermes projects contacts  <slug> [list|add "<name>" [--role r] [--platform p]
+                                 [--address a]]
+hermes projects tools     <slug> [show|set --toolsets a,b --skills x,y]
+hermes projects score     <slug> <run_no> <1-5> [--note "…"]
 hermes projects members   <slug> [--add <user> --role r]
 hermes projects cards     <slug> [--status s]
 hermes projects card add  <slug> "<title>" [--assignee <profile>] [--from-todo <id>]
@@ -894,6 +1238,10 @@ hermes projects summarise <slug>
 hermes projects doctor    [--slug s]     # broken cron links, missing host profile,
                                          # stalled repeatables, unresolvable links
 ```
+
+`hermes projects create` refuses without fields [1]–[3], and `--description -`
+reads stdin, because a mandatory long brief typed as a shell argument is a brief
+nobody writes.
 
 `hermes projects run` is the load-bearing verb: it is what the cron job calls,
 and therefore the only place that compiles guidance, instantiates the playbook
@@ -909,10 +1257,18 @@ becoming noise:
 2. **Propose, don't create.** The agent may propose a project, a playbook
    revision or a directive; the human creates and activates.
 3. **Link, never copy.** Everything a project gathers is a pointer.
+3b. **Declare the output before doing the work, and never accept your own.**
+   `outputs add` is proposable by the agent; `outputs accept` is human-only, and
+   a run that produced nothing must close `no_output` rather than narrate
+   effort (§6.1).
 4. **Never move a card past a checkpoint, never activate a playbook, never widen
    autonomy.** Those are human acts by design.
-5. **Read the last run's retro before starting work** — that is what the record
-   is for.
+5. **Read the last run's retro and score before starting work** — that is what
+   the record is for, and a `≤2` score with a note is the most specific
+   instruction the project has.
+6. **A project's `toolsets`/`skills` can only narrow what the profile allows.**
+   If a run needs a tool the profile does not enable, that is an ask (§5.3), not
+   a project edit.
 
 No new core model tool.
 
@@ -943,7 +1299,17 @@ No new core model tool.
    pointers unresolvable for 30 days.
 8. **The permission seam being bypassed.** The only defence is that there is one
    router; the negative matrix in §16 is what keeps that true.
-9. **Retro theatre.** A retro that summarises intentions instead of artefacts
+9. **Effort mistaken for delivery.** Every card done, nothing produced. →
+   mandatory declared outputs, `outcome='no_output'`, progress rung 1 outranking
+   the card ratio, and health `attention` on a `no_output`/`partial` close.
+10. **Optional fields that are not really optional.** A page that breaks, or a
+   run prompt reading "Audience: None", when fields 6–15 are empty. → headings
+   omitted with their field, collapse-to-"Add …" panels, and an explicit
+   all-optionals-empty test.
+11. **`toolsets` read as a grant.** A project handing its runs a capability the
+   host profile withholds. → intersection only, drops recorded, unknown names
+   refused (§4.1).
+12. **Retro theatre.** A retro that summarises intentions instead of artefacts
    teaches nothing. → written from cards, `task_runs`, events and the trace, and
    capped at three concrete proposals.
 
@@ -952,6 +1318,27 @@ No new core model tool.
 ## 16. Testing
 
 Behaviour contracts, not change detectors (`AGENTS.md`).
+
+**Fields (the §1.1 contract)**
+- Create is refused without name [1], description [2], ≥1 output [3], or a host
+  profile [4]; each rejection names the missing field.
+- A project with fields 6–15 all empty renders every page and compiles a run
+  prompt containing **no empty headings** and no literal "None" (the optionality
+  regression that would be least visible).
+- `name` >80 chars and empty `description` are refused at the store, not only the
+  router (the CLI path).
+- Deleting the last required output is refused; deleting an optional one is not.
+- Progress uses rung 1 when a delivery exists even if cards are 0/19, and falls
+  to rung 3 with the label "cards" when no goal and no delivery exist (§9.1).
+- `score_user` is human-only: an agent-authenticated principal is refused; the
+  project's score is the mean of the **last five** and moves when an old run is
+  re-scored.
+- `toolsets` narrowing only: a project naming a toolset the host profile does not
+  enable spawns **without** it, records the drop on the run, and never grants it;
+  an unknown toolset/skill name is rejected at write time.
+- `viewer` responses omit `contacts[].address`; members' do not.
+- Accepting the last required output on a `one_off` project offers closure and
+  does **not** close it automatically.
 
 **Store**
 - The root migration is idempotent; imports per-profile rows with `-2` slug
@@ -1024,7 +1411,9 @@ Behaviour contracts, not change detectors (`AGENTS.md`).
 
 **Frontend**
 - The list defaults to active; URL filter state round-trips; the detail page
-  renders every panel from one fetch; `filters.ts` passes the server/client
+  renders every panel from one fetch; empty optional panels collapse to "Add …"
+  (and References/Memories hide) rather than rendering empty;
+  the two-step create form blocks on [1]–[3] and defaults [4]; `filters.ts` passes the server/client
   boundary test; nav tests updated for the secondary slot and the Home card.
 
 **Live (systest box), after deploy**
@@ -1041,16 +1430,17 @@ Behaviour contracts, not change detectors (`AGENTS.md`).
 
 | # | scope | notes |
 |---|---|---|
-| 1 | **Store**: root-anchored `projects_db` + import migration + `project_members`, `project_playbook`, `project_directives`, `project_runs`, `project_run_cards` + the additive columns; `list_tasks(project_id=…)` + its index; **repoint the Electron app and `hermes project`** | Nothing else uses it yet. The repoint rides along (ed.2 Q5) because two live stores diverge daily. |
+| 1 | **Store**: root-anchored `projects_db` + import migration + `project_members`, `project_outputs`, `project_output_deliveries`, `project_contacts`, `project_playbook`, `project_directives`, `project_runs`, `project_run_cards` + the additive columns (incl. `target_audience`, `score_rubric`, `toolsets`, `skills`) + the §2.2 constraints; `list_tasks(project_id=…)` + its index; **repoint the Electron app and `hermes project`** | Nothing else uses it yet. The repoint rides along (ed.2 Q5) because two live stores diverge daily. |
 | 2 | **`kanban_view.py`**: extract `plugin_api.get_board`'s aggregation, repoint the dashboard | Pure refactor, no behaviour change, landed alone so a regression is unambiguous. |
-| 3 | **API part 1**: `projects_api.py` — record, members, profiles, links, board, cards, the permission matrix, the fan-out | Backend only. |
-| 4 | **Runs + playbook + guidance**: the run lifecycle, playbook instantiation via parent links, the compiled guidance block, checkpoints, caps, budget | Depends on `agent/seeded_session.spawn_seeded_session()` (To-dos ed.2 step 8) for `mode:'inline'`; card-only runs do not. |
+| 3 | **API part 1**: `projects_api.py` — record, **outputs + deliveries + accept**, members, profiles, **contacts**, links (incl. `sample`/`reference`/`memory`), **derived progress (§9.1)**, board, cards, the permission matrix, the fan-out | Backend only. All five mandatory fields are readable and writable at the end of this step. |
+| 4 | **Runs + playbook + guidance**: the run lifecycle, playbook instantiation via parent links, the compiled prompt block (§5.2, incl. outputs/audience/samples), the `toolsets`/`skills` intersection at spawn (§4.1), checkpoints, caps, budget, delivery recording + `no_output` (§6.1) | Depends on `agent/seeded_session.spawn_seeded_session()` (To-dos ed.2 step 8) for `mode:'inline'`; card-only runs do not. |
 | 5 | **Schedule**: `PUT/DELETE /schedule` wiring the host profile's cron job, `next_run_at`, `health`, `doctor` | |
 | 6 | **BFF + client + types** in `agent-home` | |
 | 7 | **List page** + Home card + nav slot | |
 | 8 | **Detail page**: all nine panels, the card route, the run route, `AddToProjectSheet` + "Add to project" on `/todos`, `/inbox`, `/files` | |
 | 8b | **Promotion**: `from_todo` on `POST /{slug}/cards`, the `/todos/[id]` promote action, the link-vs-promote copy | A promote button with no project page to land on is a trapdoor, so it follows 8. |
 | 9 | **CLI + skill**: `hermes projects …`, `skills/productivity/projects/SKILL.md` | The agent's route in. |
+| 9b | **Score**: `POST /runs/{n}/score`, `score_self` with the retro, the derived project score, the ≥2 divergence column, `score_rubric` | Needs runs to exist; cheap and independently useful. |
 | 10 | **Retro + learning**: retro write-back, proposed playbook revisions and directives, skill-candidate provenance into `background_review` | Last, because it needs real runs to be worth anything. |
 | 11 | **Events + summary**: `GET /{slug}/events?since=`, `POST /{slug}/summarise` | |
 
@@ -1066,6 +1456,14 @@ worked for Incomings and To-dos.
 - **Adds** `host_profile` as a required field for a repeatable project, and the
   `project_members` / `project_playbook` / `project_directives` / `project_runs` /
   `project_run_cards` tables.
+- **ed.3.1 adds, from the owner's field list:** mandatory outputs
+  (`project_outputs` + `project_output_deliveries`, and `no_output` as a run
+  outcome), contacts (`project_contacts`), target audience, score
+  (`score_user`/`score_self`/`score_rubric`), project-level tools and skills as a
+  narrowing filter, `sample`/`reference`/`memory` link kinds, the ordered progress
+  ladder (§9.1), and the panel set + create form that make ten optional fields
+  survivable. It also **renames** the Method panel to **Plan** and drops the
+  Resources panel in favour of References + Memories.
 - **Keeps unchanged**: the root-store decision, the "no second engine" posture,
   the permission model and its five rules, the fan-out, the shared rollup helper,
   panels-not-tabs, secondary nav + Home card, goal-metric progress as the
@@ -1103,6 +1501,18 @@ worked for Incomings and To-dos.
    notification system.
 10. **Projects depends on the board, to-dos and goals; none of them learn about
     Projects.** No `run_id` on `tasks`, no `project_id` on to-dos.
+11. **Outputs are mandatory and declared up front**, and a run is judged against
+    them (`delivered | partial | no_output`) rather than against its cards. Only
+    a human accepts an output.
+12. **Progress is an ordered ladder — outputs, then goal metric, then cards —
+    labelled with the rung it used.** The cards ratio is the last resort, never
+    silently the headline.
+13. **A project's tools and skills narrow, never widen, the host profile's**, and
+    are applied at spawn.
+14. **Score is 1–5, human-written, with the run's self-score kept beside it.** No
+    automation reacts to a score in v1; the divergence is the signal.
+15. **Contacts are project-scoped rows, not an address book**, and their
+    addresses are member-only PII.
 
 ---
 
@@ -1120,4 +1530,10 @@ of changing it later. None blocks implementation.
 | 5 | **One project → one board?** | **One board per project**, created with the project's slug; `board_slug` stays settable so an existing board can be adopted, and `tasks.project_id` keeps sharing technically fine. | Free — a default in the create path plus a sentence of copy. |
 | 6 | **Does a repeatable run keep its cards, or archive them?** After run 14 closes, run 15 creates fresh cards from the same steps; do run 14's cards stay on the board? | **Archive run N's `done` cards when run N+1 opens**, keeping them queryable through `project_run_cards` and the run page. A board that accumulates 52 copies of "Draft the summary" is unreadable. | Cheap; it is one sweep at run open. |
 | 7 | **Do you want a fourth autonomy level** — "agent may also *propose* new steps mid-run" (self-extending playbook)? | **No, not in v1.** A run that can add its own work is a different risk class and the retro path already gives you the same capability with a human in it. | Additive later; the retro loop is the seam it would use. |
-| 8 | **The field list.** Your message referenced "the key information for each project" but the list did not arrive. §1.1 is my reconstruction. | **Reconcile §1.1 against your list before step 1 lands** — the store PR is the cheapest place to add a column and the most expensive place to have missed one. | A column addition is cheap; a *concept* addition after the API and page exist is not. |
+| 8 | **“Samples / References” carried no M/O marker** in your list — the only field that didn't. | **Optional, and split in two**: a *sample* ("match this") is named in the run prompt; a *reference* ("read this") is listed for the run to open. If you meant it as mandatory, say so — but a mandatory exemplar would block creating a project for work nobody has done before. | Free while it is one link kind pair; the M/O choice is one check. |
+| 9 | **Is “Goal” the project's name, or a separate field?** I mapped [1] onto `projects.name` (≤80 chars, phrased as an outcome) rather than adding `goal_title` beside it. | **Same field.** Two short titles on one object always diverge, and the list page can only show one. The linked FG-29 goal stays separate and optional. | A split later is a column plus a backfill — cheap but visible in the UI. |
+| 10 | **Score: whose, and on what?** I made it per-*run*, 1–5, human-written, with the run's own `score_self` beside it, and the project score derived from the last five. | **Per run, 1–5, human-only, plus self-score.** Scoring a *project* directly gives you a number nobody updates; scoring runs gives you a trend for free. | Adding a project-level manual score later is additive. |
+| 11 | **Outputs on a repeatable project.** I made recurring outputs one row with many deliveries ("delivered 11 of the last 12 Mondays") rather than a fresh output row per run. | **One row, many deliveries.** 52 output rows a year is the same unreadability problem as 52 cards named "Draft the summary". | Cheap: it is a flag plus which table the delivery lands in. |
+| 12 | **Should `progress` ever be manual?** A percentage the owner types is honest about judgement and dishonest about staleness. | **No manual override in v1** — the ladder plus the rolling `summary` covers "where this really stands" in words, which is what a human actually reads. | Additive: a nullable `progress_override` column. |
+| 13 | **Memories [12]: curated pointers, or a project memory namespace?** I made them pointers into a profile's memory documents. | **Pointers.** A project-owned memory store would be a second memory tier competing with the shipped one and FG-29's promotion path. | A namespace later would be a real design; say now if you want it. |
+| 14 | **The field list is now §1.1 verbatim** (this replaces my earlier reconstruction). | **Confirm §1.1 before step 1 lands** — the store PR is the cheapest place to add a column and the most expensive place to have missed a concept. | A column is cheap; a *concept* added after the API and the panels exist is not. |
