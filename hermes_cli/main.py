@@ -11424,9 +11424,10 @@ def cmd_profile(args):
             f"\n {'Profile':<16} {'Served':<8} {'Base URL':<14} "
             f"{'Schema':<22} Health"
         )
+        _dash = '\u2500'
         print(
-            f" {'\u2500' * 15} {'\u2500' * 7} {'\u2500' * 13} "
-            f"{'\u2500' * 21} {'\u2500' * 18}"
+            f" {_dash * 15} {_dash * 7} {_dash * 13} "
+            f"{_dash * 21} {_dash * 18}"
         )
         for e in entries:
             marker = " \u25c6" if e.is_default else "  "
