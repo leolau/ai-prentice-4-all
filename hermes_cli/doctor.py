@@ -2465,8 +2465,20 @@ def run_doctor(args):
                 wrapper = wrapper_dir / p.name
                 if not wrapper.exists():
                     parts.append("no alias")
+                # FG-30: channel-less profiles are usable from console/CLI
+                # only — report them so they don't get forgotten.
+                if not p.gateway_running:
+                    parts.append("no channel (console/CLI only)")
+
                 status = ", ".join(parts) if parts else "configured"
-                check_ok(f"  {p.name}: {status}")
+                if not p.gateway_running:
+                    check_warn(
+                        f"  {p.name}: {status}",
+                        "adopted profiles start channel-less; "
+                        "gain a channel on a deliberate commit step",
+                    )
+                else:
+                    check_ok(f"  {p.name}: {status}")
 
             # Check for orphan wrappers
             if wrapper_dir.is_dir():

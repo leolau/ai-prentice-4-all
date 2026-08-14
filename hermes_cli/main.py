@@ -11442,6 +11442,173 @@ def cmd_profile(args):
             )
         print()
 
+    # ---------- FG-30: profile lifecycle (suggest, adopt, retire) ----------
+    elif action == "suggest":
+        import asyncio
+
+        from hermes_cli.datastore import get_store
+        from hermes_cli.goal_tree import GoalTreeStore, GoalRegistryStore
+        from hermes_cli.profile_suggestion import (
+            ProfileSuggestionStore,
+            generate_suggestion,
+        )
+        from hermes_cli.skill_promotion import SkillPromotionStore
+        from hermes_cli.access import PrincipalStore
+
+        async def _run_suggest():
+            registry = GoalRegistryStore()
+            tree = GoalTreeStore(registry)
+            app_store = get_store("supabase-app", "prod")
+            promotions = SkillPromotionStore(app_store)
+            principal = await PrincipalStore(app_store).get_owner()
+            if principal is None:
+                print("Error: no owner enrolled. Run 'hermes owner init <user_id>' first.")
+                sys.exit(1)
+            suggestion = await generate_suggestion(tree, promotions, principal)
+            if suggestion is None:
+                print("No profile suggestion generated this cycle.")
+                return
+            print(f"Suggested profile: {suggestion.proposed_name}")
+            print(f"  Role: {suggestion.proposed_role}")
+            print(f"  Goal: {suggestion.proposed_goal}")
+            print(f"  Rationale: {suggestion.rationale or '(none)'}")
+
+        asyncio.run(_run_suggest())
+
+    elif action == "suggestions":
+        import asyncio
+
+        from hermes_cli.datastore import get_store
+        from hermes_cli.access import PrincipalStore
+        from hermes_cli.profile_suggestion import ProfileSuggestionStore
+
+        async def _run_list():
+            app_store = get_store("supabase-app", "prod")
+            principal = await PrincipalStore(app_store).get_owner()
+            if principal is None:
+                print("Error: no owner enrolled.")
+                sys.exit(1)
+            store = ProfileSuggestionStore(app_store)
+            suggestions = await store.list_suggestions(principal)
+            if not suggestions:
+                print("No pending profile suggestions.")
+                return
+            for s in suggestions:
+                print(f"{s.id}  {s.proposed_name}")
+                print(f"  Role: {s.proposed_role}")
+                print(f"  Goal: {s.proposed_goal}")
+                print(f"  Rationale: {s.rationale or '(none)'}")
+
+        asyncio.run(_run_list())
+
+    elif action == "adopt":
+        import asyncio
+
+        from hermes_cli.datastore import get_store
+        from hermes_cli.access import PrincipalStore
+        from hermes_cli.profile_suggestion import ProfileSuggestionStore
+
+        async def _run_adopt():
+            app_store = get_store("supabase-app", "prod")
+            principal = await PrincipalStore(app_store).get_owner()
+            if principal is None:
+                print("Error: no owner enrolled.")
+                sys.exit(1)
+            store = ProfileSuggestionStore(app_store)
+            suggestion, profile_dir = await store.adopt(principal, args.suggestion_id)
+            print(f"✓ Adopted profile '{suggestion.proposed_name}'")
+            print(f"  Path: {profile_dir}")
+            print(f"  Goal: {suggestion.proposed_goal}")
+
+        asyncio.run(_run_adopt())
+
+    elif action == "dismiss":
+        import asyncio
+
+        from hermes_cli.datastore import get_store
+        from hermes_cli.access import PrincipalStore
+        from hermes_cli.profile_suggestion import ProfileSuggestionStore
+
+        async def _run_dismiss():
+            app_store = get_store("supabase-app", "prod")
+            principal = await PrincipalStore(app_store).get_owner()
+            if principal is None:
+                print("Error: no owner enrolled.")
+                sys.exit(1)
+            store = ProfileSuggestionStore(app_store)
+            suggestion = await store.dismiss(
+                principal, args.suggestion_id, reason=getattr(args, "reason", "")
+            )
+            print(f"✓ Dismissed suggestion '{suggestion.proposed_name}'")
+
+        asyncio.run(_run_dismiss())
+
+    elif action == "retire":
+        import asyncio
+
+        from hermes_cli.datastore import get_store
+        from hermes_cli.access import PrincipalStore
+        from hermes_cli.profile_suggestion import retire_profile as _retire_profile
+        from hermes_cli.skill_promotion import SkillPromotionStore
+
+        if not getattr(args, "yes", False):
+            try:
+                answer = input(f"Retire profile '{args.profile_name}'? [y/N] ").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                answer = ""
+            if answer not in {"y", "yes"}:
+                print("Cancelled.")
+                return
+
+        async def _run_retire():
+            app_store = get_store("supabase-app", "prod")
+            principal = await PrincipalStore(app_store).get_owner()
+            if principal is None:
+                print("Error: no owner enrolled.")
+                sys.exit(1)
+            promotions = SkillPromotionStore(app_store)
+            archive = await _retire_profile(
+                args.profile_name, principal, promotions=promotions
+            )
+            print(f" Profile '{args.profile_name}' retired")
+            print(f"  Archive: {archive}")
+
+        asyncio.run(_run_retire())
+
+    elif action == "merge":
+        import asyncio
+
+        from hermes_cli.datastore import get_store
+        from hermes_cli.access import PrincipalStore
+        from hermes_cli.profile_suggestion import merge_profiles as _merge_profiles
+        from hermes_cli.skill_promotion import SkillPromotionStore
+
+        if not getattr(args, "yes", False):
+            try:
+                answer = input(
+                    f"Merge profile '{args.source}' into '{args.target}'? [y/N] "
+                ).strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                answer = ""
+            if answer not in {"y", "yes"}:
+                print("Cancelled.")
+                return
+
+        async def _run_merge():
+            app_store = get_store("supabase-app", "prod")
+            principal = await PrincipalStore(app_store).get_owner()
+            if principal is None:
+                print("Error: no owner enrolled.")
+                sys.exit(1)
+            promotions = SkillPromotionStore(app_store)
+            archive = await _merge_profiles(
+                args.source, args.target, principal, promotions=promotions
+            )
+            print(f"✓ Profile '{args.source}' merged into '{args.target}'")
+            print(f"  Archive: {archive}")
+
+        asyncio.run(_run_merge())
+
 
 def _render_distribution_plan(plan) -> None:
     """Print a human-readable summary of a pending distribution install."""

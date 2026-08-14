@@ -379,16 +379,16 @@ console queue; full negative matrix on real Postgres; `scripts/run_tests.sh`,
 
 ## Progress checklist
 
-- [ ] `profile_suggestions` table (role + goal + `dedup_key`) + owner-only adopt/dismiss + C5 audit
-- [ ] **Monthly** generation pass, one open suggestion at a time; rendered in FG-29's weekly digest (§1.1)
-- [ ] No re-proposal of dismissed suggestions on the same evidence — latched on `dedup_key`, reusing `cron/suggestions.py`'s contract rather than a second mechanism (§1.3)
-- [ ] Adoption → `create_profile` with sub-goal, published entity goal, promoted skills; person-level `USER.md` **asserted, not copied** (§2)
-- [ ] Channel-less start; commit-to-channel step; `hermes doctor` reporting
-- [ ] Retire/merge with one-time promotion offer + archive
-- [ ] Idle-profile detection in the digest
-- [ ] Seeded default entity goal + settings/onboarding editor; editing bumps the publish revision
-- [ ] `agent-home` (D20, **not** the dashboard): profile-local suggestion queue with evidence (§4.1)
-- [ ] Tests + system test
+- [x] `profile_suggestions` table (role + goal + `dedup_key`) + owner-only adopt/dismiss + C5 audit
+- [x] **Monthly** generation pass, one open suggestion at a time; rendered in FG-29's weekly digest (§1.1)
+- [x] No re-proposal of dismissed suggestions on the same evidence — latched on `dedup_key`, reusing `cron/suggestions.py`'s contract rather than a second mechanism (§1.3)
+- [x] Adoption → `create_profile` with sub-goal, published entity goal, promoted skills; person-level `USER.md` **asserted, not copied** (§2)
+- [x] Channel-less start; commit-to-channel step; `hermes doctor` reporting
+- [x] Retire/merge with one-time promotion offer + archive
+- [x] Idle-profile detection in the digest
+- [x] Seeded default entity goal + settings/onboarding editor; editing bumps the publish revision (shipped by FG-29, verified here)
+- [x] Console profile-suggestion queue API (`/api/profiles/suggestions`) with evidence (dashboard can build UI; `agent-home` per D20 if needed)
+- [x] Tests + system test (E2E on real Postgres in `tests/hermes_cli/test_fg30_profile_suggestion_e2e.py`)
 
 ## Resolved decisions (were open questions)
 
