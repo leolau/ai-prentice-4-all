@@ -17,6 +17,13 @@ depends_on:
 
 # Projects
 
+> **Superseded for implementation by** `docs/design/projects-feature-design.md`
+> (ed.3), which consolidates this plan and ed.2 into one standalone spec and adds
+> the four dimensions neither covers: cadence (one-off / repeatable / standing),
+> autonomy and its caps, guidance (durable directives and feedback), and runs /
+> retros / the learning loop. Implement from that document; this plan remains the
+> record of the substrate review and the reasoning behind the store decision.
+>
 > **Amended by** `docs/plans/2026-08-13-001-todos-and-projects-design-revision.md`
 > (ed.2): all six open questions in §11 are answered there as defaults (with the
 > desktop repoint folded into step 1), and the to-do → card promotion this plan
