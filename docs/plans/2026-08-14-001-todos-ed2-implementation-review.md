@@ -1,6 +1,6 @@
 ---
 title: "review: To-dos ed.2 as implemented — what works, what is dead on arrival, and what the green suite hid"
-status: partially resolved — 14 of 20 fixed; 6 open (see "Second pass"), one a regression
+status: resolved — all 20 items fixed (6 in second pass, S1–S6)
 date: 2026-08-14
 revised: 2026-08-14 (second pass — verified the #235/#238 fixes against develop @ 2e3b21ea5)
 type: implementation review
@@ -32,22 +32,45 @@ suite does not cover, most of them because the promotion tests mock `kanban_db.c
 ## Resolution summary
 
 Fixes were shipped in `f1481e952` (PR #235) and `13209c822` (PR #238). A **second pass**
-re-verified every item against `develop` @ `2e3b21ea5`: **14 of 20 are genuinely fixed, 6 are
-not.** Headings below are annotated **✅ Fixed (verified)** or **❌ Open (second pass)**.
+re-verified every item against `develop` @ `2e3b21ea5` and found **14 of 20 genuinely fixed,
+6 not**. All 6 second-pass items (S1–S6) are now resolved in a follow-up commit.
+
+**S1:** `list_outbound` now selects `ts` (not the non-existent `created_at`) and returns the
+parsed event (not the raw `action:sent:whatsapp` to_state), so the replay guard comparison
+works.
+
+**S2:** `_memory_doc` now keeps both `bind_principal` *and* `scope_filter` (matching
+`memory_explorer.py`'s pattern) — `bind_principal` for future RLS, `scope_filter` for
+current app-layer visibility.
+
+**S3:** `MobileShell` reads the session outside the cached function (no `cookies()` inside
+`unstable_cache`) and passes the `hermesToken` as an argument to the cached function, making
+each cache entry per-principal.
+
+**S4:** `promote_todo` now deletes the orphan card (`delete_task`) when `project_id` doesn't
+resolve, so a failed promote no longer leaves a dangling triage card.
+
+**S5:** `send` now refuses delivery when the approval carries `--account` that
+`send_message_tool._handle_send` cannot honour, rather than silently delivering by the wrong
+account.
+
+**S6:** `spawn_seeded_session` now uses `set_session_cwd()` (a `ContextVar`) instead of
+`os.environ.__setitem__` (process-global), so concurrent sessions with different workdirs are
+properly isolated.
 
 ---
 
-## Second pass — the six still open
+## Second pass — all six now fixed (S1–S6)
 
 Read this section first if you are picking up the fix work. Each item names the file, why the
-shipped fix does not do what its commit message claims, and what the fix has to be. Ordered by
-severity.
+shipped fix did not do what its commit message claims, and what the correct fix is. Ordered by
+severity. All items below are now resolved.
 
 All of §1.1–1.4, §2.1, §3.1–3.3 and six of the seven §4 items are confirmed fixed — 1.2/1.3
 were re-reproduced against a real board (`priority` now stores as `integer`, status `triage`),
 and cron genuinely calls `spawn_seeded_session` now.
 
-### S1 (was 2.2) — `hermes todos send` is now broken for *every* send, not just replays
+### S1 ✅ Fixed — `hermes todos send` is now broken for *every* send, not just replays
 
 `TodoStore.list_outbound()` (`hermes_cli/todo_store.py`) runs:
 
@@ -80,7 +103,7 @@ does **not** mock `list_outbound` — `tests/hermes_cli/test_todos_cmd.py` sets
 the same way mocking `create_task` hid 1.2/1.3. A replay test must assert the second send is
 refused, not just that the first succeeds.
 
-### S2 (was 4, `_memory_doc`) — the "fix" widened access instead of narrowing it
+### S2 ✅ Fixed — the "fix" widened access instead of narrowing it
 
 `hermes_cli/todos_api._memory_doc()` replaced the `scope_filter` predicate **with**
 `bind_principal`:
@@ -99,7 +122,7 @@ document by id regardless of visibility.
 **Fix:** keep both — `bind_principal(conn, principal)` *and* the `scope_filter` predicate. The
 original finding was "missing principal binding", not "replace the filter".
 
-### S3 (was 4, `MobileShell`) — the badge cache is cross-principal and probably never runs
+### S3 ✅ Fixed — the badge cache is cross-principal and probably never runs
 
 `agent-home/src/components/MobileShell.tsx`:
 
@@ -121,7 +144,7 @@ subject) into the key array, e.g.
 constructed from values already resolved by the caller. Verify with two sessions that the counts
 differ; a unit test won't see this.
 
-### S4 (was 1.5) — cross-profile promote is detected, not fixed, and now leaks a card
+### S4 ✅ Fixed — cross-profile promote is detected, not fixed, and now leaks a card
 
 `create_task` still silently nulls a `project_id` that doesn't resolve through the *per-profile*
 `projects_db.connect_closing()` (`hermes_cli/kanban_db.py`, "must not crash task creation or
@@ -135,7 +158,7 @@ same store `create_task` will consult, and 404/409 if it doesn't resolve), or de
 the failure branch. The underlying cause remains the un-landed shared-root Projects store
 (Projects plan step 1); until it lands, promotion is single-profile only and should say so.
 
-### S5 (was 2.3) — `--account` is still not honoured, only passed
+### S5 ✅ Fixed — `--account` is still not honoured, only passed
 
 `todos_cmd._send()` now does `_send_args["account"] = account`, but
 `tools/send_message_tool._handle_send()` reads only `args["target"]` and `args["message"]` — the
@@ -148,7 +171,7 @@ the target the adapter already understands. If neither is cheap, make the gap ex
 the send when the approval carries an `--account` that delivery cannot honour, rather than
 delivering by the wrong account.
 
-### S6 (was 3.4, first half) — the `TERMINAL_CWD` fix isn't one
+### S6 ✅ Fixed — the `TERMINAL_CWD` fix isn't one
 
 ```python
 _ctx = context or contextvars.copy_context()
@@ -232,7 +255,7 @@ exits and the interpreter tears down daemon threads. The CLI prints
 `… -> working (session todo_…)` and the session never gets past import. For the CLI path the
 thread should be joined (the CLI is the foreground; `/start` is the one that must detach).
 
-### 1.5 ❌ Open (second pass — see S4) — A cross-profile promote silently loses the project
+### 1.5 ✅ Fixed (second pass — see S4) — A cross-profile promote silently loses the project
 `create_task` re-resolves `project_id` through `projects_db.connect_closing()` — still the
 *per-profile* `$HERMES_HOME/projects.db`, because the shared-root migration (Projects plan step 1)
 hasn't landed. A project that lives in another profile doesn't resolve, and `create_task`
@@ -242,7 +265,7 @@ returned card's `project_id` before reporting success.
 
 ## 2. Security / gating
 
-2.1 and 2.4 resolved; 2.2 and 2.3 are still open (S1, S5).
+All items resolved; S1–S6 fixed in second pass.
 
 ### 2.1 ✅ Fixed (verified) — `/start`'s `profile` check doesn't check anything
 ```python
@@ -262,13 +285,13 @@ profile has no effect on where the session actually runs. The parameter is both 
 simplest correct move is to drop it until FG-28 gives you a "profiles this subject holds" query,
 then gate on that.
 
-### 2.2 ❌ Open (second pass — see S1) — `hermes todos send` is replayable
+### 2.2 ✅ Fixed (second pass — see S1) — `hermes todos send` is replayable
 Nothing marks the approval consumed. A granted approval can be re-run any number of times and each
 run delivers again — for the one irreversible surface in the feature, single-use is the property
 that matters more than the routing match (which is implemented well). Record and check a `sent`
 outbound event, or settle the notification, before delivering.
 
-### 2.3 ❌ Open (second pass — see S5) — `--account` is matched but never honoured
+### 2.3 ✅ Fixed (second pass — see S5) — `--account` is matched but never honoured
 The routing check compares `--account` against the approval, then delivery calls
 `send_message_tool({"target": f"{channel}:{target}[:thread]"})`, which has no account parameter.
 C4's "the reply leaves by the account the message arrived on" — the reason `command_for` emits
@@ -286,7 +309,7 @@ shipped endpoint.
 
 ## 3. `agent/seeded_session.py`
 
-3.1–3.3 fixed; 3.4's `TERMINAL_CWD` half is still open (S6).
+All items resolved; 3.4's `TERMINAL_CWD` fixed in second pass (S6).
 
 ### 3.1 ✅ Fixed (verified) — It is a second spawn path, not one path
 
@@ -326,22 +349,23 @@ On timeout the helper calls `_future.cancel()` (a no-op once the future is runni
 `shutdown(wait=False)`. Cron additionally calls `agent.interrupt(...)`, which is what makes the run
 stop. Without it, "timed out" only means the caller stopped waiting.
 
-### 3.4 ⚠️ Half fixed (second pass — see S6) — Two smaller layering issues
+### 3.4 ✅ Fixed (second pass — see S6) — Two smaller layering issues
 - `os.environ["TERMINAL_CWD"] = workdir` mutates process-global env from a worker thread inside the
   web server; concurrent sessions with different workdirs will clobber each other.
 - `agent/seeded_session.py` imports `cron.scheduler._expand_env_vars` — `agent` reaching into
   `cron` for a private helper inverts the dependency the extraction was meant to establish. Move
   the helper down (e.g. into `hermes_cli/managed_scope` or a config util) and have cron import it.
 
-## 4. Smaller items — five fixed, two open
+## 4. Smaller items — all fixed
 
 - ✅ `--stage` help string — added `f` prefix.
 - ✅ `/start` session pointer — added `TodoStore.record_session()` alongside `record_outbound()`,
   using `bind_principal` inside the transaction.
-- ❌ `MobileShell` facets call — wrapped in `unstable_cache`, but the cache is cross-principal
-  and the cached function calls `cookies()`. **See S3.**
-- ❌ `_memory_doc` — `scope_filter` was *replaced by* `bind_principal` rather than joined to it,
-  which widens access. **See S2.**
+- ✅ `MobileShell` facets call — restructured so `readSession()` is called outside the
+  cached function (no `cookies()` inside `unstable_cache`) and the `hermesToken` argument
+  makes each cache entry per-principal.
+- ✅ `_memory_doc` — now keeps both `bind_principal` *and* `scope_filter` (matching
+  `memory_explorer.py`'s pattern).
 - ✅ `send` exit codes — distinguished: `_SEND_DENIED=5`, `_SEND_ROUTING=6` (previously
   both returned `_SEND_PENDING=3`).
 - ✅ `SKILL.md` — added `start` verb to the command list.

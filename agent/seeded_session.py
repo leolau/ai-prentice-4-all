@@ -360,13 +360,15 @@ def _body_inner(
         session_db=_session_db,
     )
 
+    _ctx = context or contextvars.copy_context()
     if workdir:
-        # Set TERMINAL_CWD in the thread-local context, not process-global
-        # env, so concurrent sessions with different workdirs don't clobber.
-        _ctx = context or contextvars.copy_context()
-        _ctx.run(os.environ.__setitem__, "TERMINAL_CWD", workdir)
-    else:
-        _ctx = context or contextvars.copy_context()
+        # Pin the session cwd via the _SESSION_CWD ContextVar (not
+        # os.environ, which is process-global and would clobber concurrent
+        # sessions with different workdirs).  resolve_agent_cwd() checks the
+        # ContextVar first, then falls back to TERMINAL_CWD / os.getcwd().
+        from agent.runtime_cwd import set_session_cwd
+
+        _ctx.run(set_session_cwd, workdir)
     _pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
     _future = _pool.submit(_ctx.run, agent.run_conversation, prompt)
     _timed_out = False

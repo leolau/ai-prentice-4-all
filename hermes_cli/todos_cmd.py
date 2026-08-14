@@ -517,6 +517,25 @@ async def _send(
             print(msg, file=sys.stderr)
         return _SEND_ROUTING
 
+    # Account honour gap: the approval carries --account (multi-account
+    # routing, C4 "the reply leaves by the account the message arrived
+    # on"), but send_message_tool._handle_send reads only 'target' and
+    # 'message' — the account key is discarded.  Refuse rather than
+    # silently deliver by the wrong account.  This is a stated gap, not
+    # a permanent refusal: when _handle_send threads the account through
+    # to the platform adapter, this check is removed.
+    if account:
+        msg = (
+            f"Approval for to-do {todo_id} carries --account {account!r}, "
+            f"but delivery does not yet honour multi-account routing. "
+            f"Refusing rather than delivering by the wrong account."
+        )
+        if json_mode:
+            _print_json({"error": msg})
+        else:
+            print(msg, file=sys.stderr)
+        return _SEND_ROUTING
+
     # Replay guard: a granted approval must be single-use.  If we already
     # recorded a 'sent' outbound event for this to-do, refuse to deliver again.
     existing = await store.list_outbound(principal, todo_id)

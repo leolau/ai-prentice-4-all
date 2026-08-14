@@ -53,6 +53,22 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 log = logging.getLogger(__name__)
 
 TRANSITIONS_TABLE = "task_transitions"
+
+
+def _parse_outbound_event(to_state: str) -> str:
+    """Extract the event name from an ``action:<event>:<channel>`` to_state.
+
+    ``record_outbound`` writes ``to_state = f"action:{event}:{channel}"``
+    (e.g. ``action:sent:whatsapp``).  The replay guard in ``todos_cmd._send``
+    compares the returned ``event`` against a bare name like ``"sent"``, so
+    we parse the structured shape here rather than returning the raw
+    ``to_state`` that would never match.
+    """
+    parts = str(to_state).split(":", 2)
+    if len(parts) >= 2 and parts[0] == "action":
+        return parts[1]
+    return str(to_state)
+
 PROGRESS_STATES_TABLE = "task_progress_states"
 
 #: Grants reuse the ``document`` item kind, as the arrival and file registries
@@ -868,14 +884,14 @@ class TodoStore:
             if visible is None:
                 return []
             rows = await conn.fetch(
-                f"SELECT to_state, actor, created_at "
+                f"SELECT to_state, actor, ts "
                 f"FROM {TRANSITIONS_TABLE} "
                 f"WHERE task_id = $1 AND to_state LIKE 'action:%' "
-                f"ORDER BY created_at DESC",
+                f"ORDER BY ts DESC",
                 todo_id,
             )
             return [
-                {"event": r["to_state"], "actor": r["actor"], "at": r["created_at"]}
+                {"event": _parse_outbound_event(r["to_state"]), "actor": r["actor"], "at": r["ts"]}
                 for r in rows
             ]
         finally:

@@ -240,16 +240,27 @@ async def _memory_doc(
     doc_id = str(source["document_id"])
     try:
         from hermes_cli.datastore import get_store
-        from hermes_cli.access import bind_principal
+        from hermes_cli.access import bind_principal, scope_filter
 
         app_store = get_store("supabase-app", "prod")
         conn = await app_store.connect()
         try:
+            # Keep both layers: bind_principal sets the GUC context for any
+            # future RLS policies on rag_documents, and scope_filter is the
+            # app-layer visibility predicate that actually enforces C2 today
+            # (no rag_documents RLS policy ships in this repo yet).
             await bind_principal(conn, principal)
+            pred = scope_filter(
+                principal,
+                start_index=2,  # $1 is doc_id
+                grant_item_kind="document",
+                id_column="rag_documents.id",
+            )
             row = await conn.fetchrow(
-                "SELECT id, title FROM rag_documents "
-                "WHERE id = $1::uuid",
+                f"SELECT id, title FROM rag_documents "
+                f"WHERE id = $1::uuid AND {pred.sql}",
                 doc_id,
+                *pred.params,
             )
         finally:
             await conn.close()
@@ -346,8 +357,8 @@ async def start_todo(request: Request, todo_id: str) -> dict[str, Any]:
                 session_id=_session_id,
                 actor=f"user:{principal.user_id}",
             ))
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("todos: /start session pointer for %s failed (%s)", _session_id, exc)
 
     _thread = threading.Thread(target=_spawn, daemon=True)
     _thread.start()
@@ -579,9 +590,15 @@ async def promote_todo(
             )
             # Verify the card actually carries the project_id (cross-profile
             # projects may not resolve through the per-profile store yet).
-            from hermes_cli.kanban_db import get_task
+            from hermes_cli.kanban_db import get_task, delete_task
             _card = get_task(kconn, card_id)
             _card_ok = _card is not None and bool(_card.project_id)
+            if not _card_ok:
+                # create_task silently nulls a project_id that doesn't
+                # resolve through the per-profile store.  Delete the orphan
+                # card rather than leaving a dangling triage card on the
+                # board with no project and no project_links row.
+                delete_task(kconn, card_id)
     except Exception as exc:
         logger.warning("todos: promote card creation failed (%s)", exc)
         raise HTTPException(
@@ -590,7 +607,9 @@ async def promote_todo(
     if not _card_ok:
         raise HTTPException(
             status_code=500,
-            detail="project did not resolve on the target board",
+            detail="project did not resolve on the target board "
+                   "— promotion is single-profile until the shared "
+                   "Projects store lands",
         )
 
     # 3. Write the project_links row.
