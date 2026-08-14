@@ -36,7 +36,7 @@ import sqlite3
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterable, List, Optional
+from typing import Any, Iterable, List, Optional
 
 from hermes_cli.sqlite_util import add_column_if_missing as _add_column_if_missing, write_txn
 from hermes_constants import get_hermes_home
@@ -519,6 +519,65 @@ def default_name_from_goal(goal: str) -> str:
     return g.strip()[:NAME_MAX_CHARS].strip()
 
 
+VALID_VISIBILITIES = ("shared", "private")
+
+
+def _validate_cadence(value: str) -> str:
+    v = str(value or "").strip()
+    if v not in VALID_CADENCES:
+        raise ValueError(f"cadence must be one of {sorted(VALID_CADENCES)}")
+    return v
+
+
+def _validate_autonomy(value: str) -> str:
+    v = str(value or "").strip()
+    if v not in VALID_AUTONOMY_LEVELS:
+        raise ValueError(f"autonomy must be one of {sorted(VALID_AUTONOMY_LEVELS)}")
+    return v
+
+
+def _validate_visibility(value: str) -> str:
+    v = str(value or "").strip()
+    if v not in VALID_VISIBILITIES:
+        raise ValueError(f"visibility must be one of {sorted(VALID_VISIBILITIES)}")
+    return v
+
+
+def _validate_max_in_progress(value) -> int:
+    try:
+        n = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("max_in_progress must be an integer") from exc
+    if n < 1:
+        raise ValueError("max_in_progress must be >= 1")
+    return n
+
+
+def _opt_str(value) -> Optional[str]:
+    if value is None:
+        return None
+    s = str(value).strip()
+    return s or None
+
+
+def _opt_int(value) -> Optional[int]:
+    if value is None or value == "":
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("expected an integer") from exc
+
+
+def _opt_float(value) -> Optional[float]:
+    if value is None or value == "":
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("expected a number") from exc
+
+
 @dataclass
 class ProjectFolder:
     path: str
@@ -901,6 +960,51 @@ def update_project(
     if board_slug is not None:
         sets.append("board_slug = ?")
         params.append(normalize_slug(board_slug) if board_slug.strip() else None)
+    if not sets:
+        return False
+    params.append(project_id)
+    with write_txn(conn):
+        cur = conn.execute(
+            f"UPDATE projects SET {', '.join(sets)} WHERE id = ?", params
+        )
+    return cur.rowcount > 0
+
+
+def update_project_fields(
+    conn: sqlite3.Connection,
+    project_id: str,
+    fields: dict,
+) -> bool:
+    """Patch the §2.2 record fields :func:`update_project` does not cover.
+
+    ``status`` is intentionally NOT accepted here — status transitions go
+    through :func:`set_project_status`, which owns the planning-exit gate.
+    Unknown fields raise ``ValueError`` so a router typo is loud.
+    """
+    writers = {
+        "cadence": lambda v: _validate_cadence(v),
+        "due_at": _opt_int,
+        "review_every": _opt_str,
+        "target_audience": _opt_str,
+        "score_rubric": _opt_str,
+        "visibility": _validate_visibility,
+        "definition_of_done": _opt_str,
+        "max_in_progress": _validate_max_in_progress,
+        "budget_usd_per_run": _opt_float,
+        "autonomy": lambda v: _validate_autonomy(v),
+    }
+    sets: List[str] = []
+    params: List[Any] = []
+    for key, value in fields.items():
+        if key == "status":
+            raise ValueError(
+                "status changes go through set_project_status (the "
+                "planning-exit gate)"
+            )
+        if key not in writers:
+            raise ValueError(f"unknown project field: {key!r}")
+        sets.append(f"{key} = ?")
+        params.append(writers[key](value))
     if not sets:
         return False
     params.append(project_id)
@@ -1294,6 +1398,8 @@ def add_project_link(
     A link is a pointer, never a copy — the authority stays in the profile
     that owns the referenced object. Re-inserting the same link is a no-op.
     """
+    if kind not in VALID_LINK_KINDS:
+        raise ValueError(f"link kind must be one of {sorted(VALID_LINK_KINDS)}")
     now = int(time.time())
     with write_txn(conn):
         cur = conn.execute(
@@ -1353,6 +1459,348 @@ def get_project_profiles(
             (project_id,),
         ).fetchall()
     ]
+
+
+def remove_project_profile(
+    conn: sqlite3.Connection, project_id: str, profile: str
+) -> bool:
+    """Detach a profile from a project. The caller owns the guardrails
+    (the API refuses to detach the last one); the store just removes."""
+    with write_txn(conn):
+        cur = conn.execute(
+            "DELETE FROM project_profiles WHERE project_id = ? AND profile = ?",
+            (project_id, profile),
+        )
+    return cur.rowcount > 0
+
+
+# ---------------------------------------------------------------------------
+# Outputs, deliveries, contacts (design §2.2 / §6.1; API step 3)
+# ---------------------------------------------------------------------------
+
+VALID_LINK_KINDS = (
+    "file", "arrival", "todo", "goal", "memory",
+    "conversation", "sample", "reference", "url",
+)
+VALID_OUTPUT_KINDS = ("artifact", "file", "message", "decision", "report", "code")
+VALID_OUTPUT_STATUSES = ("pending", "in_progress", "delivered", "accepted", "dropped")
+
+
+def _new_row_id(prefix: str) -> str:
+    return f"{prefix}_{secrets.token_hex(6)}"
+
+
+def add_project_output(
+    conn: sqlite3.Connection,
+    *,
+    project_id: str,
+    title: str,
+    spec: Optional[str] = None,
+    kind: str = "artifact",
+    required: bool = True,
+    recurring: bool = False,
+) -> str:
+    """Declare a deliverable [3]. Returns the new output id.
+
+    ``seq`` is assigned after the current last row, so outputs list in
+    declaration order. Declaring the deliverable before automating its
+    production is what keeps a run from succeeding at nothing (§6.1).
+    """
+    title = str(title or "").strip()
+    if not title:
+        raise ValueError("output title is required")
+    if kind not in VALID_OUTPUT_KINDS:
+        raise ValueError(f"output kind must be one of {sorted(VALID_OUTPUT_KINDS)}")
+    oid = _new_row_id("o")
+    now = _now()
+    with write_txn(conn):
+        row = conn.execute(
+            "SELECT COALESCE(MAX(seq), 0) AS m FROM project_outputs "
+            "WHERE project_id = ?",
+            (project_id,),
+        ).fetchone()
+        conn.execute(
+            """INSERT INTO project_outputs
+               (id, project_id, seq, title, spec, kind, required, recurring,
+                status, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)""",
+            (oid, project_id, int(row["m"]) + 1, title, spec, kind,
+             1 if required else 0, 1 if recurring else 0, now),
+        )
+    return oid
+
+
+def get_project_outputs(
+    conn: sqlite3.Connection, project_id: str
+) -> List[dict]:
+    """Read a project's outputs in declaration order."""
+    return [
+        dict(r)
+        for r in conn.execute(
+            "SELECT * FROM project_outputs WHERE project_id = ? ORDER BY seq",
+            (project_id,),
+        ).fetchall()
+    ]
+
+
+def update_project_output(
+    conn: sqlite3.Connection,
+    output_id: str,
+    *,
+    title: Optional[str] = None,
+    spec: Optional[str] = None,
+    kind: Optional[str] = None,
+    required: Optional[bool] = None,
+    recurring: Optional[bool] = None,
+    status: Optional[str] = None,
+) -> bool:
+    """Patch an output row. Setting ``status='delivered'`` stamps
+    ``delivered_at``; ``accepted`` is reserved for :func:`accept_project_output`
+    (only a human accepts — §6.1)."""
+    sets: List[str] = []
+    params: List[Any] = []
+    if title is not None:
+        t = str(title).strip()
+        if not t:
+            raise ValueError("output title cannot be empty")
+        sets.append("title = ?")
+        params.append(t)
+    if spec is not None:
+        sets.append("spec = ?")
+        params.append(spec)
+    if kind is not None:
+        if kind not in VALID_OUTPUT_KINDS:
+            raise ValueError(f"output kind must be one of {sorted(VALID_OUTPUT_KINDS)}")
+        sets.append("kind = ?")
+        params.append(kind)
+    if required is not None:
+        sets.append("required = ?")
+        params.append(1 if required else 0)
+    if recurring is not None:
+        sets.append("recurring = ?")
+        params.append(1 if recurring else 0)
+    if status is not None:
+        if status not in VALID_OUTPUT_STATUSES or status == "accepted":
+            raise ValueError(
+                "output status must be one of "
+                f"{sorted(s for s in VALID_OUTPUT_STATUSES if s != 'accepted')}; "
+                "acceptance goes through the human-only accept route"
+            )
+        sets.append("status = ?")
+        params.append(status)
+        if status == "delivered":
+            sets.append("delivered_at = ?")
+            params.append(_now())
+    if not sets:
+        return False
+    params.append(output_id)
+    with write_txn(conn):
+        cur = conn.execute(
+            f"UPDATE project_outputs SET {', '.join(sets)} WHERE id = ?", params
+        )
+    return cur.rowcount > 0
+
+
+def accept_project_output(
+    conn: sqlite3.Connection,
+    output_id: str,
+    *,
+    accepted_by: str,
+) -> bool:
+    """Human-only acceptance (§6.1): the run may deliver, only a person
+    accepts. Accepting a ``recurring`` output stamps the acceptance but the
+    row's deliveries keep accumulating."""
+    with write_txn(conn):
+        cur = conn.execute(
+            "UPDATE project_outputs SET status = 'accepted', accepted_at = ?, "
+            "accepted_by = ? WHERE id = ? AND status != 'dropped'",
+            (_now(), accepted_by, output_id),
+        )
+    return cur.rowcount > 0
+
+
+def remove_project_output(conn: sqlite3.Connection, output_id: str) -> bool:
+    """Delete an output row — refused for the last required output.
+
+    A project's outputs are the denominator its progress is measured in;
+    silently emptying it would turn every later run into effort mistaken
+    for delivery (§15.9).
+    """
+    with write_txn(conn):
+        row = conn.execute(
+            "SELECT project_id, required FROM project_outputs WHERE id = ?",
+            (output_id,),
+        ).fetchone()
+        if row is None:
+            return False
+        if row["required"]:
+            others = conn.execute(
+                "SELECT COUNT(*) AS n FROM project_outputs "
+                "WHERE project_id = ? AND required = 1 AND id != ?",
+                (row["project_id"], output_id),
+            ).fetchone()["n"]
+            if not others:
+                raise ValueError(
+                    "refusing to delete the last required output; declare a "
+                    "replacement first or drop the project"
+                )
+        conn.execute("DELETE FROM project_outputs WHERE id = ?", (output_id,))
+    return True
+
+
+def record_output_delivery(
+    conn: sqlite3.Connection,
+    *,
+    output_id: str,
+    run_id: Optional[str] = None,
+    task_id: Optional[str] = None,
+    link_kind: Optional[str] = None,
+    link_ref: Optional[str] = None,
+    profile: Optional[str] = None,
+    label: Optional[str] = None,
+    note: Optional[str] = None,
+) -> str:
+    """One delivery row per produced output (§6.1). Recurring outputs
+    accumulate one row per run."""
+    did = _new_row_id("d")
+    with write_txn(conn):
+        exists = conn.execute(
+            "SELECT 1 FROM project_outputs WHERE id = ?", (output_id,)
+        ).fetchone()
+        if exists is None:
+            raise ValueError(f"unknown output: {output_id!r}")
+        conn.execute(
+            """INSERT INTO project_output_deliveries
+               (id, output_id, run_id, task_id, link_kind, link_ref, profile,
+                label, note, delivered_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (did, output_id, run_id, task_id, link_kind, link_ref, profile,
+             label, note, _now()),
+        )
+    return did
+
+
+def get_output_deliveries(
+    conn: sqlite3.Connection,
+    *,
+    output_id: Optional[str] = None,
+    project_id: Optional[str] = None,
+) -> List[dict]:
+    """Deliveries for one output or for a whole project, newest first."""
+    if output_id is not None:
+        rows = conn.execute(
+            "SELECT * FROM project_output_deliveries WHERE output_id = ? "
+            "ORDER BY delivered_at DESC, id DESC",
+            (output_id,),
+        ).fetchall()
+    elif project_id is not None:
+        rows = conn.execute(
+            "SELECT d.* FROM project_output_deliveries d "
+            "JOIN project_outputs o ON o.id = d.output_id "
+            "WHERE o.project_id = ? ORDER BY d.delivered_at DESC, d.id DESC",
+            (project_id,),
+        ).fetchall()
+    else:
+        raise ValueError("output_id or project_id is required")
+    return [dict(r) for r in rows]
+
+
+def add_project_contact(
+    conn: sqlite3.Connection,
+    *,
+    project_id: str,
+    name: str,
+    role: Optional[str] = None,
+    org: Optional[str] = None,
+    platform: Optional[str] = None,
+    address: Optional[str] = None,
+    user_id: Optional[str] = None,
+    notes: Optional[str] = None,
+    created_by: Optional[str] = None,
+) -> str:
+    """Add a contact [10]. ``address`` is PII: members-only in responses."""
+    name = str(name or "").strip()
+    if not name:
+        raise ValueError("contact name is required")
+    cid = _new_row_id("c")
+    with write_txn(conn):
+        conn.execute(
+            """INSERT INTO project_contacts
+               (id, project_id, name, role, org, platform, address, user_id,
+                notes, created_by, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (cid, project_id, name, role, org, platform, address, user_id,
+             notes, created_by, _now()),
+        )
+    return cid
+
+
+def get_project_contacts(
+    conn: sqlite3.Connection, project_id: str
+) -> List[dict]:
+    """Read a project's contacts, newest first."""
+    return [
+        dict(r)
+        for r in conn.execute(
+            "SELECT * FROM project_contacts WHERE project_id = ? "
+            "ORDER BY created_at DESC",
+            (project_id,),
+        ).fetchall()
+    ]
+
+
+def update_project_contact(
+    conn: sqlite3.Connection,
+    contact_id: str,
+    **fields: Any,
+) -> bool:
+    """Patch contact fields (name, role, org, platform, address, user_id,
+    notes). Unknown fields are refused."""
+    allowed = {"name", "role", "org", "platform", "address", "user_id", "notes"}
+    sets: List[str] = []
+    params: List[Any] = []
+    for key, value in fields.items():
+        if key not in allowed:
+            raise ValueError(f"unknown contact field: {key!r}")
+        if key == "name" and not str(value or "").strip():
+            raise ValueError("contact name cannot be empty")
+        sets.append(f"{key} = ?")
+        params.append(value)
+    if not sets:
+        return False
+    params.append(contact_id)
+    with write_txn(conn):
+        cur = conn.execute(
+            f"UPDATE project_contacts SET {', '.join(sets)} WHERE id = ?",
+            params,
+        )
+    return cur.rowcount > 0
+
+
+def remove_project_contact(conn: sqlite3.Connection, contact_id: str) -> bool:
+    with write_txn(conn):
+        cur = conn.execute(
+            "DELETE FROM project_contacts WHERE id = ?", (contact_id,)
+        )
+    return cur.rowcount > 0
+
+
+def remove_project_link(
+    conn: sqlite3.Connection,
+    *,
+    project_id: str,
+    kind: str,
+    profile: str,
+    ref: str,
+) -> bool:
+    """Detach a link pointer. The referenced object is never touched."""
+    with write_txn(conn):
+        cur = conn.execute(
+            "DELETE FROM project_links "
+            "WHERE project_id = ? AND kind = ? AND profile = ? AND ref = ?",
+            (project_id, kind, profile, ref),
+        )
+    return cur.rowcount > 0
 
 
 # ---------------------------------------------------------------------------
