@@ -14,9 +14,9 @@ import { requestFreshSession } from '@/store/profile'
 import { $selectedStoredSessionId, $sessions, workspaceCwdForNewSession } from '@/store/session'
 import type { ProjectInfo, ProjectsPayload } from '@/types/hermes'
 
-// First-class, per-profile Projects (named, multi-folder workspaces). State is
-// served by the live gateway's `projects.*` JSON-RPC methods, which wrap the
-// per-profile projects.db store. The sidebar groups sessions by project folder
+// First-class Projects (named, multi-folder workspaces). State is served by
+// the live gateway's `projects.*` JSON-RPC methods, which wrap the
+// shared-root projects.db store. The sidebar groups sessions by project folder
 // membership; these atoms are the renderer's cached view.
 
 export const $projects = atom<ProjectInfo[]>([])

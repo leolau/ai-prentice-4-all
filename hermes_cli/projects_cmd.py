@@ -3,8 +3,9 @@
 A Project is a human-named workspace spanning one or more folders, with one
 designated primary repo. Projects anchor desktop session grouping and (when
 bound to a kanban board) give kanban tasks a deterministic worktree + branch
-convention. State lives in the per-profile ``$HERMES_HOME/projects.db`` store
-(see :mod:`hermes_cli.projects_db`).
+convention. State lives in the shared-root ``kanban_home()/projects.db``
+store (see :mod:`hermes_cli.projects_db`); legacy per-profile stores are
+imported into it on first open.
 
 This is a footprint-ladder rung-2 capability: a CLI command + gateway RPC,
 with zero model-tool schema cost.
@@ -30,7 +31,7 @@ def build_parser(
             "Projects are human-named workspaces that can span multiple "
             "folders / repos. They anchor desktop session grouping and, when "
             "bound to a kanban board, give tasks a deterministic worktree + "
-            "branch convention. State is per-profile."
+            "branch convention. State is shared across profiles (root store)."
         ),
     )
     sub = parser.add_subparsers(dest="project_action")
