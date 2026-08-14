@@ -769,7 +769,7 @@ _QUICK_STATE_FILES = (
     # profiles the real path is outside HERMES_HOME and the entry is silently
     # skipped (best-effort, same as the pairing stores). SQLite DBs are copied
     # WAL-safely via _safe_copy_db.
-    "projects.db",                      # per-profile project store
+    "projects.db",                      # shared-root project store (kanban_home(); here for the root/default profile)
     "response_store.db",                # gateway conversation history / tool payloads
     "memory_store.db",                  # holographic memory facts/entities
     "verification_evidence.db",         # agent verification audit trail

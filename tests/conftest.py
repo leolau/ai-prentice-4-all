@@ -206,6 +206,9 @@ _HERMES_BEHAVIORAL_VARS = frozenset({
     "HERMES_KANBAN_DB",
     "HERMES_KANBAN_BOARD",
     "HERMES_KANBAN_HOME",
+    # Root projects-store pin (mirrors HERMES_KANBAN_HOME); a developer shell
+    # pointing it at a real store must not leak into tests.
+    "HERMES_PROJECTS_DB",
     "HERMES_KANBAN_WORKSPACES_ROOT",
     "HERMES_KANBAN_LOGS_ROOT",
     "HERMES_KANBAN_TASK",
