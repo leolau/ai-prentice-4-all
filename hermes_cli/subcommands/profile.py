@@ -221,4 +221,73 @@ def build_profile_parser(subparsers, *, cmd_profile: Callable) -> None:
              "and badge it ok / unclaimed / claimed-by-other / unreachable.",
     )
 
+    # ---------- FG-30: profile lifecycle (suggest, adopt, retire) ----------
+    profile_subparsers.add_parser(
+        "suggest",
+        help="Generate a profile suggestion from the learning loop's evidence "
+             "(monthly cycle — skipped if a suggestion is already open)",
+    )
+
+    profile_subparsers.add_parser(
+        "suggestions",
+        help="List pending profile suggestions with evidence",
+    )
+
+    profile_adopt = profile_subparsers.add_parser(
+        "adopt",
+        help="Adopt a suggestion — creates the profile with sub-goal and "
+             "promoted skills (owner only)",
+    )
+    profile_adopt.add_argument(
+        "suggestion_id",
+        help="Suggestion id to adopt",
+    )
+
+    profile_dismiss = profile_subparsers.add_parser(
+        "dismiss",
+        help="Dismiss a suggestion — latched so it is never re-proposed "
+             "on the same evidence (owner only)",
+    )
+    profile_dismiss.add_argument(
+        "suggestion_id",
+        help="Suggestion id to dismiss",
+    )
+    profile_dismiss.add_argument(
+        "--reason",
+        default="",
+        help="Optional reason for the dismissal (recorded in audit)",
+    )
+
+    profile_retire = profile_subparsers.add_parser(
+        "retire",
+        help="Retire a profile — offer its skills for promotion once, archive, "
+             "release channel, mark goal completed",
+    )
+    profile_retire.add_argument(
+        "profile_name",
+        help="Profile to retire",
+    )
+    profile_retire.add_argument(
+        "-y", "--yes", action="store_true",
+        help="Skip confirmation prompt",
+    )
+
+    profile_merge = profile_subparsers.add_parser(
+        "merge",
+        help="Merge one profile into another — both profiles' skills go "
+             "through promotion; the source is archived. Memory is NOT merged.",
+    )
+    profile_merge.add_argument(
+        "source",
+        help="Source profile to merge (will be archived)",
+    )
+    profile_merge.add_argument(
+        "target",
+        help="Target profile to merge into",
+    )
+    profile_merge.add_argument(
+        "-y", "--yes", action="store_true",
+        help="Skip confirmation prompt",
+    )
+
     profile_parser.set_defaults(func=cmd_profile)

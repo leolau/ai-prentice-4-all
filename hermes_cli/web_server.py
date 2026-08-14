@@ -14147,6 +14147,77 @@ async def describe_profile_auto_endpoint(name: str, body: ProfileDescribeAuto):
 
 
 # ---------------------------------------------------------------------------
+# Profile suggestions (FG-30)
+# ---------------------------------------------------------------------------
+
+@app.get("/api/profiles/suggestions")
+async def list_profile_suggestions_endpoint():
+    """List pending profile suggestions for the active profile."""
+    from hermes_cli.access import PrincipalStore
+    from hermes_cli.profile_suggestion import ProfileSuggestionStore
+
+    store = ProfileSuggestionStore(_comms_app_store())
+    principal = await PrincipalStore(_comms_app_store()).get_owner()
+    if principal is None:
+        raise HTTPException(status_code=401, detail="no owner enrolled")
+    try:
+        suggestions = await store.list_suggestions(principal)
+        return {"suggestions": [s.as_dict() for s in suggestions]}
+    except Exception as exc:
+        _log.exception("GET /api/profiles/suggestions failed")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.post("/api/profiles/suggestions/{suggestion_id}/adopt")
+async def adopt_profile_suggestion_endpoint(suggestion_id: str):
+    """Adopt a profile suggestion (owner only)."""
+    from hermes_cli.access import PrincipalStore
+    from hermes_cli.profile_suggestion import ProfileSuggestionStore
+
+    store = ProfileSuggestionStore(_comms_app_store())
+    principal = await PrincipalStore(_comms_app_store()).get_owner()
+    if principal is None:
+        raise HTTPException(status_code=401, detail="no owner enrolled")
+    if not principal.is_owner:
+        raise HTTPException(status_code=403, detail="only the owner may adopt")
+    try:
+        suggestion, profile_dir = await store.adopt(principal, suggestion_id)
+        return {
+            "ok": True,
+            "name": suggestion.proposed_name,
+            "path": str(profile_dir),
+            "goal": suggestion.proposed_goal,
+        }
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except Exception as exc:
+        _log.exception("POST /api/profiles/suggestions/%s/adopt failed", suggestion_id)
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.post("/api/profiles/suggestions/{suggestion_id}/dismiss")
+async def dismiss_profile_suggestion_endpoint(suggestion_id: str):
+    """Dismiss a profile suggestion (owner only)."""
+    from hermes_cli.access import PrincipalStore
+    from hermes_cli.profile_suggestion import ProfileSuggestionStore
+
+    store = ProfileSuggestionStore(_comms_app_store())
+    principal = await PrincipalStore(_comms_app_store()).get_owner()
+    if principal is None:
+        raise HTTPException(status_code=401, detail="no owner enrolled")
+    if not principal.is_owner:
+        raise HTTPException(status_code=403, detail="only the owner may dismiss")
+    try:
+        suggestion = await store.dismiss(principal, suggestion_id)
+        return {"ok": True, "name": suggestion.proposed_name}
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except Exception as exc:
+        _log.exception("POST /api/profiles/suggestions/%s/dismiss failed", suggestion_id)
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+# ---------------------------------------------------------------------------
 # Skills & Tools endpoints
 #
 # Every read/write below accepts an optional ``profile`` query param so the

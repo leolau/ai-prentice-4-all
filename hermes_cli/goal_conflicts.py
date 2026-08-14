@@ -521,6 +521,41 @@ async def weekly_digest(
         lines.append("Published entity-goal copies behind their source:")
         lines.extend(f"  {goal.title} (from {goal.published_from_profile})" for goal in stale_copies)
 
+    # Profile suggestion (FG-30). The digest only *renders* an open
+    # suggestion — generation is a separate monthly pass. An open suggestion
+    # appears in every weekly review until the owner reviews it.
+    try:
+        from hermes_cli.datastore import get_store
+        from hermes_cli.profile_suggestion import (
+            ProfileSuggestionStore,
+            digest_lines as suggestion_digest_lines,
+        )
+
+        suggestion_store = ProfileSuggestionStore(get_store("supabase-app", "prod"))
+        suggestion = await suggestion_store.digest_suggestion(principal)
+        suggestion_lines = suggestion_digest_lines(suggestion)
+        if suggestion_lines:
+            lines.append("Profile suggestion:")
+            lines.extend(f"  {line}" for line in suggestion_lines)
+    except Exception:
+        pass
+
+    # Idle profile detection (FG-30). Flag profiles with no sessions for
+    # N weeks rather than waiting for someone to notice.
+    try:
+        from hermes_cli.profile_suggestion import (
+            idle_lines as idle_digest_lines,
+            idle_profiles,
+        )
+
+        idle = await idle_profiles(now=now)
+        idle_lines_rendered = idle_digest_lines(idle)
+        if idle_lines_rendered:
+            lines.append("Profiles with no recent sessions:")
+            lines.extend(f"  {line}" for line in idle_lines_rendered)
+    except Exception:
+        pass
+
     if not lines:
         lines.append("Nothing to review this week.")
     return "Weekly entity review", lines
