@@ -1,11 +1,13 @@
-"""HTTP routes for the Projects feature — API part 1 (design §12 / §17 step 3).
+"""HTTP routes for the Projects feature — API (design §12 / §17 steps 3–4).
 
 The record API: read/write of the project itself plus the sub-objects the
 first page needs — outputs (+ deliveries + the human-only accept), members,
 profiles, contacts, links, the principal-filtered board and card creation —
-and the derived values that are computed on read and never stored:
-progress (§9.1 ladder), health (§9.2, signals available at this step) and
-the card rollup.
+plus the run machinery (step 4): the playbook and its revisions (§7),
+directives/feedback guidance (§5), the run lifecycle (§6), and the
+toolsets/skills narrowing filter + autonomy route (§4/§4.1). Derived values
+are computed on read and never stored: progress (§9.1 ladder), health
+(§9.2, signals available at this step) and the card rollup.
 
 Mounted by ``web_server.py`` beside the todos and incomings routers, prefix
 ``/api/registry/projects``. Calls ``projects_db``, ``kanban_db`` and
@@ -23,9 +25,8 @@ Permissions are enforced here and only here (§11): the store has no RLS.
   ``kanban_db.list_tasks`` — a project view must not become the way to read
   another user's ``private:`` card.
 
-Not in this step (later steps in §17): playbook/directives/runs (step 4),
-schedule + full health (step 5), tools/skills narrowing (step 4), the
-``from_todo`` card seam (step 8b).
+Not in this step (later steps in §17): schedule + full health (step 5),
+score routes (step 9b), the ``from_todo`` card seam (step 8b).
 """
 
 from __future__ import annotations
@@ -1227,3 +1228,459 @@ async def get_card(request: Request, task_id: str) -> dict[str, Any]:
         return await asyncio.to_thread(_get_sync)
     except KeyError:
         raise HTTPException(status_code=404, detail="card not found")
+
+
+# ---------------------------------------------------------------------------
+# Step 4: playbook, directives (guidance), runs, tools/autonomy (§4/§5/§6/§7)
+# ---------------------------------------------------------------------------
+
+from hermes_cli import projects_run  # noqa: E402
+
+
+@router.get("/{slug}/playbook")
+async def get_playbook_route(request: Request) -> dict[str, Any]:
+    """The method: the active revision (with steps) + the revision list."""
+    project, _role, _profiles, _principal = await _require_read(request)
+
+    def _get_sync() -> dict:
+        with projects_db.connect_closing() as conn:
+            active = projects_db.get_playbook(conn, project.id)
+            revs = projects_db.list_playbook_revs(conn, project.id)
+        return {"active": active, "revisions": revs}
+
+    return await asyncio.to_thread(_get_sync)
+
+
+@router.post("/{slug}/playbook")
+async def save_playbook_route(request: Request) -> dict[str, Any]:
+    """Propose revision N+1 with ``active=0`` (§7.2).
+
+    Open to the ``member`` role — the agent proposes the method; only a
+    lead/admin may activate it. Cycle-checked at save time with the
+    offending keys named (§7.1), and a step ``assignee`` must be one of
+    the project's profiles.
+    """
+    project, _role, profiles, principal = await _require_write(
+        request, judgement=True
+    )
+    body = await request.json()
+    steps = body.get("steps") or []
+
+    def _save_sync() -> dict:
+        profile_names = {p["profile"] for p in profiles}
+        try:
+            cleaned = projects_db.validate_playbook_steps(steps)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc))
+        for step in cleaned:
+            assignee = step.get("assignee")
+            if assignee and profile_names and assignee not in profile_names:
+                raise HTTPException(
+                    status_code=422,
+                    detail=(
+                        f"step {step['key']!r}: assignee {assignee!r} is not "
+                        f"one of the project's profiles {sorted(profile_names)}"
+                    ),
+                )
+        with projects_db.connect_closing() as conn:
+            rev = projects_db.save_playbook_rev(
+                conn,
+                project_id=project.id,
+                body=str(body.get("body") or ""),
+                steps=cleaned,
+                created_by=principal.user_id,
+                note=body.get("note"),
+            )
+        # A new revision is a proposal: nothing changes until a human
+        # activates it, and a running run keeps its pinned rev either way.
+        return {"rev": rev, "active": False}
+
+    return await asyncio.to_thread(_save_sync)
+
+
+@router.post("/{slug}/playbook/{rev}/activate")
+async def activate_playbook_route(request: Request, rev: int) -> dict[str, Any]:
+    """Human-only activation (§7.2): lead/admin, records ``activated_at``
+    + ``note``. A mid-flight run is unaffected — it keeps its pinned rev."""
+    project, _role, _profiles, _principal = await _require_write(request)
+    body = await request.json() if request.headers.get("content-length") else {}
+
+    def _activate_sync() -> dict:
+        with projects_db.connect_closing() as conn:
+            ok = projects_db.activate_playbook_rev(
+                conn, project.id, rev, note=body.get("note")
+            )
+        if not ok:
+            raise HTTPException(
+                status_code=404, detail=f"playbook revision {rev} not found"
+            )
+        return {"rev": rev, "active": True}
+
+    return await asyncio.to_thread(_activate_sync)
+
+
+@router.get("/{slug}/directives")
+async def list_directives_route(request: Request) -> dict[str, Any]:
+    project, _role, _profiles, _principal = await _require_read(request)
+    include_retired = request.query_params.get("include_retired") == "true"
+
+    def _list_sync() -> dict:
+        with projects_db.connect_closing() as conn:
+            rows = projects_db.list_project_directives(
+                conn, project.id, active_only=not include_retired
+            )
+        return {
+            "directives": rows,
+            # §5.1: guidance never applies mid-conversation.
+            "applies_from": "next run",
+        }
+
+    return await asyncio.to_thread(_list_sync)
+
+
+@router.post("/{slug}/directives")
+async def add_directive_route(request: Request) -> dict[str, Any]:
+    """Standing instruction or feedback (§5). Judgement act: ``member``+.
+    The active set is capped — adding directive N+1 is a 409 *retire one
+    first*. The response carries the one product sentence that must never
+    be omitted: guidance applies from the next run."""
+    project, _role, _profiles, principal = await _require_write(
+        request, judgement=True
+    )
+    body = await request.json()
+
+    def _add_sync() -> dict:
+        cfg = projects_run.projects_runtime_config()
+        with projects_db.connect_closing() as conn:
+            try:
+                did = projects_db.add_project_directive(
+                    conn,
+                    project_id=project.id,
+                    kind=body.get("kind", "directive"),
+                    body=body.get("body", ""),
+                    scope=body.get("scope", "project"),
+                    target_ref=body.get("target_ref"),
+                    rating=body.get("rating"),
+                    author_user_id=principal.user_id,
+                    max_active=cfg["guidance_max_directives"],
+                )
+            except ValueError as exc:
+                status = 409 if "retire one first" in str(exc) else 422
+                raise HTTPException(status_code=status, detail=str(exc))
+        return {"id": did, "applies_from": "next run"}
+
+    return await asyncio.to_thread(_add_sync)
+
+
+@router.post("/{slug}/directives/{directive_id}/retire")
+async def retire_directive_route(
+    request: Request, directive_id: str
+) -> dict[str, Any]:
+    """Retire, never delete (§5.2): the historical record survives."""
+    project, _role, _profiles, _principal = await _require_write(
+        request, judgement=True
+    )
+
+    def _retire_sync() -> dict:
+        with projects_db.connect_closing() as conn:
+            ok = projects_db.retire_project_directive(conn, directive_id)
+        if not ok:
+            raise HTTPException(
+                status_code=404, detail="directive not found or already retired"
+            )
+        return {"id": directive_id, "retired": True}
+
+    return await asyncio.to_thread(_retire_sync)
+
+
+# ---------------------------------------------------------------------------
+# Runs (§6)
+# ---------------------------------------------------------------------------
+
+
+def _run_payload(conn, bconn, run: dict, *, principal) -> dict:
+    """One run row joined with its cards' live board state."""
+    cards = []
+    for rc in projects_db.get_run_cards(conn, run["id"]):
+        task = kanban_db.get_task(bconn, rc["task_id"])
+        cards.append(
+            {
+                "task_id": rc["task_id"],
+                "step_key": rc.get("step_key"),
+                "status": task.status if task else None,
+                "title": task.title if task else None,
+            }
+        )
+    payload = dict(run)
+    payload["cards"] = cards
+    payload["cost"] = projects_run.run_cost(run.get("trace_id"))
+    # Fail-open contract (§6): no ledger → "not recorded", never an error.
+    payload["cost_recorded"] = payload["cost"] is not None
+    if run.get("started_at"):
+        end = run.get("ended_at") or int(time.time())
+        payload["duration_seconds"] = max(0, end - int(run["started_at"]))
+    return payload
+
+
+@router.get("/{slug}/runs")
+async def list_runs_route(request: Request) -> dict[str, Any]:
+    """The record (§12): duration, outcome, deliveries and status."""
+    project, _role, _profiles, _principal = await _require_read(request)
+
+    def _list_sync() -> dict:
+        with projects_db.connect_closing() as conn:
+            runs = projects_db.list_project_runs(conn, project.id)
+            deliveries = projects_db.get_output_deliveries(
+                conn, project_id=project.id
+            )
+        by_run: dict = {}
+        for d in deliveries:
+            if d.get("run_id"):
+                by_run.setdefault(d["run_id"], 0)
+                by_run[d["run_id"]] += 1
+        for r in runs:
+            r["deliveries"] = by_run.get(r["id"], 0)
+            if r.get("started_at"):
+                end = r.get("ended_at") or int(time.time())
+                r["duration_seconds"] = max(0, end - int(r["started_at"]))
+        return {"runs": runs}
+
+    return await asyncio.to_thread(_list_sync)
+
+
+@router.get("/{slug}/runs/{run_no}")
+async def get_run_route(request: Request, run_no: int) -> dict[str, Any]:
+    """Run detail: cards, deliveries, cost read from the C8 trace (never
+    stored — fail-open), and the retro once written."""
+    project, _role, _profiles, principal = await _require_read(request)
+
+    def _get_sync() -> dict:
+        with projects_db.connect_closing() as conn:
+            run = projects_db.get_project_run(conn, project.id, run_no)
+            if run is None:
+                raise KeyError(run_no)
+            deliveries = projects_db.get_output_deliveries(conn, run_id=run["id"])
+            with _board_conn(project) as bconn:
+                payload = _run_payload(conn, bconn, run, principal=principal)
+        payload["deliveries"] = deliveries
+        return payload
+
+    try:
+        return await asyncio.to_thread(_get_sync)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="run not found")
+
+
+@router.post("/{slug}/runs")
+async def start_run_route(request: Request) -> dict[str, Any]:
+    """Start a run now (``trigger='manual'``); an optional ``playbook_rev``
+    repeats an old method — "do exactly what worked last time" (§7.2)."""
+    project, _role, _profiles, principal = await _require_write(
+        request, judgement=True
+    )
+    body = await request.json() if request.headers.get("content-length") else {}
+
+    def _start_sync() -> dict:
+        with projects_db.connect_closing() as conn:
+            with _board_conn(project) as bconn:
+                try:
+                    return projects_run.start_run(
+                        conn,
+                        bconn,
+                        project=project,
+                        trigger="manual",
+                        triggered_by=principal.user_id,
+                        playbook_rev=body.get("playbook_rev"),
+                    )
+                except ValueError as exc:
+                    detail = str(exc)
+                    status = 409 if "no playbook" in detail or "no profiles" in detail else 422
+                    raise HTTPException(status_code=status, detail=detail)
+
+    return await asyncio.to_thread(_start_sync)
+
+
+@router.post("/{slug}/runs/{run_no}/continue")
+async def continue_run_route(request: Request, run_no: int) -> dict[str, Any]:
+    """The human passes a checkpoint or answers a budget stop (§12): the
+    held successors move to ``todo`` and a ``waiting`` run resumes."""
+    project, _role, _profiles, _principal = await _require_write(
+        request, judgement=True
+    )
+
+    def _continue_sync() -> dict:
+        with projects_db.connect_closing() as conn:
+            run = projects_db.get_project_run(conn, project.id, run_no)
+            if run is None:
+                raise KeyError(run_no)
+            with _board_conn(project) as bconn:
+                try:
+                    return projects_run.continue_run(
+                        conn, bconn, project=project, run=run
+                    )
+                except ValueError as exc:
+                    raise HTTPException(status_code=409, detail=str(exc))
+
+    try:
+        return await asyncio.to_thread(_continue_sync)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="run not found")
+
+
+@router.post("/{slug}/runs/{run_no}/cancel")
+async def cancel_run_route(request: Request, run_no: int) -> dict[str, Any]:
+    """Stop promoting and archive the run's un-started cards; a running
+    worker is never killed (§12)."""
+    project, _role, _profiles, _principal = await _require_write(
+        request, judgement=True
+    )
+
+    def _cancel_sync() -> dict:
+        with projects_db.connect_closing() as conn:
+            run = projects_db.get_project_run(conn, project.id, run_no)
+            if run is None:
+                raise KeyError(run_no)
+            with _board_conn(project) as bconn:
+                try:
+                    return projects_run.cancel_run(
+                        conn, bconn, project=project, run=run
+                    )
+                except ValueError as exc:
+                    raise HTTPException(status_code=409, detail=str(exc))
+
+    try:
+        return await asyncio.to_thread(_cancel_sync)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="run not found")
+
+
+@router.post("/{slug}/runs/{run_no}/retro")
+async def run_retro_route(request: Request, run_no: int) -> dict[str, Any]:
+    """Write or edit the retrospective. (``score_self`` lands with step 9b;
+    ``score_user`` is human-only there.)"""
+    project, _role, _profiles, _principal = await _require_write(
+        request, judgement=True
+    )
+    body = await request.json()
+    retro = str(body.get("retro") or "").strip()
+    if not retro:
+        raise HTTPException(status_code=422, detail="retro must not be empty")
+
+    def _retro_sync() -> dict:
+        with projects_db.connect_closing() as conn:
+            run = projects_db.get_project_run(conn, project.id, run_no)
+            if run is None:
+                raise KeyError(run_no)
+            projects_db.update_project_run(
+                conn, run["id"], retro=retro, retro_at=int(time.time())
+            )
+            return projects_db.get_project_run_by_id(conn, run["id"])
+
+    try:
+        return await asyncio.to_thread(_retro_sync)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="run not found")
+
+
+# ---------------------------------------------------------------------------
+# Instruments: tools/skills narrowing (§4.1) + autonomy (§4)
+# ---------------------------------------------------------------------------
+
+
+@router.patch("/{slug}/tools")
+async def patch_tools_route(request: Request) -> dict[str, Any]:
+    """Set the project's ``toolsets``/``skills`` (§12).
+
+    Names are validated at write time so an impossible request is refused
+    loudly; the stored lists are still a *narrowing filter* — at spawn the
+    effective set is intersected with what the host profile enables (§4.1),
+    and the response shows that intersection.
+    """
+    project, _role, profiles, _principal = await _require_write(request)
+    body = await request.json()
+
+    def _patch_sync() -> dict:
+        updates: dict = {}
+        if "toolsets" in body:
+            names = [str(t).strip() for t in (body.get("toolsets") or []) if str(t).strip()]
+            unknown = [
+                t for t in names
+                if t.casefold() not in kanban_db.KNOWN_TOOLSET_NAMES
+            ]
+            if unknown:
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"unknown toolset(s): {', '.join(unknown)}",
+                )
+            updates["toolsets"] = ",".join(names)
+        if "skills" in body:
+            # One seam for resolution: the same host-profile loader the
+            # run spawn uses (§4.1), so write-time validation and spawn
+            # agree about what exists.
+            known = projects_run._available_skill_names() or None
+            names = [str(s).strip() for s in (body.get("skills") or []) if str(s).strip()]
+            if known is not None:
+                unknown = [s for s in names if s not in known]
+                if unknown:
+                    raise HTTPException(
+                        status_code=422,
+                        detail=f"unknown skill(s): {', '.join(unknown)}",
+                    )
+            updates["skills"] = ",".join(names)
+        if not updates:
+            raise HTTPException(
+                status_code=422, detail="provide toolsets and/or skills"
+            )
+        with projects_db.connect_closing() as conn:
+            projects_db.update_project_fields(conn, project.id, updates)
+            fresh = projects_db.get_project(conn, project.slug)
+            host = projects_run.host_profile_name(conn, project.id)
+            enabled = projects_run._enabled_toolsets_for_profile(host or "")
+            available = projects_run._available_skill_names()
+        cfg = projects_run.projects_runtime_config()
+        eff_ts, dropped_ts = projects_run.resolve_toolsets(
+            projects_run.parse_csv_field(fresh.toolsets), enabled
+        )
+        eff_sk, dropped_sk, truncated = projects_run.resolve_skills(
+            projects_run.parse_csv_field(fresh.skills), available,
+            cfg["max_skills"],
+        )
+        return {
+            "toolsets": projects_run.parse_csv_field(fresh.toolsets),
+            "skills": projects_run.parse_csv_field(fresh.skills),
+            "host_profile": host,
+            "effective_toolsets": eff_ts,
+            "dropped_toolsets": dropped_ts,
+            "effective_skills": eff_sk,
+            "dropped_skills": dropped_sk,
+            "skills_truncated": truncated,
+        }
+
+    return await asyncio.to_thread(_patch_sync)
+
+
+@router.patch("/{slug}/autonomy")
+async def patch_autonomy_route(request: Request) -> dict[str, Any]:
+    """A separate route so the audit line and the permission check are
+    unmistakable (§12). Lead/admin only — ``_can_write``."""
+    project, _role, _profiles, _principal = await _require_write(request)
+    body = await request.json()
+    autonomy = body.get("autonomy")
+    if autonomy not in projects_db.VALID_AUTONOMY_LEVELS:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"autonomy must be one of "
+                f"{sorted(projects_db.VALID_AUTONOMY_LEVELS)}"
+            ),
+        )
+
+    def _patch_sync() -> dict:
+        with projects_db.connect_closing() as conn:
+            projects_db.update_project_fields(
+                conn, project.id, {"autonomy": autonomy}
+            )
+            fresh = projects_db.get_project(conn, project.slug)
+        return {"slug": fresh.slug, "autonomy": fresh.autonomy}
+
+    return await asyncio.to_thread(_patch_sync)
