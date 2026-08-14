@@ -206,6 +206,7 @@ async def enrolled_profiles(
     *,
     store_factory: StoreFactory,
     registry: Optional[List[ProfileRegistryEntry]] = None,
+    active_only: bool = False,
 ) -> List[str]:
     """Profiles where ``user_id`` holds a principal row, **suspended included**.
 
@@ -218,7 +219,9 @@ async def enrolled_profiles(
     A suspended row counts. Suspension is a profile-local, reversible un-enrol
     (FG-26 §3.5) that another profile's admin can lift; banning the box-wide
     account takes that decision away from them, so a suspended enrolment is
-    blast radius rather than an absence of it.
+    blast radius rather than an absence of it. Pass ``active_only=True`` when
+    the caller wants *authority* rather than blast radius (Projects §11
+    shared-read), where a suspended enrolment carries no weight.
     """
     if not user_id:
         return []
@@ -229,8 +232,12 @@ async def enrolled_profiles(
             continue
         with _scoped_to(entry.hermes_home):
             store = store_factory(entry.hermes_home)
-            if await _principal_for_subject(store, user_id) is not None:
-                out.append(entry.name)
+            principal = await _principal_for_subject(store, user_id)
+            if principal is None:
+                continue
+            if active_only and not getattr(principal, "active", True):
+                continue
+            out.append(entry.name)
     return out
 
 
