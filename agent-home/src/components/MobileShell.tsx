@@ -2,16 +2,22 @@ import type { ReactNode } from "react";
 
 import { BottomNav } from "@/components/BottomNav";
 import { SideNav } from "@/components/SideNav";
-import { apiClientForRequest } from "@/lib/auth/principal";
+import { getPrincipal } from "@/lib/auth/principal";
+import { readSession } from "@/lib/auth/session";
+import { HermesApiClient } from "@/lib/api/client";
 import type { TodosFacets } from "@/types";
 
 // Cache the facets call for 30s so every page render doesn't hit the backend
-// for a badge count. The query is indexed; the number is not stale-sensitive.
+// for a badge count.  The hermesToken argument becomes part of the cache
+// key, so each principal gets an isolated entry — the count is never
+// served cross-principal.  readSession/cookies() are called outside the
+// cached function (in the component body) because Next 15 rejects
+// cookies() inside unstable_cache.
 import { unstable_cache } from "next/cache";
 
 const getCachedFacets = unstable_cache(
-  async () => {
-    const client = await apiClientForRequest();
+  async (hermesToken: string) => {
+    const client = new HermesApiClient({ hermesToken });
     return client.todosFacets();
   },
   ["todos-facets-badge"],
@@ -49,15 +55,25 @@ export async function MobileShell({
   /** Optional action elements rendered in the header bar, right-aligned next to the title. */
   actions?: ReactNode;
 }) {
-  // The badge count: one cached facets call per 30s. Zero renders nothing.
+  // The badge count: one cached facets call per 30s.  The session is
+  // resolved outside the cache so cookies() isn't called inside it, and
+  // the token makes each principal's cache entry distinct.
   let badgeCounts: Record<string, number> = {};
   if (showNav) {
     try {
-      const facets: TodosFacets = await getCachedFacets();
-      const openCount =
-        facets.stages.find((s) => s.value === "open")?.count ?? 0;
-      if (openCount > 0) {
-        badgeCounts = { "todos-open": openCount };
+      const principal = await getPrincipal();
+      if (principal) {
+        const session = await readSession();
+        if (session?.hermesToken) {
+          const facets: TodosFacets = await getCachedFacets(
+            session.hermesToken,
+          );
+          const openCount =
+            facets.stages.find((s) => s.value === "open")?.count ?? 0;
+          if (openCount > 0) {
+            badgeCounts = { "todos-open": openCount };
+          }
+        }
       }
     } catch {
       // Best-effort: a facets failure must not blank the page.
