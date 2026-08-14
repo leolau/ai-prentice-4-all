@@ -50,6 +50,7 @@ from pydantic import BaseModel, Field
 
 from hermes_cli import kanban_db
 from hermes_cli import kanban_diagnostics as kd
+from hermes_cli import kanban_view
 
 log = logging.getLogger(__name__)
 
@@ -139,41 +140,15 @@ def _conn(board: Optional[str] = None):
 # Serialization helpers
 # ---------------------------------------------------------------------------
 
-# Columns shown by the dashboard, in left-to-right order. "archived" is
-# available via a filter toggle rather than a visible column.
-#
-# Keep this in sync with kanban_db.VALID_STATUSES.  In particular,
-# ``scheduled`` is a first-class waiting column used for time-based follow-ups;
-# if it is omitted here, the board-level fallback below mis-buckets scheduled
-# tasks into ``todo`` and makes the dashboard look like the Scheduled column
-# disappeared.
-BOARD_COLUMNS: list[str] = [
-    "triage", "todo", "scheduled", "ready", "running", "blocked", "review", "done",
-]
-
-
-_CARD_SUMMARY_PREVIEW_CHARS = 200
-
-
-def _task_dict(
-    task: kanban_db.Task,
-    *,
-    latest_summary: Optional[str] = None,
-) -> dict[str, Any]:
-    d = asdict(task)
-    # Add derived age metrics so the UI can colour stale cards without
-    # computing deltas client-side.
-    try:
-        d["age"] = kanban_db.task_age(task)
-    except Exception:
-        d["age"] = {"created_age_seconds": None, "started_age_seconds": None, "time_to_complete_seconds": None}
-    # Surface the latest non-null run summary so dashboards don't show
-    # blank cards/drawers for tasks where the worker handed off via
-    # ``task_runs.summary`` (the kanban-worker pattern) instead of
-    # ``tasks.result``. ``None`` when no run has produced a summary yet.
-    d["latest_summary"] = latest_summary
-    # Keep body short on list endpoints; full body comes from /tasks/:id.
-    return d
+# Board columns, card-summary preview length and the per-task rollup
+# helpers live in ``hermes_cli.kanban_view`` — the one aggregation every
+# board surface renders (Projects design §12). The aliases keep this
+# module's other endpoints unchanged.
+BOARD_COLUMNS = kanban_view.BOARD_COLUMNS
+_CARD_SUMMARY_PREVIEW_CHARS = kanban_view.CARD_SUMMARY_PREVIEW_CHARS
+_task_dict = kanban_view.task_dict
+_compute_task_diagnostics = kanban_view.compute_task_diagnostics
+_warnings_summary_from_diagnostics = kanban_view.warnings_summary_from_diagnostics
 
 
 def _event_dict(event: kanban_db.Event) -> dict[str, Any]:
@@ -245,113 +220,6 @@ _WARNING_EVENT_KINDS = (
 )
 
 
-def _compute_task_diagnostics(
-    conn: sqlite3.Connection,
-    task_ids: Optional[list[str]] = None,
-) -> dict[str, list[dict]]:
-    """Run the diagnostic rule engine against every task (or a subset)
-    and return ``{task_id: [diagnostic_dict, ...]}``.
-
-    Tasks with no active diagnostics are omitted from the result.
-    Uses ``hermes_cli.kanban_diagnostics`` — see that module for the
-    rule definitions.
-    """
-    from hermes_cli import kanban_diagnostics as kd
-    from hermes_cli.config import load_config
-
-    diag_config = kd.config_from_runtime_config(load_config())
-
-    # Build the candidate task list. We need each task's row + its
-    # events + its runs. Doing N separate queries works but scales
-    # poorly; do three aggregate queries instead.
-    if task_ids is not None:
-        if not task_ids:
-            return {}
-        placeholders = ",".join(["?"] * len(task_ids))
-        rows = conn.execute(
-            f"SELECT * FROM tasks WHERE id IN ({placeholders})",
-            tuple(task_ids),
-        ).fetchall()
-    else:
-        rows = conn.execute(
-            "SELECT * FROM tasks WHERE status != 'archived'",
-        ).fetchall()
-
-    if not rows:
-        return {}
-
-    # Index events + runs by task id. For very large boards this will
-    # slurp a lot — acceptable on the dashboard's typical working set
-    # (hundreds of tasks), but we can add pagination / filtering later
-    # if profiling shows it's a hotspot.
-    row_ids = [r["id"] for r in rows]
-    placeholders = ",".join(["?"] * len(row_ids))
-    events_by_task: dict[str, list] = {tid: [] for tid in row_ids}
-    for ev_row in conn.execute(
-        f"SELECT * FROM task_events WHERE task_id IN ({placeholders}) ORDER BY id",
-        tuple(row_ids),
-    ).fetchall():
-        events_by_task.setdefault(ev_row["task_id"], []).append(ev_row)
-    runs_by_task: dict[str, list] = {tid: [] for tid in row_ids}
-    for run_row in conn.execute(
-        f"SELECT * FROM task_runs WHERE task_id IN ({placeholders}) ORDER BY id",
-        tuple(row_ids),
-    ).fetchall():
-        runs_by_task.setdefault(run_row["task_id"], []).append(run_row)
-
-    out: dict[str, list[dict]] = {}
-    for r in rows:
-        tid = r["id"]
-        diags = kd.compute_task_diagnostics(
-            r,
-            events_by_task.get(tid, []),
-            runs_by_task.get(tid, []),
-            config=diag_config,
-        )
-        if diags:
-            out[tid] = [d.to_dict() for d in diags]
-    return out
-
-
-def _warnings_summary_from_diagnostics(
-    diagnostics: list[dict],
-) -> Optional[dict]:
-    """Compact summary for cards: {count, highest_severity, kinds,
-    latest_at}. Replaces the old hallucination-only ``warnings`` object
-    — same shape additions plus ``highest_severity`` so the UI can color
-    badges per diagnostic severity.
-
-    Returns None when ``diagnostics`` is empty.
-    """
-    if not diagnostics:
-        return None
-    from hermes_cli.kanban_diagnostics import SEVERITY_ORDER
-
-    kinds: dict[str, int] = {}
-    latest = 0
-    highest_idx = -1
-    highest_sev: Optional[str] = None
-    count = 0
-    for d in diagnostics:
-        kinds[d["kind"]] = kinds.get(d["kind"], 0) + d.get("count", 1)
-        count += d.get("count", 1)
-        la = d.get("last_seen_at") or 0
-        if la > latest:
-            latest = la
-        sev = d.get("severity")
-        if sev in SEVERITY_ORDER:
-            idx = SEVERITY_ORDER.index(sev)
-            if idx > highest_idx:
-                highest_idx = idx
-                highest_sev = sev
-    return {
-        "count": count,
-        "kinds": kinds,
-        "latest_at": latest,
-        "highest_severity": highest_sev,
-    }
-
-
 def _links_for(conn: sqlite3.Connection, task_id: str) -> dict[str, list[str]]:
     """Return {'parents': [...], 'children': [...]} for a task."""
     parents = [
@@ -399,113 +267,15 @@ def get_board(
     board = _resolve_board(board)
     conn = _conn(board=board)
     try:
-        tasks = kanban_db.list_tasks(
+        # The one shared rollup (Projects design §12) — the Projects
+        # router renders its board through the same helper.
+        return kanban_view.build_board_view(
             conn,
             tenant=tenant,
             include_archived=include_archived,
             workflow_template_id=workflow_template_id,
             current_step_key=current_step_key,
         )
-        # Pre-fetch link counts per task (cheap: one query).
-        link_counts: dict[str, dict[str, int]] = {}
-        for row in conn.execute(
-            "SELECT parent_id, child_id FROM task_links"
-        ).fetchall():
-            link_counts.setdefault(row["parent_id"], {"parents": 0, "children": 0})[
-                "children"
-            ] += 1
-            link_counts.setdefault(row["child_id"], {"parents": 0, "children": 0})[
-                "parents"
-            ] += 1
-
-        # Comment + event counts (both cheap aggregates).
-        comment_counts: dict[str, int] = {
-            r["task_id"]: r["n"]
-            for r in conn.execute(
-                "SELECT task_id, COUNT(*) AS n FROM task_comments GROUP BY task_id"
-            )
-        }
-
-        # Progress rollup: for each parent, how many children are done / total.
-        # One pass over task_links joined with child status — cheaper than
-        # N per-task queries and the plugin uses it to render "N/M".
-        progress: dict[str, dict[str, int]] = {}
-        for row in conn.execute(
-            "SELECT l.parent_id AS pid, t.status AS cstatus "
-            "FROM task_links l JOIN tasks t ON t.id = l.child_id"
-        ).fetchall():
-            p = progress.setdefault(row["pid"], {"done": 0, "total": 0})
-            p["total"] += 1
-            if row["cstatus"] == "done":
-                p["done"] += 1
-
-        # Diagnostics rollup for this board — see kanban_diagnostics.
-        # We get the full structured list per task AND a compact
-        # summary for the card badge (so cards don't carry the detail
-        # text; the drawer fetches that via /tasks/:id or /diagnostics).
-        diagnostics_per_task = _compute_task_diagnostics(conn, task_ids=None)
-
-        latest_event_id = conn.execute(
-            "SELECT COALESCE(MAX(id), 0) AS m FROM task_events"
-        ).fetchone()["m"]
-
-        columns: dict[str, list[dict]] = {c: [] for c in BOARD_COLUMNS}
-        if include_archived:
-            columns["archived"] = []
-
-        # Batch-fetch the latest non-null run summary per task in one
-        # window-function query (avoids N+1 ``latest_summary`` calls
-        # for boards with hundreds of tasks). Truncated to a card-size
-        # preview here — the full text is available via /tasks/:id.
-        summary_map = kanban_db.latest_summaries(conn, [t.id for t in tasks])
-
-        for t in tasks:
-            full = summary_map.get(t.id)
-            preview = (
-                full[:_CARD_SUMMARY_PREVIEW_CHARS] if full else None
-            )
-            d = _task_dict(t, latest_summary=preview)
-            d["link_counts"] = link_counts.get(t.id, {"parents": 0, "children": 0})
-            d["comment_count"] = comment_counts.get(t.id, 0)
-            d["progress"] = progress.get(t.id)  # None when the task has no children
-            diags = diagnostics_per_task.get(t.id)
-            if diags:
-                # Full list goes into the payload so the drawer can render
-                # without a second round-trip. The board-level badge only
-                # needs the summary.
-                d["diagnostics"] = diags
-                d["warnings"] = _warnings_summary_from_diagnostics(diags)
-            col = t.status if t.status in columns else "todo"
-            columns[col].append(d)
-
-        # Stable per-column ordering already applied by list_tasks
-        # (priority DESC, created_at ASC), keep as-is.
-
-        # List of known tenants for the UI filter dropdown.
-        tenants = [
-            r["tenant"]
-            for r in conn.execute(
-                "SELECT DISTINCT tenant FROM tasks WHERE tenant IS NOT NULL ORDER BY tenant"
-            )
-        ]
-        # List of distinct assignees for the lane-by-profile sub-grouping.
-        assignees = [
-            r["assignee"]
-            for r in conn.execute(
-                "SELECT DISTINCT assignee FROM tasks WHERE assignee IS NOT NULL "
-                "AND status != 'archived' ORDER BY assignee"
-            )
-        ]
-
-        return {
-            "columns": [
-                {"name": name, "tasks": columns[name]} for name in columns.keys()
-            ],
-            "tenants": tenants,
-            "assignees": assignees,
-            "latest_event_id": int(latest_event_id),
-            "now": int(time.time()),
-        }
     finally:
         conn.close()
 
