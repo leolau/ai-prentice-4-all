@@ -2466,16 +2466,27 @@ def run_doctor(args):
                 if not wrapper.exists():
                     parts.append("no alias")
                 # FG-30: channel-less profiles are usable from console/CLI
-                # only — report them so they don't get forgotten.
-                if not p.gateway_running:
+                # only — report them so they don't get forgotten. A *stopped*
+                # gateway is a different condition entirely: that profile has a
+                # channel and isn't serving it.
+                from hermes_cli.profile_suggestion import profile_has_channel
+
+                has_channel = profile_has_channel(p.path)
+                if not has_channel:
                     parts.append("no channel (console/CLI only)")
 
                 status = ", ".join(parts) if parts else "configured"
-                if not p.gateway_running:
+                if not has_channel:
                     check_warn(
                         f"  {p.name}: {status}",
                         "adopted profiles start channel-less; "
                         "gain a channel on a deliberate commit step",
+                    )
+                elif not p.gateway_running:
+                    check_warn(
+                        f"  {p.name}: {status}",
+                        "channel configured but the gateway is not running: "
+                        f"hermes -p {p.name} gateway start",
                     )
                 else:
                     check_ok(f"  {p.name}: {status}")

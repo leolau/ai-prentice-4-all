@@ -14151,15 +14151,12 @@ async def describe_profile_auto_endpoint(name: str, body: ProfileDescribeAuto):
 # ---------------------------------------------------------------------------
 
 @app.get("/api/profiles/suggestions")
-async def list_profile_suggestions_endpoint():
+async def list_profile_suggestions_endpoint(request: Request):
     """List pending profile suggestions for the active profile."""
-    from hermes_cli.access import PrincipalStore
     from hermes_cli.profile_suggestion import ProfileSuggestionStore
 
     store = ProfileSuggestionStore(_comms_app_store())
-    principal = await PrincipalStore(_comms_app_store()).get_owner()
-    if principal is None:
-        raise HTTPException(status_code=401, detail="no owner enrolled")
+    principal = await _comms_resolve_principal(request)
     try:
         suggestions = await store.list_suggestions(principal)
         return {"suggestions": [s.as_dict() for s in suggestions]}
@@ -14169,15 +14166,12 @@ async def list_profile_suggestions_endpoint():
 
 
 @app.post("/api/profiles/suggestions/{suggestion_id}/adopt")
-async def adopt_profile_suggestion_endpoint(suggestion_id: str):
+async def adopt_profile_suggestion_endpoint(request: Request, suggestion_id: str):
     """Adopt a profile suggestion (owner only)."""
-    from hermes_cli.access import PrincipalStore
     from hermes_cli.profile_suggestion import ProfileSuggestionStore
 
     store = ProfileSuggestionStore(_comms_app_store())
-    principal = await PrincipalStore(_comms_app_store()).get_owner()
-    if principal is None:
-        raise HTTPException(status_code=401, detail="no owner enrolled")
+    principal = await _comms_resolve_principal(request)
     if not principal.is_owner:
         raise HTTPException(status_code=403, detail="only the owner may adopt")
     try:
@@ -14196,15 +14190,12 @@ async def adopt_profile_suggestion_endpoint(suggestion_id: str):
 
 
 @app.post("/api/profiles/suggestions/{suggestion_id}/dismiss")
-async def dismiss_profile_suggestion_endpoint(suggestion_id: str):
+async def dismiss_profile_suggestion_endpoint(request: Request, suggestion_id: str):
     """Dismiss a profile suggestion (owner only)."""
-    from hermes_cli.access import PrincipalStore
     from hermes_cli.profile_suggestion import ProfileSuggestionStore
 
     store = ProfileSuggestionStore(_comms_app_store())
-    principal = await PrincipalStore(_comms_app_store()).get_owner()
-    if principal is None:
-        raise HTTPException(status_code=401, detail="no owner enrolled")
+    principal = await _comms_resolve_principal(request)
     if not principal.is_owner:
         raise HTTPException(status_code=403, detail="only the owner may dismiss")
     try:

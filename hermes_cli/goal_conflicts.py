@@ -537,8 +537,8 @@ async def weekly_digest(
         if suggestion_lines:
             lines.append("Profile suggestion:")
             lines.extend(f"  {line}" for line in suggestion_lines)
-    except Exception:
-        pass
+    except Exception as exc:
+        log.warning("digest: profile suggestion not rendered: %s", exc)
 
     # Idle profile detection (FG-30). Flag profiles with no sessions for
     # N weeks rather than waiting for someone to notice.
@@ -553,8 +553,8 @@ async def weekly_digest(
         if idle_lines_rendered:
             lines.append("Profiles with no recent sessions:")
             lines.extend(f"  {line}" for line in idle_lines_rendered)
-    except Exception:
-        pass
+    except Exception as exc:
+        log.warning("digest: idle profiles not rendered: %s", exc)
 
     if not lines:
         lines.append("Nothing to review this week.")

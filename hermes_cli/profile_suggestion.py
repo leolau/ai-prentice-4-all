@@ -35,6 +35,7 @@ import hashlib
 import json
 import logging
 import re
+import shutil
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -185,9 +186,37 @@ def _row_to_suggestion(row) -> ProfileSuggestion:
     )
 
 
+def evidence_identity(evidence: Dict[str, Any]) -> Dict[str, Any]:
+    """The part of the evidence that identifies *which cluster* this is.
+
+    Hashing the whole evidence blob does not latch anything: it carries skill
+    use *counts*, a participant list and the profile description, all of which
+    move between cycles, so a dismissed suggestion would return next month
+    under a different key on the same cluster — sprawl by nagging, the failure
+    mode FG-30 §1 exists to design against.
+
+    So identity is the *work*: which skills and which unparented goals. Counts,
+    prose and the roster corroborate a cluster but do not define one — a new
+    member joining must not un-dismiss a proposal the owner already refused.
+    """
+    skills = sorted(
+        str(s.get("name", ""))
+        for s in evidence.get("top_skills") or []
+        if isinstance(s, dict) and s.get("name")
+    )
+    goals = sorted(
+        str(g.get("id", ""))
+        for g in evidence.get("orphan_goals") or []
+        if isinstance(g, dict) and g.get("id")
+    )
+    return {"skills": skills, "orphan_goals": goals}
+
+
 def _evidence_hash(evidence: Dict[str, Any]) -> str:
-    """Stable sha256 over the evidence JSONB, for the dedup_key."""
-    canonical = json.dumps(evidence, sort_keys=True, separators=(",", ":"))
+    """Stable sha256 over the evidence's *identity*, for the dedup_key."""
+    canonical = json.dumps(
+        evidence_identity(evidence), sort_keys=True, separators=(",", ":")
+    )
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
@@ -241,60 +270,14 @@ Evidence:
 """
 
 
-def _collect_evidence_signals() -> Dict[str, Any]:
-    """Read the signals already recorded — no new instrumentation.
-
-    Four signals, all from existing data:
-    1. Skill clusters from ``tools/skill_usage.py``
-    2. Goal patterns from the goal tree (orphans defaulting to the profile goal)
-    3. Session-topic divergence from ``profile_describer.py``
-    4. Distinct participants from the principals table
-    """
-    evidence: Dict[str, Any] = {}
-
-    # 1. Skill usage — which skills are most active
-    try:
-        from tools.skill_usage import load_usage
-
-        records = load_usage()
-        if records:
-            # Sort by activity count descending, take top 10
-            sorted_records = sorted(
-                records.items(),
-                key=lambda kv: len(kv[1].get("uses", [])),
-                reverse=True,
-            )[:10]
-            evidence["top_skills"] = [
-                {"name": name, "uses": len(r.get("uses", []))}
-                for name, r in sorted_records
-            ]
-    except Exception:
-        pass
-
-    # 2. Goal patterns — operational goals with no explicit parent
-    try:
-        from hermes_cli.goal_tree import GoalTreeStore
-        from hermes_cli.goal_registry import GoalRegistryStore
-
-        registry = GoalRegistryStore()
-        tree = GoalTreeStore(registry)
-        # We can't call async here, but the evidence dict carries what we need
-        # for the LLM. The actual goal-reading happens in generate_suggestion.
-        pass
-    except Exception:
-        pass
-
-    # 3. Session topic divergence — handled by the aux LLM from skill names
-    # 4. Distinct participants — read from the principals table in generate_suggestion
-    return evidence
-
-
 async def generate_suggestion(
     tree: "GoalTreeStore",
     promotions: "SkillPromotionStore",
     principal: "Principal",
     *,
     origin_profile: Optional[str] = None,
+    interval: timedelta = DEFAULT_GENERATION_INTERVAL,
+    now: Optional[datetime] = None,
     connection: Optional["asyncpg.Connection"] = None,
 ) -> Optional[ProfileSuggestion]:
     """Generate at most one suggestion per monthly cycle.
@@ -320,6 +303,13 @@ async def generate_suggestion(
         existing = await store._open_suggestion(conn, origin_profile=profile)
         if existing is not None:
             return existing
+
+        # The monthly clock. Without it the cap alone bounds nothing: a
+        # dismissal frees the one open slot, so the next pass — weekly, or
+        # whenever the owner runs the command — proposes again immediately,
+        # which is the volume Leo's monthly decision refused.
+        if not await _generation_due(conn, profile, interval=interval, now=now):
+            return None
 
         # Collect evidence signals.
         evidence = await _gather_evidence(tree, principal, conn=conn)
@@ -360,6 +350,30 @@ async def generate_suggestion(
     finally:
         if own:
             await conn.close()
+
+
+async def _generation_due(
+    conn: "asyncpg.Connection",
+    origin_profile: str,
+    *,
+    interval: timedelta = DEFAULT_GENERATION_INTERVAL,
+    now: Optional[datetime] = None,
+) -> bool:
+    """Whether ``interval`` has elapsed since this profile last proposed.
+
+    The last *proposal* is the clock — any status, so a dismissal does not reset
+    it. No extra state: the row's ``created_at`` is the timestamp.
+    """
+    last = await conn.fetchval(
+        f"SELECT MAX(created_at) FROM {SUGGESTIONS_TABLE} WHERE origin_profile = $1",
+        origin_profile,
+    )
+    if last is None:
+        return True
+    moment = now or datetime.now(timezone.utc)
+    if last.tzinfo is None:
+        last = last.replace(tzinfo=timezone.utc)
+    return (moment - last) >= interval
 
 
 async def _gather_evidence(
@@ -419,8 +433,6 @@ async def _gather_evidence(
 
     # 4. Distinct participants
     try:
-        from hermes_cli.access import ITEM_GRANTS_TABLE
-
         rows = await conn.fetch(
             "SELECT user_id, display, role FROM principals WHERE active = true"
         )
@@ -438,19 +450,21 @@ async def _gather_evidence(
 def _evidence_strong_enough(evidence: Dict[str, Any]) -> bool:
     """Whether the evidence justifies a suggestion.
 
-    A minimum of 2 signals with data is the bar — below that, the cluster is
-    not strong enough to warrant a new profile.
+    Two signals is the bar, and the skill cluster is one of them — a proposal
+    to split work needs *work* behind it, not metadata. The profile description
+    deliberately does not count: every profile has one, so counting it made any
+    profile with a single used skill clear the bar and turned "the system
+    noticed a cluster" into "the system runs monthly".
     """
-    signals = 0
-    if evidence.get("top_skills"):
-        signals += 1
+    skills = evidence.get("top_skills") or []
+    if len(skills) < 2:
+        return False
+    corroborating = 0
     if evidence.get("orphan_goals"):
-        signals += 1
-    if evidence.get("participants") and len(evidence["participants"]) > 1:
-        signals += 1
-    if evidence.get("current_description"):
-        signals += 1
-    return signals >= 2
+        corroborating += 1
+    if len(evidence.get("participants") or []) > 1:
+        corroborating += 1
+    return corroborating >= 1
 
 
 def _ask_aux_llm(
@@ -572,6 +586,88 @@ def _active_profile() -> str:
     from hermes_cli.profiles import get_active_profile_name
 
     return get_active_profile_name()
+
+
+#: Copied into an adopted profile: model/provider behaviour, per FG-30 §2.
+#: Deliberately *not* ``.env`` (credentials, resolved DSN) and not the parent's
+#: un-promoted local skills — §2 lists both as not inherited.
+_INHERITED_CONFIG_FILE = "config.yaml"
+
+#: Messaging credentials that make a profile channel-attached. A profile whose
+#: own ``.env`` names none of these is channel-less — which is not the same
+#: thing as "its gateway is not running right now".
+_CHANNEL_ENV_KEYS: Tuple[str, ...] = (
+    "TELEGRAM_BOT_TOKEN",
+    "DISCORD_BOT_TOKEN",
+    "SLACK_BOT_TOKEN",
+    "WHATSAPP_ENABLED",
+    "SIGNAL_HTTP_URL",
+    "EMAIL_ADDRESS",
+    "TWILIO_ACCOUNT_SID",
+    "MATRIX_HOMESERVER_URL",
+    "MATTERMOST_URL",
+    "HASS_TOKEN",
+    "DINGTALK_CLIENT_ID",
+    "FEISHU_APP_ID",
+    "WECOM_BOT_ID",
+    "WECOM_CALLBACK_CORP_ID",
+    "WEIXIN_ACCOUNT_ID",
+    "QQ_APP_ID",
+)
+
+
+def inherit_profile_config(
+    profile_dir: Path, *, parent_home: Optional[Path] = None
+) -> None:
+    """Give an adopted profile what FG-30 §2 says it inherits, and nothing else.
+
+    Two things: the parent's ``config.yaml`` (model/provider behaviour), and the
+    promoted-skill library — *registered* as an external dir at the shared tier,
+    never copied, so "which copy is authoritative" stays unaskable.
+    """
+    from hermes_constants import (
+        get_hermes_home,
+        reset_hermes_home_override,
+        set_hermes_home_override,
+    )
+
+    parent = parent_home if parent_home is not None else get_hermes_home()
+    source = parent / _INHERITED_CONFIG_FILE
+    target = profile_dir / _INHERITED_CONFIG_FILE
+    if source.is_file() and not target.exists():
+        shutil.copy2(source, target)
+
+    token = set_hermes_home_override(profile_dir)
+    try:
+        from hermes_cli.skill_promotion import register_shared_dir
+
+        register_shared_dir()
+    except Exception as exc:
+        log.warning("adopt: could not register the shared skill library: %s", exc)
+    finally:
+        reset_hermes_home_override(token)
+
+
+def profile_has_channel(profile_dir: Path) -> bool:
+    """Whether this profile's own ``.env`` configures a messaging channel.
+
+    Read from the file rather than the process environment: the process belongs
+    to whoever launched it, and under FG-28's one-process model that is not the
+    profile being reported on.
+    """
+    env_path = profile_dir / ".env"
+    try:
+        text = env_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        if key.strip() in _CHANNEL_ENV_KEYS and value.strip().strip("\"'"):
+            return True
+    return False
 
 
 class ProfileSuggestionStore:
@@ -858,9 +954,14 @@ class ProfileSuggestionStore:
     ) -> Tuple[ProfileSuggestion, Path]:
         """Owner-only: adopt a suggestion → create the profile + seed sub-goal.
 
-        Calls ``create_profile(clone_config=True)`` so the new profile
-        inherits config + promoted skills from the shared tier, but NOT the
-        parent's session history, participation memory, or resolved DSN.
+        Creates the profile with **no clone source**, then inherits exactly the
+        two things FG-30 §2 lists as inherited: model/provider config, and the
+        promoted-skill library at the shared tier (registered as an external
+        dir, not copied). ``clone_config=True`` cannot serve that: it also
+        copies the parent's ``.env`` and its *un-promoted* local skills, both of
+        which §2 lists as **not** inherited — and a copied ``.env`` carries the
+        parent's credentials and resolved DSN into a profile FG-27 expects to
+        derive its own.
 
         The person-level ``USER.md`` needs no work — FG-24 put it at
         ``<root>/persons/<user_id>/USER.md``, outside any profile home.
@@ -889,56 +990,26 @@ class ProfileSuggestionStore:
 
             profile_dir = create_profile(
                 name=suggestion.proposed_name,
-                clone_config=True,
                 description=suggestion.proposed_role,
                 verify_datastore=True,
                 report=print,
             )
+            inherit_profile_config(profile_dir)
 
-            # Seed the profile-tier sub-goal via the goal tree.
-            # The new profile's goal ladders into the entity goal.
-            try:
-                from hermes_cli.goal_tree import GoalTreeStore, GoalRegistryStore
-                from hermes_constants import (
-                    reset_hermes_home_override,
-                    set_hermes_home_override,
-                )
-
-                registry = GoalRegistryStore()
-                tree = GoalTreeStore(registry)
-                # Switch to the new profile context to create the goal.
-                token = set_hermes_home_override(profile_dir)
-                try:
-                    await tree.registry.create_goal(
-                        principal,
-                        suggestion.proposed_goal,
-                        tier="profile",
-                        description=suggestion.proposed_role,
-                    )
-                finally:
-                    reset_hermes_home_override(token)
-            except Exception as exc:
-                log.warning("suggestion: could not seed sub-goal: %s", exc)
-
-            # Publish the entity goal into the new profile (FG-29 §3).
-            try:
-                from hermes_cli.goal_tree import GoalTreeStore, GoalRegistryStore
-                from hermes_constants import (
-                    reset_hermes_home_override,
-                    set_hermes_home_override,
-                )
-
-                registry = GoalRegistryStore()
-                tree = GoalTreeStore(registry)
-                token = set_hermes_home_override(profile_dir)
-                try:
-                    await tree.publish_entity_goal(
-                        principal, profiles=[suggestion.proposed_name]
-                    )
-                finally:
-                    reset_hermes_home_override(token)
-            except Exception as exc:
-                log.warning("suggestion: could not publish entity goal: %s", exc)
+            # Publish the entity goal into the new profile (FG-29 §3), then
+            # ladder the new profile's own sub-goal beneath that copy. Both run
+            # from *this* profile's context: `publish_entity_goal` reads the
+            # entity goal here and crosses into the target itself through
+            # `connect_for_publish`, the one sanctioned door. Running it under a
+            # home override pointed at the new profile would look for the
+            # entity goal in the new (empty) schema and skip the target as its
+            # own origin — publishing nothing.
+            await self._seed_new_profile_goals(
+                principal,
+                profile=suggestion.proposed_name,
+                goal=suggestion.proposed_goal,
+                role=suggestion.proposed_role,
+            )
 
             # Mark the suggestion as adopted.
             row = await conn.fetchrow(
@@ -968,6 +1039,59 @@ class ProfileSuggestionStore:
         finally:
             if own:
                 await conn.close()
+
+    async def _seed_new_profile_goals(
+        self,
+        principal: "Principal",
+        *,
+        profile: str,
+        goal: str,
+        role: str,
+    ) -> None:
+        """Publish the entity goal into ``profile`` and ladder its sub-goal.
+
+        Failures are reported, not fatal: the profile exists on disk by now and
+        the suggestion is being adopted either way. But they are reported
+        loudly, because a profile whose sub-goal is missing is exactly the
+        "profile with nothing to hang off" FG-30 §2 is designed to prevent.
+        """
+        from hermes_cli.datastore import connect_for_publish
+        from hermes_cli.goal_registry import GoalRegistryStore
+        from hermes_cli.goal_tree import GoalTreeStore
+
+        registry = GoalRegistryStore(self._store)
+        tree = GoalTreeStore(registry)
+        parent_goal_id: Optional[str] = None
+        try:
+            published = await tree.publish_entity_goal(principal, profiles=[profile])
+            if published:
+                parent_goal_id = published[0].goal_id
+        except Exception as exc:
+            log.warning(
+                "adopt: entity goal not published into %s: %s", profile, exc
+            )
+
+        # The sub-goal lives in the *new* profile's schema, reached through the
+        # one sanctioned crossing rather than by re-pointing HERMES_HOME.
+        try:
+            conn = await connect_for_publish(self._store, profile=profile)
+        except Exception as exc:
+            log.warning("adopt: sub-goal not seeded for %s: %s", profile, exc)
+            return
+        try:
+            await registry.initialize(connection=conn)
+            await registry.create_goal(
+                principal,
+                goal,
+                tier="profile",
+                description=role,
+                parent_goal_id=parent_goal_id,
+                connection=conn,
+            )
+        except Exception as exc:
+            log.warning("adopt: sub-goal not seeded for %s: %s", profile, exc)
+        finally:
+            await conn.close()
 
     async def dismiss(
         self,
@@ -1031,15 +1155,24 @@ async def retire_profile(
     promotions: "SkillPromotionStore",
     connection: Optional["asyncpg.Connection"] = None,
 ) -> Path:
-    """Retire a profile: offer skills once, archive, release channel, mark goal.
+    """Owner-only: offer skills once, archive, release the channel, mark goals.
 
     1. Offer the profile's skills for promotion **once** — the only way its
-       know-how survives. A marker prevents the offer from firing again.
+       know-how survives. The marker is written after the archive succeeds, so a
+       failed retirement can be retried instead of losing the one offer.
     2. Archive via ``export_profile`` (restorable).
     3. Release the channel: disable the gateway service.
-    4. Mark the profile's goal ``completed`` via the goal tree.
+    4. Mark the profile's goals ``completed`` — the profile tier *and* the
+       operational goals under it, which would otherwise stay active under a
+       profile nobody runs.
     5. Do NOT delete the profile directory — the archive is restorable.
     """
+    if not principal.is_owner:
+        raise PermissionError(
+            "Only the owner may retire a profile: it archives the profile, "
+            "releases its channel and completes its goals"
+        )
+
     from hermes_cli.profiles import export_profile, get_profile_dir, normalize_profile_name
     from hermes_constants import get_default_hermes_root
 
@@ -1048,83 +1181,108 @@ async def retire_profile(
 
     # 1. One-time promotion offer for local skills.
     retired_marker = profile_dir / ".retired"
-    if not retired_marker.exists():
-        try:
-            from hermes_cli.skill_promotion import find_local_skill
-
-            skills_dir = profile_dir / "skills"
-            if skills_dir.is_dir():
-                for skill_md in sorted(skills_dir.rglob("SKILL.md")):
-                    skill_name = skill_md.parent.name
-                    try:
-                        await promotions.propose(
-                            principal,
-                            skill_name,
-                            rationale=f"retired from profile {canon}",
-                            origin_profile=canon,
-                            connection=connection,
-                        )
-                    except Exception as exc:
-                        log.info("retire: could not propose skill %s: %s", skill_name, exc)
-        except Exception as exc:
-            log.info("retire: skill sweep failed: %s", exc)
-        retired_marker.touch()
+    offer_made = retired_marker.exists()
+    if not offer_made:
+        await _offer_skills_for_promotion(
+            profile_dir,
+            principal,
+            promotions=promotions,
+            origin_profile=canon,
+            rationale=f"retired from profile {canon}",
+            connection=connection,
+        )
 
     # 2. Archive via the existing export path.
-    import os
-    import tempfile
-
     archive_dir = get_default_hermes_root() / "archives"
     archive_dir.mkdir(parents=True, exist_ok=True)
     output_path = str(archive_dir / f"{canon}.tar.gz")
     archive_path = export_profile(canon, output_path)
+    if not offer_made:
+        retired_marker.touch()
 
     # 3. Release the channel: disable the gateway service.
+    _release_channel(canon, profile_dir)
+
+    # 4. Mark the profile's goals completed.
+    await _complete_profile_goals(profile_dir, principal)
+
+    return archive_path
+
+
+async def _offer_skills_for_promotion(
+    profile_dir: Path,
+    principal: "Principal",
+    *,
+    promotions: "SkillPromotionStore",
+    origin_profile: str,
+    rationale: str,
+    connection: Optional["asyncpg.Connection"] = None,
+) -> None:
+    """Propose every local skill in ``profile_dir`` for promotion."""
+    skills_dir = profile_dir / "skills"
+    if not skills_dir.is_dir():
+        return
+    for skill_md in sorted(skills_dir.rglob("SKILL.md")):
+        skill_name = skill_md.parent.name
+        try:
+            await promotions.propose(
+                principal,
+                skill_name,
+                rationale=rationale,
+                origin_profile=origin_profile,
+                connection=connection,
+            )
+        except Exception as exc:
+            log.info("retire: could not propose skill %s: %s", skill_name, exc)
+
+
+def _release_channel(canon: str, profile_dir: Path) -> None:
+    """Stop and unregister the profile's gateway service, if it has one."""
     try:
         from hermes_cli.profiles import (
             _check_gateway_running,
             _cleanup_gateway_service,
             _maybe_unregister_gateway_service,
+            _stop_gateway_process,
         )
 
         if _check_gateway_running(profile_dir):
             _cleanup_gateway_service(canon, profile_dir)
             _maybe_unregister_gateway_service(canon)
-            from hermes_cli.profiles import _stop_gateway_process
-
             _stop_gateway_process(profile_dir)
     except Exception as exc:
-        log.warning("retire: could not release channel: %s", exc)
+        log.warning("retire: could not release channel for %s: %s", canon, exc)
 
-    # 4. Mark the profile's goal completed.
+
+async def _complete_profile_goals(profile_dir: Path, principal: "Principal") -> None:
+    """Complete the retired profile's goals — in *that* profile's schema.
+
+    Resolves the store *under* the home override, so the connection and the
+    schema belong to the same profile. Reusing the caller's connection would run
+    the update against the *calling* profile's schema — the scope/identity
+    mispairing FG-28 §Re-read had to fix three times.
+    """
     try:
-        from hermes_cli.goal_tree import GoalTreeStore, GoalRegistryStore
+        from hermes_cli.goal_registry import GoalRegistryStore
         from hermes_constants import (
             reset_hermes_home_override,
             set_hermes_home_override,
         )
 
-        registry = GoalRegistryStore()
-        tree = GoalTreeStore(registry)
         token = set_hermes_home_override(profile_dir)
         try:
-            goals = await tree.registry.list_goals(
-                principal, status="active", connection=connection
-            )
+            from hermes_cli.datastore import get_store
+
+            registry = GoalRegistryStore(get_store("supabase-app", "prod"))
+            goals = await registry.list_goals(principal, status="active")
+            profile_goal_ids = {g.id for g in goals if g.tier == "profile"}
             for goal in goals:
-                if goal.tier == "profile":
-                    await tree.registry.update_goal(
-                        principal,
-                        goal.id,
-                        status="completed",
-                        connection=connection,
-                    )
+                if goal.tier == "profile" or goal.parent_goal_id in profile_goal_ids:
+                    await registry.set_status(principal, goal.id, "completed")
         finally:
             reset_hermes_home_override(token)
     except Exception as exc:
-        log.warning("retire: could not mark goal completed: %s", exc)
-
-    return archive_path
+        log.warning("retire: could not mark goals completed: %s", exc)
 
 
 async def merge_profiles(
@@ -1135,47 +1293,49 @@ async def merge_profiles(
     promotions: "SkillPromotionStore",
     connection: Optional["asyncpg.Connection"] = None,
 ) -> Path:
-    """Merge: both profiles' skills go through promotion; the source is archived.
+    """Owner-only: the source's skills go through promotion; the source retires.
+
+    A merge is a retirement with a stated destination, so it ends where a
+    retirement ends: archived, channel released, goals completed. Archiving
+    alone would leave the merged-away profile running its own bot against its
+    own goals.
 
     Memory is NOT merged — for the §2 reason: deciding which memory card
     belongs to which half is a judgement no heuristic makes well.
     """
-    from hermes_cli.profiles import export_profile, get_profile_dir, normalize_profile_name
+    if not principal.is_owner:
+        raise PermissionError("Only the owner may merge profiles")
+
+    from hermes_cli.profiles import get_profile_dir, normalize_profile_name
 
     source_canon = normalize_profile_name(source)
     target_canon = normalize_profile_name(target)
     source_dir = get_profile_dir(source_canon)
+    if not get_profile_dir(target_canon).is_dir():
+        raise SuggestionError(f"Merge target profile {target_canon!r} does not exist")
 
-    # 1. Both profiles' skills go through promotion.
-    try:
-        skills_dir = source_dir / "skills"
-        if skills_dir.is_dir():
-            for skill_md in sorted(skills_dir.rglob("SKILL.md")):
-                skill_name = skill_md.parent.name
-                try:
-                    await promotions.propose(
-                        principal,
-                        skill_name,
-                        rationale=f"merged from {source_canon} into {target_canon}",
-                        origin_profile=source_canon,
-                        connection=connection,
-                    )
-                except Exception as exc:
-                    log.info("merge: could not propose skill %s: %s", skill_name, exc)
-    except Exception as exc:
-        log.info("merge: skill sweep failed: %s", exc)
+    # 1. The source's skills go through promotion — the shared tier is how the
+    #    target gets them, so nothing is copied profile-to-profile.
+    marker = source_dir / ".retired"
+    if not marker.exists():
+        await _offer_skills_for_promotion(
+            source_dir,
+            principal,
+            promotions=promotions,
+            origin_profile=source_canon,
+            rationale=f"merged from {source_canon} into {target_canon}",
+            connection=connection,
+        )
+        marker.touch()
 
-    # 2. Archive the source.
-    from hermes_constants import get_default_hermes_root
-
-    archive_dir = get_default_hermes_root() / "archives"
-    archive_dir.mkdir(parents=True, exist_ok=True)
-    output_path = str(archive_dir / f"{source_canon}.tar.gz")
-    archive_path = export_profile(source_canon, output_path)
-
-    # 3. Memory is NOT merged (FG-30 §2).
-
-    return archive_path
+    # 2. Archive, release the channel, complete the goals. Memory is not
+    #    merged (FG-30 §2).
+    return await retire_profile(
+        source_canon,
+        principal,
+        promotions=promotions,
+        connection=connection,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1194,21 +1354,28 @@ async def idle_profiles(
     weekly digest so idle profiles don't get forgotten.
     """
     from hermes_cli.profiles import list_profiles
+    from hermes_state import SessionDB
 
     moment = now or datetime.now(timezone.utc)
+    cutoff_days = idle_weeks * 7
     idle: List[Tuple[str, int]] = []
     for p in list_profiles():
         try:
-            from hermes_state import SessionDB
-
-            db_path = getattr(p, "path", None)
-            if db_path is not None:
-                db_path = db_path / "state.db"
-            db = SessionDB(db_path=db_path, read_only=True)
+            db = SessionDB(db_path=p.path / "state.db", read_only=True)
             sessions = db.list_sessions_rich(limit=1, order_by_last_active=True)
             if not sessions:
-                # No sessions at all — count from profile creation if possible.
-                idle.append((p.name, idle_weeks * 7))
+                # Never used. Count from the profile's own age, so a profile
+                # adopted this week is not reported idle on the day it is
+                # created — which is exactly when FG-30 expects it to be empty.
+                try:
+                    created = datetime.fromtimestamp(
+                        p.path.stat().st_mtime, tz=timezone.utc
+                    )
+                except OSError:
+                    continue
+                age = (moment - created).days
+                if age >= cutoff_days:
+                    idle.append((p.name, age))
                 continue
 
             last = sessions[0].get("last_active")
@@ -1219,10 +1386,10 @@ async def idle_profiles(
             if last.tzinfo is None:
                 last = last.replace(tzinfo=timezone.utc)
             days = (moment - last).days
-            if days >= idle_weeks * 7:
+            if days >= cutoff_days:
                 idle.append((p.name, days))
-        except Exception:
-            pass
+        except Exception as exc:
+            log.debug("idle scan skipped %s: %s", p.name, exc)
     return idle
 
 
@@ -1262,6 +1429,9 @@ __all__ = [
     "DEFAULT_GENERATION_INTERVAL",
     "DEFAULT_IDLE_WEEKS",
     "OPEN_STATE",
+    "evidence_identity",
+    "inherit_profile_config",
+    "profile_has_channel",
     "ProfileSuggestion",
     "ProfileSuggestionStore",
     "SUGGESTION_STATES",
