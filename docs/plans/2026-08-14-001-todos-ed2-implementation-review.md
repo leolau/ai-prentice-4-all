@@ -1,8 +1,9 @@
 ---
 title: "review: To-dos ed.2 as implemented — what works, what is dead on arrival, and what the green suite hid"
-status: resolved — all 20 items fixed (6 in second pass, S1–S6)
+status: resolved — all 20 items fixed and verified (third pass added the missing regression tests)
 date: 2026-08-14
-revised: 2026-08-14 (second pass — verified the #235/#238 fixes against develop @ 2e3b21ea5)
+revised: 2026-08-14 (second pass — verified #235/#238 against develop @ 2e3b21ea5;
+  third pass — verified S1–S6 against develop @ 31e5133c2 and added the regression tests)
 type: implementation review
 target_repo: ai-prentice-4-all
 reviews:
@@ -14,6 +15,7 @@ against:
   - docs/plans/2026-08-11-001-todos-staging-layer-plan.md
 baseline: develop @ 7e30a4424
 second_pass_baseline: develop @ 2e3b21ea5
+third_pass_baseline: develop @ 31e5133c2
 resolved_by: 48973a102 (main, #236) — for the 14 items marked ✅ Fixed (verified)
 ---
 
@@ -57,6 +59,53 @@ account.
 **S6:** `spawn_seeded_session` now uses `set_session_cwd()` (a `ContextVar`) instead of
 `os.environ.__setitem__` (process-global), so concurrent sessions with different workdirs are
 properly isolated.
+
+---
+
+## Third pass — S1–S6 verified, and the regression tests they were missing
+
+Verified against `develop` @ `31e5133c2`. All six hold. Two of them were verified against a
+real database rather than by reading the diff:
+
+- **S1** — exercised `record_outbound` / `record_session` / `list_outbound` on real Postgres
+  through the Docker harness in `tests/hermes_cli/test_todo_store_e2e.py`: the `ts` query runs,
+  the parsed event reads back as `sent`, and a spawn pointer reads back as `session` (so it
+  cannot block a first send). Both cases are now permanent tests
+  (`test_the_outbound_trail_reads_back_with_parsed_events`,
+  `test_the_outbound_trail_is_invisible_to_another_principal`) — this SQL had never executed
+  against a database, which is why two independent bugs in six lines shipped together.
+- **S1/S5 at the CLI level** — the replay refusal, the session-pointer non-match and the
+  `--account` refusal are now pinned in `tests/hermes_cli/test_todos_cmd.py`
+  (`test_an_already_sent_todo_is_refused`, `test_a_session_pointer_is_not_a_send`,
+  `test_an_account_the_delivery_cannot_honour_is_refused`), each asserting that
+  `send_message_tool` is *not* called. Every prior send test mocked
+  `list_outbound` to `[]`, so the guard was never executed by anything.
+
+Two residual notes, neither a defect in the fixes:
+
+- **S5 is a refusal, not multi-account support.** A to-do whose proposal carries `account_id`
+  can now never be sent — `todo_outbound.command_for()` emits `--account`, and `_send` refuses
+  it. That is the right failure direction, but it means C4's "the reply leaves by the account
+  the message arrived on" is *unimplemented* rather than *unenforced*. Threading an account
+  through `send_message_tool._handle_send()` to the platform adapter is the remaining work.
+- **S6's ContextVar is only read by part of the stack.** `resolve_agent_cwd()` /
+  `_SESSION_CWD` are consulted by `agent/prompt_builder.py`, `agent/coding_context.py` and
+  `agent/codex_runtime.py`, but the tools that actually execute — `tools/terminal_tool.py`,
+  `tools/file_tools.py`, `tools/code_execution_tool.py`, `tools/delegate_tool.py` — still read
+  `os.environ["TERMINAL_CWD"]` directly. Cron is unaffected because it sets that env var itself
+  under `_holds_cwd_write` (`cron/scheduler.py`), and to-do `/start` passes no `workdir` at all.
+  But a future `spawn_seeded_session(workdir=…)` caller that relies on the ContextVar alone will
+  find its terminal and file tools ignoring the workdir. Teaching those tools to consult
+  `resolve_agent_cwd()` is what would make the ContextVar the single source of truth.
+
+`pytest test_todo_store_e2e.py test_todos_cmd.py test_todos_ed2.py test_todos_promote.py` →
+green (including the new e2e cases); `ruff` clean; `tsc --noEmit` clean; `vitest` green except
+one **pre-existing, unrelated** failure: `src/app/server-client-boundary.test.ts` flags
+`app/users/page.tsx` importing `PAGE_SIZE` from the `use client` module
+`@/components/users/UsersView` — from FG-26 (`f3613dccf`, 2026-08-12), which predates this
+review's baseline. `MobileShell.test.tsx` was failing since the shell became an async server
+component in `f8bda1702` (`renderToStaticMarkup` cannot render one) and is fixed here by
+awaiting the component and rendering what it returns; the assertions are unchanged.
 
 ---
 
