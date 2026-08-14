@@ -421,3 +421,56 @@ async def test_one_person_cannot_see_or_move_anothers_todo(
 
     # The owner role is the deliberate exception (contract C2).
     assert await store.get(_principal("leo", role="owner"), todo.id) is not None
+
+
+@pytest.mark.asyncio
+async def test_the_outbound_trail_reads_back_with_parsed_events(
+    postgres_dsn: str,
+) -> None:
+    """``list_outbound`` is the replay guard's only source of truth.
+
+    It has to run against the real ``task_transitions`` shape (the timestamp
+    column is ``ts``) and return the *parsed* event name, because the row is
+    stored as ``action:<event>:<channel>`` and the guard compares a bare
+    ``"sent"``. Both halves were wrong at once behind a mocked store.
+    """
+    store = await _store(postgres_dsn)
+    ada = _principal("ada")
+    todo = await store.create(ada, title="Reply to the tender query")
+
+    assert await store.list_outbound(ada, todo.id) == []
+
+    await store.record_session(
+        ada, todo.id, session_id="todo_abc", actor="user:ada"
+    )
+    events = [row["event"] for row in await store.list_outbound(ada, todo.id)]
+    assert events == ["session"], "a spawn pointer must not read as a delivery"
+
+    await store.record_outbound(
+        ada, todo.id, event="sent", channel="whatsapp", actor="user:ada"
+    )
+    rows = await store.list_outbound(ada, todo.id)
+    assert [row["event"] for row in rows] == ["sent", "session"], "newest first"
+    assert rows[0]["actor"] == "user:ada"
+    assert rows[0]["at"] is not None
+
+
+@pytest.mark.asyncio
+async def test_the_outbound_trail_is_invisible_to_another_principal(
+    postgres_dsn: str,
+) -> None:
+    """Visibility gates the trail, not just the to-do.
+
+    Otherwise the guard would leak "this was already sent" about a to-do the
+    caller cannot read.
+    """
+    store = await _store(postgres_dsn)
+    ada = _principal("ada")
+    bob = _principal("bob")
+    todo = await store.create(ada, title="Ada's outgoing reply")
+    await store.record_outbound(
+        ada, todo.id, event="sent", channel="whatsapp", actor="user:ada"
+    )
+
+    assert await store.list_outbound(bob, todo.id) == []
+    assert len(await store.list_outbound(ada, todo.id)) == 1
