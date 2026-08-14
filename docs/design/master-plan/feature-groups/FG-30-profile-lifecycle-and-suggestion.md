@@ -1,6 +1,6 @@
 # FG-30 — Profile lifecycle: suggest, adopt, retire
 
-**Wave:** P6-D (after FG-29 — suggestion is an output of the same loop) · **Owner agent:** _unassigned_ · **Status:** IMPLEMENTED, PARTLY VERIFIED — the suggestion/adopt/retire layer shipped in #250 and its review defects are fixed in #253. **Three tasks remain, specified for cold pickup in §4.2** (T1 the `agent-home` queue, T2 commit-to-channel, T3 two decisions for Leo), plus the live system test on `hermes-systest`, which needs the box.
+**Wave:** P6-D (after FG-29 — suggestion is an output of the same loop) · **Owner agent:** _unassigned_ · **Status:** IMPLEMENTED, PARTLY VERIFIED — the suggestion/adopt/retire layer shipped in #250 and its review defects are fixed in #253. **§4.2 T1 (the `agent-home` queue), T2 (commit-to-channel) and T3 (two decisions) are implemented (edition 7).** Only the live system test on `hermes-systest` remains, which needs the box.
 
 ## Summary
 
@@ -249,13 +249,45 @@ nobody re-walks into it.
 
 ### 4.2 Remaining work, edition 5 — three tasks, cold-pickup ready
 
-Everything below is **open**. The store, the CLI, the console API, retire/merge
-and the digest all shipped (#250) and were corrected in #253; these three are
-what is left before the FG can be called done, and they are written so an agent
-that has never seen this repo can pick one up. Do them in this order — T1 is the
-only one a user can see.
+**Edition 7:** T1, T2 and T3 are **implemented**; see the "What shipped" notes at
+the head of each task for the exact surfaces, and the audit log (edition 7) for
+what the tests prove and do not. The text below is kept as the spec the work was
+checked against.
+
+Everything below was **open** as of edition 5. The store, the CLI, the console
+API, retire/merge and the digest all shipped (#250) and were corrected in #253;
+these three were what was left before the FG could be called done, written so an
+agent that had never seen the repo could pick one up. Order mattered — T1 was the
+only one a user could see.
 
 #### T1 — the suggestion queue in `agent-home` (the FG's actual surface)
+
+**What shipped (edition 7):** the four layers mirror FG-26's `/users` path exactly.
+- BFF client: `profileSuggestions()`, `adoptProfileSuggestion(id)`,
+  `dismissProfileSuggestion(id, reason?)` in `agent-home/src/lib/api/client.ts`,
+  with types in `src/types/index.ts`.
+- BFF routes: `app/api/profiles/suggestions/route.ts` (GET, any enrolled
+  principal) and `[suggestionId]/adopt` + `[suggestionId]/dismiss` (POST), each
+  `getPrincipal()`-gated (401 unauth) and forwarding under the bridged C1
+  principal. The **Python layer is the authority** — the BFF does **not**
+  re-derive `is_owner`; a 403 from upstream is the real gate (the #253 hazard,
+  re-asserted in a new layer by `route.test.ts`).
+- screen: `app/profiles/suggestions/page.tsx` + `components/profiles/ProfileSuggestionsView.tsx`,
+  linked from `app/page.tsx` beside `/users` and added to `SECONDARY_NAV`.
+  Renders at most one open suggestion as a **card** (never a list), shows role
+  + goal + rationale, evidence available but not shouted (and **without** the
+  roster, per T3 Q1), owner-only adopt/dismiss buttons hidden for a non-owner,
+  dismiss with an optional reason and a once-and-plain permanent-warning, and a
+  "what happened next" outcome that points at `hermes profile commit-channel`
+  (T2) since the new profile is channel-less.
+- The Python `POST .../dismiss` now reads the optional `reason` from the body
+  (already accepted by `store.dismiss`) so it reaches the C5 audit trail.
+
+Tests: `app/api/profiles/suggestions/route.test.ts` (11 cases — 401 unauth, the
+member-adopt-is-403-not-200 invariant, reason forwarding, unreachable 502). The
+pre-existing `server-client-boundary.test.ts` boundary failure in
+`app/users/page.tsx` is **not** introduced by this work (it fails on `develop`
+without these changes).
 
 **Why it is not optional:** today an open suggestion is reachable only from
 `hermes profile suggestions` and as one line in the weekly digest. On the phone
@@ -299,6 +331,33 @@ owner's — the #253 defect, in a new layer).
 
 #### T2 — commit-to-channel
 
+**What shipped (edition 7):** `hermes profile commit-channel <name>` — one command
+in `hermes_cli/profile_suggestion.py::commit_channel` (the FG-30 lifecycle verbs
+live there, beside `retire_profile`/`merge_profiles`), wired through the
+`profile` subparser (`subcommands/profile.py`) and dispatched in `main.py`. It:
+
+1. **refuses a token already used by another profile *before* writing it**,
+   naming the holder — `find_token_collision()` scans every other profile's
+   `.env` for the same platform's token key (per-platform, so two platforms
+   sharing a shape don't false-positive) and raises `ChannelCollisionError`. The
+   gateway's `EX_CONFIG` permanent stop stays the backstop, not the UX.
+2. writes the platform token into **that profile's own `.env`** under a
+   `HERMES_HOME` override (so `save_env_value` lands in the right file, never the
+   process environment, #219/#220) — `--token` or an interactive `getpass`
+   prompt, optional `--allowed-users`, `--no-start` to skip the service;
+3. registers + starts the profile's gateway service by reusing the existing
+   `gateway install`/`start` machinery under the same override (the service name
+   is `HERMES_HOME`-derived, so it scopes to this profile) — best-effort, since a
+   box without a service manager (CI) is not a failure of the commit; and
+4. reports the handle to message (best-effort `getMe` for telegram).
+
+The doctor assertion §4.2 names — "after a successful commit the profile moves
+to the ok line" — is `profile_has_channel(profile_dir)` becoming true, asserted
+in `test_fg30_review_defects.py` along with the collision-refused-before-write
+and writes-to-the-target's-own-.env invariants. Telegram, Discord and Slack
+(bot-token platforms) are committable; WhatsApp/Signal/email keep their own
+wizards and are refused with a pointer.
+
 **What is missing:** §3 says an adopted profile starts channel-less and "gains a
 channel when the owner commits". Nothing implements the commit. Today the owner
 hand-edits the new profile's `.env` and then runs the generic gateway commands,
@@ -326,22 +385,33 @@ machinery:
 
 #### T3 — two decisions for Leo (do not guess; ask, then implement)
 
-1. **The roster is sent to the aux LLM.** `_gather_evidence()` collects
-   `user_id`, `display` and `role` for **every active principal**, and
-   `_ask_aux_llm()` serialises the whole evidence dict into the prompt
-   (`evidence_text = json.dumps(evidence, ...)`). So the names and roles of
-   everyone in the profile leave the box to a third-party model in order to pick
-   a profile name — which naming does not need. Options: drop `participants`
-   from the prompt while keeping it as a *local* corroborating signal (the
-   cheapest, and it changes no behaviour that matters); reduce it to a count;
-   or keep it and record it as a C5 disclosure. Same question applies to
-   `evidence` being returned verbatim by the console API and rendered in T1.
-2. **`get_store("supabase-app", "prod")` is hard-coded** in
-   `hermes_cli/goal_conflicts.py`'s digest block and in
-   `profile_suggestion.py`'s callers, so a dev context reads and writes prod.
-   Consistent with the other C3 consumers on this tier, so it is a `prod`-only
-   assumption rather than a routing bug — but it should be either a deliberate,
-   written assumption or a resolved mode.
+**Resolved, edition 6 (Leo):** Q1 — drop `participants` from the prompt, keep it
+as a local corroborating signal. Q2 — keep `prod` hard-coded; record it as a
+deliberate written assumption.
+
+#### T3 — resolved decisions and what shipped
+
+1. **The roster is no longer sent to the aux LLM** (edition 6, Leo). The whole
+   evidence dict used to be serialised into the prompt
+   (`evidence_text = json.dumps(evidence, ...)`), so every active principal's
+   `user_id`, `display` and `role` left the box to a third-party model each
+   monthly pass — to *name* a profile, which naming does not need. The fix is
+   `_evidence_for_prompt()` in `profile_suggestion.py`: it returns the evidence
+   minus `participants` for the prompt only. The roster stays in `evidence` for
+   the local bar (`_evidence_strong_enough` still corroborates on it), for the
+   stored JSONB, and for the dedup identity (unchanged — `evidence_identity`
+   already ignored it). So no behaviour that matters changes; a member's name
+   and role simply stop leaving the box. The console API returning `evidence`
+   verbatim is the same question: T1's surface is its consumer and is unbuilt,
+   so nothing leaks today; when T1 renders evidence it must render the prompt
+   slice, not the raw blob.
+2. **`get_store("supabase-app", "prod")` stays hard-coded** (edition 6, Leo).
+   The digest block in `hermes_cli/goal_conflicts.py` and the callers in
+   `profile_suggestion.py` (`_resolve_store`, the retire goal-completion path)
+   are one-tier C3 consumers with no dev/staging context on this path, so the
+   hard-coding is an assumption, not a routing bug. It is now a *written*
+   assumption: each site carries a comment naming the decision and pointing at
+   `_resolve_store` for the reasoning, rather than being left implicit.
 
 ### 5. The first goal — a default, editable in settings
 
@@ -479,12 +549,12 @@ console queue; full negative matrix on real Postgres; `scripts/run_tests.sh`,
 - [~] **Monthly** generation pass, one open suggestion at a time; rendered in FG-29's weekly digest (§1.1) — the interval is now enforced (edition 4); nothing *schedules* the pass, so it runs when `hermes profile suggest` is run
 - [x] No re-proposal of dismissed suggestions on the same evidence — latched on `dedup_key` over the evidence's *identity* (edition 4), reusing `cron/suggestions.py`'s contract rather than a second mechanism (§1.3)
 - [x] Adoption → `create_profile` with sub-goal, published entity goal, promoted skills through the shared tier; parent `.env` and un-promoted local skills **not** copied; person-level `USER.md` **asserted, not copied** (§2)
-- [~] Channel-less start + `hermes doctor` reporting (channel-less is read from the profile's own `.env`, not from whether its gateway happens to be running). The **commit-to-channel step** is still the generic `hermes gateway` path — no FG-30 command exists for it: **§4.2 T2**
+- [x] Channel-less start + `hermes doctor` reporting (channel-less is read from the profile's own `.env`, not from whether its gateway happens to be running). **Commit-to-channel** ships as `hermes profile commit-channel` (refuses a token already used by another profile before writing it, writes into the profile's own `.env`, starts the service, reports the handle): **§4.2 T2**
 - [x] Retire/merge with one-time promotion offer + archive; owner-only, channel released, profile-tier **and** child goals completed, in the retired profile's own schema
 - [x] Idle-profile detection in the digest (a just-adopted profile is not reported idle on day one)
 - [x] Seeded default entity goal + settings/onboarding editor; editing bumps the publish revision (shipped by FG-29, verified here)
-- [ ] **`agent-home`** (D20, **not** the dashboard): profile-local suggestion queue with evidence (§4.1). Only the console API exists (`/api/profiles/suggestions`) — the owner-facing surface is unbuilt, so today the queue is reachable from the CLI and the digest: **§4.2 T1**
-- [ ] Two decisions for Leo before they are implemented: the roster leaving the box in the aux-LLM prompt, and `prod` hard-coded in the store resolver: **§4.2 T3**
+- [x] **`agent-home`** (D20, **not** the dashboard): profile-local suggestion queue with evidence (§4.1). Four-layer mirror of `/users` — BFF client + `app/api/profiles/suggestions` routes (GET open to enrolled; adopt/dismiss POST forwarding under the bridged principal, Python the authority) + `app/profiles/suggestions` screen linked beside `/users`: **§4.2 T1**
+- [x] Two decisions resolved (edition 6, Leo): `participants` dropped from the aux-LLM prompt (`_evidence_for_prompt`) while kept as a local corroborating signal; `prod` hard-coding kept and recorded as a written assumption at each call site: **§4.2 T3**
 - [~] Tests (E2E on real Postgres in `tests/hermes_cli/test_fg30_profile_suggestion_e2e.py`, plus `test_fg30_review_defects.py` for the properties that suite could not see). **System test on `hermes-systest` not run** — it needs the box, which no cloud agent can reach
 
 ## Re-read against the shipped implementation, edition 4
@@ -531,24 +601,30 @@ Two notes that are not defects:
 |------|---------|--------|--------|-----------|
 | 2026-08-10 | 1 | devin (for Leo) | Created FG doc | Leo's answer to the OPC-routing question turned out to be a new capability rather than a UX choice: **support both** — a channel per profile for clarity, but starting from one or a couple of profiles because "the human may not know what kind of profile does he/she needs", with the system **suggesting more profiles over time, as part of the learning and promotion**. Every other Phase-6 doc had assumed static, up-front profile structure. Profile creation becomes an *output* of the same loop FG-29 uses for skills: the evidence that distils a skill also shows where work clusters into a distinct sub-goal. Three holes that the suggestion mechanism opens are addressed here rather than left implicit: (a) a bot token needs a human at BotFather, so a mandatory credential step would block the routine act of adopting a suggestion — adopted profiles therefore start **channel-less** and earn a channel when the owner commits; (b) suggestion without **retirement/merge** produces sprawl, and each profile costs a memory, a channel and a thing to remember, so idle detection and a retire path with a one-time promotion offer are in scope; (c) **splitting memory** between a parent and a new profile is a judgement no heuristic makes well and nobody will do by hand, so adoption deliberately inherits only the unambiguous parts (sub-goal, promoted skills, person-level `USER.md`) — lossy but honest and automatable, and it gives skill promotion a second purpose, since a promoted skill is what a new instrument starts life with. | Leo: "We need to support both. Each profile should have its own bot/channel to make things more clear and efficient for both the human and the system. However, at the beginning, the human may not know what kind of profile does he/she needs. Therefore, the system should be able to start with just one profile or a couple of profiles and the ability to suggest more profiles to add over time, as part of the learning and promotion." |
 | 2026-08-14 | 3 | devin (for Leo) | Leo's two open questions closed (one open suggestion, monthly; role **and** goal both required) and three pickup defects fixed: the shipped `cron/suggestions.py` surface, the `USER.md` inheritance that is already true, and the unnamed UI surface | Leo answered both open questions, and answering the cadence one broke the doc's own wiring: it said suggestion generation "runs on the same weekly digest" as skill promotion, but **monthly** generation cannot share a weekly clock. Split explicitly — generation is its own monthly pass gated on no suggestion being open, rendering still rides `weekly_digest()`, which schedules nothing — because "same digest" would otherwise be implemented as "weekly", i.e. four times the intended volume against a mechanism whose dismissals latch forever. Role+goal are both required for a reason worth recording: a role has no end state, and §4's retire path fires when a sub-goal *completes*, so a role-only suggestion could never retire and would produce exactly the sprawl this FG bounds. Three defects found by reading the doc against shipped code rather than trusting it: (a) **`cron/suggestions.py` already implements this pattern** — consent-first proposals from four sources with `dedup_key`-latched dismissals — and the doc specified a fresh non-repetition rule, i.e. a second latching mechanism, which `AGENTS.md` rejects; the contract is now reused and the separate store is argued (JSON file vs `evidence` JSONB + goal/principal FKs) instead of assumed; (b) the "inherit the person-level `USER.md`" item is **already true** — FG-24 edition 3 put it at `<root>/persons/<user_id>/USER.md`, outside any profile home, so an implementer reading "inherited" as "copy on adoption" would reintroduce the drifting-copies problem that amendment exists to remove; it is now an assertion, and the test asserts by path; (c) the UI surface was "console", which under **D20** must be `agent-home` — read as the dashboard it would have put this FG's main surface in the frozen operator console. Also recorded: the queue is **profile-local** because `profile_suggestions` FKs profile-local `goals`/`principals`, and a cross-profile view needs FG-28's unshipped switcher — the FG-26 item-1 trap, named so nobody walks into it again. |
+| 2026-08-14 | 6 | devin (for Leo) | T3 decided and implemented: `participants` dropped from the aux-LLM prompt; `prod` hard-coding kept and recorded as a written assumption | Leo answered both: Q1 — drop `participants` from the prompt and keep it as a local corroborating signal; Q2 — keep `prod` hard-coded. Q1 ships as `_evidence_for_prompt()` in `profile_suggestion.py`, which returns the evidence minus `participants` for the prompt only; the roster still corroborates in `_evidence_strong_enough`, still lives in the stored JSONB, and `evidence_identity` (the dedup key) already ignored it, so no behaviour that matters changes — a member's name and role just stop leaving the box each monthly pass. The console API returning `evidence` verbatim is the same question; T1 is its consumer and is unbuilt, so nothing leaks today, and when T1 renders evidence it must render the prompt slice. Q2 is now a *written* assumption: each site (`_resolve_store`, the retire goal-completion path, and the digest block in `goal_conflicts.py`) carries a comment naming the decision and pointing at `_resolve_store`, rather than being left implicit. Two tests added in `test_fg30_review_defects.py`: the roster is absent from the prompt slice, and it still corroborates locally. T3's checklist item is ticked; T1 and T2 remain. |
+| 2026-08-14 | 7 | devin (for Leo) | T1 and T2 implemented — the `agent-home` queue and `hermes profile commit-channel`; only the live box test remains | Leo asked to fix all three. **T1** is a four-layer mirror of FG-26's `/users` path: BFF client methods (`profileSuggestions`/`adopt`/`dismiss`) + `app/api/profiles/suggestions` routes that forward under the bridged C1 principal and **do not re-derive `is_owner`** (a 403 from Python is the real gate — the #253 hazard re-asserted in a new layer by `route.test.ts`, which checks a member's adopt is the upstream 403, not a 200 as the owner) + an `app/profiles/suggestions` screen that renders at most one open suggestion as a card (not a list — lists train batch-dismissal and a dismissal latches forever), shows role+goal+rationale with the evidence available but not shouted and **without the roster** (T3 Q1's prompt slice carries through to the renderer), hides adopt/dismiss for a non-owner, takes an optional dismiss reason with a once-and-plain permanent warning, and tells the owner what happened next (channel-less → `hermes profile commit-channel`). The Python `.../dismiss` route now reads `reason` from the body so it reaches the C5 audit. **T2** is `commit_channel` in `profile_suggestion.py` plus the `profile commit-channel` subcommand and dispatch: `find_token_collision` scans every other profile's `.env` for the same platform's token and raises `ChannelCollisionError` naming the holder **before** the write; the token lands in the profile's own `.env` under a `HERMES_HOME` override (never the process env, #219/#220); the existing `gateway install`/`start` machinery is reused under the same override so the service name scopes to the profile; the handle is reported best-effort. Telegram/Discord/Slack are committable; WhatsApp/Signal/email keep their wizards and are refused with a pointer. The doctor assertion §4.2 names — "after a successful commit the profile moves to the ok line" — is `profile_has_channel(profile_dir)` going true, asserted alongside collision-refused-before-write and writes-to-the-target's-own-.env. **Verification:** `test_fg30_review_defects.py` now 29 green (T2 + T3 cases; E2E `test_fg30_profile_suggestion_e2e.py` 8 green on real Docker-Postgres); `agent-home` `route.test.ts` 11 green, `tsc -p . --noEmit` clean, eslint clean on the new files; Python `ruff` + `ty` clean. **What green does not prove:** the live `hermes-systest` procedure still needs the box (no SSH from a cloud agent), so "system test" stays unticked; and the agent-home boundary test has a **pre-existing** failure in `app/users/page.tsx` (confirmed on `develop` without these changes) that is not introduced by this work. |
 | 2026-08-14 | 5 | devin (for Leo) | The three remaining items written up as cold-pickup tasks (§4.2), and the cloud-agent prompt rewritten for what is actually left | Leo asked for the remaining work to be in the file so another agent can do it. The prompt was the dangerous part, exactly as in FG-28 #222: it still opened with "add `profile_suggestions`… implement retire and merge", so a fresh agent would have rebuilt a layer that ships — and rebuilt it *without* the nine corrections, since the prompt describes the original intent, not the shipped code. It now points at §4.2, lists the invariants each fix installed (identity-only `dedup_key`, the `_generation_due` clock measured against any status, no `.env`/local-skill inheritance, `connect_for_publish` as the only crossing, `_comms_resolve_principal` on every route, merge-is-retirement), and states what a green suite here does not prove — the shipped 8 tests missed all nine defects, two of which `ty` alone could see. T1 is specified as a table of the four layers to mirror from FG-26's `/users` path so the queue is not invented from scratch; T2 as composition over `hermes gateway setup`/`install` plus a token-collision refusal *before* the write, since the gateway's `EX_CONFIG` stop is a backstop and not a UX; T3 as two questions to ask rather than guess — the aux-LLM prompt serialises the whole evidence dict, so every active principal's `user_id`, name and role leaves the box to name a profile, which naming does not need. |
 | 2026-08-14 | 4 | devin (for Leo) | Reviewed the shipped implementation (#250); nine defects fixed and the checklist re-marked honestly | Leo asked for a review of the implementation. The layer's shape follows `skill_promotion.py` correctly, so the defects were all in the *properties*, not the structure — and every one of them was invisible to the suite that shipped with it, because those 8 tests exercise the store's CRUD with hand-written evidence dicts and a hand-written `dedup_key`. The latch test, for instance, proposes the *same literal dict twice*, so it cannot see that a key hashed over skill use counts changes every week; the routes were never instantiated, so "owner only" gating nothing was invisible for the same reason FG-26's activation bug and FG-28's three route defects were. The one that would have hurt most in production is adoption calling `create_profile(clone_config=True)`: that copies the parent's `.env` — credentials and resolved DSN — and its un-promoted local skills into the new profile, i.e. exactly the two items §2 lists as not inherited, while the docstring asserted the opposite. Three checklist items were also ticked without the work: the `agent-home` queue (rewritten in the tick to "dashboard can build UI", which inverts D20), the commit-to-channel step, and "system test" — ticked on the strength of Docker-Postgres E2E tests, where §System testing means the live box. Those are back to open/partial. The two worst were only visible to a type checker: `ty` reports that both goal-tree call sites construct `GoalRegistryStore` without its required `store` and call a `update_goal` method that does not exist — each wrapped in its own `except Exception: log.warning`, so adoption produced a profile with no sub-goal and no entity goal, and retirement completed nothing, both silently and both green. |
 | 2026-08-10 | 2 | devin (for Leo) | First goal seeded + editable in `agent-home` settings; invitation delivery recorded as a decision, not a hole | Leo closed the two smaller onboarding gaps. The **first goal** is seeded from a system default and edited in settings — which matters more than it sounds: an entity goal nobody wrote means publication, roll-up, conflict detection and skill scoring all have nothing to hang off, and a *seeded* generic goal invites replacement where an empty field invites being skipped. The settings page is therefore a writer into the goal tree — an edit bumps the publish revision and marks every profile's copy stale (FG-29 §3), rather than being a text box. The **invitation link** is shared by the owner through their own channel, so the missing SMTP is a decision rather than a gap; the cost is written down here instead of being forgotten — a relayed link sits in a chat app's scrollback and the relaying owner could activate the account themselves, so "the user set their own password" is not an integrity property this deployment can claim. | Leo: "The first goal can come from the system default, but also must be configurable at the settings page in the agent-home. The invitation link can be shared by the owner using his/her own mean." |
 
 ## Cloud-agent prompt
 
-> **The suggestion layer already ships.** #250 implemented it and #253 fixed nine
-> defects in it; do **not** rebuild `profile_suggestions`, the store, the CLI
-> verbs, retire/merge or the digest wiring. Read §4.2 — your task is **T1, T2 or
-> T3 from that list, one per PR**, and §"Re-read against the shipped
-> implementation" for the mistakes already made here so you do not repeat them.
+> **The FG-30 implementation is complete except the live box test (edition 7).**
+> #250 implemented the suggestion/adopt/retire layer; #253 fixed nine defects in
+> it; edition 7 added §4.2 T1 (the `agent-home` queue), T2 (`hermes profile
+> commit-channel`) and T3 (two decisions). Do **not** rebuild any of it. The only
+> remaining item is the live `hermes-systest` procedure in §"System testing",
+> which needs the box — see the last paragraph.
 >
 > Repo `leolau/ai-prentice-4-all`, branch off `develop`. Read
 > `docs/design/master-plan/README.md`, `AGENTS.md`, FG-24 (incl. its amendment),
 > FG-27, FG-28, FG-29 and this doc. Then read, in the code:
 > `hermes_cli/profile_suggestion.py` (the whole thing — it carries the reasons in
-> its docstrings), the three `/api/profiles/suggestions*` routes in
-> `hermes_cli/web_server.py`, and both FG-30 test files in `tests/hermes_cli/`.
+> its docstrings, including `commit_channel`), the three
+> `/api/profiles/suggestions*` routes in `hermes_cli/web_server.py`, the
+> `app/api/profiles/suggestions` BFF routes + `app/profiles/suggestions` screen
+> in `agent-home/`, and the FG-30 test files in `tests/hermes_cli/` and
+> `agent-home/src/app/api/profiles/suggestions/route.test.ts`.
 >
 > **The invariants you must not break, each of which has a test:**
 >
@@ -570,6 +646,12 @@ Two notes that are not defects:
 >   and misattributes the C5 audit row.
 > - Retire and merge are owner-only, and a merge is a retirement with a
 >   destination — the source loses its channel and its goals, not just its files.
+> - `commit_channel` refuses a token already used by another profile **before**
+>   writing it (naming the holder), writes into the profile's own `.env` under a
+>   `HERMES_HOME` override (never the process env), and `profile_has_channel`
+>   reads true after a successful commit. The aux-LLM prompt never carries the
+>   roster (`_evidence_for_prompt`); `prod` hard-coding in the store resolver is
+>   a written assumption, not a bug.
 >
 > **What a green test suite here does not prove.** The FG-30 suite that shipped
 > with #250 was 8 passing real-Postgres tests, and it missed all nine defects:

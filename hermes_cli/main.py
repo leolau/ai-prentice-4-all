@@ -11609,6 +11609,58 @@ def cmd_profile(args):
 
         asyncio.run(_run_merge())
 
+    elif action == "commit-channel":
+        from hermes_cli.profile_suggestion import (
+            ChannelCollisionError,
+            commit_channel as _commit_channel,
+        )
+
+        token = getattr(args, "token", None)
+        if not token:
+            try:
+                import getpass
+
+                token = getpass.getpass(
+                    f"  {args.platform} bot token for '{args.profile_name}': "
+                )
+            except (EOFError, KeyboardInterrupt):
+                print("\nCancelled.")
+                return
+        if not token or not token.strip():
+            print("Error: a non-empty token is required.")
+            return
+
+        try:
+            result = _commit_channel(
+                args.profile_name,
+                platform=args.platform,
+                token=token,
+                allowed_users=getattr(args, "allowed_users", None),
+                start_service=not getattr(args, "no_start", False),
+            )
+        except ChannelCollisionError as exc:
+            # Refused before the write — no .env touched, no service touched.
+            print(f"✗ {exc}")
+            sys.exit(1)
+        except FileNotFoundError as exc:
+            print(f"✗ {exc}")
+            sys.exit(1)
+        except ValueError as exc:
+            print(f"✗ {exc}")
+            sys.exit(1)
+
+        print(f"✓ {result['profile']} now has a {result['platform']} channel")
+        if result.get("handle"):
+            print(f"  Handle: {result['handle']}")
+        if result.get("service_started"):
+            print("  Gateway service started.")
+        else:
+            print(
+                "  Gateway service not started here — run "
+                f"`hermes -p {result['profile']} gateway start` when ready, or "
+                f"`hermes doctor` to confirm the channel is configured."
+            )
+
 
 def _render_distribution_plan(plan) -> None:
     """Print a human-readable summary of a pending distribution install."""

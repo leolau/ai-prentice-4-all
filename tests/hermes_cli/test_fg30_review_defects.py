@@ -109,6 +109,49 @@ def test_skills_without_corroboration_do_not_clear_the_bar() -> None:
 
 
 # ---------------------------------------------------------------------------
+# The roster stays local (FG-30 §4.2 T3 Q1)
+# ---------------------------------------------------------------------------
+
+
+def test_the_roster_is_not_sent_to_the_aux_llm() -> None:
+    """``participants`` corroborates locally but never leaves the box.
+
+    Every active principal's ``user_id``, ``display`` and ``role`` would
+    otherwise be serialised into the prompt sent to a third-party model
+    each monthly pass, just to name a profile — which naming does not
+    need. The evidence bar still counts the roster; the prompt does not.
+    """
+    evidence = {
+        "top_skills": [{"name": "invoice", "uses": 9}, {"name": "tax", "uses": 4}],
+        "orphan_goals": [{"id": "g1", "title": "file the return", "tier": "operational"}],
+        "participants": [
+            {"user_id": "u1", "display": "Ada", "role": "owner"},
+            {"user_id": "u2", "display": "Bob", "role": "member"},
+        ],
+        "current_description": "build the product",
+    }
+
+    for_prompt = ps._evidence_for_prompt(evidence)
+
+    assert "participants" not in for_prompt
+    assert "Ada" not in repr(for_prompt) and "Bob" not in repr(for_prompt)
+    # The local signal is untouched — the bar still corroborates on it.
+    assert evidence["participants"] == evidence["participants"]
+
+
+def test_the_roster_still_corroborates_locally() -> None:
+    """Dropping it from the prompt must not weaken the evidence bar."""
+    with_roster = {
+        "top_skills": [{"name": "invoice", "uses": 9}, {"name": "tax", "uses": 4}],
+        "participants": [
+            {"user_id": "u1", "display": "Ada", "role": "owner"},
+            {"user_id": "u2", "display": "Bob", "role": "member"},
+        ],
+    }
+    assert ps._evidence_strong_enough(with_roster)
+
+
+# ---------------------------------------------------------------------------
 # The monthly clock
 # ---------------------------------------------------------------------------
 
@@ -335,3 +378,129 @@ def test_suggestion_routes_bind_the_requesting_principal(handler_name: str) -> N
     assert "get_owner" not in code, "the route resolves the owner, not the caller"
     assert "_comms_resolve_principal(request)" in code
     assert "request" in inspect.signature(handler).parameters
+
+
+# ---------------------------------------------------------------------------
+# Commit-to-channel (FG-30 §4.2 T2)
+# ---------------------------------------------------------------------------
+
+
+def _profile_tree(tmp_path: Path) -> tuple[Path, dict[str, Path]]:
+    """Build a fake profile tree under the (conftest-isolated) HERMES_HOME.
+
+    `get_default_hermes_root()` reads `HERMES_HOME`, which the autouse
+    `_hermetic_environment` fixture points at a temp dir — so profiles live
+    under `<HERMES_HOME>/profiles/<name>` and the default profile *is*
+    `<HERMES_HOME>`. Returns (root, {name: dir}) with `finance` (the profile
+    to commit) and `other` (a holder of a colliding token).
+    """
+    from hermes_constants import get_hermes_home
+
+    root = Path(get_hermes_home())
+    profiles = root / "profiles"
+    finance = profiles / "finance"
+    other = profiles / "other"
+    finance.mkdir(parents=True, exist_ok=True)
+    other.mkdir(parents=True, exist_ok=True)
+    (finance / ".env").write_text("# empty\n", encoding="utf-8")
+    return root, {"default": root, "finance": finance, "other": other}
+
+
+def test_find_token_collision_names_the_holder(tmp_path: Path) -> None:
+    """The pre-write refusal names the profile that already holds the token.
+
+    The runtime `EX_CONFIG` stop is a backstop, not a UX — discovering a
+    collision as "the service will not start" is a bad way to learn you pasted
+    the wrong token. ``find_token_collision`` reads every other profile's
+    ``.env`` and returns the holder's name.
+    """
+    _root, dirs = _profile_tree(tmp_path)
+    (dirs["other"] / ".env").write_text('TELEGRAM_BOT_TOKEN="shared"\n', encoding="utf-8")
+
+    holder = ps.find_token_collision("telegram", "shared", skip_profile="finance")
+    assert holder == "other"
+    # An unused token has no holder.
+    assert ps.find_token_collision("telegram", "fresh", skip_profile="finance") is None
+
+
+def test_find_token_collision_is_per_platform(tmp_path: Path) -> None:
+    """Two platforms may use the same-shaped string — only the same platform's
+    token key is compared, so a Discord token that happens to equal a Telegram
+    token in another profile does not trip the Telegram collision check."""
+    _root, dirs = _profile_tree(tmp_path)
+    (dirs["other"] / ".env").write_text('DISCORD_BOT_TOKEN="xyz"\n', encoding="utf-8")
+
+    assert ps.find_token_collision("telegram", "xyz", skip_profile="finance") is None
+    assert ps.find_token_collision("discord", "xyz", skip_profile="finance") == "other"
+
+
+def test_commit_channel_refuses_a_collision_before_writing(tmp_path: Path) -> None:
+    """The collision is refused *before* the target's ``.env`` is touched.
+
+    No half-written state: the token is never written, so the profile stays
+    channel-less and `hermes doctor` keeps reporting it as adoptable. The
+    exception names the holder.
+    """
+    _root, dirs = _profile_tree(tmp_path)
+    (dirs["other"] / ".env").write_text('TELEGRAM_BOT_TOKEN="dup"\n', encoding="utf-8")
+    finance_env = dirs["finance"] / ".env"
+    finance_env.write_text("# empty\n", encoding="utf-8")
+
+    with pytest.raises(ps.ChannelCollisionError) as exc_info:
+        ps.commit_channel(
+            "finance", platform="telegram", token="dup", start_service=False
+        )
+    assert exc_info.value.holder == "other"
+    assert "other" in str(exc_info.value)
+    # The target's .env was NOT modified — still channel-less.
+    assert "dup" not in finance_env.read_text(encoding="utf-8")
+    assert not ps.profile_has_channel(dirs["finance"])
+
+
+def test_commit_channel_writes_into_the_profiles_own_env_and_gains_a_channel(
+    tmp_path: Path,
+) -> None:
+    """After a successful commit the profile moves to the ok line.
+
+    This is the assertion §4.2 T2 calls worth writing: the token lands in the
+    profile's *own* `.env` (never the process environment, #219/#220 — verified
+    by reading the file, not the process), and `profile_has_channel` then
+    reads it as configured. `start_service=False` keeps the test off the
+    service manager, which a CI box does not have.
+    """
+    _root, dirs = _profile_tree(tmp_path)
+    import os
+
+    finance_env = dirs["finance"] / ".env"
+    finance_env.write_text("# empty\n", encoding="utf-8")
+    # The another-profile's .env is the wrong destination (#219/#220): the
+    # override must route the write into finance's own file, never the
+    # default profile's. The default home here is the root itself.
+    default_env = dirs["default"] / ".env"
+
+    result = ps.commit_channel(
+        "finance", platform="telegram", token="123:abc-fresh", start_service=False
+    )
+
+    assert result["channel_less"] is False
+    # The target profile's file carries the token; the default profile's does not.
+    written = finance_env.read_text(encoding="utf-8")
+    assert "123:abc-fresh" in written
+    assert "TELEGRAM_BOT_TOKEN" in written
+    assert not default_env.exists() or "123:abc-fresh" not in default_env.read_text(
+        encoding="utf-8", errors="replace"
+    )
+    # The doctor's read now says the profile has a channel.
+    assert ps.profile_has_channel(dirs["finance"])
+
+
+def test_commit_channel_unknown_platform_is_refused(tmp_path: Path) -> None:
+    """Channels with complex credentials (WhatsApp, Signal) have their own
+    wizards and are not committable here — refused with a pointer, not a
+    half-configured .env."""
+    _root, dirs = _profile_tree(tmp_path)
+
+    with pytest.raises(ValueError):
+        ps.commit_channel(
+            "finance", platform="whatsapp", token="x", start_service=False
+        )

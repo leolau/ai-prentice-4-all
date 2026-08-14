@@ -14191,15 +14191,28 @@ async def adopt_profile_suggestion_endpoint(request: Request, suggestion_id: str
 
 @app.post("/api/profiles/suggestions/{suggestion_id}/dismiss")
 async def dismiss_profile_suggestion_endpoint(request: Request, suggestion_id: str):
-    """Dismiss a profile suggestion (owner only)."""
+    """Dismiss a profile suggestion (owner only).
+
+    Accepts an optional ``reason`` in the JSON body — recorded in the C5
+    audit trail. A dismissal is permanent for that evidence (latched on
+    ``dedup_key``), so the owner is asked to confirm once and plainly on
+    the surface; the reason is the place to say why.
+    """
     from hermes_cli.profile_suggestion import ProfileSuggestionStore
 
     store = ProfileSuggestionStore(_comms_app_store())
     principal = await _comms_resolve_principal(request)
     if not principal.is_owner:
         raise HTTPException(status_code=403, detail="only the owner may dismiss")
+    reason = ""
     try:
-        suggestion = await store.dismiss(principal, suggestion_id)
+        body = await request.json()
+        if isinstance(body, dict) and isinstance(body.get("reason"), str):
+            reason = body["reason"].strip()
+    except Exception:
+        pass
+    try:
+        suggestion = await store.dismiss(principal, suggestion_id, reason=reason)
         return {"ok": True, "name": suggestion.proposed_name}
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc

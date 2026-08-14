@@ -53,6 +53,9 @@ import type {
   OnboardingReadinessResponse,
   Principal,
   ProfilesResponse,
+  ProfileSuggestionAdoptResponse,
+  ProfileSuggestionDismissResponse,
+  ProfileSuggestionsResponse,
   ProposedAction,
   Role,
   SessionCreateResponse,
@@ -186,6 +189,49 @@ export class HermesApiClient {
    */
   async profiles(): Promise<ProfilesResponse> {
     return this.request("/api/profiles");
+  }
+
+  // --- Profile suggestions (FG-30) ---------------------------------------
+  // The Python API is the authority: it enforces owner-only adopt/dismiss by
+  // binding the requesting principal (`_comms_resolve_principal`, the #253
+  // fix), and the dedup_key latches a dismissal forever. These methods just
+  // forward; a 403 from upstream is the real gate, not a BFF re-derivation.
+
+  /**
+   * Pending profile suggestions for the active profile (read-only, any
+   * enrolled principal). At most one is `proposed` at a time (§1.1).
+   */
+  async profileSuggestions(): Promise<ProfileSuggestionsResponse> {
+    return this.request("/api/profiles/suggestions");
+  }
+
+  /**
+   * Adopt a suggestion (owner only). Returns the new profile's path and
+   * goal — the new profile is channel-less until the owner commits one (§3).
+   */
+  async adoptProfileSuggestion(
+    suggestionId: string,
+  ): Promise<ProfileSuggestionAdoptResponse> {
+    return this.request(
+      `/api/profiles/suggestions/${encodeURIComponent(suggestionId)}/adopt`,
+      { method: "POST" },
+    );
+  }
+
+  /**
+   * Dismiss a suggestion (owner only). `reason` is optional and recorded in
+   * the C5 audit. A dismissal is **permanent** for that evidence: the
+   * `dedup_key` latches it, so the same cluster is never re-proposed (§1.1).
+   */
+  async dismissProfileSuggestion(
+    suggestionId: string,
+    reason?: string,
+  ): Promise<ProfileSuggestionDismissResponse> {
+    const json = reason ? { reason } : undefined;
+    return this.request(
+      `/api/profiles/suggestions/${encodeURIComponent(suggestionId)}/dismiss`,
+      { method: "POST", json },
+    );
   }
 
   /** Resolve the C1 principal + role for the current bridged session. */
