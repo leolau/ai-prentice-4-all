@@ -1,9 +1,8 @@
-"""Per-profile first-class Project store.
+"""Root-anchored first-class Project store.
 
-A **Project** is a human-named, multi-folder workspace. Unlike the desktop's
-old inferred "workspaces" (derived from each session's ``cwd`` + a git probe)
-and unlike kanban's self-generated worktrees, a Project is an explicit,
-persisted entity the user creates and names. It anchors:
+A **Project** is the durable record of a piece of work that can be reviewed,
+repeated and learnt from (see ``docs/design/projects-feature-design.md``).
+It anchors:
 
 - **Desktop session grouping** — a session belongs to a project when its
   ``cwd`` lives under one of the project's folders (longest-prefix match).
@@ -11,19 +10,26 @@ persisted entity the user creates and names. It anchors:
   under the project's primary repo with a deterministic branch name, instead
   of the random ``wt/<task-id>`` fallback.
 
-Scope: **per-profile**, stored at ``$HERMES_HOME/projects.db`` (resolved via
-``get_hermes_home()``), mirroring sessions / config / cron. This deliberately
-differs from kanban, whose board DB is root-anchored and shared across
-profiles. A Project may *bind* a kanban board (``board_slug``) so the two
-systems agree on the repo + branch convention without merging their stores.
+Scope: **shared root**, stored at ``kanban_home() / "projects.db"`` — the
+same resolver the kanban board uses, so the two can never disagree about
+which root they are on. A project's work IS kanban cards and its schedule IS
+a ``hermes cron`` job, so the record must live where both live: above any one
+profile. ``HERMES_PROJECTS_DB`` overrides the resolution for tests and odd
+deployments (and is the reversibility lever for the root migration).
 
-The schema is intentionally small and additive: column additions go through
+Legacy per-profile stores (``$HERMES_HOME/projects.db``) are imported into
+the root DB on first open (:func:`import_profile_stores`); the per-profile
+files are left in place, untouched and unread afterwards.
+
+The schema is intentionally additive: column additions go through
 :func:`_add_column_if_missing` so opening an old DB is always safe.
 """
 
 from __future__ import annotations
 
 import contextlib
+import json
+import logging
 import os
 import re
 import secrets
@@ -31,10 +37,12 @@ import sqlite3
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterable, List, Optional
+from typing import Any, Iterable, List, Optional
 
 from hermes_cli.sqlite_util import add_column_if_missing as _add_column_if_missing, write_txn
 from hermes_constants import get_hermes_home
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Paths
@@ -42,10 +50,33 @@ from hermes_constants import get_hermes_home
 
 
 def projects_db_path() -> Path:
-    """The per-profile projects DB path (``$HERMES_HOME/projects.db``).
+    """The shared-root projects DB path (``kanban_home() / "projects.db"``).
 
-    Profile-aware: ``get_hermes_home()`` already points at the active profile's
-    home. Tests pass an explicit ``db_path`` to :func:`connect`.
+    Resolution order:
+
+    1. ``HERMES_PROJECTS_DB`` env var when set and non-empty (explicit
+       override for tests, unusual deployments, and the reversibility path
+       for the root migration).
+    2. ``kanban_db.kanban_home() / "projects.db"`` — the same resolver the
+       board uses, so projects and cards always share a root.
+
+    The kanban import is lazy: ``kanban_db`` imports this module inside a
+    function, and a module-level import here would close the loop.
+    """
+    override = os.environ.get("HERMES_PROJECTS_DB", "").strip()
+    if override:
+        return Path(override).expanduser()
+    from hermes_cli.kanban_db import kanban_home
+
+    return kanban_home() / "projects.db"
+
+
+def legacy_profile_projects_db_path() -> Path:
+    """The old per-profile location (``$HERMES_HOME/projects.db``).
+
+    Kept for the one-shot root import (:func:`import_profile_stores`) and
+    for callers that need to *name* the legacy file (backups, diagnostics).
+    Runtime reads and writes never touch it.
     """
     return get_hermes_home() / "projects.db"
 
@@ -119,6 +150,170 @@ CREATE TABLE IF NOT EXISTS project_links (
 
 CREATE INDEX IF NOT EXISTS idx_project_links_kind
     ON project_links(project_id, kind, added_at DESC);
+
+-- ── Projects feature (design §2.2) ───────────────────────────────────────────────
+
+-- People. A member is a *person* (box-wide user id); a participant profile is
+-- an *instrument* the work runs on (project_profiles above). Both lists are
+-- needed and they are not the same list.
+CREATE TABLE IF NOT EXISTS project_members (
+    project_id  TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    user_id     TEXT NOT NULL,
+    role        TEXT NOT NULL DEFAULT 'member',   -- lead | member | viewer
+    added_by    TEXT,
+    added_at    INTEGER NOT NULL,
+    PRIMARY KEY (project_id, user_id)
+);
+
+-- [10] contacts: people involved who are not users of this box. No principal,
+-- no permissions, no global address book. `address` may be an outbound
+-- destination and is therefore PII: returned to members only, never to a
+-- viewer, and never compiled into a run prompt unless the step needs it.
+CREATE TABLE IF NOT EXISTS project_contacts (
+    id          TEXT PRIMARY KEY,
+    project_id  TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    name        TEXT NOT NULL,
+    role        TEXT,                       -- 'client', 'reviewer', 'the list' …
+    org         TEXT,
+    platform    TEXT,                       -- email | telegram | slack | phone | …
+    address     TEXT,                       -- PII; see the note above
+    user_id     TEXT,                       -- set when the contact also has a principal
+    notes       TEXT,
+    created_by  TEXT,
+    created_at  INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_project_contacts_project
+    ON project_contacts(project_id);
+
+-- [3] outputs: the deliverables, declared before the work. Mandatory: a
+-- project has at least one row. This table is what gives progress a
+-- denominator that means something.
+CREATE TABLE IF NOT EXISTS project_outputs (
+    id            TEXT PRIMARY KEY,
+    project_id    TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    seq           INTEGER NOT NULL,          -- display order
+    title         TEXT NOT NULL,             -- "The Monday digest email"
+    spec          TEXT,                      -- what "good" looks like; free text
+    kind          TEXT NOT NULL DEFAULT 'artifact',
+                                             -- artifact | file | message | decision | report | code
+    required      INTEGER NOT NULL DEFAULT 1,
+    recurring     INTEGER NOT NULL DEFAULT 0, -- delivered once per run (repeatable projects)
+    status        TEXT NOT NULL DEFAULT 'pending',
+                                             -- pending | in_progress | delivered | accepted | dropped
+    delivered_at  INTEGER,
+    accepted_at   INTEGER,                   -- a human accepted it; only a human may
+    accepted_by   TEXT,
+    created_at    INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_project_outputs_project
+    ON project_outputs(project_id, seq);
+
+-- One row per *delivery* of an output: which run produced it and what the
+-- artefact is. `recurring` outputs accumulate one row per run.
+CREATE TABLE IF NOT EXISTS project_output_deliveries (
+    id           TEXT PRIMARY KEY,
+    output_id    TEXT NOT NULL REFERENCES project_outputs(id) ON DELETE CASCADE,
+    run_id       TEXT,                       -- project_runs.id, when a run produced it
+    task_id      TEXT,                       -- the card that produced it, when any
+    link_kind    TEXT,                       -- file | url | attachment | session | memory
+    link_ref     TEXT,                       -- the pointer, resolved under the caller's principal
+    profile      TEXT,                       -- which profile owns the referent
+    label        TEXT,                       -- cached display label (link rot)
+    note         TEXT,
+    delivered_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_project_output_deliveries_output
+    ON project_output_deliveries(output_id, delivered_at DESC);
+
+-- The method: a versioned playbook. One row per revision; `steps` is a JSON
+-- array of card templates (design §7). A new revision is created inactive
+-- and activated by a human.
+CREATE TABLE IF NOT EXISTS project_playbook (
+    project_id   TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    rev          INTEGER NOT NULL,
+    body         TEXT NOT NULL DEFAULT '',   -- prose: what this project does
+    steps        TEXT NOT NULL DEFAULT '[]', -- JSON: ordered card templates
+    active       INTEGER NOT NULL DEFAULT 0,
+    created_by   TEXT,
+    created_at   INTEGER NOT NULL,
+    activated_at INTEGER,
+    note         TEXT,                        -- why this revision exists (often a retro id)
+    PRIMARY KEY (project_id, rev)
+);
+
+-- The method: guidance the user gives over time. A directive is a standing
+-- instruction; feedback is a judgement about a run or a card. Both are
+-- durable and compiled into future run prompts; neither is ever injected
+-- into a live conversation.
+CREATE TABLE IF NOT EXISTS project_directives (
+    id            TEXT PRIMARY KEY,
+    project_id    TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    kind          TEXT NOT NULL,              -- directive | feedback
+    body          TEXT NOT NULL,
+    scope         TEXT NOT NULL DEFAULT 'project',  -- project | run | card
+    target_ref    TEXT,                       -- run_no or task_id when scope != project
+    rating        TEXT,                       -- feedback only: good | bad (null for directive)
+    author_user_id TEXT NOT NULL,
+    created_at    INTEGER NOT NULL,
+    active        INTEGER NOT NULL DEFAULT 1,
+    retired_at    INTEGER,
+    superseded_by TEXT                        -- another directive id
+);
+CREATE INDEX IF NOT EXISTS idx_project_directives_active
+    ON project_directives(project_id, active, created_at DESC);
+
+-- The record: one row per occurrence (design §6).
+CREATE TABLE IF NOT EXISTS project_runs (
+    id            TEXT PRIMARY KEY,
+    project_id    TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    run_no        INTEGER NOT NULL,
+    trigger       TEXT NOT NULL,     -- schedule | manual | event | review
+    triggered_by  TEXT,              -- user id, or 'cron:<job_id>'
+    profile       TEXT NOT NULL,     -- the host profile the run executed under
+    playbook_rev  INTEGER,           -- NULL for a run with no playbook (ad-hoc work)
+    status        TEXT NOT NULL,     -- running | waiting | blocked | done | failed | cancelled
+    started_at    INTEGER NOT NULL,
+    ended_at      INTEGER,
+    session_id    TEXT,              -- SessionDB id of the seeded session, when there is one
+    trace_id      TEXT,              -- C8 trace; cost and steps are read from it
+    outcome       TEXT,              -- one line, machine-set on close
+    summary       TEXT,              -- the agent's account of the run
+    retro         TEXT,              -- the retrospective; NULL until written
+    retro_at      INTEGER,
+    score_self    INTEGER,           -- [7] 1–5, the run's own claim, written with the retro
+    score_user    INTEGER,           -- [7] 1–5, the human's; only a human may write it
+    score_note    TEXT,              -- why that score (the part worth reading)
+    scored_by     TEXT,
+    scored_at     INTEGER,
+    error         TEXT,
+    UNIQUE (project_id, run_no)
+);
+CREATE INDEX IF NOT EXISTS idx_project_runs_recent
+    ON project_runs(project_id, run_no DESC);
+
+-- Which cards belong to which run. The mapping lives here so the shared
+-- board learns nothing about Projects (no run_id column on tasks).
+CREATE TABLE IF NOT EXISTS project_run_cards (
+    run_id    TEXT NOT NULL REFERENCES project_runs(id) ON DELETE CASCADE,
+    task_id   TEXT NOT NULL,
+    step_key  TEXT,                  -- the playbook step it came from, when any
+    PRIMARY KEY (run_id, task_id)
+);
+
+-- Skill candidates a run's retro proposed (design §8.2 row 3). The row adds
+-- no mechanism — the shipped background-review loop still distils skills and
+-- FG-29 still promotes them; a project's contribution is *provenance*: the
+-- candidate records the project and run it came from.
+CREATE TABLE IF NOT EXISTS project_skill_candidates (
+    id          TEXT PRIMARY KEY,
+    project_id  TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    run_no      INTEGER NOT NULL,
+    name        TEXT NOT NULL,
+    body        TEXT NOT NULL,
+    created_at  INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_project_skill_candidates
+    ON project_skill_candidates(project_id, created_at DESC);
 """
 
 
@@ -179,11 +374,13 @@ _INITIALIZED_PATHS: set[str] = set()
 
 
 def connect(db_path: Optional[Path] = None) -> sqlite3.Connection:
-    """Open (and initialize if needed) the per-profile projects DB.
+    """Open (and initialize if needed) the shared-root projects DB.
 
     WAL with DELETE fallback for network filesystems (shared helper from
     ``hermes_state``). Schema init is idempotent (``CREATE TABLE IF NOT
-    EXISTS`` + additive migrations) and cached per-path per-process.
+    EXISTS`` + additive migrations) and cached per-path per-process. On the
+    first open of the default (root) path per process, legacy per-profile
+    stores are imported (:func:`import_profile_stores`).
     """
     path = db_path if db_path is not None else projects_db_path()
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -198,6 +395,16 @@ def connect(db_path: Optional[Path] = None) -> sqlite3.Connection:
         if resolved not in _INITIALIZED_PATHS:
             conn.executescript(SCHEMA_SQL)
             _migrate_add_optional_columns(conn)
+            if db_path is None:
+                # One-shot-per-process import of the legacy per-profile
+                # stores. Row-keyed idempotent; a corrupt legacy file must
+                # never keep the root store from opening.
+                try:
+                    import_profile_stores(conn, path.parent)
+                except Exception:
+                    logger.warning(
+                        "projects: legacy profile-store import failed", exc_info=True
+                    )
             _INITIALIZED_PATHS.add(resolved)
     except Exception:
         conn.close()
@@ -224,22 +431,167 @@ def connect_closing(db_path: Optional[Path] = None):
             pass
 
 
-# TEXT columns added to `projects` after v1; re-applied idempotently on every
-# open so a legacy DB upgrades in place.
-_OPTIONAL_PROJECT_COLUMNS = ("board_slug", "primary_path", "icon", "color")
+# Columns added to `projects` after v1; re-applied idempotently on every
+# open so a legacy DB upgrades in place. (name, full column DDL) pairs —
+# SQLite's ADD COLUMN requires a constant default for NOT NULL, which the
+# Projects-feature columns (design §2.2) all have.
+_PROJECT_COLUMN_MIGRATIONS: tuple[tuple[str, str], ...] = (
+    ("board_slug", "board_slug TEXT"),
+    ("primary_path", "primary_path TEXT"),
+    ("icon", "icon TEXT"),
+    ("color", "color TEXT"),
+    # Projects feature (2026-08) — the ed.3 additive column set.
+    ("goal", "goal TEXT"),
+    ("visibility", "visibility TEXT NOT NULL DEFAULT 'shared'"),
+    ("owner_user_id", "owner_user_id TEXT"),
+    ("status", "status TEXT NOT NULL DEFAULT 'active'"),
+    ("cadence", "cadence TEXT NOT NULL DEFAULT 'one_off'"),
+    ("schedule", "schedule TEXT"),
+    ("review_every", "review_every TEXT"),
+    ("autonomy", "autonomy TEXT NOT NULL DEFAULT 'supervised'"),
+    ("max_in_progress", "max_in_progress INTEGER NOT NULL DEFAULT 1"),
+    ("budget_usd_per_run", "budget_usd_per_run REAL"),
+    ("definition_of_done", "definition_of_done TEXT"),
+    ("target_audience", "target_audience TEXT"),
+    ("score_rubric", "score_rubric TEXT"),
+    ("toolsets", "toolsets TEXT"),
+    ("skills", "skills TEXT"),
+    ("due_at", "due_at INTEGER"),
+    ("host_profile", "host_profile TEXT"),
+    ("cron_job_id", "cron_job_id TEXT"),
+    ("summary", "summary TEXT"),
+    ("summary_at", "summary_at INTEGER"),
+    ("last_reviewed_at", "last_reviewed_at INTEGER"),
+    ("next_run_at", "next_run_at INTEGER"),
+    ("imported_from_profile", "imported_from_profile TEXT"),
+)
 
 
 def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
     """Add columns introduced after v1 to legacy DBs (safe on every open)."""
     cols = {row["name"] for row in conn.execute("PRAGMA table_info(projects)")}
-    for col in _OPTIONAL_PROJECT_COLUMNS:
+    for col, ddl in _PROJECT_COLUMN_MIGRATIONS:
         if col not in cols:
-            _add_column_if_missing(conn, "projects", col, f"{col} TEXT")
+            _add_column_if_missing(conn, "projects", col, ddl)
 
 
 # ---------------------------------------------------------------------------
 # Dataclasses
 # ---------------------------------------------------------------------------
+
+# Field limits and vocabularies the store enforces (design §2.2). The router
+# re-checks them for better error codes; enforcing them here means the CLI
+# cannot bypass them.
+GOAL_MAX_CHARS = 160
+NAME_MAX_CHARS = 60
+VALID_PROJECT_STATUSES = ("planning", "active", "paused", "done", "archived")
+VALID_CADENCES = ("one_off", "repeatable", "standing")
+VALID_AUTONOMY_LEVELS = ("manual", "supervised", "autonomous")
+VALID_MEMBER_ROLES = ("lead", "member", "viewer")
+
+
+def _validate_goal(goal: str) -> str:
+    """Field [1]: the outcome sentence — non-empty, one sentence, ≤160 chars."""
+    g = str(goal or "").strip()
+    if not g:
+        raise ValueError("project goal must not be empty")
+    if len(g) > GOAL_MAX_CHARS:
+        raise ValueError(
+            f"project goal must be at most {GOAL_MAX_CHARS} chars "
+            f"(got {len(g)}): it is one outcome sentence, not the brief"
+        )
+    return g
+
+
+def _validate_name(name: str) -> str:
+    """The short label — non-empty, ≤60 chars (fits a list row, board, slug)."""
+    n = str(name or "").strip()
+    if not n:
+        raise ValueError("project name must not be empty")
+    if len(n) > NAME_MAX_CHARS:
+        raise ValueError(
+            f"project name must be at most {NAME_MAX_CHARS} chars (got {len(n)})"
+        )
+    return n
+
+
+def default_name_from_goal(goal: str) -> str:
+    """Derive the short label from the goal's leading clause (design §2.2).
+
+    Leading clause = text before the first ``—``, ``:`` or ``.``; failing
+    that, the first six words. Truncated to ``NAME_MAX_CHARS``. Never tracks
+    the goal afterwards — the two are edited independently.
+    """
+    g = str(goal or "").strip()
+    for sep in ("—", ":", "."):
+        idx = g.find(sep)
+        if idx > 0:
+            g = g[:idx]
+            break
+    else:
+        words = g.split()
+        if len(words) > 6:
+            g = " ".join(words[:6])
+    return g.strip()[:NAME_MAX_CHARS].strip()
+
+
+VALID_VISIBILITIES = ("shared", "private")
+
+
+def _validate_cadence(value: str) -> str:
+    v = str(value or "").strip()
+    if v not in VALID_CADENCES:
+        raise ValueError(f"cadence must be one of {sorted(VALID_CADENCES)}")
+    return v
+
+
+def _validate_autonomy(value: str) -> str:
+    v = str(value or "").strip()
+    if v not in VALID_AUTONOMY_LEVELS:
+        raise ValueError(f"autonomy must be one of {sorted(VALID_AUTONOMY_LEVELS)}")
+    return v
+
+
+def _validate_visibility(value: str) -> str:
+    v = str(value or "").strip()
+    if v not in VALID_VISIBILITIES:
+        raise ValueError(f"visibility must be one of {sorted(VALID_VISIBILITIES)}")
+    return v
+
+
+def _validate_max_in_progress(value) -> int:
+    try:
+        n = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("max_in_progress must be an integer") from exc
+    if n < 1:
+        raise ValueError("max_in_progress must be >= 1")
+    return n
+
+
+def _opt_str(value) -> Optional[str]:
+    if value is None:
+        return None
+    s = str(value).strip()
+    return s or None
+
+
+def _opt_int(value) -> Optional[int]:
+    if value is None or value == "":
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("expected an integer") from exc
+
+
+def _opt_float(value) -> Optional[float]:
+    if value is None or value == "":
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("expected a number") from exc
 
 
 @dataclass
@@ -271,6 +623,31 @@ class Project:
     primary_path: Optional[str] = None
     archived: bool = False
     folders: List[ProjectFolder] = field(default_factory=list)
+    # Projects-feature columns (design §2.2). Defaults match the additive
+    # column defaults so legacy rows and new rows read identically.
+    goal: Optional[str] = None
+    visibility: str = "shared"
+    owner_user_id: Optional[str] = None
+    status: str = "active"
+    cadence: str = "one_off"
+    schedule: Optional[str] = None
+    review_every: Optional[str] = None
+    autonomy: str = "supervised"
+    max_in_progress: int = 1
+    budget_usd_per_run: Optional[float] = None
+    definition_of_done: Optional[str] = None
+    target_audience: Optional[str] = None
+    score_rubric: Optional[str] = None
+    toolsets: Optional[str] = None
+    skills: Optional[str] = None
+    due_at: Optional[int] = None
+    host_profile: Optional[str] = None
+    cron_job_id: Optional[str] = None
+    summary: Optional[str] = None
+    summary_at: Optional[int] = None
+    last_reviewed_at: Optional[int] = None
+    next_run_at: Optional[int] = None
+    imported_from_profile: Optional[str] = None
 
     def to_dict(self) -> dict:
         return {
@@ -285,22 +662,72 @@ class Project:
             "archived": bool(self.archived),
             "created_at": self.created_at,
             "folders": [f.to_dict() for f in self.folders],
+            "goal": self.goal,
+            "visibility": self.visibility,
+            "owner_user_id": self.owner_user_id,
+            "status": self.status,
+            "cadence": self.cadence,
+            "schedule": self.schedule,
+            "review_every": self.review_every,
+            "autonomy": self.autonomy,
+            "max_in_progress": self.max_in_progress,
+            "budget_usd_per_run": self.budget_usd_per_run,
+            "definition_of_done": self.definition_of_done,
+            "target_audience": self.target_audience,
+            "score_rubric": self.score_rubric,
+            "toolsets": self.toolsets,
+            "skills": self.skills,
+            "due_at": self.due_at,
+            "host_profile": self.host_profile,
+            "cron_job_id": self.cron_job_id,
+            "summary": self.summary,
+            "summary_at": self.summary_at,
+            "last_reviewed_at": self.last_reviewed_at,
+            "next_run_at": self.next_run_at,
+            "imported_from_profile": self.imported_from_profile,
         }
 
 
+def _row_get(row: sqlite3.Row, key: str, default=None):
+    """Read ``row[key]`` when the column exists (legacy DB tolerance)."""
+    return row[key] if key in row.keys() else default
+
+
 def _project_from_row(row: sqlite3.Row) -> Project:
-    keys = row.keys()
     return Project(
         id=row["id"],
         slug=row["slug"],
         name=row["name"],
         created_at=row["created_at"],
-        description=row["description"] if "description" in keys else None,
-        icon=row["icon"] if "icon" in keys else None,
-        color=row["color"] if "color" in keys else None,
-        board_slug=row["board_slug"] if "board_slug" in keys else None,
-        primary_path=row["primary_path"] if "primary_path" in keys else None,
-        archived=bool(row["archived"]) if "archived" in keys else False,
+        description=_row_get(row, "description"),
+        icon=_row_get(row, "icon"),
+        color=_row_get(row, "color"),
+        board_slug=_row_get(row, "board_slug"),
+        primary_path=_row_get(row, "primary_path"),
+        archived=bool(_row_get(row, "archived", 0)),
+        goal=_row_get(row, "goal"),
+        visibility=_row_get(row, "visibility", "shared") or "shared",
+        owner_user_id=_row_get(row, "owner_user_id"),
+        status=_row_get(row, "status", "active") or "active",
+        cadence=_row_get(row, "cadence", "one_off") or "one_off",
+        schedule=_row_get(row, "schedule"),
+        review_every=_row_get(row, "review_every"),
+        autonomy=_row_get(row, "autonomy", "supervised") or "supervised",
+        max_in_progress=int(_row_get(row, "max_in_progress", 1) or 1),
+        budget_usd_per_run=_row_get(row, "budget_usd_per_run"),
+        definition_of_done=_row_get(row, "definition_of_done"),
+        target_audience=_row_get(row, "target_audience"),
+        score_rubric=_row_get(row, "score_rubric"),
+        toolsets=_row_get(row, "toolsets"),
+        skills=_row_get(row, "skills"),
+        due_at=_row_get(row, "due_at"),
+        host_profile=_row_get(row, "host_profile"),
+        cron_job_id=_row_get(row, "cron_job_id"),
+        summary=_row_get(row, "summary"),
+        summary_at=_row_get(row, "summary_at"),
+        last_reviewed_at=_row_get(row, "last_reviewed_at"),
+        next_run_at=_row_get(row, "next_run_at"),
+        imported_from_profile=_row_get(row, "imported_from_profile"),
     )
 
 
@@ -356,16 +783,22 @@ def create_project(
     icon: Optional[str] = None,
     color: Optional[str] = None,
     board_slug: Optional[str] = None,
+    goal: Optional[str] = None,
+    owner_user_id: Optional[str] = None,
 ) -> str:
     """Create a project and return its id.
+
+    The low-level writer, kept for the legacy workspace surfaces (the
+    desktop's session grouping, ``hermes project``). Full Projects-feature
+    creates go through :func:`create_full_project`, which enforces the
+    mandatory fields [1]–[4].
 
     ``folders`` are normalized to absolute paths. If ``primary_path`` is given
     it is added to the folder set (if not already present) and marked primary;
     otherwise the first folder becomes primary.
     """
-    name = str(name or "").strip()
-    if not name:
-        raise ValueError("project name must not be empty")
+    name = _validate_name(name)
+    validated_goal = _validate_goal(goal) if goal is not None else None
 
     slug_candidate = normalize_slug(slug) if slug else _slugify(name)
     pid = _new_project_id()
@@ -388,8 +821,8 @@ def create_project(
         conn.execute(
             "INSERT INTO projects "
             "(id, slug, name, description, icon, color, board_slug, "
-            " primary_path, created_at, archived) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0)",
+            " primary_path, created_at, archived, goal, owner_user_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)",
             (
                 pid,
                 unique,
@@ -400,6 +833,8 @@ def create_project(
                 normalize_slug(board_slug) if board_slug else None,
                 primary,
                 now,
+                validated_goal,
+                owner_user_id,
             ),
         )
         for path in folder_paths:
@@ -409,6 +844,67 @@ def create_project(
                 "VALUES (?, ?, ?, ?, ?)",
                 (pid, path, None, 1 if path == primary else 0, now),
             )
+    return pid
+
+
+def create_full_project(
+    conn: sqlite3.Connection,
+    *,
+    goal: str,
+    description: str,
+    name: Optional[str] = None,
+    slug: Optional[str] = None,
+    folders: Optional[Iterable[str]] = None,
+    primary_path: Optional[str] = None,
+    icon: Optional[str] = None,
+    color: Optional[str] = None,
+    board_slug: Optional[str] = None,
+    owner_user_id: Optional[str] = None,
+    cadence: str = "one_off",
+    autonomy: str = "supervised",
+) -> str:
+    """Create a project under the full §2.2 contract and return its id.
+
+    Mandatory: ``goal`` [1] (non-empty, ≤160) and ``description`` [2]
+    (non-empty). ``name`` defaults from the goal's leading clause and is
+    independently editable afterwards. The row lands in ``planning`` — it
+    may only leave once the caller has written at least one output [3], one
+    member and one profile [4] (:func:`set_project_status` enforces the
+    gate). Outputs/members/profiles are written through their own helpers so
+    the caller controls their rows.
+    """
+    validated_goal = _validate_goal(goal)
+    desc = str(description or "").strip()
+    if not desc:
+        raise ValueError("project description must not be empty")
+    if cadence not in VALID_CADENCES:
+        raise ValueError(f"cadence must be one of {sorted(VALID_CADENCES)}")
+    if autonomy not in VALID_AUTONOMY_LEVELS:
+        raise ValueError(f"autonomy must be one of {sorted(VALID_AUTONOMY_LEVELS)}")
+
+    label = _validate_name(name) if name else default_name_from_goal(validated_goal)
+    if not label:
+        raise ValueError("project name must not be empty")
+
+    pid = create_project(
+        conn,
+        name=label,
+        slug=slug,
+        folders=folders,
+        primary_path=primary_path,
+        description=desc,
+        icon=icon,
+        color=color,
+        board_slug=board_slug,
+        goal=validated_goal,
+        owner_user_id=owner_user_id,
+    )
+    with write_txn(conn):
+        conn.execute(
+            "UPDATE projects SET status = 'planning', cadence = ?, autonomy = ? "
+            "WHERE id = ?",
+            (cadence, autonomy, pid),
+        )
     return pid
 
 
@@ -444,12 +940,17 @@ def update_project(
     project_id: str,
     *,
     name: Optional[str] = None,
+    goal: Optional[str] = None,
     description: Optional[str] = None,
     icon: Optional[str] = None,
     color: Optional[str] = None,
     board_slug: Optional[str] = None,
 ) -> bool:
     """Patch top-level project fields. Only provided fields change.
+
+    ``name`` and ``goal`` are independent fields (design decision 11):
+    re-wording the goal never silently renames the project, and renaming
+    never rewrites the goal.
 
     ``icon``, ``color``, and ``board_slug`` accept an empty string to clear
     (store NULL) — passing ``None`` leaves the field untouched, so callers that
@@ -458,11 +959,11 @@ def update_project(
     sets: List[str] = []
     params: List[object] = []
     if name is not None:
-        n = str(name).strip()
-        if not n:
-            raise ValueError("project name must not be empty")
         sets.append("name = ?")
-        params.append(n)
+        params.append(_validate_name(name))
+    if goal is not None:
+        sets.append("goal = ?")
+        params.append(_validate_goal(goal))
     if description is not None:
         sets.append("description = ?")
         params.append(description)
@@ -481,6 +982,180 @@ def update_project(
     with write_txn(conn):
         cur = conn.execute(
             f"UPDATE projects SET {', '.join(sets)} WHERE id = ?", params
+        )
+    return cur.rowcount > 0
+
+
+def update_project_fields(
+    conn: sqlite3.Connection,
+    project_id: str,
+    fields: dict,
+) -> bool:
+    """Patch the §2.2 record fields :func:`update_project` does not cover.
+
+    ``status`` is intentionally NOT accepted here — status transitions go
+    through :func:`set_project_status`, which owns the planning-exit gate.
+    Unknown fields raise ``ValueError`` so a router typo is loud.
+    """
+    writers = {
+        "cadence": lambda v: _validate_cadence(v),
+        "due_at": _opt_int,
+        "review_every": _opt_str,
+        "target_audience": _opt_str,
+        "score_rubric": _opt_str,
+        "visibility": _validate_visibility,
+        "definition_of_done": _opt_str,
+        "max_in_progress": _validate_max_in_progress,
+        "budget_usd_per_run": _opt_float,
+        "autonomy": lambda v: _validate_autonomy(v),
+        # §4.1 instruments: stored as comma lists; the narrowing
+        # intersection happens at run spawn time, never at write time.
+        "toolsets": _opt_str,
+        "skills": _opt_str,
+        # §3.2 schedule wiring: the cron store is authoritative; these are
+        # the project-side halves of the link (``schedule`` text, the job
+        # id in the host profile's store, and the ``next_run_at`` display
+        # cache refreshed on read).
+        "schedule": _opt_str,
+        "cron_job_id": _opt_str,
+        "next_run_at": _opt_int,
+    }
+    sets: List[str] = []
+    params: List[Any] = []
+    for key, value in fields.items():
+        if key == "status":
+            raise ValueError(
+                "status changes go through set_project_status (the "
+                "planning-exit gate)"
+            )
+        if key not in writers:
+            raise ValueError(f"unknown project field: {key!r}")
+        sets.append(f"{key} = ?")
+        params.append(writers[key](value))
+    if not sets:
+        return False
+    params.append(project_id)
+    with write_txn(conn):
+        cur = conn.execute(
+            f"UPDATE projects SET {', '.join(sets)} WHERE id = ?", params
+        )
+    return cur.rowcount > 0
+
+
+def set_project_status(
+    conn: sqlite3.Connection, project_id: str, status: str
+) -> bool:
+    """Move a project between statuses, enforcing the §2.2 exit gate.
+
+    Leaving ``planning`` requires at least one output [3], one member and
+    one profile [4] — declaring the deliverable after automating its
+    production is how you get a run that succeeds at nothing. The error
+    names every missing piece.
+    """
+    if status not in VALID_PROJECT_STATUSES:
+        raise ValueError(f"status must be one of {sorted(VALID_PROJECT_STATUSES)}")
+    with write_txn(conn):
+        row = conn.execute(
+            "SELECT status FROM projects WHERE id = ?", (project_id,)
+        ).fetchone()
+        if row is None:
+            return False
+        if row["status"] == "planning" and status != "planning":
+            missing: List[str] = []
+            for table, label in (
+                ("project_outputs", "at least one output"),
+                ("project_members", "at least one member"),
+                ("project_profiles", "at least one profile"),
+            ):
+                count = conn.execute(
+                    f"SELECT COUNT(*) AS n FROM {table} WHERE project_id = ?",
+                    (project_id,),
+                ).fetchone()["n"]
+                if not count:
+                    missing.append(label)
+            if missing:
+                raise ValueError(
+                    f"project {project_id} cannot leave 'planning': missing "
+                    + ", ".join(missing)
+                )
+        cur = conn.execute(
+            "UPDATE projects SET status = ? WHERE id = ?", (status, project_id)
+        )
+    return cur.rowcount > 0
+
+
+def set_project_summary(
+    conn: sqlite3.Connection, project_id: str, summary: str
+) -> Optional[int]:
+    """Write the rolling \"where this stands\" (§2.2) and stamp ``summary_at``.
+
+    The one write entry point for ``summary`` — ``update_project_fields``
+    deliberately does not accept it, so the audit line (who summarised,
+    when) has exactly one place to come from. Returns ``summary_at``, or
+    ``None`` if the project does not exist.
+    """
+    summary = str(summary or "").strip()
+    if not summary:
+        raise ValueError("summary must not be empty")
+    now = _now()
+    with write_txn(conn):
+        cur = conn.execute(
+            "UPDATE projects SET summary = ?, summary_at = ? WHERE id = ?",
+            (summary, now, project_id),
+        )
+    return now if cur.rowcount > 0 else None
+
+
+# ---------------------------------------------------------------------------
+# project_members (people on the project; profiles live in project_profiles)
+# ---------------------------------------------------------------------------
+
+
+def add_project_member(
+    conn: sqlite3.Connection,
+    *,
+    project_id: str,
+    user_id: str,
+    role: str = "member",
+    added_by: Optional[str] = None,
+) -> bool:
+    """Add a member. Returns False if already a member."""
+    user_id = str(user_id or "").strip()
+    if not user_id:
+        raise ValueError("member user_id must not be empty")
+    if role not in VALID_MEMBER_ROLES:
+        raise ValueError(f"member role must be one of {sorted(VALID_MEMBER_ROLES)}")
+    now = _now()
+    with write_txn(conn):
+        cur = conn.execute(
+            "INSERT OR IGNORE INTO project_members "
+            "(project_id, user_id, role, added_by, added_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (project_id, user_id, role, added_by, now),
+        )
+    return cur.rowcount > 0
+
+
+def get_project_members(
+    conn: sqlite3.Connection, project_id: str
+) -> List[dict]:
+    """Read ``project_members`` rows, leads first, then by added_at."""
+    rows = conn.execute(
+        "SELECT * FROM project_members WHERE project_id = ? "
+        "ORDER BY CASE role WHEN 'lead' THEN 0 WHEN 'member' THEN 1 ELSE 2 END, "
+        "added_at ASC",
+        (project_id,),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def remove_project_member(
+    conn: sqlite3.Connection, project_id: str, user_id: str
+) -> bool:
+    with write_txn(conn):
+        cur = conn.execute(
+            "DELETE FROM project_members WHERE project_id = ? AND user_id = ?",
+            (project_id, user_id),
         )
     return cur.rowcount > 0
 
@@ -772,6 +1447,8 @@ def add_project_link(
     A link is a pointer, never a copy — the authority stays in the profile
     that owns the referenced object. Re-inserting the same link is a no-op.
     """
+    if kind not in VALID_LINK_KINDS:
+        raise ValueError(f"link kind must be one of {sorted(VALID_LINK_KINDS)}")
     now = int(time.time())
     with write_txn(conn):
         cur = conn.execute(
@@ -831,3 +1508,1088 @@ def get_project_profiles(
             (project_id,),
         ).fetchall()
     ]
+
+
+def remove_project_profile(
+    conn: sqlite3.Connection, project_id: str, profile: str
+) -> bool:
+    """Detach a profile from a project. The caller owns the guardrails
+    (the API refuses to detach the last one); the store just removes."""
+    with write_txn(conn):
+        cur = conn.execute(
+            "DELETE FROM project_profiles WHERE project_id = ? AND profile = ?",
+            (project_id, profile),
+        )
+    return cur.rowcount > 0
+
+
+# ---------------------------------------------------------------------------
+# Outputs, deliveries, contacts (design §2.2 / §6.1; API step 3)
+# ---------------------------------------------------------------------------
+
+VALID_LINK_KINDS = (
+    "file", "arrival", "todo", "goal", "memory",
+    "conversation", "sample", "reference", "url",
+)
+VALID_OUTPUT_KINDS = ("artifact", "file", "message", "decision", "report", "code")
+VALID_OUTPUT_STATUSES = ("pending", "in_progress", "delivered", "accepted", "dropped")
+
+
+def _new_row_id(prefix: str) -> str:
+    return f"{prefix}_{secrets.token_hex(6)}"
+
+
+def add_project_output(
+    conn: sqlite3.Connection,
+    *,
+    project_id: str,
+    title: str,
+    spec: Optional[str] = None,
+    kind: str = "artifact",
+    required: bool = True,
+    recurring: bool = False,
+) -> str:
+    """Declare a deliverable [3]. Returns the new output id.
+
+    ``seq`` is assigned after the current last row, so outputs list in
+    declaration order. Declaring the deliverable before automating its
+    production is what keeps a run from succeeding at nothing (§6.1).
+    """
+    title = str(title or "").strip()
+    if not title:
+        raise ValueError("output title is required")
+    if kind not in VALID_OUTPUT_KINDS:
+        raise ValueError(f"output kind must be one of {sorted(VALID_OUTPUT_KINDS)}")
+    oid = _new_row_id("o")
+    now = _now()
+    with write_txn(conn):
+        row = conn.execute(
+            "SELECT COALESCE(MAX(seq), 0) AS m FROM project_outputs "
+            "WHERE project_id = ?",
+            (project_id,),
+        ).fetchone()
+        conn.execute(
+            """INSERT INTO project_outputs
+               (id, project_id, seq, title, spec, kind, required, recurring,
+                status, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)""",
+            (oid, project_id, int(row["m"]) + 1, title, spec, kind,
+             1 if required else 0, 1 if recurring else 0, now),
+        )
+    return oid
+
+
+def get_project_outputs(
+    conn: sqlite3.Connection, project_id: str
+) -> List[dict]:
+    """Read a project's outputs in declaration order."""
+    return [
+        dict(r)
+        for r in conn.execute(
+            "SELECT * FROM project_outputs WHERE project_id = ? ORDER BY seq",
+            (project_id,),
+        ).fetchall()
+    ]
+
+
+def update_project_output(
+    conn: sqlite3.Connection,
+    output_id: str,
+    *,
+    title: Optional[str] = None,
+    spec: Optional[str] = None,
+    kind: Optional[str] = None,
+    required: Optional[bool] = None,
+    recurring: Optional[bool] = None,
+    status: Optional[str] = None,
+) -> bool:
+    """Patch an output row. Setting ``status='delivered'`` stamps
+    ``delivered_at``; ``accepted`` is reserved for :func:`accept_project_output`
+    (only a human accepts — §6.1)."""
+    sets: List[str] = []
+    params: List[Any] = []
+    if title is not None:
+        t = str(title).strip()
+        if not t:
+            raise ValueError("output title cannot be empty")
+        sets.append("title = ?")
+        params.append(t)
+    if spec is not None:
+        sets.append("spec = ?")
+        params.append(spec)
+    if kind is not None:
+        if kind not in VALID_OUTPUT_KINDS:
+            raise ValueError(f"output kind must be one of {sorted(VALID_OUTPUT_KINDS)}")
+        sets.append("kind = ?")
+        params.append(kind)
+    if required is not None:
+        sets.append("required = ?")
+        params.append(1 if required else 0)
+    if recurring is not None:
+        sets.append("recurring = ?")
+        params.append(1 if recurring else 0)
+    if status is not None:
+        if status not in VALID_OUTPUT_STATUSES or status == "accepted":
+            raise ValueError(
+                "output status must be one of "
+                f"{sorted(s for s in VALID_OUTPUT_STATUSES if s != 'accepted')}; "
+                "acceptance goes through the human-only accept route"
+            )
+        sets.append("status = ?")
+        params.append(status)
+        if status == "delivered":
+            sets.append("delivered_at = ?")
+            params.append(_now())
+    if not sets:
+        return False
+    params.append(output_id)
+    with write_txn(conn):
+        cur = conn.execute(
+            f"UPDATE project_outputs SET {', '.join(sets)} WHERE id = ?", params
+        )
+    return cur.rowcount > 0
+
+
+def accept_project_output(
+    conn: sqlite3.Connection,
+    output_id: str,
+    *,
+    accepted_by: str,
+) -> bool:
+    """Human-only acceptance (§6.1): the run may deliver, only a person
+    accepts. Accepting a ``recurring`` output stamps the acceptance but the
+    row's deliveries keep accumulating."""
+    with write_txn(conn):
+        cur = conn.execute(
+            "UPDATE project_outputs SET status = 'accepted', accepted_at = ?, "
+            "accepted_by = ? WHERE id = ? AND status != 'dropped'",
+            (_now(), accepted_by, output_id),
+        )
+    return cur.rowcount > 0
+
+
+def remove_project_output(conn: sqlite3.Connection, output_id: str) -> bool:
+    """Delete an output row — refused for the last required output.
+
+    A project's outputs are the denominator its progress is measured in;
+    silently emptying it would turn every later run into effort mistaken
+    for delivery (§15.9).
+    """
+    with write_txn(conn):
+        row = conn.execute(
+            "SELECT project_id, required FROM project_outputs WHERE id = ?",
+            (output_id,),
+        ).fetchone()
+        if row is None:
+            return False
+        if row["required"]:
+            others = conn.execute(
+                "SELECT COUNT(*) AS n FROM project_outputs "
+                "WHERE project_id = ? AND required = 1 AND id != ?",
+                (row["project_id"], output_id),
+            ).fetchone()["n"]
+            if not others:
+                raise ValueError(
+                    "refusing to delete the last required output; declare a "
+                    "replacement first or drop the project"
+                )
+        conn.execute("DELETE FROM project_outputs WHERE id = ?", (output_id,))
+    return True
+
+
+def record_output_delivery(
+    conn: sqlite3.Connection,
+    *,
+    output_id: str,
+    run_id: Optional[str] = None,
+    task_id: Optional[str] = None,
+    link_kind: Optional[str] = None,
+    link_ref: Optional[str] = None,
+    profile: Optional[str] = None,
+    label: Optional[str] = None,
+    note: Optional[str] = None,
+) -> str:
+    """One delivery row per produced output (§6.1). Recurring outputs
+    accumulate one row per run."""
+    did = _new_row_id("d")
+    with write_txn(conn):
+        exists = conn.execute(
+            "SELECT 1 FROM project_outputs WHERE id = ?", (output_id,)
+        ).fetchone()
+        if exists is None:
+            raise ValueError(f"unknown output: {output_id!r}")
+        conn.execute(
+            """INSERT INTO project_output_deliveries
+               (id, output_id, run_id, task_id, link_kind, link_ref, profile,
+                label, note, delivered_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (did, output_id, run_id, task_id, link_kind, link_ref, profile,
+             label, note, _now()),
+        )
+    return did
+
+
+def get_output_deliveries(
+    conn: sqlite3.Connection,
+    *,
+    output_id: Optional[str] = None,
+    project_id: Optional[str] = None,
+    run_id: Optional[str] = None,
+) -> List[dict]:
+    """Deliveries for one output, one run, or a whole project, newest first."""
+    if output_id is not None:
+        rows = conn.execute(
+            "SELECT * FROM project_output_deliveries WHERE output_id = ? "
+            "ORDER BY delivered_at DESC, id DESC",
+            (output_id,),
+        ).fetchall()
+    elif run_id is not None:
+        rows = conn.execute(
+            "SELECT * FROM project_output_deliveries WHERE run_id = ? "
+            "ORDER BY delivered_at DESC, id DESC",
+            (run_id,),
+        ).fetchall()
+    elif project_id is not None:
+        rows = conn.execute(
+            "SELECT d.* FROM project_output_deliveries d "
+            "JOIN project_outputs o ON o.id = d.output_id "
+            "WHERE o.project_id = ? ORDER BY d.delivered_at DESC, d.id DESC",
+            (project_id,),
+        ).fetchall()
+    else:
+        raise ValueError("output_id or project_id is required")
+    return [dict(r) for r in rows]
+
+
+def add_project_contact(
+    conn: sqlite3.Connection,
+    *,
+    project_id: str,
+    name: str,
+    role: Optional[str] = None,
+    org: Optional[str] = None,
+    platform: Optional[str] = None,
+    address: Optional[str] = None,
+    user_id: Optional[str] = None,
+    notes: Optional[str] = None,
+    created_by: Optional[str] = None,
+) -> str:
+    """Add a contact [10]. ``address`` is PII: members-only in responses."""
+    name = str(name or "").strip()
+    if not name:
+        raise ValueError("contact name is required")
+    cid = _new_row_id("c")
+    with write_txn(conn):
+        conn.execute(
+            """INSERT INTO project_contacts
+               (id, project_id, name, role, org, platform, address, user_id,
+                notes, created_by, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (cid, project_id, name, role, org, platform, address, user_id,
+             notes, created_by, _now()),
+        )
+    return cid
+
+
+def get_project_contacts(
+    conn: sqlite3.Connection, project_id: str
+) -> List[dict]:
+    """Read a project's contacts, newest first."""
+    return [
+        dict(r)
+        for r in conn.execute(
+            "SELECT * FROM project_contacts WHERE project_id = ? "
+            "ORDER BY created_at DESC",
+            (project_id,),
+        ).fetchall()
+    ]
+
+
+def update_project_contact(
+    conn: sqlite3.Connection,
+    contact_id: str,
+    **fields: Any,
+) -> bool:
+    """Patch contact fields (name, role, org, platform, address, user_id,
+    notes). Unknown fields are refused."""
+    allowed = {"name", "role", "org", "platform", "address", "user_id", "notes"}
+    sets: List[str] = []
+    params: List[Any] = []
+    for key, value in fields.items():
+        if key not in allowed:
+            raise ValueError(f"unknown contact field: {key!r}")
+        if key == "name" and not str(value or "").strip():
+            raise ValueError("contact name cannot be empty")
+        sets.append(f"{key} = ?")
+        params.append(value)
+    if not sets:
+        return False
+    params.append(contact_id)
+    with write_txn(conn):
+        cur = conn.execute(
+            f"UPDATE project_contacts SET {', '.join(sets)} WHERE id = ?",
+            params,
+        )
+    return cur.rowcount > 0
+
+
+def remove_project_contact(conn: sqlite3.Connection, contact_id: str) -> bool:
+    with write_txn(conn):
+        cur = conn.execute(
+            "DELETE FROM project_contacts WHERE id = ?", (contact_id,)
+        )
+    return cur.rowcount > 0
+
+
+def remove_project_link(
+    conn: sqlite3.Connection,
+    *,
+    project_id: str,
+    kind: str,
+    profile: str,
+    ref: str,
+) -> bool:
+    """Detach a link pointer. The referenced object is never touched."""
+    with write_txn(conn):
+        cur = conn.execute(
+            "DELETE FROM project_links "
+            "WHERE project_id = ? AND kind = ? AND profile = ? AND ref = ?",
+            (project_id, kind, profile, ref),
+        )
+    return cur.rowcount > 0
+
+
+# ---------------------------------------------------------------------------
+# Playbook (design §7)
+# ---------------------------------------------------------------------------
+
+VALID_STEP_MODES = ("card", "inline")
+
+
+def validate_playbook_steps(steps: Any) -> List[dict]:
+    """Validate a ``steps`` array **at save time** (design §7.1).
+
+    Refuses the whole array with the offending keys named: missing/blank
+    ``key`` or ``title``, duplicate keys, an unknown ``mode``, and a
+    ``depends_on`` graph that is cyclic or references an unknown key. A
+    cycle discovered at 09:00 on Monday is a silent no-run, so the refusal
+    happens when the method is written, not when it fires.
+    """
+    if not isinstance(steps, list):
+        raise ValueError("playbook steps must be a JSON array")
+    seen: set = set()
+    cleaned: List[dict] = []
+    for i, step in enumerate(steps):
+        if not isinstance(step, dict):
+            raise ValueError(f"step #{i + 1} must be an object")
+        key = str(step.get("key") or "").strip()
+        if not key:
+            raise ValueError(f"step #{i + 1} has no key")
+        if key in seen:
+            raise ValueError(f"duplicate step key: {key!r}")
+        seen.add(key)
+        title = str(step.get("title") or "").strip()
+        if not title:
+            raise ValueError(f"step {key!r} has no title")
+        mode = str(step.get("mode") or "card").strip()
+        if mode not in VALID_STEP_MODES:
+            raise ValueError(
+                f"step {key!r}: mode must be one of {sorted(VALID_STEP_MODES)}"
+            )
+        deps = step.get("depends_on") or []
+        if not isinstance(deps, list):
+            raise ValueError(f"step {key!r}: depends_on must be an array")
+        cleaned.append(
+            {
+                "key": key,
+                "title": title,
+                "body": str(step.get("body") or ""),
+                "mode": mode,
+                "assignee": step.get("assignee"),
+                "depends_on": [str(d) for d in deps],
+                "checkpoint": bool(step.get("checkpoint")),
+            }
+        )
+
+    for step in cleaned:
+        for dep in step["depends_on"]:
+            if dep not in seen:
+                raise ValueError(
+                    f"step {step['key']!r} depends on unknown key {dep!r}"
+                )
+
+    # Cycle detection (iterative DFS), naming the keys on the cycle path.
+    WHITE, GRAY, BLACK = 0, 1, 2
+    color = {s["key"]: WHITE for s in cleaned}
+    deps_of = {s["key"]: s["depends_on"] for s in cleaned}
+
+    def _visit(root: str) -> None:
+        stack = [(root, iter(deps_of[root]))]
+        path = [root]
+        color[root] = GRAY
+        while stack:
+            node, it = stack[-1]
+            advanced = False
+            for dep in it:
+                if color[dep] == GRAY:
+                    cycle = path[path.index(dep):] + [dep]
+                    raise ValueError(
+                        "playbook steps contain a cycle: "
+                        + " -> ".join(cycle)
+                    )
+                if color[dep] == WHITE:
+                    color[dep] = GRAY
+                    path.append(dep)
+                    stack.append((dep, iter(deps_of[dep])))
+                    advanced = True
+                    break
+            if not advanced:
+                color[node] = BLACK
+                path.pop()
+                stack.pop()
+
+    for step in cleaned:
+        if color[step["key"]] == WHITE:
+            _visit(step["key"])
+    return cleaned
+
+
+def save_playbook_rev(
+    conn: sqlite3.Connection,
+    *,
+    project_id: str,
+    body: str = "",
+    steps: Any,
+    created_by: Optional[str] = None,
+    note: Optional[str] = None,
+) -> int:
+    """Create playbook revision N+1 with ``active=0`` (design §7.2).
+
+    A new revision is a proposal: it changes nothing until a human
+    activates it, and a running run keeps its pinned rev either way.
+    Returns the new rev number.
+    """
+    cleaned = validate_playbook_steps(steps)
+    with write_txn(conn):
+        row = conn.execute(
+            "SELECT COALESCE(MAX(rev), 0) AS m FROM project_playbook "
+            "WHERE project_id = ?",
+            (project_id,),
+        ).fetchone()
+        rev = int(row["m"]) + 1
+        conn.execute(
+            """INSERT INTO project_playbook
+               (project_id, rev, body, steps, active, created_by, created_at, note)
+               VALUES (?, ?, ?, ?, 0, ?, ?, ?)""",
+            (project_id, rev, str(body or ""), json.dumps(cleaned),
+             created_by, _now(), note),
+        )
+    return rev
+
+
+def activate_playbook_rev(
+    conn: sqlite3.Connection,
+    project_id: str,
+    rev: int,
+    *,
+    note: Optional[str] = None,
+) -> bool:
+    """Human-only activation (§7.2): exactly one rev is active at a time."""
+    with write_txn(conn):
+        exists = conn.execute(
+            "SELECT 1 FROM project_playbook WHERE project_id = ? AND rev = ?",
+            (project_id, rev),
+        ).fetchone()
+        if exists is None:
+            return False
+        conn.execute(
+            "UPDATE project_playbook SET active = 0, activated_at = NULL "
+            "WHERE project_id = ?",
+            (project_id,),
+        )
+        conn.execute(
+            "UPDATE project_playbook SET active = 1, activated_at = ?, "
+            "note = COALESCE(?, note) WHERE project_id = ? AND rev = ?",
+            (_now(), note, project_id, rev),
+        )
+    return True
+
+
+def get_playbook(
+    conn: sqlite3.Connection,
+    project_id: str,
+    rev: Optional[int] = None,
+) -> Optional[dict]:
+    """One playbook revision; ``rev=None`` returns the active one."""
+    if rev is None:
+        row = conn.execute(
+            "SELECT * FROM project_playbook WHERE project_id = ? AND active = 1",
+            (project_id,),
+        ).fetchone()
+    else:
+        row = conn.execute(
+            "SELECT * FROM project_playbook WHERE project_id = ? AND rev = ?",
+            (project_id, int(rev)),
+        ).fetchone()
+    if row is None:
+        return None
+    d = dict(row)
+    try:
+        d["steps"] = json.loads(d.get("steps") or "[]")
+    except (TypeError, ValueError):
+        d["steps"] = []
+    return d
+
+
+def list_playbook_revs(conn: sqlite3.Connection, project_id: str) -> List[dict]:
+    rows = conn.execute(
+        "SELECT project_id, rev, body, active, created_by, created_at, "
+        "activated_at, note FROM project_playbook WHERE project_id = ? "
+        "ORDER BY rev DESC",
+        (project_id,),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# Directives (design §5)
+# ---------------------------------------------------------------------------
+
+VALID_DIRECTIVE_KINDS = ("directive", "feedback")
+VALID_DIRECTIVE_SCOPES = ("project", "run", "card")
+
+
+def add_project_directive(
+    conn: sqlite3.Connection,
+    *,
+    project_id: str,
+    kind: str,
+    body: str,
+    scope: str = "project",
+    target_ref: Optional[str] = None,
+    rating: Optional[str] = None,
+    author_user_id: str,
+    max_active: int = 20,
+    active: bool = True,
+) -> str:
+    """Add guidance (§5). The active set is capped: adding directive N+1 is
+    refused with *retire one first* — a monotonically growing instruction
+    list is a tax on every run (§5.2).
+
+    ``active=False`` proposes the directive (§8.2): it lands inactive and
+    consumes no cap slot until a member activates it."""
+    if kind not in VALID_DIRECTIVE_KINDS:
+        raise ValueError(f"kind must be one of {sorted(VALID_DIRECTIVE_KINDS)}")
+    if scope not in VALID_DIRECTIVE_SCOPES:
+        raise ValueError(f"scope must be one of {sorted(VALID_DIRECTIVE_SCOPES)}")
+    text = str(body or "").strip()
+    if not text:
+        raise ValueError("directive body must not be empty")
+    if not str(author_user_id or "").strip():
+        raise ValueError("author_user_id is required")
+    if rating is not None and rating not in ("good", "bad"):
+        raise ValueError("rating must be 'good' or 'bad'")
+    with write_txn(conn):
+        if active:
+            n = conn.execute(
+                "SELECT COUNT(*) AS n FROM project_directives "
+                "WHERE project_id = ? AND active = 1",
+                (project_id,),
+            ).fetchone()["n"]
+            if n >= max_active:
+                raise ValueError(
+                    f"directive cap reached ({max_active} active): retire one first"
+                )
+        did = _new_row_id("dir")
+        conn.execute(
+            """INSERT INTO project_directives
+               (id, project_id, kind, body, scope, target_ref, rating,
+                author_user_id, created_at, active)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (did, project_id, kind, text, scope, target_ref, rating,
+             str(author_user_id).strip(), _now(), 1 if active else 0),
+        )
+    return did
+
+
+def activate_project_directive(
+    conn: sqlite3.Connection,
+    directive_id: str,
+    *,
+    max_active: int = 20,
+) -> bool:
+    """Activate a **proposed** directive (§8.2): any member may cross it.
+
+    Only rows that were proposed (``active=0`` and never retired) can be
+    activated; the active-set cap is enforced at the crossing, not at
+    proposal time. Returns False when there is nothing to activate.
+    Raises ValueError when the cap blocks the crossing."""
+    with write_txn(conn):
+        row = conn.execute(
+            "SELECT project_id FROM project_directives "
+            "WHERE id = ? AND active = 0 AND retired_at IS NULL",
+            (directive_id,),
+        ).fetchone()
+        if row is None:
+            return False
+        n = conn.execute(
+            "SELECT COUNT(*) AS n FROM project_directives "
+            "WHERE project_id = ? AND active = 1",
+            (row["project_id"],),
+        ).fetchone()["n"]
+        if n >= max_active:
+            raise ValueError(
+                f"directive cap reached ({max_active} active): retire one first"
+            )
+        conn.execute(
+            "UPDATE project_directives SET active = 1 WHERE id = ?",
+            (directive_id,),
+        )
+    return True
+
+
+def retire_project_directive(conn: sqlite3.Connection, directive_id: str) -> bool:
+    """Retire, never delete (§5.2): the record of what the agent was told
+    when run 9 executed must survive."""
+    with write_txn(conn):
+        cur = conn.execute(
+            "UPDATE project_directives SET active = 0, retired_at = ? "
+            "WHERE id = ? AND active = 1",
+            (_now(), directive_id),
+        )
+    return cur.rowcount > 0
+
+
+def list_project_directives(
+    conn: sqlite3.Connection,
+    project_id: str,
+    *,
+    active_only: bool = True,
+) -> List[dict]:
+    sql = "SELECT * FROM project_directives WHERE project_id = ?"
+    if active_only:
+        sql += " AND active = 1"
+    # Newest first; ``rowid`` breaks same-second ties in insertion order so
+    # a later instruction visibly wins (§5.2).
+    sql += " ORDER BY created_at DESC, rowid DESC"
+    return [dict(r) for r in conn.execute(sql, (project_id,)).fetchall()]
+
+
+def list_proposed_directives(
+    conn: sqlite3.Connection,
+    project_id: str,
+) -> List[dict]:
+    """Proposed-but-inactive directives (§8.2): ``active=0`` and never
+    retired — the rows a run's retro proposed, waiting for a member."""
+    rows = conn.execute(
+        "SELECT * FROM project_directives "
+        "WHERE project_id = ? AND active = 0 AND retired_at IS NULL "
+        "ORDER BY created_at DESC, rowid DESC",
+        (project_id,),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# Skill candidates (design §8.2 row 3) — provenance only, no mechanism
+# ---------------------------------------------------------------------------
+
+
+def add_skill_candidate(
+    conn: sqlite3.Connection,
+    *,
+    project_id: str,
+    run_no: int,
+    name: str,
+    body: str,
+) -> str:
+    """Record a skill a run's retro proposed. The row is pure provenance —
+    it records the project and run the candidate came from; the shipped
+    skills loop (§8.2) does the distilling and promoting."""
+    candidate_name = str(name or "").strip()
+    if not candidate_name:
+        raise ValueError("skill candidate name must not be empty")
+    text = str(body or "").strip()
+    if not text:
+        raise ValueError("skill candidate body must not be empty")
+    cid = _new_row_id("skc")
+    with write_txn(conn):
+        conn.execute(
+            """INSERT INTO project_skill_candidates
+               (id, project_id, run_no, name, body, created_at)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (cid, project_id, int(run_no), candidate_name, text, _now()),
+        )
+    return cid
+
+
+def list_skill_candidates(
+    conn: sqlite3.Connection,
+    project_id: str,
+) -> List[dict]:
+    rows = conn.execute(
+        "SELECT * FROM project_skill_candidates WHERE project_id = ? "
+        "ORDER BY created_at DESC, rowid DESC",
+        (project_id,),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# Runs (design §6)
+# ---------------------------------------------------------------------------
+
+VALID_RUN_TRIGGERS = ("schedule", "manual", "event", "review")
+VALID_RUN_STATUSES = (
+    "running", "waiting", "blocked", "done", "failed", "cancelled",
+)
+
+
+def open_project_run(
+    conn: sqlite3.Connection,
+    *,
+    project_id: str,
+    trigger: str,
+    triggered_by: Optional[str] = None,
+    profile: str,
+    playbook_rev: Optional[int] = None,
+    trace_id: Optional[str] = None,
+) -> dict:
+    """Open the run row: ``run_no = max+1``, status ``running`` (§6)."""
+    if trigger not in VALID_RUN_TRIGGERS:
+        raise ValueError(f"trigger must be one of {sorted(VALID_RUN_TRIGGERS)}")
+    if not str(profile or "").strip():
+        raise ValueError("run profile is required")
+    rid = _new_row_id("run")
+    with write_txn(conn):
+        row = conn.execute(
+            "SELECT COALESCE(MAX(run_no), 0) AS m FROM project_runs "
+            "WHERE project_id = ?",
+            (project_id,),
+        ).fetchone()
+        run_no = int(row["m"]) + 1
+        conn.execute(
+            """INSERT INTO project_runs
+               (id, project_id, run_no, trigger, triggered_by, profile,
+                playbook_rev, status, started_at, trace_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, 'running', ?, ?)""",
+            (rid, project_id, run_no, trigger, triggered_by,
+             str(profile).strip(), playbook_rev, _now(), trace_id),
+        )
+    return get_project_run_by_id(conn, rid)
+
+
+def get_project_run_by_id(
+    conn: sqlite3.Connection, run_id: str
+) -> Optional[dict]:
+    row = conn.execute(
+        "SELECT * FROM project_runs WHERE id = ?", (run_id,)
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def get_project_run(
+    conn: sqlite3.Connection, project_id: str, run_no: int
+) -> Optional[dict]:
+    row = conn.execute(
+        "SELECT * FROM project_runs WHERE project_id = ? AND run_no = ?",
+        (project_id, int(run_no)),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def list_project_runs(
+    conn: sqlite3.Connection, project_id: str, *, limit: int = 50
+) -> List[dict]:
+    return [
+        dict(r)
+        for r in conn.execute(
+            "SELECT * FROM project_runs WHERE project_id = ? "
+            "ORDER BY run_no DESC LIMIT ?",
+            (project_id, int(limit)),
+        ).fetchall()
+    ]
+
+
+_RUN_PATCH_FIELDS = {
+    "status", "session_id", "trace_id", "outcome", "summary", "retro",
+    "retro_at", "score_self", "score_user", "score_note", "scored_by",
+    "scored_at", "error", "ended_at",
+}
+
+
+def update_project_run(
+    conn: sqlite3.Connection, run_id: str, **fields: Any
+) -> bool:
+    """Patch run fields. ``score_user`` is NOT writable through this
+    helper's callers in the router for agent principals — the human-only
+    rule is enforced at the seam (§16)."""
+    sets: List[str] = []
+    params: List[Any] = []
+    for key, value in fields.items():
+        if key not in _RUN_PATCH_FIELDS:
+            raise ValueError(f"unknown run field: {key!r}")
+        if key == "status" and value not in VALID_RUN_STATUSES:
+            raise ValueError(f"status must be one of {sorted(VALID_RUN_STATUSES)}")
+        sets.append(f"{key} = ?")
+        params.append(value)
+    if not sets:
+        return False
+    params.append(run_id)
+    with write_txn(conn):
+        cur = conn.execute(
+            f"UPDATE project_runs SET {', '.join(sets)} WHERE id = ?", params
+        )
+    return cur.rowcount > 0
+
+
+def close_project_run(
+    conn: sqlite3.Connection,
+    run_id: str,
+    *,
+    status: str,
+    outcome: Optional[str] = None,
+    summary: Optional[str] = None,
+    error: Optional[str] = None,
+) -> bool:
+    """Close a run: terminal status + machine-set outcome (§6.1)."""
+    if status not in ("done", "failed", "cancelled", "blocked"):
+        raise ValueError("a run closes into done | failed | cancelled | blocked")
+    return update_project_run(
+        conn,
+        run_id,
+        status=status,
+        outcome=outcome,
+        summary=summary,
+        error=error,
+        ended_at=_now(),
+    )
+
+
+def link_run_card(
+    conn: sqlite3.Connection,
+    run_id: str,
+    task_id: str,
+    step_key: Optional[str] = None,
+) -> bool:
+    """Record that a card belongs to a run — the mapping lives here so the
+    shared board learns nothing about Projects (no run_id on tasks)."""
+    with write_txn(conn):
+        cur = conn.execute(
+            "INSERT OR IGNORE INTO project_run_cards (run_id, task_id, step_key) "
+            "VALUES (?, ?, ?)",
+            (run_id, task_id, step_key),
+        )
+    return cur.rowcount > 0
+
+
+def get_run_cards(conn: sqlite3.Connection, run_id: str) -> List[dict]:
+    return [
+        dict(r)
+        for r in conn.execute(
+            "SELECT * FROM project_run_cards WHERE run_id = ?", (run_id,)
+        ).fetchall()
+    ]
+
+
+# ---------------------------------------------------------------------------
+# Root migration: import the legacy per-profile stores (design §2.1)
+# ---------------------------------------------------------------------------
+
+# The v1 columns a legacy store can carry. Anything newer (goal, status, …)
+# cannot exist in a pre-repoint store, so there is nothing else to copy.
+_LEGACY_PROJECT_COLUMNS = (
+    "id",
+    "slug",
+    "name",
+    "description",
+    "icon",
+    "color",
+    "board_slug",
+    "primary_path",
+    "created_at",
+    "archived",
+)
+
+
+def _legacy_store_candidates(root: Path, target: Path) -> List[tuple]:
+    """(profile_name, db_path) for every per-profile projects.db under root.
+
+    Only the profile layout has legacy stores to import: ``<root>/profiles/
+    <name>/projects.db``. When ``HERMES_HOME`` equals the root (Docker /
+    custom deployments) the legacy DB *is* the root DB — upgraded in place,
+    nothing to import — and it is skipped via the target comparison.
+    """
+    candidates: List[tuple] = []
+    profiles_dir = root / "profiles"
+    if not profiles_dir.is_dir():
+        return candidates
+    target_resolved = target.resolve()
+    for entry in sorted(profiles_dir.iterdir()):
+        try:
+            if not entry.is_dir():
+                continue
+            db = entry / "projects.db"
+            if not db.is_file() or db.resolve() == target_resolved:
+                continue
+        except OSError:
+            continue
+        candidates.append((entry.name, db))
+    return candidates
+
+
+def _import_one_profile_store(
+    conn: sqlite3.Connection, profile: str, db_path: Path
+) -> int:
+    """Copy one legacy per-profile store into the root store.
+
+    Idempotent, keyed on ``(imported_from_profile, old id)``. Slug
+    collisions get a ``-2``-style suffix; an id already owned by a row from
+    elsewhere is remapped to a fresh id (children follow). Returns the
+    number of projects imported by this call.
+    """
+    try:
+        src = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    except sqlite3.Error as exc:
+        logger.warning("projects: cannot open legacy store %s: %s", db_path, exc)
+        return 0
+    imported = 0
+    try:
+        src.row_factory = sqlite3.Row
+        tables = {
+            r[0]
+            for r in src.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        }
+        if "projects" not in tables:
+            return 0
+        src_cols = {
+            r["name"] for r in src.execute("PRAGMA table_info(projects)")
+        }
+        project_rows = src.execute(
+            "SELECT * FROM projects ORDER BY created_at ASC"
+        ).fetchall()
+        if not project_rows:
+            return 0
+
+        id_map: dict = {}
+        with write_txn(conn):
+            for row in project_rows:
+                old_id = row["id"]
+                if conn.execute(
+                    "SELECT 1 FROM projects "
+                    "WHERE imported_from_profile = ? AND id = ?",
+                    (profile, old_id),
+                ).fetchone() is not None:
+                    id_map[old_id] = old_id  # imported on an earlier pass
+                    continue
+                new_id = old_id
+                if conn.execute(
+                    "SELECT 1 FROM projects WHERE id = ?", (new_id,)
+                ).fetchone() is not None:
+                    new_id = _new_project_id()
+                    while conn.execute(
+                        "SELECT 1 FROM projects WHERE id = ?", (new_id,)
+                    ).fetchone() is not None:
+                        new_id = _new_project_id()
+                slug = _unique_slug(conn, str(row["slug"]).strip() or _slugify(row["name"]))
+                conn.execute(
+                    "INSERT INTO projects "
+                    "(id, slug, name, description, icon, color, board_slug, "
+                    " primary_path, created_at, archived, imported_from_profile) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        new_id,
+                        slug,
+                        row["name"],
+                        row["description"] if "description" in src_cols else None,
+                        row["icon"] if "icon" in src_cols else None,
+                        row["color"] if "color" in src_cols else None,
+                        row["board_slug"] if "board_slug" in src_cols else None,
+                        row["primary_path"] if "primary_path" in src_cols else None,
+                        row["created_at"],
+                        int(bool(row["archived"])),
+                        profile,
+                    ),
+                )
+                id_map[old_id] = new_id
+                imported += 1
+
+            if imported and "project_folders" in tables:
+                for r in src.execute("SELECT * FROM project_folders"):
+                    new_pid = id_map.get(r["project_id"])
+                    if new_pid is None:
+                        continue
+                    conn.execute(
+                        "INSERT OR IGNORE INTO project_folders "
+                        "(project_id, path, label, is_primary, added_at) "
+                        "VALUES (?, ?, ?, ?, ?)",
+                        (
+                            new_pid,
+                            r["path"],
+                            r["label"],
+                            int(bool(r["is_primary"])),
+                            r["added_at"],
+                        ),
+                    )
+            if imported and "project_profiles" in tables:
+                for r in src.execute("SELECT * FROM project_profiles"):
+                    new_pid = id_map.get(r["project_id"])
+                    if new_pid is None:
+                        continue
+                    conn.execute(
+                        "INSERT OR IGNORE INTO project_profiles "
+                        "(project_id, profile, role, added_by, added_at) "
+                        "VALUES (?, ?, ?, ?, ?)",
+                        (new_pid, r["profile"], r["role"], r["added_by"], r["added_at"]),
+                    )
+            if imported and "project_links" in tables:
+                for r in src.execute("SELECT * FROM project_links"):
+                    new_pid = id_map.get(r["project_id"])
+                    if new_pid is None:
+                        continue
+                    conn.execute(
+                        "INSERT OR IGNORE INTO project_links "
+                        "(project_id, kind, profile, ref, label, added_by, added_at) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                        (
+                            new_pid,
+                            r["kind"],
+                            r["profile"],
+                            r["ref"],
+                            r["label"],
+                            r["added_by"],
+                            r["added_at"],
+                        ),
+                    )
+    except sqlite3.Error as exc:
+        logger.warning("projects: skipping legacy store %s: %s", db_path, exc)
+        return 0
+    finally:
+        with contextlib.suppress(Exception):
+            src.close()
+    return imported
+
+
+def import_profile_stores(conn: sqlite3.Connection, root: Path) -> int:
+    """Import every legacy per-profile projects.db under ``root``.
+
+    Called on the first open of the root DB (see :func:`connect`). Row-keyed
+    idempotent — a second run is a no-op. The per-profile files are left in
+    place, untouched, so pointing ``HERMES_PROJECTS_DB`` back at one
+    reverses the migration. Returns the number of projects imported.
+    """
+    imported = 0
+    for profile, db_path in _legacy_store_candidates(Path(root), Path(root) / "projects.db"):
+        try:
+            n = _import_one_profile_store(conn, profile, db_path)
+        except Exception as exc:  # never let one bad store stop the rest
+            logger.warning("projects: skipping legacy store %s: %s", db_path, exc)
+            continue
+        if n:
+            logger.info(
+                "projects: imported %d project(s) from profile store %s", n, db_path
+            )
+        imported += n
+    return imported

@@ -115,6 +115,7 @@ _CLONE_ALL_DEFAULT_EXCLUDE_ROOT: frozenset[str] = frozenset({
 #   backups             — `hermes backup` archives
 #   state-snapshots     — quick-backup snapshot trees
 #   checkpoints         — session checkpoint data
+#   persons             — FG-24 person-level identity, instance-wide
 _CLONE_ALL_HISTORY_EXCLUDE_ROOT: frozenset[str] = frozenset({
     "state.db",
     "state.db-wal",
@@ -123,7 +124,16 @@ _CLONE_ALL_HISTORY_EXCLUDE_ROOT: frozenset[str] = frozenset({
     "backups",
     "state-snapshots",
     "checkpoints",
+    "persons",
 })
+
+#: Per-principal curated memory, excluded from ``--clone-all`` (FG-24).
+#: ``memories/users/<uid>/`` is what the agent learned about one person *in
+#: the source profile*; the clone's principals are decided by enrolment, so
+#: copying it hands facts about people to a profile they may never join. The
+#: profile-shared ``memories/MEMORY.md`` still travels — it is the profile's
+#: own notes, and it is what ``--clone`` has always copied.
+_CLONE_ALL_MEMORY_EXCLUDE = ("memories", "users")
 
 # Marker file written by `hermes profile create --no-skills`.  When present in
 # a profile's root, callers of seed_profile_skills() (fresh-create, `hermes
@@ -145,7 +155,11 @@ def has_bundled_skills_opt_out(profile_dir: Path) -> bool:
 def _clone_all_copytree_ignore(source_dir: Path):
     """Exclude infrastructure artifacts when cloning a profile via --clone-all.
 
-    Three categories:
+    Four categories:
+      0. ``memories/users/`` and ``persons/`` — per-principal curated memory
+         (FG-24). See ``_CLONE_ALL_MEMORY_EXCLUDE``: a clone's principals come
+         from enrolment, so what the agent learned about one person in the
+         source profile is not the clone's to hold.
       1. Root-level entries in ``_CLONE_ALL_HISTORY_EXCLUDE_ROOT`` — session
          history, backups, and snapshots that belong to the SOURCE profile
          and should never carry into a fresh clone.  Applies to any source.
@@ -183,6 +197,15 @@ def _clone_all_copytree_ignore(source_dir: Path):
                 # symlinks, missing parents).  Fail open — better to
                 # over-copy than silently drop user data.
                 at_root = False
+            # Per-principal memory, one level down (FG-24).
+            parent, child = _CLONE_ALL_MEMORY_EXCLUDE
+            try:
+                in_memories = Path(directory).resolve() == source_resolved / parent
+            except (OSError, ValueError):
+                in_memories = False
+            if in_memories and entry == child:
+                ignored.append(entry)
+                continue
             if at_root:
                 # History artifacts: excluded for ANY source profile.
                 if entry in _CLONE_ALL_HISTORY_EXCLUDE_ROOT:

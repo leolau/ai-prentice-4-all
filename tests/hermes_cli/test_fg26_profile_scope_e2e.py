@@ -435,6 +435,28 @@ async def _seed_owned_rows(dsn: str, schema: str, user_id: str) -> None:
             user_id,
             f"private:{user_id}",
         )
+        # Layer-4 memory, in the shape the pgvector store creates it: owned,
+        # swept by discovery like any other table, and — unlike a document —
+        # not somebody else's to inherit.
+        await connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS memories (
+                id BIGSERIAL PRIMARY KEY,
+                owner_user_id TEXT NOT NULL,
+                visibility TEXT NOT NULL,
+                content TEXT NOT NULL
+            )
+            """
+        )
+        await connection.execute(
+            """
+            INSERT INTO memories (owner_user_id, visibility, content)
+            VALUES ($1, $2, 'they dislike early meetings'),
+                   ($1, 'shared', 'they run the Tuesday review')
+            """,
+            user_id,
+            f"private:{user_id}",
+        )
     finally:
         await connection.close()
 
@@ -460,6 +482,14 @@ async def test_hard_delete_leaves_no_dangling_owner(
         _owner(), email="heir@x.io", profile="default", display="Heir"
     )
     await _seed_owned_rows(postgres_dsn, schema, leaver.principal.user_id)
+    # The curated files a session actually reads, which no strategy used to
+    # touch: a person could be deleted from the console and keep being
+    # described to the agent by name.
+    participation = (
+        hermes_root / "memories" / "users" / leaver.principal.user_id / "MEMORY.md"
+    )
+    participation.parent.mkdir(parents=True)
+    participation.write_text("they dislike early meetings")
 
     deleted = await service.delete_member(
         _owner(),
@@ -493,6 +523,27 @@ async def test_hard_delete_leaves_no_dangling_owner(
 
     # The box-wide account is deliberately untouched: it may serve other profiles.
     assert admin.deleted == []
+
+    # What the agent learned about them is deleted under BOTH strategies:
+    # transferring a person's memory to their successor is not a change of
+    # ownership, it is disclosure.
+    connection = await asyncpg.connect(postgres_dsn, ssl=False)
+    try:
+        remaining = await connection.fetch(
+            f"SELECT owner_user_id FROM {schema}.memories"
+        )
+    finally:
+        await connection.close()
+    assert remaining == []
+    assert deleted.ownership.deleted.get("memories") == 2
+
+    if strategy == "purge":
+        assert not participation.exists()
+        assert deleted.memory_files_erased
+    else:
+        # transfer moves what they owned; it does not erase them.
+        assert participation.exists()
+        assert deleted.memory_files_erased == []
 
 
 @pytest.mark.asyncio

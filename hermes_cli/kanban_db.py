@@ -2027,6 +2027,11 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_tasks_session_id ON tasks(session_id)"
     )
+    # Projects feature (design §2.3): a project's board read must not scan
+    # the whole table.
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_tasks_project ON tasks(project_id, status)"
+    )
 
     # task_events gained a run_id column; back-fill it as NULL for
     # historical events (they predate runs and can't be attributed).
@@ -2508,9 +2513,9 @@ def create_task(
     # anchored to the project's primary repo as a git worktree, so its branch
     # can be named deterministically (project slug + task id) instead of the
     # random ``wt/<task-id>`` fallback the worker skill applies when no branch
-    # is set. Projects live in the creator's per-profile projects.db; the repo
-    # path is absolute (profile-independent) and the branch name is pure, so the
-    # cross-profile dispatcher needs no projects.db access at dispatch time.
+    # is set. Projects live in the shared root-anchored projects.db, visible
+    # from every profile; the repo path is absolute and the branch name is
+    # pure, so resolving the link at creation time is all the dispatcher needs.
     project_obj = None
     # Primary repo of a project-linked worktree task whose path we still need to
     # derive (a fresh worktree dir under the repo, computed once task_id exists).
@@ -2797,6 +2802,7 @@ def list_tasks(
     status: Optional[str] = None,
     tenant: Optional[str] = None,
     session_id: Optional[str] = None,
+    project_id: Optional[str] = None,
     include_archived: bool = False,
     limit: Optional[int] = None,
     order_by: Optional[str] = None,
@@ -2820,6 +2826,24 @@ def list_tasks(
     if session_id is not None:
         query += " AND session_id = ?"
         params.append(session_id)
+    if project_id is not None:
+        # Projects reads filter in SQL (idx_tasks_project), not in Python.
+        # ``tasks.project_id`` persists the resolved project id, so accept
+        # id-or-slug like ``create_task`` does; an unresolvable value simply
+        # matches nothing.
+        pid = str(project_id).strip()
+        if pid:
+            try:
+                from hermes_cli import projects_db as _pdb
+
+                with _pdb.connect_closing() as _pconn:
+                    _proj = _pdb.get_project(_pconn, pid)
+                if _proj is not None:
+                    pid = _proj.id
+            except Exception:
+                pass
+        query += " AND project_id = ?"
+        params.append(pid)
     if workflow_template_id is not None:
         query += " AND workflow_template_id = ?"
         params.append(workflow_template_id)
@@ -3168,6 +3192,55 @@ def list_events(conn: sqlite3.Connection, task_id: str) -> list[Event]:
             )
         )
     return out
+
+
+def _event_from_row(r: sqlite3.Row) -> Event:
+    try:
+        payload = json.loads(r["payload"]) if r["payload"] else None
+    except Exception:
+        payload = None
+    return Event(
+        id=r["id"],
+        task_id=r["task_id"],
+        kind=r["kind"],
+        payload=payload,
+        created_at=r["created_at"],
+        run_id=(int(r["run_id"]) if "run_id" in r.keys() and r["run_id"] is not None else None),
+    )
+
+
+def events_tail(
+    conn: sqlite3.Connection,
+    task_ids: Iterable[str],
+    *,
+    since_id: int = 0,
+    limit: int = 200,
+) -> tuple[int, list[Event]]:
+    """Return ``(latest_event_id, events)`` for a set of tasks.
+
+    The live-update tail behind ``GET /projects/{slug}/events?since=``:
+    events with ``id > since_id`` across the given tasks, oldest first,
+    capped at ``limit``. ``latest_event_id`` is the current head of the
+    whole set — independent of ``since_id`` and of the cap — so a caller
+    whose window overflowed still learns where the head is. No tasks
+    (or no events) → ``(0, [])``.
+    """
+    ids = [t for t in task_ids if t]
+    if not ids:
+        return 0, []
+    marks = ",".join("?" * len(ids))
+    head = conn.execute(
+        f"SELECT MAX(id) AS m FROM task_events WHERE task_id IN ({marks})",
+        ids,
+    ).fetchone()
+    latest = int(head["m"]) if head and head["m"] is not None else 0
+    rows = conn.execute(
+        "SELECT * FROM task_events WHERE task_id IN ("
+        + marks
+        + ") AND id > ? ORDER BY id ASC LIMIT ?",
+        [*ids, int(since_id), int(limit)],
+    ).fetchall()
+    return latest, [_event_from_row(r) for r in rows]
 
 
 def _append_event(

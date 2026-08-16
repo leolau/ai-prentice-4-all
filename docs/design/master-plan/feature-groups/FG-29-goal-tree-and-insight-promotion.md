@@ -1,6 +1,6 @@
 # FG-29 — Goal tree + skill promotion (the ai4all spine)
 
-**Wave:** P6-A′ (with FG-24; before FG-26 renders anything) · **Owner agent:** _unassigned_ · **Status:** PLAN — not started (edition 2)
+**Wave:** P6-A′ (with FG-24; before FG-26 renders anything) · **Owner agent:** _unassigned_ · **Status:** DONE — implemented, deployed and system-tested on `hermes-systest` 2026-08-12; the loop that *runs* it landed later, in FG-30's `hermes-review-pass.timer` (#268/#269 — until then nothing on the box had ever called promotion, and its table did not exist there). One checklist item stays with FG-24 by design
 
 ## Summary
 
@@ -498,6 +498,30 @@ and promotion queue; full matrix on real Postgres; `scripts/run_tests.sh`,
       `../victim` installed as one contained directory and the victim outside
       the library survived (PR #205's containment, live).
 
+## Fixed — the digest can no longer lose a section without saying so
+
+Found in the Phase-6 close-out pass (2026-08-16, `develop` @ `3afc06225`),
+fixed the same day: each of the three optional sections now contributes
+`<section>: unavailable — <error>: <reason>` instead of nothing, so the failure
+travels to the phone rather than to `agent.log`. The sections stay optional —
+one unconfigured store still costs only its own section. What was there:
+
+`weekly_digest()` assembles six sections. Three of them — the FG-30 profile
+suggestion, idle profiles, and FG-31 capacity — are wrapped in
+`except Exception: log.warning(...)` and contribute nothing when they fail, so
+the digest is delivered looking complete while the owner is told nothing about
+what is missing. With no section producing lines at all the digest reads
+"Nothing to review this week", which is the same sentence a genuinely quiet
+week produces.
+
+This is the shape that has now produced three defects in this phase (retirement
+reporting success over goals it never closed, the review pass's swallowed
+`skill_promotions` failure, and #253's dead code behind `except Exception`): a
+step that cannot run reports as a step with nothing to say. The digest is the
+loop's only weekly output, and it runs unattended, so it is the worst place for
+it. The fix keeps the property the `try` blocks exist for and adds the one
+thing they were missing: the owner is told which section is missing and why.
+
 ## Implementation notes (edition 2 → shipped)
 
 Where the implementation departs from the text above, and why:
@@ -556,6 +580,7 @@ Where the implementation departs from the text above, and why:
 
 | Date | Edition | Author | Change | Rationale |
 |------|---------|--------|--------|-----------|
+| 2026-08-16 | 3 | devin (for Leo) | Phase-6 close-out: status corrected to DONE, and one finding recorded — the weekly digest can lose a section without saying so | The header said `PLAN — not started` for an FG that was deployed and system-tested on 2026-08-11. Reading `weekly_digest()` against the shipped code turned up the same shape that has produced three defects in this phase: the suggestion, idle-profile and capacity sections each sit behind `except Exception: log.warning(...)`, so a failed section is indistinguishable from a section with nothing to report, and an all-failed digest reads "Nothing to review this week". Worth noting that FG-29's own promotion table had never existed on the live box until #269 created it — the loop's output being unreachable is this FG's recurring failure mode, not a one-off. |
 | 2026-08-10 | 1 | devin (for Leo) | Created FG doc | Leo reframed the domain model: ai4all serves **one entity pursuing one ultimate goal**; a **profile is an instrument for a sub-goal**; **people participate in as many profiles as their work spans**. That resolved the groups-vs-profiles question (a person can already hold a `principals` row in several profiles under one shared GoTrue subject, so FG-25 is not needed for v1) and exposed what was missing. Corrected an error: I had asserted Hermes has no goal object, when FG-04/FG-09 shipped a full registry; what it lacks is `parent_goal_id`, cross-profile reach, prompt presence (verified absent) and an upward path. Chose publish-with-revision over live inheritance per the closed-PR precedent in `AGENTS.md`. | Leo: "a profile is an infrastructure defined to help to improve on sub-goal with similar behavioural characteristics … to further provide know-hows, insights and innovations on how to achieve the goal." |
 | 2026-08-10 | 2 | devin (for Leo) | Goal **lifetime** made load-bearing; up-flow rebuilt on the **existing skills loop**; participation + memory split added | Three corrections from Leo. **(1) Goals differ by lifetime** — some last years, some come and go inside a single session — and the system must not conflate them. Lifetime is now a *commitment about mutability* that decides placement: only `entity`/`profile`/`participant` may enter a prompt, `operational` stays tool-appended exactly as FG-09 has it, and a tier change takes effect **at the next session** because the live prompt is frozen for the session's life. That preserves FG-09's rule where it is right instead of overriding it, and it is what makes the stable-tier Purpose block defensible. The ladder deliberately spans both lifetimes — a short-lived goal declares its parent — so the agent can always resolve *which long-term goal does this serve*, and can notice when the answer is "none". **(2) The up-flow already exists**: edition 1 proposed a free-text `insight_candidates` table, which reinvented the self-improvement loop that is Leo's reason for building on Hermes at all. Rebuilt on it — `agent/background_review.py` already distils skills, so the missing piece is only *crossing the profile boundary*. The shared library needs no new mechanism either: `skills.external_dirs` already exists and is **read-only to autonomous curation** (`is_external_skill_path`), which is precisely the property promotion requires — a profile's curator cannot write into the org tier by accident, so the audited promotion path is the only way in. Promoting *skills* rather than prose also means the shared tier accumulates executable, tested artefacts. **(3) Both organisational shapes are one mechanism** — participation = (person × profile) covers many-people-one-sub-goal (SME/school/family) and one-person-many-sub-goals (OPC) without branching. But the OPC case exposed a flaw in FG-24: putting *all* per-user memory inside the profile would duplicate the founder's identity facts across four profiles and let them drift, so memory now splits by what the fact is *about* — person-level `USER.md` shared across a person's participations, participation-level memory isolated per profile. | Leo: "some goals are very long term and don't change very often but some goals are very short-lived and will come and go in every session or even in the middle of a session. The system must be careful with this distinction." · "The existing Hermes infrastructure already support self-improving … this should be the 'Insight flows up'." · "in a One-Person-Company (OPC) the CEO is also the CTO is also the CMO is also the CFO. The same person will provide the real-world connections and insights and knowhows for different sub-goals." |
 | 2026-08-10 | 3 | devin (for Leo) | Promotion becomes a **weekly digest with two-stage approval**; auto-approve dropped; open questions closed; profile lifecycle split out to FG-30 | Leo answered all three open questions. **(1)** Promotion cadence is weekly, so human approval is affordable — which removes the reason for the single-principal auto-approve path I had recommended, and one always-audited code path is worth more than a saved minute. Batching also fits the loop's shape: `background_review` already runs asynchronously and writes locally, so only the *crossing* needs a human, and it can wait for a review moment. **(2)** The teacher must review before promotion, which is stronger than the owner-only gate I had and splits the judgement correctly: the origin profile's reviewer is the only person who can tell whether a skill carries traces of the people it was learned from, while the owner is the only person who can tell whether it belongs to the whole entity. Both stages are recorded separately in `skill_promotions`, and because `body_hash` pins the approved bytes, an edit after approval is a new proposal rather than a silent substitution. **(3)** The routing answer — per-profile channels, but starting from one or two profiles with the system suggesting more over time — turned out to be a new capability rather than a UX preference, since every doc so far assumed static profile structure; it is written up as **FG-30 (profile lifecycle: suggest, adopt, retire)** and depends on this FG's digest and promotion path. | Leo: "How often does the skill promotion happen, if once a day or once a week, it is ok to let the human to approve the system suggested promotion" · "Yes, teacher needs to review before promotion" · "Each profile should have its own bot/channel … However, at the beginning, the human may not know what kind of profile does he/she needs." |

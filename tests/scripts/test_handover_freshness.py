@@ -15,8 +15,14 @@ one: staleness measured as "the documented sha is not HEAD" fires on **every**
 deploy — including the deploy that ships the doc update, whose merge sha does
 not exist when the doc is written. An always-red check gets muted, which is how
 the document went stale to begin with. So drift means *the deployment tooling
-the document describes* moved after the document was last written; being a few
-feature commits behind HEAD is a note.
+the document describes* moved after the document was last written.
+
+Being a few feature commits behind HEAD was reported as a note, and that is the
+third failure mode: the note printed on every single deploy, always saying that
+nothing was wrong. Amber that never turns green is read as background colour —
+the same muting, one shade down. It is silent now, and the only behind-HEAD case
+still reported is a documented revision this history does not contain, which
+means the doc was verified against a different line of development entirely.
 """
 
 import subprocess
@@ -95,31 +101,56 @@ def test_the_real_failure_deploy_tooling_moved_after_the_doc_was_written(checkou
     assert "deploy/hermes-deploy.sh" in finding["expected"]
 
 
-def test_a_doc_behind_head_with_no_tooling_change_is_a_note_not_drift(checkout):
-    """Every deploy moves HEAD. If that alone were drift the check would be red
-    forever — including on the deploy that ships the doc update, whose merge sha
-    cannot be known when the doc is written."""
+def test_a_doc_behind_head_with_no_tooling_change_says_nothing(checkout):
+    """Every deploy moves HEAD, so this is the *normal* state of the document.
+
+    It used to be a note, and the note printed on every deploy for four days
+    while nothing was wrong — a check that is never green teaches its reader to
+    skip the line, and the drift finding prints on that same line.
+    """
+    repo, commit = checkout
+    verified = commit(DOC.format(date="2026-08-05", revision="0" * 9))
+    (repo / ds.HANDOVER_DOC).write_text(
+        DOC.format(date="2026-08-05", revision=verified[:9]), encoding="utf-8"
+    )
+    _git(repo, "commit", "-q", "-a", "-m", "verified sha")
+    commit("export const x = 1\n", path="agent-home/src/feature.ts")
+
+    assert ds.check_handover_doc(repo) == []
+
+
+def test_a_documented_revision_this_history_does_not_contain_is_a_note(checkout):
+    """The one behind-HEAD case still worth printing.
+
+    A sha no commit here contains means the doc was verified against another
+    line of development — its claims cannot be placed against what is deployed,
+    and "nothing changed since" cannot even be computed honestly.
+    """
     repo, commit = checkout
     commit(DOC.format(date="2026-08-05", revision="657f1190b"))
     commit("export const x = 1\n", path="agent-home/src/feature.ts")
+
     findings = ds.check_handover_doc(repo)
+
     assert [f["severity"] for f in findings] == [NOTE]
-    assert "nothing it documents has changed" in findings[0]["detail"]
+    assert "657f1190b" in findings[0]["actual"]
+    assert "not in this history" in findings[0]["detail"]
 
 
 def test_a_doc_updated_in_the_same_commit_as_the_tooling_is_clean(checkout):
     """The doc and the tool change together — the normal, correct case, and the
     one a HEAD-equality check could never satisfy."""
     repo, commit = checkout
-    commit(DOC.format(date="2026-08-05", revision="657f1190b"))
+    verified = commit(DOC.format(date="2026-08-05", revision="0" * 9))
     (repo / "deploy").mkdir(parents=True, exist_ok=True)
     (repo / "deploy" / "hermes-deploy.sh").write_text("echo v2\n", encoding="utf-8")
     (repo / ds.HANDOVER_DOC).write_text(
-        DOC.format(date="2026-08-06", revision="657f1190b"), encoding="utf-8"
+        DOC.format(date="2026-08-06", revision=verified[:9]), encoding="utf-8"
     )
     _git(repo, "add", "deploy/hermes-deploy.sh", str(ds.HANDOVER_DOC))
     _git(repo, "commit", "-q", "-m", "tool + doc")
-    assert [f["severity"] for f in ds.check_handover_doc(repo)] == [NOTE]
+
+    assert ds.check_handover_doc(repo) == []
 
 
 def test_an_abbreviated_claim_matching_head_is_not_drift(checkout):
@@ -178,6 +209,27 @@ def test_the_cli_exits_nonzero_on_a_stale_doc_and_names_it(
     )
     assert ds.main(["handover"]) == 0
     assert "current" in capsys.readouterr().out
+
+
+def test_the_cli_says_current_while_the_deployment_moves_ahead(
+    capsys, monkeypatch, checkout
+):
+    """The deploy's last line: green until something documented actually moves."""
+    repo, commit = checkout
+    verified = commit(DOC.format(date="2026-08-05", revision="0" * 9))
+    (repo / ds.HANDOVER_DOC).write_text(
+        DOC.format(date="2026-08-05", revision=verified[:9]), encoding="utf-8"
+    )
+    _git(repo, "commit", "-q", "-a", "-m", "verified sha")
+    monkeypatch.setattr(ds, "REPO_ROOT", repo)
+
+    commit("export const x = 1\n", path="agent-home/src/feature.ts")
+    assert ds.main(["handover"]) == 0
+    assert "current" in capsys.readouterr().out
+
+    commit("echo v3\n", path="deploy/hermes-deploy.sh")
+    assert ds.main(["handover"]) == 1
+    assert "STALE" in capsys.readouterr().out
 
 
 def test_the_state_check_does_not_report_doc_freshness():

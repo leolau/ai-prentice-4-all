@@ -17,11 +17,13 @@ import "server-only";
 import { hermesApiBaseUrl } from "@/lib/env";
 import type {
   AgentAttachmentPayload,
+  CapacityResponse,
   ChangeOpResponse,
   ChangesResponse,
   ChatMessagesResponse,
   ChatSendResponse,
   CoreManifestResponse,
+  CreateProjectPayload,
   DirectoryResponse,
   EntityGoalResponse,
   FileAsset,
@@ -53,6 +55,25 @@ import type {
   OnboardingReadinessResponse,
   Principal,
   ProfilesResponse,
+  ProfileSuggestionAdoptResponse,
+  ProfileSuggestionDismissResponse,
+  ProfileSuggestionsResponse,
+  Project,
+  ProjectBoardView,
+  ProjectCardDetail,
+  ProjectContact,
+  ProjectDetail,
+  ProjectDirectivesResponse,
+  ProjectDoctorDetail,
+  ProjectEventsResponse,
+  ProjectLink,
+  ProjectOutput,
+  ProjectPlaybookResponse,
+  ProjectRun,
+  ProjectScheduleResult,
+  ProjectsDoctorResponse,
+  ProjectsResponse,
+  ProjectToolsResolution,
   ProposedAction,
   Role,
   SessionCreateResponse,
@@ -186,6 +207,60 @@ export class HermesApiClient {
    */
   async profiles(): Promise<ProfilesResponse> {
     return this.request("/api/profiles");
+  }
+
+  // --- Profile suggestions (FG-30) ---------------------------------------
+  // The Python API is the authority: it enforces owner-only adopt/dismiss by
+  // binding the requesting principal (`_comms_resolve_principal`, the #253
+  // fix), and the dedup_key latches a dismissal forever. These methods just
+  // forward; a 403 from upstream is the real gate, not a BFF re-derivation.
+
+  /**
+   * This profile's open suggestion (`suggestions`, at most one per §1.1) plus a
+   * capped `reviewed` trail so the owner keeps a trace of what they just did.
+   * The trail carries no `evidence` — that blob holds the participants roster.
+   * Any enrolled principal may read; adopt/dismiss are owner-only action routes.
+   */
+  async profileSuggestions(): Promise<ProfileSuggestionsResponse> {
+    return this.request("/api/profiles/suggestions");
+  }
+
+  /**
+   * Adopt a suggestion (owner only). Returns the new profile's path and
+   * goal — the new profile is channel-less until the owner commits one (§3).
+   */
+  async adoptProfileSuggestion(
+    suggestionId: string,
+  ): Promise<ProfileSuggestionAdoptResponse> {
+    return this.request(
+      `/api/profiles/suggestions/${encodeURIComponent(suggestionId)}/adopt`,
+      { method: "POST" },
+    );
+  }
+
+  /**
+   * Dismiss a suggestion (owner only). `reason` is optional and recorded in
+   * the C5 audit. A dismissal is **permanent** for that evidence: the
+   * `dedup_key` latches it, so the same cluster is never re-proposed (§1.1).
+   */
+  async dismissProfileSuggestion(
+    suggestionId: string,
+    reason?: string,
+  ): Promise<ProfileSuggestionDismissResponse> {
+    const json = reason ? { reason } : undefined;
+    return this.request(
+      `/api/profiles/suggestions/${encodeURIComponent(suggestionId)}/dismiss`,
+      { method: "POST", json },
+    );
+  }
+
+  /**
+   * FG-31 capacity headroom — one verdict naming the bound that produced it.
+   * Read-only, and box-wide: the active-session registry is profile-local, so
+   * Python aggregates every profile's leases rather than reporting this one's.
+   */
+  async capacity(): Promise<CapacityResponse> {
+    return this.request("/api/capacity");
   }
 
   /** Resolve the C1 principal + role for the current bridged session. */
@@ -1107,6 +1182,505 @@ export class HermesApiClient {
       method: "PATCH",
       json: payload,
     });
+  }
+
+  // ── Projects (design ed.3.2 §12 — BFF mirror of /api/registry/projects) ──
+
+  /** The readable projects, newest first, with derived progress + health. */
+  async projects(
+    opts: {
+      status?: string;
+      cadence?: string;
+      health?: string;
+      q?: string;
+      archived?: boolean;
+      limit?: number;
+      cursor?: string;
+    } = {},
+  ): Promise<ProjectsResponse> {
+    const p = new URLSearchParams();
+    for (const key of ["status", "cadence", "health", "q", "cursor"] as const) {
+      const value = opts[key];
+      if (value) p.set(key, String(value));
+    }
+    if (opts.archived) p.set("archived", "true");
+    if (opts.limit !== undefined) p.set("limit", String(opts.limit));
+    const qs = p.toString();
+    return this.request(`/api/registry/projects${qs ? `?${qs}` : ""}`);
+  }
+
+  /** Diagnosable breaks across readable projects (§15.1), or one slug's. */
+  async projectsDoctor(slug?: string): Promise<ProjectsDoctorResponse> {
+    const qs = slug ? `?slug=${encodeURIComponent(slug)}` : "";
+    return this.request(`/api/registry/projects/doctor${qs}`);
+  }
+
+  /** Create under the full §2.2 contract — goal, description, an output, host profile. */
+  async createProject(payload: CreateProjectPayload): Promise<Project & { created: boolean }> {
+    return this.request("/api/registry/projects", {
+      method: "POST",
+      json: payload,
+    });
+  }
+
+  /** The whole record in one read: fields, outputs, people, links, runs, health. */
+  async project(slug: string): Promise<ProjectDetail> {
+    return this.request(`/api/registry/projects/${encodeURIComponent(slug)}`);
+  }
+
+  /** Edit record fields. Leaving `repeatable` pauses + detaches the schedule (§3.1). */
+  async updateProject(
+    slug: string,
+    payload: Record<string, unknown>,
+  ): Promise<Project> {
+    return this.request(`/api/registry/projects/${encodeURIComponent(slug)}`, {
+      method: "PATCH",
+      json: payload,
+    });
+  }
+
+  /** Autonomy gets its own route so the audit line is unmistakable (§12). */
+  async setProjectAutonomy(
+    slug: string,
+    autonomy: string,
+  ): Promise<{ slug: string; autonomy: string }> {
+    return this.request(
+      `/api/registry/projects/${encodeURIComponent(slug)}/autonomy`,
+      { method: "PATCH", json: { autonomy } },
+    );
+  }
+
+  /** Create or update the host profile's cron job (§3.2). Lead only. */
+  async setProjectSchedule(
+    slug: string,
+    schedule: string,
+  ): Promise<ProjectScheduleResult> {
+    return this.request(
+      `/api/registry/projects/${encodeURIComponent(slug)}/schedule`,
+      { method: "PUT", json: { schedule } },
+    );
+  }
+
+  /** Remove the schedule: both halves of the link go (§3.2). */
+  async clearProjectSchedule(
+    slug: string,
+  ): Promise<{ scheduled: false; removed: boolean }> {
+    return this.request(
+      `/api/registry/projects/${encodeURIComponent(slug)}/schedule`,
+      { method: "DELETE" },
+    );
+  }
+
+  /** One project's doctor: the findings and the health they imply. */
+  async projectDoctor(slug: string): Promise<ProjectDoctorDetail> {
+    return this.request(
+      `/api/registry/projects/${encodeURIComponent(slug)}/doctor`,
+    );
+  }
+
+  /** The project's cards, column-grouped through the shared rollup. */
+  async projectBoard(slug: string): Promise<ProjectBoardView> {
+    return this.request(
+      `/api/registry/projects/${encodeURIComponent(slug)}/board`,
+    );
+  }
+
+  /** §12: the live-update event tail — pass the previous `latest_event_id`. */
+  async projectEvents(
+    slug: string,
+    since?: number,
+  ): Promise<ProjectEventsResponse> {
+    const query = since != null ? `?since=${encodeURIComponent(since)}` : "";
+    return this.request(
+      `/api/registry/projects/${encodeURIComponent(slug)}/events${query}`,
+    );
+  }
+
+  /** §2.2: write the rolling "where this stands" summary (§17 step 11). */
+  async summariseProject(
+    slug: string,
+    summary: string,
+  ): Promise<{ summary: string; summary_at: number }> {
+    return this.request(
+      `/api/registry/projects/${encodeURIComponent(slug)}/summarise`,
+      { method: "POST", json: { summary } },
+    );
+  }
+
+  /** Create a card carrying the project id — lands in `triage` (§10). */
+  async createProjectCard(
+    slug: string,
+    payload: {
+      title?: string;
+      body?: string;
+      assignee?: string;
+      from_todo?: { profile?: string; id: string };
+    },
+  ): Promise<{
+    task_id: string;
+    project_id: string;
+    status: string;
+    from_todo?: { profile: string; id: string };
+  }> {
+    return this.request(
+      `/api/registry/projects/${encodeURIComponent(slug)}/cards`,
+      { method: "POST", json: payload },
+    );
+  }
+
+  /** One card, re-checked under the caller's principal. */
+  async projectCard(
+    slug: string,
+    taskId: string,
+  ): Promise<ProjectCardDetail> {
+    return this.request(
+      `/api/registry/projects/${encodeURIComponent(slug)}/cards/${encodeURIComponent(taskId)}`,
+    );
+  }
+
+  /** Add a deliverable [3]. */
+  async addProjectOutput(
+    slug: string,
+    payload: {
+      title: string;
+      spec?: string;
+      kind?: string;
+      required?: boolean;
+      recurring?: boolean;
+    },
+  ): Promise<ProjectOutput> {
+    return this.request(
+      `/api/registry/projects/${encodeURIComponent(slug)}/outputs`,
+      { method: "POST", json: payload },
+    );
+  }
+
+  /** Patch an output. Flipping `required` is lead-only upstream. */
+  async updateProjectOutput(
+    slug: string,
+    outputId: string,
+    payload: Record<string, unknown>,
+  ): Promise<ProjectOutput> {
+    return this.request(
+      `/api/registry/projects/${encodeURIComponent(slug)}/outputs/${encodeURIComponent(outputId)}`,
+      { method: "PATCH", json: payload },
+    );
+  }
+
+  /** Delete an output — refuses on the last required one. */
+  async deleteProjectOutput(
+    slug: string,
+    outputId: string,
+  ): Promise<{ deleted: string }> {
+    return this.request(
+      `/api/registry/projects/${encodeURIComponent(slug)}/outputs/${encodeURIComponent(outputId)}`,
+      { method: "DELETE" },
+    );
+  }
+
+  /** Record a delivery (run, card, or a hand-attached artefact). */
+  async deliverProjectOutput(
+    slug: string,
+    outputId: string,
+    payload: {
+      run_id?: string;
+      task_id?: string;
+      link_kind?: string;
+      link_ref?: string;
+      profile?: string;
+      label?: string;
+      note?: string;
+    } = {},
+  ): Promise<{ delivery_id: string; output_id: string; by: string }> {
+    return this.request(
+      `/api/registry/projects/${encodeURIComponent(slug)}/outputs/${encodeURIComponent(outputId)}/deliver`,
+      { method: "POST", json: payload },
+    );
+  }
+
+  /** Human-only acceptance (§6.1); offers closure on the last required output. */
+  async acceptProjectOutput(
+    slug: string,
+    outputId: string,
+  ): Promise<{ accepted: string; by: string; offers_closure: boolean }> {
+    return this.request(
+      `/api/registry/projects/${encodeURIComponent(slug)}/outputs/${encodeURIComponent(outputId)}/accept`,
+      { method: "POST", json: {} },
+    );
+  }
+
+  /** Add a member (a person) to the project. */
+  async addProjectMember(
+    slug: string,
+    payload: { user_id: string; role?: string },
+  ): Promise<{ user_id: string; role: string }> {
+    return this.request(
+      `/api/registry/projects/${encodeURIComponent(slug)}/members`,
+      { method: "POST", json: payload },
+    );
+  }
+
+  /** Remove a member — refuses on the last lead. */
+  async removeProjectMember(
+    slug: string,
+    userId: string,
+  ): Promise<{ removed: string }> {
+    return this.request(
+      `/api/registry/projects/${encodeURIComponent(slug)}/members/${encodeURIComponent(userId)}`,
+      { method: "DELETE" },
+    );
+  }
+
+  /** Attach an instrument (profile) the project runs on. */
+  async addProjectProfile(
+    slug: string,
+    payload: { profile: string; role?: string },
+  ): Promise<{ profile: string }> {
+    return this.request(
+      `/api/registry/projects/${encodeURIComponent(slug)}/profiles`,
+      { method: "POST", json: payload },
+    );
+  }
+
+  /** Detach a profile — refuses on the last one. */
+  async removeProjectProfile(
+    slug: string,
+    name: string,
+  ): Promise<{ detached: string }> {
+    return this.request(
+      `/api/registry/projects/${encodeURIComponent(slug)}/profiles/${encodeURIComponent(name)}`,
+      { method: "DELETE" },
+    );
+  }
+
+  /** Add a contact [10]. */
+  async addProjectContact(
+    slug: string,
+    payload: {
+      name: string;
+      role?: string;
+      org?: string;
+      platform?: string;
+      address?: string;
+      user_id?: string;
+      notes?: string;
+    },
+  ): Promise<ProjectContact> {
+    return this.request(
+      `/api/registry/projects/${encodeURIComponent(slug)}/contacts`,
+      { method: "POST", json: payload },
+    );
+  }
+
+  /** Patch a contact's fields. */
+  async updateProjectContact(
+    slug: string,
+    contactId: string,
+    payload: Record<string, unknown>,
+  ): Promise<ProjectContact> {
+    return this.request(
+      `/api/registry/projects/${encodeURIComponent(slug)}/contacts/${encodeURIComponent(contactId)}`,
+      { method: "PATCH", json: payload },
+    );
+  }
+
+  /** Delete a contact. */
+  async deleteProjectContact(
+    slug: string,
+    contactId: string,
+  ): Promise<{ deleted: string }> {
+    return this.request(
+      `/api/registry/projects/${encodeURIComponent(slug)}/contacts/${encodeURIComponent(contactId)}`,
+      { method: "DELETE" },
+    );
+  }
+
+  /** Attach a pointer (§11 rule 5): file, arrival, to-do, goal, memory, URL… */
+  async linkToProject(
+    slug: string,
+    payload: {
+      kind: string;
+      ref: string;
+      profile?: string;
+      label?: string;
+    },
+  ): Promise<ProjectLink> {
+    return this.request(
+      `/api/registry/projects/${encodeURIComponent(slug)}/links`,
+      { method: "POST", json: payload },
+    );
+  }
+
+  /** Detach a pointer. */
+  async unlinkFromProject(
+    slug: string,
+    payload: { kind: string; ref: string; profile?: string },
+  ): Promise<{ detached: { kind: string; profile: string; ref: string } }> {
+    return this.request(
+      `/api/registry/projects/${encodeURIComponent(slug)}/links`,
+      { method: "DELETE", json: payload },
+    );
+  }
+
+  /** The method: active revision + all revisions (§7). */
+  async projectPlaybook(slug: string): Promise<ProjectPlaybookResponse> {
+    return this.request(
+      `/api/registry/projects/${encodeURIComponent(slug)}/playbook`,
+    );
+  }
+
+  /** Propose revision N+1 (inactive). Cycle-checked; assignees must be profiles. */
+  async saveProjectPlaybook(
+    slug: string,
+    payload: { body?: string; steps: unknown[]; note?: string },
+  ): Promise<{ rev: number; active: false }> {
+    return this.request(
+      `/api/registry/projects/${encodeURIComponent(slug)}/playbook`,
+      { method: "POST", json: payload },
+    );
+  }
+
+  /** Human-only activation (§7.2) — lead/admin. */
+  async activateProjectPlaybook(
+    slug: string,
+    rev: number,
+    note?: string,
+  ): Promise<{ rev: number; active: true }> {
+    return this.request(
+      `/api/registry/projects/${encodeURIComponent(slug)}/playbook/${encodeURIComponent(rev)}/activate`,
+      { method: "POST", json: note ? { note } : {} },
+    );
+  }
+
+  /** Standing instructions + feedback (§5). */
+  async projectDirectives(
+    slug: string,
+    opts: { includeRetired?: boolean } = {},
+  ): Promise<ProjectDirectivesResponse> {
+    const qs = opts.includeRetired ? "?include_retired=true" : "";
+    return this.request(
+      `/api/registry/projects/${encodeURIComponent(slug)}/directives${qs}`,
+    );
+  }
+
+  /** Add guidance — applies from the next run, never mid-conversation. */
+  async addProjectDirective(
+    slug: string,
+    payload: {
+      kind?: string;
+      body: string;
+      scope?: string;
+      target_ref?: string;
+      rating?: string;
+    },
+  ): Promise<{ id: string; applies_from: string }> {
+    return this.request(
+      `/api/registry/projects/${encodeURIComponent(slug)}/directives`,
+      { method: "POST", json: payload },
+    );
+  }
+
+  /** Retire, never delete (§5.2). */
+  async retireProjectDirective(
+    slug: string,
+    directiveId: string,
+  ): Promise<{ id: string; retired: true }> {
+    return this.request(
+      `/api/registry/projects/${encodeURIComponent(slug)}/directives/${encodeURIComponent(directiveId)}/retire`,
+      { method: "POST", json: {} },
+    );
+  }
+
+  /** §8.2: a member activates a proposed directive — applies next run. */
+  async activateProjectDirective(
+    slug: string,
+    directiveId: string,
+  ): Promise<{ id: string; active: true; applies_from: string }> {
+    return this.request(
+      `/api/registry/projects/${encodeURIComponent(slug)}/directives/${encodeURIComponent(directiveId)}/activate`,
+      { method: "POST", json: {} },
+    );
+  }
+
+  /** The record: every run with duration, outcome, deliveries, scores. */
+  async projectRuns(slug: string): Promise<{ runs: ProjectRun[] }> {
+    return this.request(
+      `/api/registry/projects/${encodeURIComponent(slug)}/runs`,
+    );
+  }
+
+  /** One run's cards, deliveries, cost (fail-open) and retro. */
+  async projectRun(slug: string, runNo: number): Promise<ProjectRun> {
+    return this.request(
+      `/api/registry/projects/${encodeURIComponent(slug)}/runs/${encodeURIComponent(runNo)}`,
+    );
+  }
+
+  /** Start a run now (`trigger='manual'`); `playbook_rev` repeats an old method. */
+  async startProjectRun(
+    slug: string,
+    payload: { playbook_rev?: number } = {},
+  ): Promise<ProjectRun> {
+    return this.request(
+      `/api/registry/projects/${encodeURIComponent(slug)}/runs`,
+      { method: "POST", json: payload },
+    );
+  }
+
+  /** Pass a checkpoint / answer a budget stop (§12). */
+  async continueProjectRun(slug: string, runNo: number): Promise<ProjectRun> {
+    return this.request(
+      `/api/registry/projects/${encodeURIComponent(slug)}/runs/${encodeURIComponent(runNo)}/continue`,
+      { method: "POST", json: {} },
+    );
+  }
+
+  /** Stop promoting and archive un-started cards; never kills a worker. */
+  async cancelProjectRun(slug: string, runNo: number): Promise<ProjectRun> {
+    return this.request(
+      `/api/registry/projects/${encodeURIComponent(slug)}/runs/${encodeURIComponent(runNo)}/cancel`,
+      { method: "POST", json: {} },
+    );
+  }
+
+  /** Write or edit the retrospective. */
+  async writeProjectRetro(
+    slug: string,
+    runNo: number,
+    retro: string,
+  ): Promise<ProjectRun> {
+    return this.request(
+      `/api/registry/projects/${encodeURIComponent(slug)}/runs/${encodeURIComponent(runNo)}/retro`,
+      { method: "POST", json: { retro } },
+    );
+  }
+
+  /** §8.1: score a run 1–5 — human-only, editable, never agent-writable. */
+  async scoreProjectRun(
+    slug: string,
+    runNo: number,
+    payload: { score: number; note?: string },
+  ): Promise<{
+    scored: number;
+    score_user: number;
+    score_note: string | null;
+    by: string;
+  }> {
+    return this.request(
+      `/api/registry/projects/${encodeURIComponent(slug)}/runs/${encodeURIComponent(runNo)}/score`,
+      { method: "POST", json: payload },
+    );
+  }
+
+  /** Set toolsets/skills; returns the resolved host-profile intersection (§4.1). */
+  async setProjectTools(
+    slug: string,
+    payload: { toolsets?: string[]; skills?: string[] },
+  ): Promise<ProjectToolsResolution> {
+    return this.request(
+      `/api/registry/projects/${encodeURIComponent(slug)}/tools`,
+      { method: "PATCH", json: payload },
+    );
   }
 }
 

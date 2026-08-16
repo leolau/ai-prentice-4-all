@@ -61,6 +61,26 @@ CONFLICT_KINDS: Tuple[str, ...] = (
     "stated_blockage",
 )
 
+#: How much of a failure's text a digest line carries. Enough to recognise the
+#: cause; the log has the rest.
+_REASON_CHARS = 160
+
+
+def _unavailable(section: str, exc: BaseException) -> str:
+    """The line a section that could not run contributes to the digest.
+
+    A section whose store is unreachable used to contribute *nothing*, which in
+    a digest is indistinguishable from a section with nothing to report — and
+    with every section failing, the digest read "Nothing to review this week".
+    The three optional sections stay optional (one unconfigured store must not
+    cost the owner the rest of the review), but they say so.
+    """
+    log.warning("digest: %s not rendered: %s", section, exc)
+    reason = " ".join(f"{type(exc).__name__}: {exc}".split())
+    if len(reason) > _REASON_CHARS:
+        reason = reason[: _REASON_CHARS - 1] + "…"
+    return f"{section}: unavailable — {reason}"
+
 
 @dataclass(frozen=True)
 class Conflict:
@@ -520,6 +540,69 @@ async def weekly_digest(
     if stale_copies:
         lines.append("Published entity-goal copies behind their source:")
         lines.extend(f"  {goal.title} (from {goal.published_from_profile})" for goal in stale_copies)
+
+    # Profile suggestion (FG-30). The digest only *renders* an open
+    # suggestion — generation is a separate monthly pass. An open suggestion
+    # appears in every weekly review until the owner reviews it.
+    try:
+        from hermes_cli.datastore import get_store
+        from hermes_cli.profile_suggestion import (
+            ProfileSuggestionStore,
+            digest_lines as suggestion_digest_lines,
+        )
+
+        suggestion_store = ProfileSuggestionStore(get_store("supabase-app", "prod"))
+        # "prod" hard-coded by decision (FG-30 §4.2 T3 Q2): the digest's
+        # suggestion render is a one-tier C3 consumer with no dev context;
+        # the same assumption is recorded in profile_suggestion._resolve_store.
+        suggestion = await suggestion_store.digest_suggestion(principal)
+        suggestion_lines = suggestion_digest_lines(suggestion)
+        if suggestion_lines:
+            lines.append("Profile suggestion:")
+            lines.extend(f"  {line}" for line in suggestion_lines)
+    except Exception as exc:
+        lines.append(_unavailable("Profile suggestion", exc))
+
+    # Idle profile detection (FG-30). Flag profiles with no sessions for
+    # N weeks rather than waiting for someone to notice.
+    idle_names: List[str] = []
+    try:
+        from hermes_cli.profile_suggestion import (
+            idle_lines as idle_digest_lines,
+            idle_profiles,
+        )
+
+        idle = await idle_profiles(now=now)
+        idle_names = [name for name, _age in idle]
+        idle_lines_rendered = idle_digest_lines(idle)
+        if idle_lines_rendered:
+            lines.append("Profiles with no recent sessions:")
+            lines.extend(f"  {line}" for line in idle_lines_rendered)
+    except Exception as exc:
+        lines.append(_unavailable("Profiles with no recent sessions", exc))
+
+    # Capacity headroom (FG-31). Arrives in the same review moment as
+    # everything else, and reuses the idle profiles just computed as its
+    # cheapest recommendation.
+    try:
+        from hermes_cli.capacity import (
+            COMFORTABLE,
+            digest_lines as capacity_digest_lines,
+            headroom,
+        )
+        from hermes_cli.config import load_config
+
+        verdict = headroom(load_config(), idle_profiles=idle_names)
+        # A comfortable box says the reading and the verdict, nothing to act on.
+        capacity_lines = (
+            capacity_digest_lines(verdict)[:2]
+            if verdict.state == COMFORTABLE
+            else capacity_digest_lines(verdict)
+        )
+        lines.append("Capacity:")
+        lines.extend(f"  {line}" for line in capacity_lines)
+    except Exception as exc:
+        lines.append(_unavailable("Capacity", exc))
 
     if not lines:
         lines.append("Nothing to review this week.")

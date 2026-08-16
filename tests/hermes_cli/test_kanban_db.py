@@ -3227,6 +3227,7 @@ def test_migrate_add_optional_columns_tolerates_concurrent_migration(kanban_home
         CREATE TABLE tasks (
             id INTEGER PRIMARY KEY,
             title TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'triage',
             tenant TEXT,
             result TEXT,
             idempotency_key TEXT,

@@ -276,6 +276,7 @@ from hermes_cli.files_api import router as _files_router  # noqa: E402
 from hermes_cli.incomings_api import router as _incomings_router  # noqa: E402
 from hermes_cli.todos_api import router as _todos_router  # noqa: E402
 from hermes_cli.goals_api import router as _goals_router  # noqa: E402
+from hermes_cli.projects_api import router as _projects_router  # noqa: E402
 
 app.include_router(_memory_oauth_router)
 app.include_router(_memory_explorer_router)
@@ -283,6 +284,7 @@ app.include_router(_files_router)
 app.include_router(_incomings_router)
 app.include_router(_todos_router)
 app.include_router(_goals_router)
+app.include_router(_projects_router)
 
 # ---------------------------------------------------------------------------
 # Session token for protecting sensitive endpoints (reveal).
@@ -3674,9 +3676,11 @@ async def comms_member_activity(request: Request, _console_scope=Depends(require
 async def comms_delete_member(user_id: str, request: Request, _console_scope=Depends(require_console_scope)):
     """Remove an enrolment, resolving the rows it owns (**owner only**).
 
-    ``strategy=transfer|purge`` is required, because nothing cascades to
-    memories, files or GTS items: without an answer their rows would keep a
-    dangling ``owner_user_id`` that no principal resolves.
+    ``strategy=transfer|purge`` is required, because without an answer their
+    rows would keep a dangling ``owner_user_id`` that no principal resolves.
+    ``purge`` also erases the curated memory files about them in this profile
+    (and their cross-profile identity file if this was their last
+    participation on the box); ``transfer`` leaves both alone.
     """
     params = request.query_params
     strategy = (params.get("strategy") or "").strip()
@@ -12664,27 +12668,47 @@ async def set_memory_provider(body: MemoryProviderSelect):
 
 
 @app.post("/api/memory/reset")
-async def reset_memory(body: MemoryReset):
+async def reset_memory(body: MemoryReset, request: Request):
+    """Erase the acting principal's curated memory (FG-24 layout).
+
+    Scoped to the caller: since FG-24 an erase that walked two filenames left
+    every participation and person file in place while reporting success, and
+    an erase that walked all of them would let one principal delete the
+    agent's notes about everybody else. The profile-wide shared block goes
+    only for the roles allowed to write it.
+    """
+    from tools.memory_tool import SHARED_WRITE_ROLES, curated_memory_files
+
     target = (body.target or "all").strip().lower()
     if target not in {"all", "memory", "user"}:
         raise HTTPException(status_code=400, detail="target must be all, memory, or user")
 
-    mem_dir = get_hermes_home() / "memories"
+    try:
+        principal = await _comms_resolve_principal(request)
+        user_id: Optional[str] = principal.user_id
+        may_erase_shared = principal.role in SHARED_WRITE_ROLES
+    except HTTPException:
+        raise
+    except Exception:
+        # No directory configured: the single-user box, where the shared
+        # files are the caller's own memory.
+        user_id = None
+        may_erase_shared = True
+
     deleted = []
-    targets = []
-    if target in {"all", "memory"}:
-        targets.append("MEMORY.md")
-    if target in {"all", "user"}:
-        targets.append("USER.md")
-    for fname in targets:
-        path = mem_dir / fname
-        if path.exists():
-            try:
-                path.unlink()
-                deleted.append(fname)
-            except OSError as exc:
-                raise HTTPException(status_code=500, detail=f"Could not delete {fname}: {exc}")
-    return {"ok": True, "deleted": deleted}
+    for curated in curated_memory_files(
+        user_id=user_id, target=target, include_shared=may_erase_shared
+    ):
+        if not curated.path.exists():
+            continue
+        try:
+            curated.path.unlink()
+        except OSError as exc:
+            raise HTTPException(
+                status_code=500, detail=f"Could not delete {curated.path.name}: {exc}"
+            )
+        deleted.append({"file": curated.path.name, "scope": curated.scope})
+    return {"ok": True, "principal": user_id, "deleted": deleted}
 
 
 # ---------------------------------------------------------------------------
@@ -14144,6 +14168,134 @@ async def describe_profile_auto_endpoint(name: str, body: ProfileDescribeAuto):
         # auto-generated.
         "description_auto": bool(outcome.ok),
     }
+
+
+# ---------------------------------------------------------------------------
+# Capacity headroom (FG-31)
+# ---------------------------------------------------------------------------
+
+@app.get("/api/capacity")
+async def capacity_headroom_endpoint(request: Request):
+    """Where the box stands, for the agent-home headroom card.
+
+    Read-only and box-wide by design: the active-session registry is
+    profile-local, so the count is aggregated across every profile's home —
+    a per-profile reading would understate the load on the RAM they share.
+    Any enrolled principal may read it; nothing here is mutable, and the
+    recommendations are advice rather than an applied change.
+    """
+    from hermes_cli.capacity import as_dict, headroom
+
+    await _comms_resolve_principal(request)
+    try:
+        from hermes_cli.config import load_config
+
+        config = load_config()
+    except Exception:
+        config = {}
+    try:
+        idle: list[str] = []
+        try:
+            from hermes_cli.profile_suggestion import idle_profiles
+
+            idle = [name for name, _age in await idle_profiles()]
+        except Exception as exc:
+            _log.debug("capacity: idle profiles unavailable: %s", exc)
+        return as_dict(headroom(config, idle_profiles=idle))
+    except Exception:
+        _log.exception("GET /api/capacity failed")
+        raise HTTPException(
+            status_code=500, detail="Capacity indicators are unavailable."
+        )
+
+
+# ---------------------------------------------------------------------------
+# Profile suggestions (FG-30)
+# ---------------------------------------------------------------------------
+
+@app.get("/api/profiles/suggestions")
+async def list_profile_suggestions_endpoint(request: Request):
+    """This profile's open suggestion, and a capped trail of reviewed ones.
+
+    Two keys rather than one list of every status: ``suggestions`` is the open
+    card (at most one, §1.1) with its evidence — the decision being asked for —
+    and ``reviewed`` is a capped trail of decisions already made, projected to
+    what the trail renders. Without the trail an adopt vanishes the card the
+    owner was just looking at; with the *full* rows it would ship every past
+    ``evidence`` blob, and those carry §4.2 T3's ``participants`` roster to any
+    enrolled reader of the screen.
+    """
+    from hermes_cli.profile_suggestion import ProfileSuggestionStore
+
+    store = ProfileSuggestionStore(_comms_app_store())
+    principal = await _comms_resolve_principal(request)
+    try:
+        open_rows, reviewed = await store.queue(principal)
+        return {
+            "suggestions": [s.as_dict() for s in open_rows],
+            "reviewed": [s.as_summary_dict() for s in reviewed],
+        }
+    except Exception as exc:
+        _log.exception("GET /api/profiles/suggestions failed")
+        raise HTTPException(
+            status_code=500, detail="Profile suggestions are unavailable."
+        ) from exc
+
+
+@app.post("/api/profiles/suggestions/{suggestion_id}/adopt")
+async def adopt_profile_suggestion_endpoint(request: Request, suggestion_id: str):
+    """Adopt a profile suggestion (owner only)."""
+    from hermes_cli.profile_suggestion import ProfileSuggestionStore
+
+    store = ProfileSuggestionStore(_comms_app_store())
+    principal = await _comms_resolve_principal(request)
+    if not principal.is_owner:
+        raise HTTPException(status_code=403, detail="only the owner may adopt")
+    try:
+        suggestion, profile_dir = await store.adopt(principal, suggestion_id)
+        return {
+            "ok": True,
+            "name": suggestion.proposed_name,
+            "path": str(profile_dir),
+            "goal": suggestion.proposed_goal,
+        }
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except Exception as exc:
+        _log.exception("POST /api/profiles/suggestions/%s/adopt failed", suggestion_id)
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.post("/api/profiles/suggestions/{suggestion_id}/dismiss")
+async def dismiss_profile_suggestion_endpoint(request: Request, suggestion_id: str):
+    """Dismiss a profile suggestion (owner only).
+
+    Accepts an optional ``reason`` in the JSON body — recorded in the C5
+    audit trail. A dismissal is permanent for that evidence (latched on
+    ``dedup_key``), so the owner is asked to confirm once and plainly on
+    the surface; the reason is the place to say why.
+    """
+    from hermes_cli.profile_suggestion import ProfileSuggestionStore
+
+    store = ProfileSuggestionStore(_comms_app_store())
+    principal = await _comms_resolve_principal(request)
+    if not principal.is_owner:
+        raise HTTPException(status_code=403, detail="only the owner may dismiss")
+    reason = ""
+    try:
+        body = await request.json()
+        if isinstance(body, dict) and isinstance(body.get("reason"), str):
+            reason = body["reason"].strip()
+    except Exception:
+        pass
+    try:
+        suggestion = await store.dismiss(principal, suggestion_id, reason=reason)
+        return {"ok": True, "name": suggestion.proposed_name}
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except Exception as exc:
+        _log.exception("POST /api/profiles/suggestions/%s/dismiss failed", suggestion_id)
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 # ---------------------------------------------------------------------------

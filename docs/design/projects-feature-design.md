@@ -1335,6 +1335,12 @@ No new core model tool.
 
 Behaviour contracts, not change detectors (`AGENTS.md`).
 
+> **Review of the shipped steps 1–8 lives in
+> [`docs/reviews/2026-08-13-projects-steps-1-8-review.md`](../reviews/2026-08-13-projects-steps-1-8-review.md)**
+> — 9 backend findings (H1–H4, M1–M3, L1–L2) and 8 agent-home findings
+> (F1–F8), each with the call site, the shipped seam to use and the test that
+> would have caught it. Read it before continuing at step 9.
+
 **Fields (the §1.1 contract)**
 - Create is refused without goal [1], description [2], ≥1 output [3], or a host
   profile [4]; each rejection names the missing field.

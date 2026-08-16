@@ -307,7 +307,10 @@ export default function SystemPage() {
           const res = await api.resetMemory(
             target as "all" | "memory" | "user",
           );
-          showToast(`Reset: ${res.deleted.join(", ") || "nothing"}`, "success");
+          const erased = res.deleted
+            .map((d) => `${d.file} (${d.scope})`)
+            .join(", ");
+          showToast(`Reset: ${erased || "nothing"}`, "success");
           loadAll();
         } catch (e) {
           showToast(`Reset failed: ${e}`, "error");
@@ -653,7 +656,7 @@ export default function SystemPage() {
         onCancel={memoryReset.cancel}
         onConfirm={memoryReset.confirm}
         title="Reset memory"
-        description="This permanently erases the selected built-in memory files. This cannot be undone."
+        description="This permanently erases your own built-in memory in this profile — not other people's, and not what the agent has learned about you elsewhere. This cannot be undone."
         loading={memoryReset.isDeleting}
       />
       <DeleteConfirmDialog

@@ -55,8 +55,9 @@ import dataclasses
 import io
 import logging
 import secrets
+import shutil
 import urllib.parse
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Mapping, Optional
 
 import httpx
@@ -426,18 +427,66 @@ def parse_member_csv(csv_text: str) -> list[ImportRow]:
     return rows
 
 
+def _erase_memory_files(user_id: str) -> list[str]:
+    """Erase the curated memory files about ``user_id`` this profile owns.
+
+    This profile's whole participation directory goes (it is this person in
+    this profile, and nothing else is in it). Their person-level identity file
+    is shared across every profile on the box, so it goes only when this was
+    their last participation anywhere — one profile's owner does not get to
+    erase who somebody is for profiles they do not run.
+
+    Best-effort by design: an unreadable file must not roll back an enrolment
+    that has already been removed, so a failure is logged and reported rather
+    than raised.
+    """
+    from tools.memory_tool import (
+        get_memory_dir,
+        get_person_memory_dir,
+        person_memory_files_on_box,
+    )
+
+    erased: list[str] = []
+    participation = get_memory_dir(user_id)
+    if participation.is_dir():
+        try:
+            shutil.rmtree(participation)
+            erased.append(str(participation))
+        except OSError as exc:
+            logger.warning("member delete: could not erase %s: %s", participation, exc)
+
+    remaining = [
+        curated
+        for curated in person_memory_files_on_box(user_id)
+        if curated.scope == "participation"
+    ]
+    if remaining:
+        return erased
+    person_dir = get_person_memory_dir(user_id)
+    if person_dir.is_dir():
+        try:
+            shutil.rmtree(person_dir)
+            erased.append(str(person_dir))
+        except OSError as exc:
+            logger.warning("member delete: could not erase %s: %s", person_dir, exc)
+    return erased
+
+
 @dataclass(frozen=True)
 class DeletedMember:
     """Outcome of a hard delete: the enrolment removed + what its data did."""
 
     user_id: str
     ownership: OwnershipOutcome
+    #: Curated memory files erased (``purge`` only), as display paths.
+    memory_files_erased: list[str] = field(default_factory=list)
 
     def as_dict(self) -> dict[str, object]:
         return {
             "ok": True,
             "user_id": self.user_id,
             "ownership": self.ownership.as_dict(),
+            "memory_files_erased": list(self.memory_files_erased),
         }
 
 
@@ -1228,13 +1277,19 @@ class MemberService:
         would sign the person out of every other profile they are enrolled in,
         which is not this console's authority to decide. What this removes is
         their enrolment here.
+
+        Under ``purge`` the curated memory files about this person in *this*
+        profile go too, and their cross-profile identity file goes when this
+        was their last participation on the box. Rows without files was the
+        wrong half: the files are the half the system prompt reads, so a
+        purged person could keep being described to the agent by name.
         """
         require_owner(actor)
         if strategy not in DELETE_STRATEGIES:
             raise MemberError(
                 "strategy is required and must be one of "
-                f"{DELETE_STRATEGIES} — state what happens to the rows this "
-                "user owns (nothing cascades to memories, files or GTS items)."
+                f"{DELETE_STRATEGIES} — state what happens to the rows and "
+                "files this user owns."
             )
         if user_id == actor.user_id:
             raise MemberError("You cannot delete your own enrolment.")
@@ -1277,6 +1332,7 @@ class MemberService:
             await connection.close()
         await self.invitations.revoke(user_id=user_id)
         await self._store.unenroll(user_id)
+        erased = _erase_memory_files(user_id) if strategy == "purge" else []
         await self._audit(
             actor,
             "user.delete",
@@ -1284,10 +1340,13 @@ class MemberService:
             {
                 "strategy": strategy,
                 "successor": successor,
+                "memory_files_erased": erased,
                 **outcome.as_dict(),
             },
         )
-        return DeletedMember(user_id=user_id, ownership=outcome)
+        return DeletedMember(
+            user_id=user_id, ownership=outcome, memory_files_erased=erased
+        )
 
     # -- internals -----------------------------------------------------------
 

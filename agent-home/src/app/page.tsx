@@ -2,8 +2,10 @@ import Link from "next/link";
 
 import { LogoutButton } from "@/components/LogoutButton";
 import { MobileShell } from "@/components/MobileShell";
-import { requirePrincipal } from "@/lib/auth/principal";
+import { ProjectsHomeCard } from "@/components/projects/ProjectsHomeCard";
+import { apiClientForRequest, requirePrincipal } from "@/lib/auth/principal";
 import { scopedSelect } from "@/lib/supabase/context";
+import type { ProjectListItem } from "@/types";
 
 // The seam proof reads the live principal (cookie) + Supabase, so it must
 // render per-request, never at build time.
@@ -33,6 +35,18 @@ export default async function HomePage() {
     });
   } catch (err) {
     readError = err instanceof Error ? err.message : "scoped read failed";
+  }
+
+  // The first-class Projects card (§13): active projects with their health
+  // and next run. Best-effort like the nav badge — a projects fetch failure
+  // must not blank Home, so the card simply stays absent.
+  let activeProjects: ProjectListItem[] | null = null;
+  try {
+    const client = await apiClientForRequest();
+    const response = await client.projects({ status: "active", limit: 5 });
+    activeProjects = response.items;
+  } catch {
+    activeProjects = null;
   }
 
   return (
@@ -97,6 +111,8 @@ export default async function HomePage() {
         </p>
       </section>
 
+      {activeProjects ? <ProjectsHomeCard items={activeProjects} /> : null}
+
       <nav
         data-component="HomeLinks"
         className="mt-4 grid grid-cols-1 gap-2 sm:grid-cols-2"
@@ -115,6 +131,47 @@ export default async function HomePage() {
               {principal.role === "owner" || principal.role === "admin"
                 ? "Directory, enrolment & activation links"
                 : "Who else is in this profile"}
+            </span>
+          </span>
+          <span aria-hidden className="text-[var(--color-muted)]">
+            ›
+          </span>
+        </Link>
+
+        {/* FG-30 — the suggestion queue. Any enrolled principal may read it;
+         * only the owner gets adopt/dismiss buttons (the Python layer is the
+         * authority, returning 403 for a non-owner). The queue is
+         * profile-local — there is no cross-profile view (FG-28 has not
+         * shipped a switcher). */}
+        <Link
+          href="/profiles/suggestions"
+          data-component="ProfileSuggestionsLink"
+          className="flex items-center justify-between rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface)] p-4 active:opacity-70"
+        >
+          <span>
+            <span className="block text-sm font-medium">Profile suggestions</span>
+            <span className="block text-xs text-[var(--color-muted)]">
+              {principal.is_owner
+                ? "Review a proposed sub-goal"
+                : "Proposed sub-goals (read-only)"}
+            </span>
+          </span>
+          <span aria-hidden className="text-[var(--color-muted)]">
+            ›
+          </span>
+        </Link>
+
+        {/* FG-31: the answer to "when should I upgrade the box?", stated as a
+         * verdict rather than a graph. */}
+        <Link
+          href="/capacity"
+          data-component="CapacityLink"
+          className="flex items-center justify-between rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface)] p-4 active:opacity-70"
+        >
+          <span>
+            <span className="block text-sm font-medium">Capacity</span>
+            <span className="block text-xs text-[var(--color-muted)]">
+              Headroom, and when to upgrade the box
             </span>
           </span>
           <span aria-hidden className="text-[var(--color-muted)]">

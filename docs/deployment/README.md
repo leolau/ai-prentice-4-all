@@ -5,7 +5,7 @@ It states what exists, what is verified, what is *not*, and where the detail
 lives. The per-topic documents are authoritative for procedure; this file is
 authoritative for **what is currently true of the live box**.
 
-Last verified: 2026-08-12, application at `e18b223e1` (what the box runs; the
+Last verified: 2026-08-16, application at `3900ed007` (what the box runs; the
 repo moves ahead of it — the box is deployed by whoever merges, not by this
 document).
 
@@ -19,9 +19,16 @@ Staleness is deliberately *not* "this sha is not HEAD": every deploy moves HEAD,
 so that fires on every deploy forever — including the deploy shipping the doc
 update, whose merge sha cannot be known while the doc is being written — and an
 always-red check gets muted, which is how this document went stale in the first
-place. Being a few feature commits behind HEAD is reported as a note. Re-verify
-the claims below before moving the line forward: a fresh date on stale prose is
-worse than an old date.
+place. Being a few feature commits behind HEAD is the document's *normal* state
+and says nothing at all: it was a note until 2026-08-16, and that note printed
+on every deploy for four days to report that nothing was wrong — amber that
+never turns green is read as background colour, and the drift finding prints on
+the same line. The one behind-HEAD case still reported is a documented revision
+this history does not contain, which means the doc was verified against a
+different line of development and its claims cannot be placed at all.
+
+Re-verify the claims below before moving the line forward: a fresh date on stale
+prose is worse than an old date.
 
 ## Read these in this order
 
@@ -89,12 +96,20 @@ agent-home            (the phone PWA — note the name, see below)
 `hermes-calendar-triage` ran as **root** from 2026-08-11 to 2026-08-12: it was
 installed by hand, its unit was in no repository, and the 2026-07-31
 de-privileging drop-ins could not cover a unit that did not exist yet. Nothing
-reported it — `deploy_state.py check` compares units against the snapshot, and
-the snapshot had never seen this unit either. Both calendar units and a
+reported it — `deploy_state.py check` walked the snapshot's units and never
+asked the box what *else* was installed, so a unit the snapshot had never seen
+was invisible by construction. Both calendar units and a
 `10-unprivileged.conf` for the triage agent are now captured state, and
 `deploy/hermes-calendar-triage.service` exists so a rebuild does not repeat it.
-The lesson is the general one: *a unit installed by hand starts life outside
-every check we have.*
+
+**That blind spot is closed as of 2026-08-16** (#272): `check` enumerates the
+box with the manifest's own `unit_globs` and reports every installed unit *and
+drop-in* the snapshot does not contain, naming the account it would run as
+(`runs as root (no User=)` when it declares none). It was found the same way it
+was born — two new `hermes-review-pass` units sat on the box uncaptured and the
+check said "no drift". A unit installed by hand is no longer outside every
+check we have, but it is still outside the *reviewed* one until someone captures
+it: the finding is drift, and capture is the fix.
 
 `hermes-calendar-poller` was installed on 2026-08-11. Before that only the
 triage half of the calendar pipeline had a unit, so nothing fetched events:
@@ -125,13 +140,22 @@ the tell. It is an npm **workspace** of the root `package.json` — install and
 build from the repo root (`npm ci && npm run build --workspace agent-home`), never
 from inside `agent-home/`, which would create a second unhoisted dep tree.
 
-Three timers:
+Four timers:
 
 ```
 hermes-drift-check.timer         Mondays 09:00   three checks, reports only on drift
 hermes-secret-backup.timer       daily 04:30     encrypted credential backup, pushes
 hermes-memory-projection.timer   daily 03:00     refits the memory explorer's 2-D map
+hermes-review-pass.timer         Mondays 08:00   the learning loop's review moment
 ```
+
+The review pass is the clock for FG-29/FG-30/FG-31: it generates the monthly
+profile suggestion, alerts on sibling-goal conflicts and delivers the weekly
+digest as a notification. Until it existed, every one of those outputs was
+reachable only by someone typing a command, so on this box none of them was
+ever produced — `generate_suggestion()`'s only caller was the interactive CLI.
+Generation self-gates to monthly inside the function, so the timer is weekly and
+the digest's dedupe key is the ISO week.
 
 The projection fit is a whole-corpus SVD, so it can never run in a page
 request; without the timer the map would keep showing the corpus as it was the
@@ -142,7 +166,9 @@ The weekly unit runs four `ExecStart` lines in order, added as drop-ins so the
 captured base unit stays byte-identical:
 
 1. `check_runtime_drift.py` — interpreter and package baseline
-2. `deploy_state.py check` — config, `.env` key names, credential modes, units
+2. `deploy_state.py check` — config, `.env` key names, credential modes, the
+   captured units, and any `hermes-*`/`agent-home*` unit or drop-in installed
+   on the box that the snapshot has never seen
 3. `backup_secrets.py verify` — backup freshness, coverage, and that it is
    actually *offsite*
 4. `deploy_state.py handover --notify` — whether this document still describes
@@ -191,12 +217,25 @@ root-owned `state-secrets.env` (itself in the backup) and the private age key.
 
 ## What is verified, and what is not
 
-Verified on the live box, not in a fixture:
+Verified on the live box, not in a fixture. The list below is cumulative; the
+lines re-checked at this verification (2026-08-16, `3900ed007`) are marked ✔:
 
+- ✔ 15 enabled long-running units — the 14 `hermes-*` above plus `agent-home` —
+  all `active`, and `systemctl show -p User` reads `hermes` for **every one of
+  them**, including `agent-home` and both calendar units.
+- ✔ Four enabled timers, matching the table above.
+- ✔ `hermes-drift-check.service` has exactly the four `ExecStart` lines listed,
+  in that order, with `User=hermes` and `SuccessExitStatus=0 1`.
+- ✔ The state key still cannot push, and the box's clone has **no unpushed
+  commits** — the two captures it made on 2026-08-15/16 were finished off-box
+  and are now in the state repo.
+- ✔ The installed deploy script is byte-identical to `deploy/hermes-deploy.sh`.
+- ✔ Interpreter Python 3.11.15, `age` 1.1.1.
+- ✔ `datastore show` reports `app_prod` claimed by `/opt/data/hermes-home-staging`.
+- ✔ An uncaptured unit and an uncaptured drop-in are each reported as drift,
+  naming the account they would run as; capturing them clears it.
 - `render` reproduces the live `config.yaml` byte-for-byte.
 - The weekly unit completes as `hermes` with `Result=success`.
-- The state key **cannot** push (`git push --dry-run` → `marked as read only`).
-- The installed deploy script is byte-identical to the reviewed copy in git.
 - The first bundle pushed: 17 files, 8.7 KB ciphertext, `age-encryption.org/v1`.
 - An independent clone of the backup repo contains only the bundle and the index,
   and greps clean for `ghp_`, `GOCSPX`, `ya29`, `1//`, `AKIA`, `sk-`, the Telegram
@@ -281,9 +320,11 @@ compares, "we have backups" is a belief. Do this periodically, not once.
 - **The box cannot publish its own state.** `capture` commits locally and the
   push fails ("marked as read only") — deliberate, so a compromised box cannot
   rewrite the record used to detect its drift. It is also silent: a state commit
-  once sat unpushed for a whole deploy cycle. Finish it off-box
-  (`format-patch origin/main..main` → apply in a session clone → push) and
-  confirm `git log origin/main..main` on the box is empty.
+  once sat unpushed for a whole deploy cycle, and two more did between 2026-08-15
+  and 2026-08-16. Finish it off-box (`format-patch origin/main..main` → apply in
+  a session clone → push → `reset --hard origin/main` on the box once the trees
+  match) and confirm `git log origin/main..main` on the box is empty. It was
+  empty at this verification.
 
 ## If you change anything on the box
 
@@ -306,6 +347,15 @@ writes nothing, so a state trail can quietly stop being updated. It did — no
 capture ran between 2026-08-05 and 2026-08-12, and the weekly check answered
 with 16 findings that were all just "nobody captured", which is exactly the
 noise that gets a real finding ignored.
+
+The other arguments used to fail the opposite way, which was worse. They decide
+*coverage*, and a forgotten one exited 0: on 2026-08-16 a capture run without
+`--credential-glob`, `--deploy-script` and `--secrets-out` dropped 15 credential
+files and the deploy script's hash out of the record, and the next check
+reported "no drift" about files it was no longer looking at. `capture` now
+refuses to record less than the previous capture did, naming the argument that
+went missing; `--allow-narrowing` is there for when the coverage is genuinely
+gone rather than forgotten.
 
 Then commit the diff in the state repo **from a session, not from the box** — the
 box's key is read-only. The `git diff` there is the review: it names the MCP

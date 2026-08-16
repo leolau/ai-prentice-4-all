@@ -1,8 +1,10 @@
-"""Tests for the per-profile Projects store (hermes_cli/projects_db)."""
+"""Tests for the shared-root Projects store (hermes_cli/projects_db).
+
+Root anchoring + the legacy import live in test_projects_root_store.py;
+this file covers the record CRUD and the §2.2 store-level constraints.
+"""
 
 from __future__ import annotations
-
-import os
 
 import pytest
 
@@ -168,7 +170,144 @@ def test_per_profile_isolation(tmp_path):
         b.close()
 
 
-def test_db_path_under_hermes_home():
-    # Resolves under HERMES_HOME (set by the autouse isolation fixture).
-    assert pdb.projects_db_path().name == "projects.db"
-    assert os.path.basename(str(pdb.projects_db_path().parent))  # non-empty parent
+def test_db_path_root_anchored():
+    # The store resolves through the same resolver the kanban board uses.
+    # (In tests HERMES_HOME is a custom layout, so kanban_home() ==
+    # HERMES_HOME and the path still lands under the isolated home.)
+    from hermes_cli.kanban_db import kanban_home
+
+    assert pdb.projects_db_path() == kanban_home() / "projects.db"
+
+
+def test_db_path_env_override(tmp_path, monkeypatch):
+    # HERMES_PROJECTS_DB is the explicit override — and the reversibility
+    # lever for the root migration.
+    target = tmp_path / "elsewhere" / "projects.db"
+    monkeypatch.setenv("HERMES_PROJECTS_DB", str(target))
+    assert pdb.projects_db_path() == target
+
+
+def test_legacy_profile_path_still_named():
+    # The old per-profile location stays nameable (backups, diagnostics).
+    assert pdb.legacy_profile_projects_db_path().name == "projects.db"
+
+
+# ---------------------------------------------------------------------------
+# §2.2 store-level constraints
+# ---------------------------------------------------------------------------
+
+
+def test_name_capped_at_60_chars(conn):
+    with pytest.raises(ValueError, match="name"):
+        pdb.create_project(conn, name="x" * 61)
+
+
+def test_goal_capped_at_160_chars(conn):
+    with pytest.raises(ValueError, match="goal"):
+        pdb.create_project(conn, name="P", goal="g" * 161)
+
+
+def test_create_full_project_requires_goal_and_description(conn):
+    with pytest.raises(ValueError, match="goal"):
+        pdb.create_full_project(conn, goal="   ", description="brief")
+    with pytest.raises(ValueError, match="description"):
+        pdb.create_full_project(conn, goal="Ship the thing", description="  ")
+
+
+def test_create_full_project_lands_in_planning(conn):
+    pid = pdb.create_full_project(
+        conn, goal="Acme is live on prod with the team trained", description="brief"
+    )
+    proj = pdb.get_project(conn, pid)
+    assert proj.status == "planning"
+    assert proj.cadence == "one_off"
+    assert proj.autonomy == "supervised"
+
+
+def test_name_defaults_from_goal_leading_clause(conn):
+    # Em-dash, colon and period split the leading clause; otherwise the
+    # first six words.
+    pid = pdb.create_full_project(
+        conn, goal="Land Q3 revenue — Acme rollout and training", description="d"
+    )
+    assert pdb.get_project(conn, pid).name == "Land Q3 revenue"
+
+    pid = pdb.create_full_project(
+        conn, goal="Send the Monday digest: weekly summary mail", description="d"
+    )
+    assert pdb.get_project(conn, pid).name == "Send the Monday digest"
+
+    pid = pdb.create_full_project(
+        conn,
+        goal="One two three four five six seven eight nine ten",
+        description="d",
+    )
+    assert pdb.get_project(conn, pid).name == "One two three four five six"
+
+
+def test_goal_and_name_edit_independently(conn):
+    pid = pdb.create_full_project(conn, goal="First goal sentence", description="d")
+    # Re-wording the goal never renames the project…
+    pdb.update_project(conn, pid, goal="Second goal sentence")
+    proj = pdb.get_project(conn, pid)
+    assert proj.goal == "Second goal sentence"
+    assert proj.name == "First goal sentence"
+    # …and renaming never rewrites the goal.
+    pdb.update_project(conn, pid, name="New Label")
+    proj = pdb.get_project(conn, pid)
+    assert proj.name == "New Label"
+    assert proj.goal == "Second goal sentence"
+    # The store re-validates on patch.
+    with pytest.raises(ValueError, match="goal"):
+        pdb.update_project(conn, pid, goal="g" * 161)
+
+
+def _seed_planning_row(conn, pid):
+    """Write the §2.2 gate rows (output + member + profile) directly."""
+    import time
+
+    from hermes_cli.sqlite_util import write_txn
+
+    now = int(time.time())
+    with write_txn(conn):
+        conn.execute(
+            "INSERT INTO project_outputs "
+            "(id, project_id, seq, title, created_at) VALUES (?, ?, 1, 'Out', ?)",
+            ("o_1", pid, now),
+        )
+    pdb.add_project_member(conn, project_id=pid, user_id="u1", role="lead")
+    pdb.add_project_profile(conn, project_id=pid, profile="default")
+
+
+def test_leaving_planning_refused_until_gate_rows_exist(conn):
+    pid = pdb.create_full_project(conn, goal="Gate test", description="d")
+
+    with pytest.raises(ValueError, match="output") as exc:
+        pdb.set_project_status(conn, pid, "active")
+    # Every missing piece is named.
+    assert "member" in str(exc.value) and "profile" in str(exc.value)
+
+    _seed_planning_row(conn, pid)
+    assert pdb.set_project_status(conn, pid, "active") is True
+    assert pdb.get_project(conn, pid).status == "active"
+
+
+def test_status_vocabulary_validated(conn):
+    pid = pdb.create_project(conn, name="P")
+    with pytest.raises(ValueError, match="status"):
+        pdb.set_project_status(conn, pid, "shipping")
+
+
+def test_member_roles_validated_and_deduplicated(conn):
+    pid = pdb.create_project(conn, name="P")
+    with pytest.raises(ValueError, match="role"):
+        pdb.add_project_member(conn, project_id=pid, user_id="u1", role="boss")
+
+    assert pdb.add_project_member(conn, project_id=pid, user_id="u1", role="lead") is True
+    assert pdb.add_project_member(conn, project_id=pid, user_id="u1") is False
+    members = pdb.get_project_members(conn, pid)
+    assert [m["user_id"] for m in members] == ["u1"]
+    assert members[0]["role"] == "lead"
+
+    assert pdb.remove_project_member(conn, pid, "u1") is True
+    assert pdb.get_project_members(conn, pid) == []

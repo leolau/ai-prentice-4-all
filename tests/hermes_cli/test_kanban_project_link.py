@@ -71,3 +71,19 @@ def test_unknown_project_id_falls_back_gracefully(kanban_conn):
     task = kb.get_task(kanban_conn, tid)
     assert task.workspace_kind == "scratch"
     assert task.project_id is None
+
+
+def test_list_tasks_filters_by_project(kanban_conn):
+    # Design §2.3: a project's board read filters in SQL, not in Python.
+    proj = _make_project()
+    other = _make_project(name="Side Project", repo="/tmp/side")
+    linked = kb.create_task(kanban_conn, title="linked", project_id=proj.slug)
+    kb.create_task(kanban_conn, title="elsewhere", project_id=other.slug)
+    kb.create_task(kanban_conn, title="unlinked")
+
+    ids = {t.id for t in kb.list_tasks(kanban_conn, project_id=proj.id)}
+    assert ids == {linked}
+    # The slug resolves the same way the id does.
+    assert {t.id for t in kb.list_tasks(kanban_conn, project_id=proj.slug)} == {linked}
+    # A project with no tasks returns an empty list, not an error.
+    assert kb.list_tasks(kanban_conn, project_id="p_nope") == []

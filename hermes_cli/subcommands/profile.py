@@ -40,7 +40,10 @@ def build_profile_parser(subparsers, *, cmd_profile: Callable) -> None:
     profile_create.add_argument(
         "--clone-all",
         action="store_true",
-        help="Full copy of active profile (all state, excluding per-profile history)",
+        help=(
+            "Full copy of active profile (all state, excluding per-profile "
+            "history and each person's own memory)"
+        ),
     )
     profile_create.add_argument(
         "--clone-from",
@@ -219,6 +222,112 @@ def build_profile_parser(subparsers, *, cmd_profile: Callable) -> None:
         "health",
         help="Probe each profile's app-datastore binding (schema_owner claim) "
              "and badge it ok / unclaimed / claimed-by-other / unreachable.",
+    )
+
+    # ---------- FG-30: profile lifecycle (suggest, adopt, retire) ----------
+    profile_subparsers.add_parser(
+        "suggest",
+        help="Generate a profile suggestion from the learning loop's evidence "
+             "(monthly cycle — skipped if a suggestion is already open)",
+    )
+
+    profile_subparsers.add_parser(
+        "suggestions",
+        help="List pending profile suggestions with evidence",
+    )
+
+    profile_adopt = profile_subparsers.add_parser(
+        "adopt",
+        help="Adopt a suggestion — creates the profile with sub-goal and "
+             "promoted skills (owner only)",
+    )
+    profile_adopt.add_argument(
+        "suggestion_id",
+        help="Suggestion id to adopt",
+    )
+
+    profile_dismiss = profile_subparsers.add_parser(
+        "dismiss",
+        help="Dismiss a suggestion — latched so it is never re-proposed "
+             "on the same evidence (owner only)",
+    )
+    profile_dismiss.add_argument(
+        "suggestion_id",
+        help="Suggestion id to dismiss",
+    )
+    profile_dismiss.add_argument(
+        "--reason",
+        default="",
+        help="Optional reason for the dismissal (recorded in audit)",
+    )
+
+    profile_retire = profile_subparsers.add_parser(
+        "retire",
+        help="Retire a profile — offer its skills for promotion once, archive, "
+             "release channel, mark goal completed",
+    )
+    profile_retire.add_argument(
+        "profile_name",
+        help="Profile to retire",
+    )
+    profile_retire.add_argument(
+        "-y", "--yes", action="store_true",
+        help="Skip confirmation prompt",
+    )
+
+    profile_merge = profile_subparsers.add_parser(
+        "merge",
+        help="Merge one profile into another — both profiles' skills go "
+             "through promotion; the source is archived. Memory is NOT merged.",
+    )
+    profile_merge.add_argument(
+        "source",
+        help="Source profile to merge (will be archived)",
+    )
+    profile_merge.add_argument(
+        "target",
+        help="Target profile to merge into",
+    )
+    profile_merge.add_argument(
+        "-y", "--yes", action="store_true",
+        help="Skip confirmation prompt",
+    )
+
+    profile_commit_channel = profile_subparsers.add_parser(
+        "commit-channel",
+        help="Give an adopted (channel-less) profile its own messaging channel — "
+             "writes the platform token into the profile's own .env, refuses a "
+             "token already used by another profile, and starts its gateway service",
+    )
+    profile_commit_channel.add_argument(
+        "profile_name",
+        help="Profile to give a channel (must already exist)",
+    )
+    profile_commit_channel.add_argument(
+        "--platform",
+        default="telegram",
+        help="Bot-token platform to commit (default: telegram). "
+             "Currently: telegram, discord, slack.",
+    )
+    profile_commit_channel.add_argument(
+        "--token",
+        default=None,
+        help="The platform bot token to write into the profile's .env. If "
+             "omitted, you are prompted for it (it is never echoed to stdout "
+             "in logs).",
+    )
+    profile_commit_channel.add_argument(
+        "--allowed-users",
+        default=None,
+        help="Optional comma-separated allowlist (e.g. Telegram user ids or "
+             "Discord guild ids). If omitted, the bot responds to everyone.",
+    )
+    profile_commit_channel.add_argument(
+        "--no-start",
+        action="store_true",
+        help="Write the token without installing/starting the gateway service "
+             "(the profile will show as channel-configured-but-stopped in "
+             "`hermes doctor`).",
     )
 
     profile_parser.set_defaults(func=cmd_profile)
