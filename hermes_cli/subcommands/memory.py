@@ -41,7 +41,7 @@ def build_memory_parser(subparsers, *, cmd_memory: Callable) -> None:
     memory_sub.add_parser("off", help="Disable external provider (built-in only)")
     _reset_parser = memory_sub.add_parser(
         "reset",
-        help="Erase all built-in memory (MEMORY.md and USER.md)",
+        help="Erase your own built-in memory in this profile",
     )
     _reset_parser.add_argument(
         "--yes",
@@ -54,6 +54,14 @@ def build_memory_parser(subparsers, *, cmd_memory: Callable) -> None:
         choices=["all", "memory", "user"],
         default="all",
         help="Which store to reset: 'all' (default), 'memory', or 'user'",
+    )
+    _reset_parser.add_argument(
+        "--all-principals",
+        action="store_true",
+        help=(
+            "Owner/admin: also erase the agent's notes about every other "
+            "person in this profile (not their cross-profile identity)"
+        ),
     )
     register_vectors_subparser(memory_sub)
     register_sharing_subparser(memory_sub)

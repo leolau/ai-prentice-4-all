@@ -195,6 +195,13 @@ def member_delete_command(args: argparse.Namespace) -> int:
         f"(strategy={outcome.strategy}): {outcome.rows_transferred} rows "
         f"transferred, {outcome.rows_deleted} deleted."
     )
+    for path in deleted.memory_files_erased:
+        print(f"Erased curated memory: {path}")
+    if outcome.strategy == "transfer" and not deleted.memory_files_erased:
+        print(
+            "Their curated memory files were left in place — transfer moves "
+            "what they owned, and memory about a person is not inheritable."
+        )
     print(
         "Their box-wide account still exists — accounts are shared across "
         "profiles, so removing it here does not sign them out elsewhere."

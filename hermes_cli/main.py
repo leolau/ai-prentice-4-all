@@ -10957,8 +10957,10 @@ def cmd_profile(args):
                 )
                 if clone_all:
                     print(
-                        f"Full copy from {source_label} "
-                        "(excluding session history, backups, and snapshots)."
+                        f"Full copy from {source_label} (excluding session "
+                        "history, backups, snapshots, and each person's own "
+                        "memory \u2014 who this profile serves is decided by "
+                        "enrolment)."
                     )
                 else:
                     print(
@@ -12633,31 +12635,85 @@ def cmd_memory(args):
         print("\n  ✓ Memory provider: built-in only")
         print("  Saved to config.yaml\n")
     elif sub == "reset":
-        from hermes_constants import get_hermes_home, display_hermes_home
+        from hermes_constants import display_hermes_home
+        from tools.memory_tool import SHARED_WRITE_ROLES, curated_memory_files
 
-        mem_dir = get_hermes_home() / "memories"
         target = getattr(args, "target", "all")
-        files_to_reset = []
-        if target in {"all", "memory"}:
-            files_to_reset.append(("MEMORY.md", "agent notes"))
-        if target in {"all", "user"}:
-            files_to_reset.append(("USER.md", "user profile"))
+        all_principals = getattr(args, "all_principals", False)
 
-        # Check what exists
-        existing = [
-            (f, desc) for f, desc in files_to_reset if (mem_dir / f).exists()
+        # Whose memory this erases. Since FG-24 the curated tier is per
+        # participation and per person, so "reset" without an actor would
+        # either erase two files nobody writes to any more, or erase facts
+        # about people who did not ask for it. The caller is resolved through
+        # the same ladder a channel-less session uses.
+        from hermes_cli.principal_binding import resolve_local_principal
+
+        resolution = resolve_local_principal()
+        binding = resolution.binding
+        user_id = binding.user_id if binding else None
+        role = binding.role if binding else "owner"
+        # A box with nobody enrolled (no database, single user) keeps its
+        # pre-FG-24 behaviour: there is one memory and it is the caller's.
+        single_user = resolution.candidates == 0
+        may_erase_shared = single_user or role in SHARED_WRITE_ROLES
+
+        if all_principals and not may_erase_shared:
+            print(
+                "\n  --all-principals erases memory about other people; "
+                "only an owner or admin can do that.\n"
+            )
+            return
+        if user_id is None and not single_user:
+            print(
+                "\n  Cannot tell whose memory to erase: this profile has "
+                f"{resolution.candidates} enrolled principals and no local "
+                "binding.\n  Run `hermes member local-principal --set "
+                "<user_id>` first.\n"
+            )
+            return
+
+        files = [
+            f
+            for f in curated_memory_files(
+                user_id=user_id,
+                target=target,
+                include_shared=may_erase_shared,
+                all_principals=all_principals,
+            )
+            if f.path.exists()
         ]
-        if not existing:
+        if not files:
             print(
                 f"\n  Nothing to reset — no memory files found in {display_hermes_home()}/memories/\n"
             )
             return
 
-        print(f"\n  This will permanently erase the following memory files:")
-        for f, desc in existing:
-            path = mem_dir / f
-            size = path.stat().st_size
-            print(f"    ◆ {f} ({desc}) — {size:,} bytes")
+        whose = (
+            "every enrolled principal in this profile"
+            if all_principals
+            else (user_id or "this profile")
+        )
+        print(f"\n  This will permanently erase, for {whose}:")
+        for curated in files:
+            size = curated.path.stat().st_size
+            print(f"    ◆ {curated.path.name} ({curated.label}) — {size:,} bytes")
+
+        # What survives is as load-bearing as what goes: the old wording
+        # promised a blank slate over files it never touched.
+        survivors = [
+            f
+            for f in curated_memory_files(
+                user_id=user_id,
+                target="all",
+                include_shared=True,
+                all_principals=True,
+            )
+            if f.path.exists() and f.path not in {c.path for c in files}
+        ]
+        if survivors:
+            print("\n  Left in place:")
+            for curated in survivors:
+                print(f"    · {curated.path.name} ({curated.label})")
 
         if not getattr(args, "yes", False):
             try:
@@ -12669,14 +12725,21 @@ def cmd_memory(args):
                 print("  Cancelled.\n")
                 return
 
-        for f, desc in existing:
-            (mem_dir / f).unlink()
-            print(f"  ✓ Deleted {f} ({desc})")
+        for curated in files:
+            curated.path.unlink()
+            print(f"  ✓ Deleted {curated.path.name} ({curated.label})")
 
-        print(
-            f"\n  Memory reset complete. New sessions will start with a blank slate."
-        )
-        print(f"  Files were in: {display_hermes_home()}/memories/\n")
+        if survivors:
+            print(
+                "\n  Erased what was listed. New sessions still see the "
+                "memory left in place above."
+            )
+        else:
+            print(
+                "\n  Memory reset complete. New sessions will start with a "
+                "blank slate."
+            )
+        print(f"  Files were under: {display_hermes_home()}/\n")
     else:
         from hermes_cli.memory_setup import memory_command
 

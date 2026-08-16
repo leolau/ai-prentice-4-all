@@ -40,7 +40,10 @@ def build_profile_parser(subparsers, *, cmd_profile: Callable) -> None:
     profile_create.add_argument(
         "--clone-all",
         action="store_true",
-        help="Full copy of active profile (all state, excluding per-profile history)",
+        help=(
+            "Full copy of active profile (all state, excluding per-profile "
+            "history and each person's own memory)"
+        ),
     )
     profile_create.add_argument(
         "--clone-from",

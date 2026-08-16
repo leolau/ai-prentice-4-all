@@ -1095,8 +1095,14 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ provider }),
     }),
+  // Scoped to the acting principal (FG-24): each deleted entry names the
+  // file and which tier it came from (shared / participation / person).
   resetMemory: (target: "all" | "memory" | "user") =>
-    fetchJSON<{ ok: boolean; deleted: string[] }>("/api/memory/reset", {
+    fetchJSON<{
+      ok: boolean;
+      principal: string | null;
+      deleted: { file: string; scope: string }[];
+    }>("/api/memory/reset", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ target }),

@@ -190,7 +190,8 @@ class TestMemoryEndpoints:
         (mem / "USER.md").write_text("user")
 
         r = self.client.post("/api/memory/reset", json={"target": "user"})
-        assert r.status_code == 200 and "USER.md" in r.json()["deleted"]
+        assert r.status_code == 200
+        assert "USER.md" in [d["file"] for d in r.json()["deleted"]]
         assert (mem / "MEMORY.md").exists()
 
         assert self.client.post(
