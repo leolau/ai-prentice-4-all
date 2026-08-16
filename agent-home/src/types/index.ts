@@ -1515,6 +1515,17 @@ export interface TaskEventRow {
   created_at: number;
 }
 
+/**
+ * §12/§17 step 11: the live-update tail from `GET /projects/:slug/events`.
+ * `latest_event_id` names the current head even when `events` is empty —
+ * a poller keeps it as the next `since` without a second read.
+ */
+export interface ProjectEventsResponse {
+  events: TaskEventRow[];
+  latest_event_id: number;
+  since: number;
+}
+
 /** One doctor finding (§15 failure mode 1). */
 export interface ProjectDoctorFinding {
   code: string;

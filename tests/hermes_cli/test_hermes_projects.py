@@ -282,6 +282,31 @@ def test_retro_refuses_a_malformed_proposal(env, tmp_path, monkeypatch, capsys):
     assert "kind one of" in capsys.readouterr().err
 
 
+def test_summarise_round_trip(env, tmp_path, monkeypatch, capsys):
+    import io
+
+    run, _capsys = env
+    slug = _create(run, capsys, tmp_path)
+
+    # Empty stdin is refused — a blank "where this stands" is not a summary.
+    monkeypatch.setattr(sys, "stdin", io.StringIO("   "))
+    assert run("summarise", slug) == 2
+    assert "nothing to write" in capsys.readouterr().err
+
+    monkeypatch.setattr(
+        sys, "stdin", io.StringIO("Run 14 waiting on your answer about the tone.")
+    )
+    assert run("summarise", slug) == 0
+    out = capsys.readouterr().out
+    assert "Summary updated" in out
+    assert "Run 14 waiting on your answer about the tone." in out
+
+    # The rolling summary rides the detail read.
+    assert run("show", slug) == 0
+    out = capsys.readouterr().out
+    assert "where this stands: Run 14 waiting on your answer about the tone." in out
+
+
 def test_doctor_healthy_box(env, capsys):
     run, _capsys = env
     assert run("doctor") == 0

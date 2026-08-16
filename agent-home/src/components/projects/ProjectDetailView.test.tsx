@@ -380,6 +380,8 @@ describe("ProjectDetailView", () => {
     expect(html).toContain("Continue run 14");
     // The agent's standing line rides under the header.
     expect(html).toContain("Where this stands");
+    // The rolling summary says how fresh it is (§17 step 11).
+    expect(html).toContain("where this stands · updated today");
     for (const label of ["Brief", "Outputs", "Progress", "Board", "Runs", "Plan", "Guidance", "People", "Files", "Tools"]) {
       expect(html).toContain(label);
     }

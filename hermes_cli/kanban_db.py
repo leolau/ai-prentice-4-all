@@ -3194,6 +3194,55 @@ def list_events(conn: sqlite3.Connection, task_id: str) -> list[Event]:
     return out
 
 
+def _event_from_row(r: sqlite3.Row) -> Event:
+    try:
+        payload = json.loads(r["payload"]) if r["payload"] else None
+    except Exception:
+        payload = None
+    return Event(
+        id=r["id"],
+        task_id=r["task_id"],
+        kind=r["kind"],
+        payload=payload,
+        created_at=r["created_at"],
+        run_id=(int(r["run_id"]) if "run_id" in r.keys() and r["run_id"] is not None else None),
+    )
+
+
+def events_tail(
+    conn: sqlite3.Connection,
+    task_ids: Iterable[str],
+    *,
+    since_id: int = 0,
+    limit: int = 200,
+) -> tuple[int, list[Event]]:
+    """Return ``(latest_event_id, events)`` for a set of tasks.
+
+    The live-update tail behind ``GET /projects/{slug}/events?since=``:
+    events with ``id > since_id`` across the given tasks, oldest first,
+    capped at ``limit``. ``latest_event_id`` is the current head of the
+    whole set — independent of ``since_id`` and of the cap — so a caller
+    whose window overflowed still learns where the head is. No tasks
+    (or no events) → ``(0, [])``.
+    """
+    ids = [t for t in task_ids if t]
+    if not ids:
+        return 0, []
+    marks = ",".join("?" * len(ids))
+    head = conn.execute(
+        f"SELECT MAX(id) AS m FROM task_events WHERE task_id IN ({marks})",
+        ids,
+    ).fetchone()
+    latest = int(head["m"]) if head and head["m"] is not None else 0
+    rows = conn.execute(
+        "SELECT * FROM task_events WHERE task_id IN ("
+        + marks
+        + ") AND id > ? ORDER BY id ASC LIMIT ?",
+        [*ids, int(since_id), int(limit)],
+    ).fetchall()
+    return latest, [_event_from_row(r) for r in rows]
+
+
 def _append_event(
     conn: sqlite3.Connection,
     task_id: str,
