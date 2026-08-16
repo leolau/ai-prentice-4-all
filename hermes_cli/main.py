@@ -12636,7 +12636,11 @@ def cmd_memory(args):
         print("  Saved to config.yaml\n")
     elif sub == "reset":
         from hermes_constants import display_hermes_home
-        from tools.memory_tool import SHARED_WRITE_ROLES, curated_memory_files
+        from tools.memory_tool import (
+            SHARED_WRITE_ROLES,
+            curated_memory_files,
+            erase_curated_file,
+        )
 
         target = getattr(args, "target", "all")
         all_principals = getattr(args, "all_principals", False)
@@ -12726,7 +12730,7 @@ def cmd_memory(args):
                 return
 
         for curated in files:
-            curated.path.unlink()
+            erase_curated_file(curated)
             print(f"  ✓ Deleted {curated.path.name} ({curated.label})")
 
         if survivors:

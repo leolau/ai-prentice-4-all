@@ -162,6 +162,22 @@ def test_reset_says_what_it_left_instead_of_promising_a_blank_slate(
     assert "blank slate" not in out
 
 
+def test_reset_leaves_no_directory_claiming_a_person_is_still_known(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An emptied ``users/<uid>/`` is a person this profile still appears to
+    know: it is what --all-principals enumerates and what a purge reads to
+    decide an identity file is still in use."""
+    from hermes_cli.main import cmd_memory
+
+    _bind(monkeypatch, "ana", "member")
+    cmd_memory(_Args(all_principals=False))
+
+    assert not (home / "memories" / "users" / "ana").exists()
+    assert not (home.parent.parent / "persons" / "ana").exists()
+    assert memory_tool._participation_user_ids() == ["ben"]
+
+
 def test_only_owner_or_admin_can_erase_memory_about_other_people(
     home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -191,6 +207,16 @@ def test_an_owner_can_clear_the_profile_but_not_who_people_are(
 # ---------------------------------------------------------------------------
 # What a hard delete leaves behind
 # ---------------------------------------------------------------------------
+
+
+def test_the_delete_help_describes_what_it_does_to_memory() -> None:
+    """Found by reading ``--help`` on the box: the description still said
+    "Nothing cascades to memories" after purge had started erasing them."""
+    from hermes_cli.member import DELETE_DESCRIPTION
+
+    assert "Nothing cascades to memories" not in DELETE_DESCRIPTION
+    assert "deleted under both strategies" in DELETE_DESCRIPTION
+    assert "erases the curated memory files" in DELETE_DESCRIPTION
 
 
 def test_a_purged_person_stops_being_described_to_the_agent(home: Path) -> None:

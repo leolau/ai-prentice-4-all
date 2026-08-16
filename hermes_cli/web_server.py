@@ -12677,7 +12677,11 @@ async def reset_memory(body: MemoryReset, request: Request):
     agent's notes about everybody else. The profile-wide shared block goes
     only for the roles allowed to write it.
     """
-    from tools.memory_tool import SHARED_WRITE_ROLES, curated_memory_files
+    from tools.memory_tool import (
+        SHARED_WRITE_ROLES,
+        curated_memory_files,
+        erase_curated_file,
+    )
 
     target = (body.target or "all").strip().lower()
     if target not in {"all", "memory", "user"}:
@@ -12702,7 +12706,7 @@ async def reset_memory(body: MemoryReset, request: Request):
         if not curated.path.exists():
             continue
         try:
-            curated.path.unlink()
+            erase_curated_file(curated)
         except OSError as exc:
             raise HTTPException(
                 status_code=500, detail=f"Could not delete {curated.path.name}: {exc}"
