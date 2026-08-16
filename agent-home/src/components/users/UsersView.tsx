@@ -4,6 +4,7 @@ import { useState } from "react";
 
 import { BusyRegion } from "@/components/ui/BusyRegion";
 import { Pill } from "@/components/ui/Pill";
+import { ProfileSwitcher } from "@/components/profiles/ProfileSwitcher";
 import { CreateUserForm } from "@/components/users/CreateUserForm";
 import { CsvImportPanel } from "@/components/users/CsvImportPanel";
 import { DirectoryPanel } from "@/components/users/DirectoryPanel";
@@ -13,6 +14,7 @@ import { UserRow } from "@/components/users/UserRow";
 import { PAGE_SIZE, errorMessage, sendJson } from "@/components/users/api";
 import { optimisticRoleChange } from "@/components/users/optimistic";
 import type {
+  AdministeredProfileEntry,
   DirectoryResponse,
   Member,
   MemberCreateResponse,
@@ -29,6 +31,13 @@ export interface UsersViewProps {
   userId: string;
   /** The profile this console administers (FG-27 derives its schema from it). */
   profile: string;
+  /**
+   * FG-28 — the profiles the caller may administer, re-derived server-side
+   * per request. Drives the switcher; empty for a `member`/`viewer`, who
+   * only sees the current profile label. Optional with `[]` default so the
+   * single-profile test render stays byte-identical.
+   */
+  administeredProfiles?: AdministeredProfileEntry[];
   /** The colleague list every enrolled principal may read. */
   directory: DirectoryResponse;
   /** The first roster page — null for a non-admin, who never fetches one. */
@@ -53,6 +62,7 @@ export function UsersView({
   role,
   userId,
   profile,
+  administeredProfiles = [],
   directory,
   initialPage,
 }: UsersViewProps) {
@@ -248,7 +258,15 @@ export function UsersView({
     <div data-component="UsersView" className="flex flex-col gap-4">
       <p className="flex flex-wrap items-center gap-2 text-xs text-[var(--color-muted)]">
         <Pill tone="accent">{role}</Pill>
-        <Pill tone="muted">profile: {profile}</Pill>
+        {canManage ? (
+          <ProfileSwitcher
+            profiles={administeredProfiles}
+            value={profile}
+            canManage={canManage}
+          />
+        ) : (
+          <Pill tone="muted">profile: {profile}</Pill>
+        )}
         {canManage ? <Pill tone="muted">{total} enrolled</Pill> : null}
       </p>
 

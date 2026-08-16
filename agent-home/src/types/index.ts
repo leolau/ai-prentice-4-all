@@ -394,6 +394,33 @@ export interface ProfilesResponse {
 }
 
 /**
+ * FG-28 — one profile the acting admin may switch the console to.
+ *
+ * The list is re-derived server-side per request: only profiles where the
+ * caller holds an active `admin`/`owner` row in that profile's own
+ * `principals` table appear. `administered_profiles` never reads a shared
+ * authority store, so there is nothing for the client to keep in sync.
+ *
+ * `health` is a live probe (`probe_registry_health`): `ok` means the
+ * profile's schema is contactable and claimed by itself; `claimed-by-other`
+ * would fail closed on connect — the switcher badges it before the user
+ * takes a turn there; `unreachable`/`unknown` degrade gracefully.
+ */
+export interface AdministeredProfileEntry {
+  name: string;
+  is_default: boolean;
+  served: boolean;
+  base_url: string;
+  schema: string;
+  health: "ok" | "core-only" | "unreachable" | "unclaimed" | "claimed-by-other" | "unknown";
+  health_detail: string;
+}
+
+export interface AdministeredProfilesResponse {
+  profiles: AdministeredProfileEntry[];
+}
+
+/**
  * FG-30 — a profile suggestion: a proposal (with evidence) that work in one
  * profile has clustered into a distinct sub-goal deserving its own profile.
  *

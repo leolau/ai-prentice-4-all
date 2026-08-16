@@ -17,6 +17,7 @@ import "server-only";
 import { hermesApiBaseUrl } from "@/lib/env";
 import type {
   AgentAttachmentPayload,
+  AdministeredProfilesResponse,
   CapacityResponse,
   ChangeOpResponse,
   ChangesResponse,
@@ -184,12 +185,47 @@ export class HermesApiClient {
   }
 
   /**
+   * Issue a request that does NOT carry the bound profile.
+   *
+   * Used by cross-profile reads (`/api/profiles/administered`) that have no
+   * single target to scope to: sending `?profile=` there would be echoed back
+   * by the Python layer as the active scope, hiding administration in every
+   * other profile. Reuses the bound token + base URL, drops only the
+   * `?profile=` query and `profile` body field.
+   */
+  private async requestUnscoped<T>(
+    path: string,
+    init: RequestInit & { json?: unknown } = {},
+  ): Promise<T> {
+    const unscoped = new HermesApiClient({
+      hermesToken: this.hermesToken,
+      baseUrl: this.baseUrl,
+    });
+    return unscoped.request<T>(path, init);
+  }
+
+  /**
    * List the profiles this box serves (FG-28). Each is an independent
    * `HERMES_HOME` — its own SOUL, goal, skills, memory and credentials — so the
    * chat surface can address one deliberately instead of always the default.
    */
   async profiles(): Promise<ProfilesResponse> {
     return this.request("/api/profiles");
+  }
+
+  /**
+   * The profiles this caller may administer (FG-28 switcher feed).
+   *
+   * The Python layer re-derives authority per profile — only profiles where
+   * the verified subject holds an active `admin`/`owner` row in that
+   * profile's own `principals` table are returned — so the switcher renders
+   * a routing hint, never a grant. The request bypasses the bound profile:
+   * this is a cross-profile read with no single target, and sending
+   * `?profile=` would be echoed back by Python as the active scope, hiding
+   * administration in every other profile.
+   */
+  async administeredProfiles(): Promise<AdministeredProfilesResponse> {
+    return this.requestUnscoped("/api/profiles/administered");
   }
 
   // --- Profile suggestions (FG-30) ---------------------------------------

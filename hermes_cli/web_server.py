@@ -13801,6 +13801,77 @@ async def list_profiles_endpoint():
         return {"profiles": _fallback_profile_dicts(profiles_mod)}
 
 
+@app.get("/api/profiles/administered")
+async def list_administered_profiles_endpoint(request: "Request"):
+    """FG-28 switcher feed — the caller's administered profiles with health.
+
+    The cross-profile read the profile switcher renders. Lists **only**
+    profiles where the verified caller holds an active ``admin``/``owner`` row
+    in that profile's own ``principals`` (re-derived via
+    :func:`administered_profiles`, never a shared authority store), then
+    augments each entry with its registry metadata + live probed health so the
+    switcher can badge reachable / unreachable / claimed-by-other before a
+    routed turn goes there.
+
+    Not a per-turn scoping route: there is no target profile, so
+    :func:`require_console_scope` does not apply (it would refuse caller's
+    default scope). The owner-fallback refusal **does** apply — a missing
+    subject is 401, never the enrolled owner — because this endpoint sits on
+    the console path and naming one profile's owner as "the set of profiles
+    you may administer" is the same hole §"The most dangerous hole" describes.
+    """
+    from hermes_cli.access import PrincipalStore
+    from hermes_cli.console_scope import administered_profiles
+    from hermes_cli.profile_registry import (
+        get_profile_registry,
+        probe_registry_health,
+    )
+
+    subject = _comms_session_subject(request)
+    if not subject:
+        raise HTTPException(status_code=401, detail=_CONSOLE_NO_SUBJECT)
+
+    def store_factory(home):
+        # `_comms_app_store()` honours the active scope, so the store
+        # `administered_profiles` builds per profile resolves that profile's
+        # own `principals` table — never a shared authority store.
+        return PrincipalStore(_comms_app_store())
+
+    try:
+        names = await administered_profiles(
+            subject, store_factory=store_factory
+        )
+    except _CommsNotConfigured as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    # Augment the administered-name set with registry metadata + probed
+    # health. Filtering by the names set preserves the registry's default-first
+    # ordering rather than the call-order :func:`administered_profiles` returns
+    # (which mirrors the same registry, but spelling that dependency here keeps
+    # the contract explicit).
+    administered = set(names)
+    entries = [
+        entry
+        for entry in get_profile_registry()
+        if entry.name in administered
+    ]
+    payloads = []
+    for entry in entries:
+        probed = probe_registry_health(entry)
+        payloads.append(
+            {
+                "name": probed.name,
+                "is_default": probed.is_default,
+                "served": probed.served,
+                "base_url": probed.base_url,
+                "schema": probed.schema,
+                "health": probed.health,
+                "health_detail": probed.health_detail,
+            }
+        )
+    return {"profiles": payloads}
+
+
 @app.post("/api/profiles")
 async def create_profile_endpoint(body: ProfileCreate):
     from hermes_cli import profiles as profiles_mod
