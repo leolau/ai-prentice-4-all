@@ -156,6 +156,11 @@ export function ProjectDetailView({
             {project.summary ? (
               <p className="mt-2 rounded-xl bg-[var(--color-surface-2)] px-3 py-2 text-sm italic">
                 {project.summary}
+                {project.summary_at != null ? (
+                  <span className="mt-1 block text-xs not-italic text-[var(--color-muted)]">
+                    where this stands · updated {dayDistance(project.summary_at)}
+                  </span>
+                ) : null}
               </p>
             ) : null}
 

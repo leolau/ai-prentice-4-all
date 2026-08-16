@@ -219,6 +219,8 @@ def _cmd_show(api: _Api, args) -> int:
     progress = d.get("progress") or {}
     if progress.get("headline"):
         print(f"  progress: {progress['headline']}")
+    if d.get("summary"):
+        print(f"  where this stands: {d['summary']}")
     outputs = d.get("outputs") or []
     if outputs:
         print("  outputs:")
@@ -390,6 +392,27 @@ def _cmd_retro(api: _Api, args) -> int:
     retro = run.get("retro") or ""
     print(f"Run {run.get('run_no')} of {args.slug} [{run.get('status')}]")
     print(retro if retro else "(no retro yet — write one with --write)")
+    return 0
+
+
+def _cmd_summarise(api: _Api, args) -> int:
+    """Write the rolling \"where this stands\" (§2.2) — read from stdin,
+    the same contract as ``retro --write``."""
+    summary = sys.stdin.read().strip()
+    if not summary:
+        print("projects: nothing to write on stdin", file=sys.stderr)
+        return 2
+    resp = api.request(
+        "POST", f"/{args.slug}/summarise", json_body={"summary": summary}
+    )
+    if resp.status_code != 200:
+        return _fail(resp)
+    data = resp.json()
+    if args.json:
+        _print_json(data)
+        return 0
+    print(f"Summary updated for {args.slug} (at {data.get('summary_at')}).")
+    print(f"  {data.get('summary')}")
     return 0
 
 
@@ -1051,6 +1074,8 @@ async def _dispatch(args: argparse.Namespace) -> int:
             return _cmd_score(api, args)
         if verb == "retro":
             return _cmd_retro(api, args)
+        if verb == "summarise":
+            return _cmd_summarise(api, args)
         if verb == "doctor":
             return _cmd_doctor(api, args)
         print(f"projects: unknown command: {verb}", file=sys.stderr)
@@ -1265,6 +1290,13 @@ def register_projects_subparser(
         ),
     )
     retro.add_argument("--json", **json_flag)
+
+    summarise = sub.add_parser(
+        "summarise",
+        help="Write the rolling 'where this stands' summary (stdin)",
+    )
+    summarise.add_argument("slug")
+    summarise.add_argument("--json", **json_flag)
 
     doctor = sub.add_parser(
         "doctor", help="Diagnosable breaks (broken schedules, stalls)"

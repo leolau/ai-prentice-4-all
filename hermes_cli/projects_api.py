@@ -29,14 +29,15 @@ Permissions are enforced here and only here (§11): the store has no RLS.
   ``kanban_db.list_tasks`` — a project view must not become the way to read
   another user's ``private:`` card.
 
-Not in this step (later steps in §17): the events feed + ``summarise``
-(step 11). The ``from_todo`` card seam (§10, step 8b) landed on
-``POST /{slug}/cards``; the score routes (§8, step 9b) landed on
+Every §17 API step has landed: the ``from_todo`` card seam (§10, step 8b)
+on ``POST /{slug}/cards``; the score routes (§8, step 9b) on
 ``POST /{slug}/runs/{n}/score`` + ``score_self`` on the retro route; the
-retro learning write-back (§8.2, step 10) landed as ``proposals`` on the
-retro route — playbook revisions and directives land inactive, skill
-candidates record project + run provenance — plus
-``POST /{slug}/directives/{id}/activate`` for the member crossing.
+retro learning write-back (§8.2, step 10) as ``proposals`` on the retro
+route — playbook revisions and directives land inactive, skill candidates
+record project + run provenance — plus
+``POST /{slug}/directives/{id}/activate`` for the member crossing; and the
+events feed + ``summarise`` (step 11) as ``GET /{slug}/events?since=`` and
+``POST /{slug}/summarise``.
 """
 
 from __future__ import annotations
@@ -1311,6 +1312,89 @@ async def project_board(request: Request) -> dict[str, Any]:
             )
 
     return await asyncio.to_thread(_board_sync)
+
+
+# ---------------------------------------------------------------------------
+# GET /{slug}/events — the live-update tail (§12)
+# ---------------------------------------------------------------------------
+
+
+@router.get("/{slug}/events")
+async def project_events(request: Request) -> dict[str, Any]:
+    """The event tail for live updates: ``task_events`` rows for the
+    project's cards with ``id`` greater than ``since``, plus the current
+    ``latest_event_id`` to use as the next cursor. The board read passes
+    the caller's principal, so another user's ``private:`` cards — and
+    their events — stay invisible here too."""
+    project, _role, _profiles, principal = await _require_read(request)
+    raw_since = request.query_params.get("since")
+    since = 0
+    if raw_since is not None:
+        try:
+            since = int(raw_since)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="since must be an integer")
+        if since < 0:
+            raise HTTPException(status_code=400, detail="since must be >= 0")
+
+    def _events_sync() -> dict:
+        with _board_conn(project) as bconn:
+            task_ids = [
+                t.id
+                for t in kanban_db.list_tasks(
+                    bconn, project_id=project.id, principal=principal
+                )
+            ]
+            latest, events = kanban_db.events_tail(bconn, task_ids, since_id=since)
+        return {
+            "events": [_event_dict(ev) for ev in events],
+            "latest_event_id": latest,
+            "since": since,
+        }
+
+    return await asyncio.to_thread(_events_sync)
+
+
+# ---------------------------------------------------------------------------
+# POST /{slug}/summarise — the rolling "where this stands" (§2.2)
+# ---------------------------------------------------------------------------
+
+
+_SUMMARY_MAX_LEN = 4_000
+
+
+@router.post("/{slug}/summarise")
+async def summarise_project(request: Request) -> dict[str, Any]:
+    """Write the rolling "where this stands" summary, stamping ``summary_at``.
+
+    A record-keeping write (§2.2): whoever can write the project may
+    summarise it — typically the agent at the end of a run, or a human
+    correcting the record. Not a judgement act.
+    """
+    project, _role, _profiles, _principal = await _require_write(request)
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="invalid JSON body")
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="expected a JSON object")
+    summary = str(body.get("summary") or "").strip()
+    if not summary:
+        raise HTTPException(status_code=422, detail="summary must not be empty")
+    if len(summary) > _SUMMARY_MAX_LEN:
+        raise HTTPException(
+            status_code=422,
+            detail=f"summary must be at most {_SUMMARY_MAX_LEN} characters",
+        )
+
+    def _summarise_sync() -> dict:
+        with projects_db.connect_closing() as conn:
+            summary_at = projects_db.set_project_summary(conn, project.id, summary)
+        if summary_at is None:
+            raise HTTPException(status_code=404, detail="project not found")
+        return {"summary": summary, "summary_at": summary_at}
+
+    return await asyncio.to_thread(_summarise_sync)
 
 
 @router.post("/{slug}/cards")
