@@ -38,17 +38,42 @@ STEPS = [
 ]
 
 
+class _FakeApprovalStore:
+    """Records the ``NotificationStore.create`` kwargs (the H1 seam)."""
+
+    def __init__(self):
+        self.calls: list = []
+
+    async def initialize(self):
+        pass
+
+    async def create(self, **kwargs):
+        self.calls.append(kwargs)
+        return object()
+
+
+APPROVALS = _FakeApprovalStore()
+
+
 @pytest.fixture
 def env(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_PROJECTS_DB", str(tmp_path / "projects.db"))
     monkeypatch.setenv("HERMES_KANBAN_DB", str(tmp_path / "kanban.db"))
+    APPROVALS.calls.clear()
+    monkeypatch.setattr(
+        "hermes_cli.datastore.get_store", lambda *a, **k: object()
+    )
+    monkeypatch.setattr(
+        projects_run, "_approval_store",
+        lambda app_store, *, config: APPROVALS,
+    )
     # Deterministic host seams for the §4.1 intersection.
     monkeypatch.setattr(
         projects_run, "_enabled_toolsets_for_profile",
         lambda profile: ["research", "web"],
     )
     monkeypatch.setattr(
-        projects_run, "_available_skill_names", lambda: ["digest"]
+        projects_run, "_available_skill_names", lambda profile: ["digest"]
     )
 
     state = {"actor": OWNER, "enrolled": set(), "subject": OWNER.user_id}

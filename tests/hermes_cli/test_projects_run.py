@@ -30,17 +30,42 @@ GUIDE_CFG = {
 }
 
 
+class _FakeApprovalStore:
+    """Records the ``NotificationStore.create`` kwargs (the H1 seam)."""
+
+    def __init__(self):
+        self.calls: list = []
+
+    async def initialize(self):
+        pass
+
+    async def create(self, **kwargs):
+        self.calls.append(kwargs)
+        return object()
+
+
+APPROVALS = _FakeApprovalStore()
+
+
 @pytest.fixture
 def stores(tmp_path, monkeypatch):
     """Isolated projects + kanban stores with deterministic host seams."""
     monkeypatch.setenv("HERMES_PROJECTS_DB", str(tmp_path / "projects.db"))
     monkeypatch.setenv("HERMES_KANBAN_DB", str(tmp_path / "kanban.db"))
+    APPROVALS.calls.clear()
+    monkeypatch.setattr(
+        "hermes_cli.datastore.get_store", lambda *a, **k: object()
+    )
+    monkeypatch.setattr(
+        projects_run, "_approval_store",
+        lambda app_store, *, config: APPROVALS,
+    )
     monkeypatch.setattr(
         projects_run, "_enabled_toolsets_for_profile",
         lambda profile: ["research", "web"],
     )
     monkeypatch.setattr(
-        projects_run, "_available_skill_names", lambda: ["digest", "email"]
+        projects_run, "_available_skill_names", lambda profile: ["digest", "email"]
     )
     monkeypatch.setattr(
         projects_run, "projects_runtime_config", lambda: dict(GUIDE_CFG)
@@ -627,3 +652,265 @@ def test_run_requires_an_active_project_and_a_playbook(stores):
             fresh = projects_db.get_project(conn, project2.id)
             with pytest.raises(ValueError, match="no playbook"):
                 projects_run.start_run(conn, bconn, project=fresh)
+
+
+# ---------------------------------------------------------------------------
+# Block 2 — the run lifecycle's four seams (H1–H4, review 2026-08-17)
+# ---------------------------------------------------------------------------
+
+
+def test_checkpoint_and_budget_approvals_raise_through_the_fg10_store(stores):
+    """H1: a supervised checkpoint AND a budget stop both raise through
+    ``NotificationStore.create`` — owner-targeted, irreversible (C6 never
+    auto-answers), deduped per run."""
+    project, _ = _make_project(budget=5.0)
+    _save_playbook(project.id)  # STEPS carries the 'approve' checkpoint
+    with projects_db.connect_closing() as conn:
+        projects_db.activate_playbook_rev(conn, project.id, 1)
+    result = _start(project.id, cost_reader=lambda trace: 12.5)
+    assert result["run"]["status"] == "waiting"  # the budget stop holds it
+    by_key = {c["dedupe_key"]: c for c in APPROVALS.calls}
+    slug = project.slug
+    assert set(by_key) == {
+        f"proj:{slug}:run:1:checkpoint",
+        f"proj:{slug}:run:1:budget",
+    }
+    for call in APPROVALS.calls:
+        assert call["kind"] == "approval"
+        assert call["target_user_id"] == "leo"
+        assert call["reversible"] is False  # §4: a human passes checkpoints
+        assert call["title"]
+
+
+def test_a_broken_approval_surface_fails_the_run(stores, monkeypatch):
+    """No fail-open: a swallowed approval is worse than a failed start."""
+    def _boom(app_store, *, config):
+        raise RuntimeError("approval store offline")
+
+    monkeypatch.setattr(projects_run, "_approval_store", _boom)
+    project, _ = _make_project()
+    _save_playbook(project.id)
+    with projects_db.connect_closing() as conn:
+        projects_db.activate_playbook_rev(conn, project.id, 1)
+    with pytest.raises(RuntimeError, match="approval store offline"):
+        _start(project.id)
+
+
+def test_a_project_without_an_owner_cannot_raise_approvals(stores):
+    """The approval needs a human target — name the absence, don't drop it."""
+    with projects_db.connect_closing() as conn:
+        pid = projects_db.create_full_project(
+            conn,
+            goal="An imported legacy project with no owner on record",
+            description="No owner_user_id.",
+            cadence="one_off",
+        )
+        project = projects_db.get_project(conn, pid)
+    with pytest.raises(RuntimeError, match="no owner_user_id"):
+        projects_run.raise_approval(project, {"run_no": 1}, "needs a human")
+
+
+class _FakeTrace:
+    def __init__(self, trace_id="trace-real-1"):
+        self.trace_id = trace_id
+        self.events = []
+
+
+class _FakeLedger:
+    def __init__(self):
+        self.flushed = []
+
+    async def flush(self, trace, **kwargs):
+        self.flushed.append(trace.trace_id)
+
+
+def test_run_binds_a_real_c8_trace_and_flushes_it(stores, monkeypatch):
+    """H2: the run row carries a minted trace id (never a synthetic
+    ``proj-…``), the spawn executes under ``bind_trace``, and the ledger
+    flushes the run's events before the budget gate reads them."""
+    from hermes_cli import interactions
+
+    trace, ledger = _FakeTrace(), _FakeLedger()
+
+    def fake_create_trace(*, config, actor_user_id, session_key, platform, mode):
+        assert actor_user_id == "leo"          # the trace's actor is the owner
+        assert platform == "projects"
+        assert mode == "prod"                  # off-gateway surface (§ C8)
+        assert session_key == f"projects:{project_slug[0]}:run-1"
+        return trace, ledger
+
+    project, _ = _make_project(autonomy="autonomous")
+    project_slug = [project.slug]
+    monkeypatch.setattr(interactions, "create_trace", fake_create_trace)
+    bound = []
+
+    def fake_spawn(*, project, run, guidance, inline_steps, enabled_toolsets):
+        bound.append(interactions.current_trace_id())
+        return {"session_id": "sess-1", "error": None}
+
+    _save_playbook(project.id, [{"key": "read", "title": "Read", "mode": "inline"}])
+    with projects_db.connect_closing() as conn:
+        projects_db.activate_playbook_rev(conn, project.id, 1)
+    result = _start(project.id, spawn_inline=fake_spawn)
+    assert result["run"]["trace_id"] == "trace-real-1"
+    assert bound == ["trace-real-1"]     # spawn ran under the bound trace
+    assert ledger.flushed == ["trace-real-1"]
+
+
+def test_tracing_off_means_no_trace_and_no_budget_gate(stores, monkeypatch):
+    """H2 honest fallback: with tracing disabled the run row carries no
+    trace, cost reads as not recorded, and the budget gate never fires on
+    made-up numbers."""
+    from hermes_cli import interactions
+
+    monkeypatch.setattr(
+        interactions, "create_trace", lambda **kwargs: (None, None)
+    )
+    project, _ = _make_project(budget=5.0)
+    _save_playbook(project.id, [{"key": "one", "title": "One"}])
+    with projects_db.connect_closing() as conn:
+        projects_db.activate_playbook_rev(conn, project.id, 1)
+    result = _start(project.id)
+    assert result["run"]["trace_id"] is None
+    assert result["budget_gate"] is None
+    assert projects_run.run_cost(result["run"]["trace_id"]) is None
+
+
+def test_cost_sums_the_trace_cost_events():
+    """The ledger stores no cost column: cost lives in ``kind='cost'``
+    events with ``amount_usd=…`` in the summary."""
+    from types import SimpleNamespace
+
+    events = [
+        SimpleNamespace(
+            kind="cost",
+            summary="model=m amount_usd=1.25000000 status=estimated "
+                    "input_tokens=1 output_tokens=2",
+        ),
+        SimpleNamespace(kind="cost", summary="model=m amount_usd=0.75"),
+        SimpleNamespace(kind="tool_call", summary="amount_usd=99"),
+    ]
+    assert projects_run._cost_from_interactions(events) == 2.0
+    assert projects_run._cost_from_interactions([]) is None
+    assert projects_run._cost_from_interactions(
+        [SimpleNamespace(kind="cost", summary="no amount here")]
+    ) is None
+
+
+def test_run_cost_with_a_principal_but_no_ledger_is_not_recorded(stores):
+    """Default reader, no supabase-app store → ``None`` (cost_recorded is
+    False at the API), never an error."""
+    from hermes_cli.access import Principal
+
+    principal = Principal(user_id="leo", display="Leo", role="member")
+    assert projects_run.run_cost("trace-x", principal=principal) is None
+
+
+# Capture the REAL resolvers before any fixture monkeypatches them, so the
+# H3 contract tests can restore them over the fixture's deterministic fakes.
+_REAL_ENABLED_TOOLSETS = projects_run._enabled_toolsets_for_profile
+
+
+def test_toolsets_resolve_from_the_host_profile_not_the_caller():
+    """H3 (invariant 14): the narrowing reads the NAMED profile's config
+    inside its runtime scope — never the calling process's config."""
+    import os
+    from pathlib import Path
+
+    from hermes_cli import profiles
+
+    home = Path(os.environ["HERMES_HOME"])
+    # The calling process's (default) profile enables "web"…
+    (home / "config.yaml").write_text("toolsets:\n  - web\n")
+    # …while host profile "alpha" enables only "shell".
+    alpha = profiles.get_profile_dir("alpha")
+    alpha.mkdir(parents=True, exist_ok=True)
+    (alpha / "config.yaml").write_text("toolsets:\n  - shell\n")
+
+    assert _REAL_ENABLED_TOOLSETS("alpha") == ["shell"]
+    assert _REAL_ENABLED_TOOLSETS("default") == ["web"]
+    # Unknown profile → fail closed: no grant.
+    assert _REAL_ENABLED_TOOLSETS("ghost") == []
+
+
+def test_narrowing_never_grants_beyond_the_host_profile(stores, monkeypatch):
+    """H3 end-to-end: a project hosted by profile 'alpha' (toolsets:
+    [shell]) requesting 'web' gets it DROPPED — the host's set is the
+    ceiling, whatever the calling process enables."""
+    import os
+    from pathlib import Path
+
+    from hermes_cli import profiles
+
+    monkeypatch.setattr(
+        projects_run, "_enabled_toolsets_for_profile", _REAL_ENABLED_TOOLSETS
+    )
+    alpha = profiles.get_profile_dir("alpha")
+    alpha.mkdir(parents=True, exist_ok=True)
+    (alpha / "config.yaml").write_text("toolsets:\n  - shell\n")
+    # The caller's own profile enables "web" — it must not leak in.
+    (Path(os.environ["HERMES_HOME"]) / "config.yaml").write_text(
+        "toolsets:\n  - web\n"
+    )
+
+    with projects_db.connect_closing() as conn:
+        pid = projects_db.create_full_project(
+            conn,
+            goal="Hosted by alpha — narrowing must hold",
+            description="Runs under profile alpha.",
+            owner_user_id="leo",
+            cadence="one_off",
+            autonomy="autonomous",
+        )
+        projects_db.add_project_profile(
+            conn, project_id=pid, profile="alpha", role="host"
+        )
+        projects_db.add_project_member(
+            conn, project_id=pid, user_id="leo", role="lead"
+        )
+        projects_db.add_project_output(
+            conn, project_id=pid, title="The output", required=True,
+        )
+        projects_db.update_project_fields(conn, pid, {"toolsets": "web,shell"})
+        projects_db.set_project_status(conn, pid, "active")
+
+    _save_playbook(pid, [{"key": "one", "title": "One"}])
+    with projects_db.connect_closing() as conn:
+        projects_db.activate_playbook_rev(conn, pid, 1)
+    result = _start(pid)
+    assert result["toolsets_effective"] == ["shell"]
+    assert result["toolsets_dropped"] == ["web"]
+    assert "NOT enabled by host profile 'alpha'" in result["run"]["summary"]
+
+
+def test_default_spawn_runs_in_the_host_profile_home(stores, monkeypatch):
+    """H4: the seeded session gets the HOST profile's home and the caller's
+    context (the trace binding rides it). Both entry points — the API's
+    manual start and cron's ``hermes projects run <slug>`` — spawn through
+    this one path (§6), so this single seam covers them."""
+    from types import SimpleNamespace
+
+    from agent import seeded_session
+    from hermes_cli import profiles
+
+    calls = []
+
+    def fake_spawn(prompt, **kwargs):
+        calls.append(kwargs)
+        return SimpleNamespace(
+            session_id=kwargs["session_id"], result=None,
+            timed_out=False, error=None,
+        )
+
+    monkeypatch.setattr(seeded_session, "spawn_seeded_session", fake_spawn)
+    project, _ = _make_project()
+    _save_playbook(
+        project.id, [{"key": "read", "title": "Read", "mode": "inline"}]
+    )
+    with projects_db.connect_closing() as conn:
+        projects_db.activate_playbook_rev(conn, project.id, 1)
+    result = _start(project.id)
+    assert result["run"]["session_id"]
+    assert calls, "the default spawn must go through spawn_seeded_session"
+    assert calls[0]["profile_home"] == str(profiles.get_profile_dir("default"))
+    assert calls[0]["context"] is not None

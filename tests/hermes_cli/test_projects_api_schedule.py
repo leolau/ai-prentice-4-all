@@ -55,7 +55,7 @@ def env(tmp_path, monkeypatch):
         lambda profile: ["research", "web"],
     )
     monkeypatch.setattr(
-        projects_run, "_available_skill_names", lambda: ["digest"]
+        projects_run, "_available_skill_names", lambda profile: ["digest"]
     )
 
     state = {"actor": OWNER, "enrolled": set(), "subject": OWNER.user_id}

@@ -1816,7 +1816,9 @@ def _run_payload(conn, bconn, run: dict, *, principal) -> dict:
         )
     payload = dict(run)
     payload["cards"] = cards
-    payload["cost"] = projects_run.run_cost(run.get("trace_id"))
+    payload["cost"] = projects_run.run_cost(
+        run.get("trace_id"), principal=principal
+    )
     # Fail-open contract (§6): no ledger → "not recorded", never an error.
     payload["cost_recorded"] = payload["cost"] is not None
     if run.get("started_at"):
@@ -2211,7 +2213,9 @@ async def patch_tools_route(request: Request) -> dict[str, Any]:
             # One seam for resolution: the same host-profile loader the
             # run spawn uses (§4.1), so write-time validation and spawn
             # agree about what exists.
-            known = projects_run._available_skill_names() or None
+            with projects_db.connect_closing() as conn:
+                host = projects_run.host_profile_name(conn, project.id)
+            known = projects_run._available_skill_names(host or "") or None
             names = [str(s).strip() for s in (body.get("skills") or []) if str(s).strip()]
             if known is not None:
                 unknown = [s for s in names if s not in known]
@@ -2230,7 +2234,7 @@ async def patch_tools_route(request: Request) -> dict[str, Any]:
             fresh = projects_db.get_project(conn, project.slug)
             host = projects_run.host_profile_name(conn, project.id)
             enabled = projects_run._enabled_toolsets_for_profile(host or "")
-            available = projects_run._available_skill_names()
+            available = projects_run._available_skill_names(host or "")
         cfg = projects_run.projects_runtime_config()
         eff_ts, dropped_ts = projects_run.resolve_toolsets(
             projects_run.parse_csv_field(fresh.toolsets), enabled
