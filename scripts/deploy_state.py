@@ -837,6 +837,12 @@ def _last_commit(root: Path, paths: tuple[str, ...]) -> str | None:
     return _git(root, "log", "-1", "--format=%H", "--", *paths) or None
 
 
+def _is_ancestor(root: Path, revision: str) -> bool:
+    """Whether HEAD contains `revision` — False if git cannot say."""
+    result = _git(root, "merge-base", "--is-ancestor", revision, "HEAD")
+    return result is not None
+
+
 def _describes_current_tooling(root: Path, doc_revision: str) -> list[str]:
     """Deployment-relevant paths changed after the doc was last written."""
     changed = _git(
@@ -856,8 +862,15 @@ def check_handover_doc(repo_root: Path | None = None) -> list[dict[str, str]]:
     Requiring its `Last verified` sha to equal HEAD sounds stricter and is worse:
     every deploy moves HEAD, so it would report drift on every deploy forever —
     including the one that ships the doc update — and a check that is always red
-    gets muted, which is how the doc went stale in the first place. A revision
-    behind HEAD with no deploy-tooling change since is *reported as a note*.
+    gets muted, which is how the doc went stale in the first place.
+
+    For the same reason a revision behind HEAD with nothing documented changed
+    since is *silent*, not a note. It used to be a note, and the note printed on
+    every deploy for four days saying nothing was wrong; amber that never goes
+    green is read as background colour, and then the red one is too. The one
+    behind-HEAD case still worth saying out loud is a documented revision this
+    checkout does not contain — that is a doc verified against something other
+    than this line of history, and its claims cannot be placed at all.
     """
     root = repo_root or REPO_ROOT
     doc = root / HANDOVER_DOC
@@ -906,13 +919,16 @@ def check_handover_doc(repo_root: Path | None = None) -> list[dict[str, str]]:
 
     changed = _describes_current_tooling(root, doc_revision)
     if not changed:
+        if _is_ancestor(root, documented):
+            return []
         return [{
             "severity": SEVERITY_NOTE,
             "component": "handover-doc",
-            "expected": f"{live[:9]} (deployed)",
+            "expected": f"a revision this checkout contains ({live[:9]} deployed)",
             "actual": f"{documented} (verified {match.group('date')})",
-            "detail": "verified at an earlier revision, but nothing it "
-            "documents has changed since",
+            "detail": "the documented revision is not in this history — the doc "
+            "was verified against a different line of development, so nothing "
+            "it claims can be placed against what is deployed",
         }]
     return [{
         "severity": SEVERITY_DRIFT,
