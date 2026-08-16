@@ -19,9 +19,16 @@ Staleness is deliberately *not* "this sha is not HEAD": every deploy moves HEAD,
 so that fires on every deploy forever — including the deploy shipping the doc
 update, whose merge sha cannot be known while the doc is being written — and an
 always-red check gets muted, which is how this document went stale in the first
-place. Being a few feature commits behind HEAD is reported as a note. Re-verify
-the claims below before moving the line forward: a fresh date on stale prose is
-worse than an old date.
+place. Being a few feature commits behind HEAD is the document's *normal* state
+and says nothing at all: it was a note until 2026-08-16, and that note printed
+on every deploy for four days to report that nothing was wrong — amber that
+never turns green is read as background colour, and the drift finding prints on
+the same line. The one behind-HEAD case still reported is a documented revision
+this history does not contain, which means the doc was verified against a
+different line of development and its claims cannot be placed at all.
+
+Re-verify the claims below before moving the line forward: a fresh date on stale
+prose is worse than an old date.
 
 ## Read these in this order
 
