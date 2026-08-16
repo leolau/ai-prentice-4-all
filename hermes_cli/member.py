@@ -37,6 +37,21 @@ from hermes_cli.members import (
 )
 
 
+#: What ``member delete`` does, in the words the operator reads before doing
+#: it. Kept as a constant so a test can hold it to the behaviour: it said
+#: "Nothing cascades to memories" for as long as purge had been erasing them.
+DELETE_DESCRIPTION = (
+    "Un-enrol a member from this profile. Nothing cascades to the rows they "
+    "own, so a strategy is required: 'transfer' moves them to another "
+    "principal, 'purge' deletes their private rows and moves the shared ones "
+    "to you. Memory is not inheritable either way: their memory rows are "
+    "deleted under both strategies, and 'purge' also erases the curated "
+    "memory files about them (and their cross-profile identity file if this "
+    "was their last participation on the box). Their box-wide account is "
+    "left alone."
+)
+
+
 def _prod_store() -> PrincipalStore:
     return PrincipalStore(get_store("supabase-app", "prod"))
 
@@ -396,13 +411,7 @@ def register_member_subparser(subparsers: argparse._SubParsersAction) -> None:
     delete = member_sub.add_parser(
         "delete",
         help="Remove an enrolment, transferring or purging the rows it owns",
-        description=(
-            "Un-enrol a member from this profile. Nothing cascades to "
-            "memories, files or GTS items, so a strategy is required: "
-            "'transfer' moves their rows to another principal, 'purge' "
-            "deletes their private rows and moves the shared ones to you. "
-            "Their box-wide account is left alone."
-        ),
+        description=DELETE_DESCRIPTION,
     )
     delete.add_argument("user_id", help="The member's principal id")
     delete.add_argument(

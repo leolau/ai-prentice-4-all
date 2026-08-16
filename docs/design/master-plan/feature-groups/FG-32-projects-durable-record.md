@@ -1,47 +1,60 @@
----
-title: "design: Projects — the durable record of a piece of work that can be reviewed, repeated and learnt from"
-status: draft — spec for review, then implementation
-date: 2026-08-13
-revised: 2026-08-14 (ed.3.2 — owner's 15-field list; goal split from name, samples/references optional; see §1.1)
-type: feature design (implementation-ready, standalone)
-target_repo: ai-prentice-4-all
-audience: an implementing agent with no other context than this file and the tree
-origin: |
-  Leo, 2026-08-13: "a project stores all the related information about a project
-  which can be long lasting, repeatable or one-time only. It can be fully
-  automatic or it can require user to provide instructions, feedback and
-  guidance over time. Everything is tracked properly in Project so that it can
-  be reviewed, repeated and learnt from over time."
+# FG-32 — Projects: the durable record of a piece of work
 
-  Leo, 2026-08-14 — the fifteen fields a project holds, M = mandatory,
-  O = optional: 1 Goal (short title) M · 2 Requirements/Description (long) M ·
-  3 Outputs M · 4 Participants M · 5 Progress M · 6 Target audience O ·
-  7 Score O · 8 Samples/References · 9 Plan O · 10 Contacts O · 11 Files O ·
-  12 Memories O · 13 Tools O · 14 Skills O · 15 Conversation Histories O.
-  §1.1 is that list, verbatim, mapped to storage; every other section is
-  written to serve it.
-consolidates:
-  - docs/plans/2026-08-12-001-projects-page-plan.md (ed.1 — the substrate review, the record, the page)
-  - docs/plans/2026-08-13-001-todos-and-projects-design-revision.md (ed.2 — Projects' six open questions answered; the to-do → card seam)
-extends_with:
-  - cadence (one-off / repeatable / standing) — new
-  - autonomy (manual / supervised / autonomous) and its caps — new
-  - guidance (durable directives + feedback, and when they take effect) — new
-  - runs, retros and the learning loop — new
-depends_on:
-  - hermes_cli/kanban_db.py            # the execution substrate (statuses, links, runs, events, attachments)
-  - hermes_cli/projects_db.py          # the Project record; already carries board_slug, project_profiles, project_links
-  - hermes_cli/todo_store.py           # "what needs me next" — a project asks through it
-  - hermes_cli/human_comms.py          # FG-10 approvals + proactive asks ('approval' | 'proactive_ask')
-  - cron/jobs.py, cron/scheduler.py    # the shipped, profile-scoped schedule engine a repeatable project uses
-  - agent/background_review.py         # the shipped skill-distillation loop the learning path ends in
-  - hermes_cli/interactions.py         # C8 trace ledger; kind='cost' is where a run's cost comes from
-  - docs/design/master-plan/feature-groups/FG-27-profile-scoped-datastore-isolation.md
-  - docs/design/master-plan/feature-groups/FG-28-multi-profile-administration.md
-  - docs/design/master-plan/feature-groups/FG-29-goal-tree-and-insight-promotion.md
----
+**Wave:** P7-A (after FG-27/FG-28/FG-29; needs no other FG to start) · **Owner agent:** devin (design), devin (implementation) · **Status:** IMPLEMENTED — steps 1–11 are merged into `develop` (#251 store, #252 kanban rollup, #254 API, #258 runs, #259 schedule, #261 BFF, #263 list, #266 detail, #279/#280 8b + live, #271 CLI + skill, #275 score, #276 learning + events). The design is frozen at ed.3.2; §1.1 is the owner's fifteen-field list verbatim. **Open defects are recorded in §20** — the review found 17, none of them fixed at the time of writing
 
-# Projects
+## Provenance
+
+This FG began life as a standalone implementation design
+(this document (FG-32), ed.1 → ed.3.2) so that an agent with
+no other context could build it; it is recorded here, unchanged in substance,
+because Projects is a feature group of the same weight as the rest of the plan
+and its record belongs beside them.
+
+**Origin — Leo, 2026-08-13:**
+
+> "a project stores all the related information about a project which can be
+> long lasting, repeatable or one-time only. It can be fully automatic or it
+> can require user to provide instructions, feedback and guidance over time.
+> Everything is tracked properly in Project so that it can be reviewed,
+> repeated and learnt from over time."
+
+**The fifteen fields — Leo, 2026-08-14** (M = mandatory, O = optional):
+1 Goal (short title) M · 2 Requirements/Description (long) M · 3 Outputs M ·
+4 Participants M · 5 Progress M · 6 Target audience O · 7 Score O ·
+8 Samples/References O · 9 Plan O · 10 Contacts O · 11 Files O · 12 Memories O ·
+13 Tools O · 14 Skills O · 15 Conversation Histories O.
+**§1.1 is that list, verbatim, mapped to storage**; every other section exists to
+serve it.
+
+**Consolidates** (both superseded for implementation by this document):
+`docs/plans/2026-08-12-001-projects-page-plan.md` (ed.1 — the substrate review,
+the record, the page) and
+`docs/plans/2026-08-13-001-todos-and-projects-design-revision.md` (ed.2 —
+Projects' six open questions answered; the to-do → card seam).
+
+**Extends those with** cadence (one-off / repeatable / standing), autonomy
+(manual / supervised / autonomous) and its caps, guidance (durable directives +
+feedback, and when they take effect), and runs / retros / the learning loop.
+
+**Editions:** ed.1 2026-08-13 · ed.2 · ed.3 (owner's 15-field rebuild, #242) ·
+ed.3.2 2026-08-14 (goal split from name, samples/references optional, #245) ·
+recorded as FG-32 2026-08-17.
+
+## Reuse map
+
+| anchor | what it already provides |
+|---|---|
+| `hermes_cli/kanban_db.py` | the execution substrate — statuses, task links, runs, events, attachments |
+| `hermes_cli/projects_db.py` | the Project record; already carried `board_slug`, `project_profiles`, `project_links` |
+| `hermes_cli/todo_store.py` | "what needs me next" — a project asks through it rather than inventing an inbox |
+| `hermes_cli/human_comms.py` | FG-10 approvals and proactive asks (`approval` \| `proactive_ask`) |
+| `cron/jobs.py`, `cron/scheduler.py` | the shipped, profile-scoped schedule engine a repeatable project uses — Projects adds no scheduler |
+| `agent/background_review.py` | the shipped skill-distillation loop the learning path ends in |
+| `hermes_cli/interactions.py` | C8 trace ledger; `kind='cost'` is where a run's cost comes from |
+| FG-27 | profile-scoped datastore isolation — why project links are pointers, never copies |
+| FG-28 | multi-profile administration — the host-profile model a run executes under |
+| FG-29 | goal tree + skill promotion — the two destinations a retro's learning may cross into |
+
 
 ## 0. How to read this document
 
@@ -1336,7 +1349,7 @@ No new core model tool.
 Behaviour contracts, not change detectors (`AGENTS.md`).
 
 > **Review of the shipped steps 1–8 lives in
-> [`docs/reviews/2026-08-13-projects-steps-1-8-review.md`](../reviews/2026-08-13-projects-steps-1-8-review.md)**
+> [`docs/reviews/2026-08-13-projects-steps-1-8-review.md`](../../../reviews/2026-08-13-projects-steps-1-8-review.md)**
 > — 9 backend findings (H1–H4, M1–M3, L1–L2) and 8 agent-home findings
 > (F1–F8), each with the call site, the shipped seam to use and the test that
 > would have caught it. Read it before continuing at step 9.
@@ -1568,3 +1581,95 @@ of changing it later. None blocks implementation.
 | 12 | **Should `progress` ever be manual?** A percentage the owner types is honest about judgement and dishonest about staleness. | **No manual override in v1** — the ladder plus the rolling `summary` covers "where this really stands" in words, which is what a human actually reads. | Additive: a nullable `progress_override` column. |
 | 13 | **Memories [12]: curated pointers, or a project memory namespace?** I made them pointers into a profile's memory documents. | **Pointers.** A project-owned memory store would be a second memory tier competing with the shipped one and FG-29's promotion path. | A namespace later would be a real design; say now if you want it. |
 | 14 | **§1.1 is now the owner's list verbatim, with fields 8 and 9 settled (ed.3.2).** Nothing in it is my reconstruction any more. | **Treat §1.1 as frozen for step 1** — the store PR is the cheapest place to add a column and the most expensive place to have missed a concept. | A column is cheap; a *concept* added after the API and the panels exist is not. |
+
+---
+
+## 20. Implementation status and open defects
+
+The design above is frozen at ed.3.2. This section is the **record of what was
+built against it** and what is still wrong; it is maintained by review, not by
+design changes. Anything that requires the design to change gets a new edition
+above, not a note here.
+
+### 20.1 What landed
+
+All eleven steps of §17 are merged into `develop`, plus two additions the
+sequencing did not name (8b, 9b) and a live-integration merge:
+
+| Step | Scope | PR / commit |
+|---|---|---|
+| 1 | Root-anchored Projects store, migration, profile import | #251 |
+| 2 | Kanban board rollup extraction | #252 |
+| 3 | Projects API (list/detail/writes, permission gates) | #254 |
+| 4 | Run lifecycle, playbooks, guidance, toolset/skill narrowing | #258 |
+| 5 | Schedule wiring, health, `doctor` | #259 |
+| 6 | BFF routes, client, types | #261 |
+| 7 | Projects list page | #263 |
+| 8 | Detail page, run and card routes | #266 |
+| 8b | `from_todo` promotion seam | `ffb139319` (#279/#280) |
+| 9 | `hermes projects` CLI + `skills/productivity/projects/SKILL.md` | #271 |
+| 9b | Score routes and the `score` verb | #274 |
+| 10 | Retro → learning (playbook rev / directive / skill candidate, all inactive) | #275, #276 |
+| 11 | Event tail, rolling `summarise`, phase closeout | #276, #278 |
+| — | Live integration into `develop` | #279, #280 |
+
+Verified at `7c737474f`: 185 Projects Python tests pass, 46 agent-home Projects
+tests pass, `tsc --noEmit` clean. The feature has **not** been deployed or
+system-tested on a live box.
+
+### 20.2 Open defects
+
+Two reviews, both merged as documents, carry the findings and the fix recipes.
+**None of the first review's findings had been fixed at the time of the second.**
+
+- [`docs/reviews/2026-08-13-projects-steps-1-8-review.md`](../../../reviews/2026-08-13-projects-steps-1-8-review.md)
+  (#270) — 17 findings on steps 1–8 with per-finding call site, runtime effect,
+  the shipped seam to use, and the test that would have caught it.
+- [`docs/reviews/2026-08-17-projects-end-to-end-review.md`](../../../reviews/2026-08-17-projects-end-to-end-review.md)
+  — re-verification of all 17 against the current tree (16 open, F8 fixed by
+  step 8b) plus five new findings on steps 8b–11, each with the call site, the
+  runtime effect, the fix against a shipped seam and the test that catches it.
+  Its closing section is the **ordered fix checklist** for all 21 open items,
+  grouped into five independently shippable blocks — that is the list to work
+  from.
+
+The design-relevant ones, in the order the second review recommends fixing them:
+
+1. **E1 — the human-only acts are enforceable in one place out of three.**
+   §6.1 (accept), §8.1 (score) and §8.2 ("a human approves every crossing")
+   describe three human acts. Only `score` has an identity gate, and
+   `projects_cli` patches that gate out for the agent's own route (§14), so the
+   learning loop can close with no human in it. This is the one finding that
+   weakens a *design guarantee* rather than an implementation: the record's
+   trustworthiness rests on those three acts.
+2. **F1a/F1b/F1c/F4 — three of the four detail-page writes look like failures.**
+   Accept-output, continue-run and add-directive return ack envelopes that the
+   panels merge as rows, and `RunView` never revalidates. §13's promise that the
+   page shows what actually happened is not kept.
+3. **H1–H4 — the run lifecycle's four seams are not in force at spawn time.**
+   Approvals (§4.3) are never raised, `budget_usd_per_run` (§4.2) is
+   unenforceable because runs carry a synthetic `trace_id` bound to no C8 trace,
+   toolset narrowing (§4.1, invariant 14) reads the calling process's config
+   instead of the host profile's, and an inline run spawns without
+   `profile_home` so it executes outside the profile the run row records (§11).
+4. **M1/M2/F2 — health and the list contradict §9.2.** A never-run repeatable
+   project is never `stalled`, `stalled` projects are excluded from the
+   Attention chip that exists to surface them, and the list filters after the
+   page slice so paging *loses* matching rows.
+5. **E3 — the §12 event tail has no consumer**, so §13's live board updates do
+   not happen; the page refreshes only after its own writes.
+
+### 20.3 Testing gaps that let the above through
+
+§16's contracts are behaviour-shaped and the store/router honour them. Two
+holes account for nearly every open finding, and both should be closed before
+the next step lands:
+
+- **The run seams are only ever tested through injected fakes**, so defects in
+  the *default* implementations of `spawn_inline`, `cost_reader` and the
+  approval hook are invisible by construction. §16 needs one contract per seam
+  asserting the real default resolves a real symbol.
+- **The ~34 BFF routes have no tests**, and the client tests assert URLs rather
+  than response handling — which is exactly the F1 bug class. One test per write
+  feeding the actual upstream envelope through the panel's state update closes
+  it.
