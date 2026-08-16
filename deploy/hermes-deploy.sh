@@ -68,6 +68,33 @@ git checkout -q "$BRANCH" 2>/dev/null || git checkout -q -b "$BRANCH" --track "o
 git checkout -f "origin/$BRANCH" -- .
 git reset -q "origin/$BRANCH"
 git merge --ff-only "origin/$BRANCH" >/dev/null 2>&1 || git update-ref "refs/heads/$BRANCH" "origin/$BRANCH"
+# `checkout -- .` writes what the new revision HAS; it removes nothing the new
+# revision LACKS, and the reset above then leaves the orphan untracked. So a
+# file deleted or renamed upstream lived on here forever — a stale document is
+# the harmless case, an importable deleted module is not. Delete exactly what
+# git says the two revisions deleted: nothing untracked (.env, agent-home.env,
+# .next/) is named by that list, so nothing untracked can be caught by it.
+# --no-renames matters: the case that found this was a rename, and git reports
+# a rename as R rather than D, so the old path would go on surviving.
+while IFS= read -r gone; do
+  [ -z "$gone" ] && continue
+  keep=0
+  for a in "${ALLOWED_LOCAL_MODS[@]}"; do [ "$gone" = "$a" ] && keep=1; done
+  [ "$keep" = 1 ] && continue
+  [ -e "$gone" ] || continue
+  rm -f "$gone"
+  echo "removed upstream-deleted file: $gone"
+  rmdir -p --ignore-fail-on-non-empty "$(dirname "$gone")" 2>/dev/null || true
+done < <(git diff --name-only --no-renames --diff-filter=D "$BEFORE" "origin/$BRANCH")
+# Orphans from deploys made before the loop above existed, and anything a
+# process wrote into the checkout. Ignored paths (.env, agent-home.env, .next/)
+# are excluded by --porcelain, so what remains is genuinely unaccounted for.
+# Reported, never deleted — the deploy does not know what it did not put there.
+untracked=$(git status --porcelain --untracked-files=normal | awk '$1 == "??" {print $2}')
+if [ -n "$untracked" ]; then
+  echo "untracked files in the deployment checkout (not from this revision):"
+  echo "$untracked" | sed 's/^/  /'
+fi
 for a in "${ALLOWED_LOCAL_MODS[@]}"; do
   [ -f "/opt/data/backups/deploy-$TS/$a" ] && cp -a "/opt/data/backups/deploy-$TS/$a" "$a"
 done

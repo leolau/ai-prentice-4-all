@@ -101,11 +101,16 @@ clean. **Fail:** any modification — the box is then not testing the repository
 which is the drift this whole programme exists to prevent.
 
 **Untracked files are a finding, not noise.** A dry run of this suite on
-`dfa32fe3c` found `?? docs/design/projects-feature-design.md` (102 KB, owned by
-`hermes`) — something wrote a document into the deployment's own checkout. It
-changes no behaviour, so nothing else in this suite would ever see it, which is
-precisely why A1 reads `--porcelain` and not just the sha. Report the path, its
-owner and its mtime; do not delete it.
+`dfa32fe3c` found `?? docs/design/projects-feature-design.md` — byte-identical to
+its last committed version, still on the box days after #283 renamed it away.
+The deploy could not delete: `git checkout -f <ref> -- .` writes what the ref
+has and removes nothing it lacks, so **every** upstream delete or rename had been
+surviving on the box. A stale document is the harmless case; a deleted module
+that is still importable is the same hole. Fixed since — the deploy now removes
+what the two revisions deleted, and lists whatever is left untracked.
+
+So A1 has a second half: the deploy output must not name an untracked file it
+cannot account for. Report the path, its owner and its mtime; do not delete it.
 
 ### A2 — every enabled unit is active
 
