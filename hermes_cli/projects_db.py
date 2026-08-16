@@ -997,6 +997,13 @@ def update_project_fields(
         # intersection happens at run spawn time, never at write time.
         "toolsets": _opt_str,
         "skills": _opt_str,
+        # §3.2 schedule wiring: the cron store is authoritative; these are
+        # the project-side halves of the link (``schedule`` text, the job
+        # id in the host profile's store, and the ``next_run_at`` display
+        # cache refreshed on read).
+        "schedule": _opt_str,
+        "cron_job_id": _opt_str,
+        "next_run_at": _opt_int,
     }
     sets: List[str] = []
     params: List[Any] = []
