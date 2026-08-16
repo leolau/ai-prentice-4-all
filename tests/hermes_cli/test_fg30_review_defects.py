@@ -351,6 +351,110 @@ async def test_merge_refuses_a_non_owner() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Retirement closes goals — with a word the registry knows, and says when it
+# could not. Live systest, hermes-systest 2026-08-16: `profile retire` printed
+# success while every goal stayed `active`, because "completed" is not in the
+# registry's vocabulary and the failure was logged and swallowed.
+# ---------------------------------------------------------------------------
+
+
+def test_the_retirement_status_is_one_the_registry_accepts() -> None:
+    from hermes_cli.goal_registry import GOAL_STATUSES
+
+    assert ps.RETIRED_GOAL_STATUS in GOAL_STATUSES
+    assert "completed" not in GOAL_STATUSES, (
+        "the word the live box tried; kept here so a rename of the vocabulary "
+        "does not quietly re-open the same hole"
+    )
+
+
+@pytest.mark.asyncio
+async def test_set_status_validates_before_it_reaches_the_database() -> None:
+    """The real gate: ``set_status`` raises on an unknown status, up front.
+
+    Exercised through ``GoalRegistryStore`` itself rather than asserted about,
+    so this stays true if the validation moves.
+    """
+    from hermes_cli.access import Principal
+    from hermes_cli.goal_registry import GoalRegistryStore
+
+    class _Sentinel(Exception):
+        pass
+
+    class _Store:
+        mode = "prod"
+
+        async def connect(self):
+            raise _Sentinel("reached the database")
+
+    registry = GoalRegistryStore(_Store())
+    owner = Principal(user_id="root", display="root", role="owner")
+
+    with pytest.raises(ValueError, match="Unknown goal status"):
+        await registry.set_status(owner, "goal-1", "completed")
+
+    # The status retirement uses passes validation and gets as far as the DB.
+    with pytest.raises(_Sentinel):
+        await registry.set_status(owner, "goal-1", ps.RETIRED_GOAL_STATUS)
+
+
+@pytest.mark.asyncio
+async def test_retire_reports_that_the_goals_were_not_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A retirement whose goal step failed must not read as a clean one."""
+    from hermes_cli.access import Principal
+
+    profile_dir = tmp_path / "profiles" / "systest30"
+    profile_dir.mkdir(parents=True)
+    archive = tmp_path / "archives" / "systest30.tar.gz"
+    archive.parent.mkdir(parents=True)
+    archive.write_bytes(b"")
+
+    monkeypatch.setattr(
+        "hermes_cli.profiles.get_profile_dir", lambda name: profile_dir
+    )
+    monkeypatch.setattr(
+        "hermes_cli.profiles.export_profile", lambda name, out: str(archive)
+    )
+    monkeypatch.setattr(
+        "hermes_constants.get_default_hermes_root", lambda: tmp_path
+    )
+    monkeypatch.setattr(ps, "_release_channel", lambda canon, d: None)
+
+    async def _boom(profile_dir: Path, principal: object):
+        return 0, "ValueError: Unknown goal status: 'completed'"
+
+    monkeypatch.setattr(ps, "_complete_profile_goals", _boom)
+
+    owner = Principal(user_id="root", display="root", role="owner")
+    result = await ps.retire_profile("systest30", owner, promotions=None)
+
+    assert result.goals_completed == 0
+    assert result.goal_error is not None, (
+        "the archive exists, the goals do not — the caller must be able to "
+        "tell that apart from a clean retirement"
+    )
+    assert Path(result.archive) == archive
+
+
+def test_the_cli_prints_the_unclosed_goals(capsys: pytest.CaptureFixture) -> None:
+    from hermes_cli.main import _print_retired_goals
+
+    _print_retired_goals(
+        ps.RetireResult(archive=Path("/tmp/a.tar.gz"), goals_completed=0,
+                        goal_error="ValueError: boom")
+    )
+    failed = capsys.readouterr().out
+    assert "NOT closed" in failed and "ValueError: boom" in failed
+
+    _print_retired_goals(
+        ps.RetireResult(archive=Path("/tmp/a.tar.gz"), goals_completed=2)
+    )
+    assert "Goals closed: 2" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
 # The console routes act as the caller, not as the owner
 # ---------------------------------------------------------------------------
 
