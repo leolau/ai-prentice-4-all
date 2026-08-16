@@ -61,6 +61,26 @@ CONFLICT_KINDS: Tuple[str, ...] = (
     "stated_blockage",
 )
 
+#: How much of a failure's text a digest line carries. Enough to recognise the
+#: cause; the log has the rest.
+_REASON_CHARS = 160
+
+
+def _unavailable(section: str, exc: BaseException) -> str:
+    """The line a section that could not run contributes to the digest.
+
+    A section whose store is unreachable used to contribute *nothing*, which in
+    a digest is indistinguishable from a section with nothing to report — and
+    with every section failing, the digest read "Nothing to review this week".
+    The three optional sections stay optional (one unconfigured store must not
+    cost the owner the rest of the review), but they say so.
+    """
+    log.warning("digest: %s not rendered: %s", section, exc)
+    reason = " ".join(f"{type(exc).__name__}: {exc}".split())
+    if len(reason) > _REASON_CHARS:
+        reason = reason[: _REASON_CHARS - 1] + "…"
+    return f"{section}: unavailable — {reason}"
+
 
 @dataclass(frozen=True)
 class Conflict:
@@ -541,7 +561,7 @@ async def weekly_digest(
             lines.append("Profile suggestion:")
             lines.extend(f"  {line}" for line in suggestion_lines)
     except Exception as exc:
-        log.warning("digest: profile suggestion not rendered: %s", exc)
+        lines.append(_unavailable("Profile suggestion", exc))
 
     # Idle profile detection (FG-30). Flag profiles with no sessions for
     # N weeks rather than waiting for someone to notice.
@@ -559,7 +579,7 @@ async def weekly_digest(
             lines.append("Profiles with no recent sessions:")
             lines.extend(f"  {line}" for line in idle_lines_rendered)
     except Exception as exc:
-        log.warning("digest: idle profiles not rendered: %s", exc)
+        lines.append(_unavailable("Profiles with no recent sessions", exc))
 
     # Capacity headroom (FG-31). Arrives in the same review moment as
     # everything else, and reuses the idle profiles just computed as its
@@ -582,7 +602,7 @@ async def weekly_digest(
         lines.append("Capacity:")
         lines.extend(f"  {line}" for line in capacity_lines)
     except Exception as exc:
-        log.warning("digest: capacity headroom not rendered: %s", exc)
+        lines.append(_unavailable("Capacity", exc))
 
     if not lines:
         lines.append("Nothing to review this week.")
