@@ -7,6 +7,7 @@ vi.mock("next/navigation", () => ({
   useRouter: () => ({ refresh: () => {}, push: () => {} }),
 }));
 
+import { AddToProjectSheet } from "@/components/projects/AddToProjectSheet";
 import { CardDetailView } from "@/components/projects/CardDetailView";
 import { ProjectDetailView } from "@/components/projects/ProjectDetailView";
 import { RunView } from "@/components/projects/RunView";
@@ -418,6 +419,31 @@ describe("CardDetailView", () => {
     expect(html).toContain("Write the thing.");
     expect(html).toContain("Done — sent to the channel.");
     expect(html).toContain("/projects/monday-digest");
+  });
+});
+
+describe("AddToProjectSheet", () => {
+  it("offers only linking when there is nothing to promote", () => {
+    const html = renderToStaticMarkup(
+      <AddToProjectSheet onClose={() => {}} fixedSlug="monday-digest" fixedName="Digest" />,
+    );
+    expect(html).toContain("Add link");
+    expect(html).not.toContain("Promote to card");
+  });
+
+  it("offers promotion alongside linking for a to-do (§10)", () => {
+    const html = renderToStaticMarkup(
+      <AddToProjectSheet
+        onClose={() => {}}
+        prefill={{ kind: "todo", ref: "td_1", label: "Draft the plan" }}
+        promote={{ todoId: "td_1", todoTitle: "Draft the plan" }}
+      />,
+    );
+    expect(html).toContain("Promote to card");
+    expect(html).toContain("Add link");
+    // The one line of copy that states the difference (§13).
+    expect(html).toContain("moves the");
+    expect(html).toContain("to-do to working");
   });
 });
 

@@ -366,6 +366,7 @@ export function TodoDetailView({ todo }: { todo: TodoDetail }) {
         <AddToProjectSheet
           onClose={() => setAddOpen(false)}
           prefill={{ kind: "todo", ref: current.id, label: current.title }}
+          promote={{ todoId: current.id, todoTitle: current.title }}
         />
       ) : null}
     </div>

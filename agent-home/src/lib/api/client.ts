@@ -1230,12 +1230,17 @@ export class HermesApiClient {
   async createProjectCard(
     slug: string,
     payload: {
-      title: string;
+      title?: string;
       body?: string;
       assignee?: string;
-      from_todo?: string;
+      from_todo?: { profile?: string; id: string };
     },
-  ): Promise<{ task_id: string; project_id: string; status: string }> {
+  ): Promise<{
+    task_id: string;
+    project_id: string;
+    status: string;
+    from_todo?: { profile: string; id: string };
+  }> {
     return this.request(
       `/api/registry/projects/${encodeURIComponent(slug)}/cards`,
       { method: "POST", json: payload },
