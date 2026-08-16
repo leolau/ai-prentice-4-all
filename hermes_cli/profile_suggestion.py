@@ -39,7 +39,16 @@ import shutil
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence, Tuple
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Dict,
+    List,
+    Literal,
+    Optional,
+    Sequence,
+    Tuple,
+)
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     import asyncpg
@@ -59,6 +68,15 @@ SUGGESTION_STATES: Tuple[str, ...] = ("proposed", "adopted", "dismissed")
 
 #: The single open state.
 OPEN_STATE: Tuple[str, ...] = ("proposed",)
+
+#: The reviewed trail: what the owner already acted on.
+REVIEWED_STATES: Tuple[str, ...] = ("adopted", "dismissed")
+
+#: How many reviewed rows the queue surface returns. The trail is a trace of
+#: recent decisions, not an archive: it grows for the lifetime of the profile
+#: and every row carries an ``evidence`` blob, so an uncapped read hands a
+#: mobile screen an unbounded payload for a section that renders three fields.
+REVIEWED_HISTORY_LIMIT = 20
 
 #: How often generation runs — separate from FG-29's weekly digest clock.
 DEFAULT_GENERATION_INTERVAL = timedelta(days=30)
@@ -153,6 +171,27 @@ class ProfileSuggestion:
             "evidence": self.evidence,
             "dedup_key": self.dedup_key,
             "origin_profile": self.origin_profile,
+            "status": self.status,
+            "reviewed_by": self.reviewed_by,
+            "reviewed_at": self.reviewed_at.isoformat() if self.reviewed_at else None,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+        }
+
+    def as_summary_dict(self) -> dict:
+        """The reviewed-trail projection: what a decision *was*, nothing more.
+
+        Deliberately omits ``evidence``, which per §4.2 T3 carries the
+        ``participants`` roster — ``user_id``, display name and role of every
+        active principal. The full row is the material for a decision the owner
+        has not made yet; once reviewed, the trail renders status, role and goal,
+        so shipping the roster to every enrolled reader of the queue screen
+        would be a disclosure with no reader.
+        """
+        return {
+            "id": self.id,
+            "proposed_name": self.proposed_name,
+            "proposed_role": self.proposed_role,
+            "proposed_goal": self.proposed_goal,
             "status": self.status,
             "reviewed_by": self.reviewed_by,
             "reviewed_at": self.reviewed_at.isoformat() if self.reviewed_at else None,
@@ -467,6 +506,20 @@ def _evidence_strong_enough(evidence: Dict[str, Any]) -> bool:
     return corroborating >= 1
 
 
+def _evidence_for_prompt(evidence: Dict[str, Any]) -> Dict[str, Any]:
+    """The evidence slice sent to the aux LLM.
+
+    ``participants`` (every active principal's ``user_id``, ``display`` and
+    ``role``) is a *local* corroborating signal — it counts towards the
+    evidence bar in ``_evidence_strong_enough`` — but it is deliberately
+    **not** sent to a third-party model. Naming a profile does not need the
+    roster, and shipping it would make every member's identity and role
+    leave the box to a vendor each monthly pass (Leo's decision, FG-30 §4.2
+    T3 Q1 — drop from the prompt, keep as a local signal).
+    """
+    return {k: v for k, v in evidence.items() if k != "participants"}
+
+
 def _ask_aux_llm(
     origin_profile: str,
     evidence: Dict[str, Any],
@@ -476,6 +529,10 @@ def _ask_aux_llm(
     Mirrors ``profile_describer.py``'s lazy import + lenient parse pattern.
     Never raises for expected failure modes — returns None so generation
     can be skipped this cycle.
+
+    The roster (``participants``) is stripped before the prompt is built —
+    see ``_evidence_for_prompt``. It stays in ``evidence`` for the local
+    bar and the stored JSONB; it just never reaches the model.
     """
     try:
         from agent.auxiliary_client import (
@@ -495,7 +552,7 @@ def _ask_aux_llm(
     if client is None or not aux_model:
         return None
 
-    evidence_text = json.dumps(evidence, indent=2, default=str)
+    evidence_text = json.dumps(_evidence_for_prompt(evidence), indent=2, default=str)
     user_msg = _USER_TEMPLATE.format(
         origin_profile=origin_profile,
         description=evidence.get("current_description", "(no description)"),
@@ -576,7 +633,14 @@ def _extract_json_blob(raw: str) -> Optional[dict]:
 
 
 def _resolve_store() -> "SupabaseAppStore":
-    """Resolve the active profile's SupabaseAppStore (C3 datastore routing)."""
+    """Resolve the active profile's SupabaseAppStore (C3 datastore routing).
+
+    ``"prod"`` is hard-coded deliberately, not a routing bug: this is a
+    one-tier (C3 ``supabase-app``) consumer and there is no dev/staging
+    context on the profile-suggestion path. Consistent with the other C3
+    consumers on this tier (FG-27). Leo's decision, FG-30 §4.2 T3 Q2: keep
+    hard-coded; recorded here as an assumption rather than left implicit.
+    """
     from hermes_cli.datastore import get_store
 
     return get_store("supabase-app", "prod")
@@ -866,22 +930,61 @@ class ProfileSuggestionStore:
         principal: "Principal",
         *,
         statuses: Sequence[str] = OPEN_STATE,
+        limit: Optional[int] = None,
         connection: Optional["asyncpg.Connection"] = None,
     ) -> List[ProfileSuggestion]:
-        """Suggestions in ``statuses``, newest first."""
+        """Suggestions in ``statuses``, newest first, at most ``limit`` rows.
+
+        ``limit`` is a SQL ``LIMIT``, not a slice of a full fetch: the reviewed
+        trail is unbounded over a profile's life and each row carries evidence.
+        """
         own = connection is None
         conn = connection or await self._connect()
         try:
             await self.initialize(connection=conn)
-            rows = await conn.fetch(
-                f"""
+            sql = f"""
                 SELECT {_SUGGESTION_COLUMNS} FROM {SUGGESTIONS_TABLE}
                 WHERE status = ANY($1::text[])
                 ORDER BY created_at DESC
-                """,
-                list(statuses),
-            )
+            """
+            if limit is None:
+                rows = await conn.fetch(sql, list(statuses))
+            else:
+                rows = await conn.fetch(sql + " LIMIT $2", list(statuses), int(limit))
             return [_row_to_suggestion(row) for row in rows]
+        finally:
+            if own:
+                await conn.close()
+
+    async def queue(
+        self,
+        principal: "Principal",
+        *,
+        reviewed_limit: int = REVIEWED_HISTORY_LIMIT,
+        connection: Optional["asyncpg.Connection"] = None,
+    ) -> Tuple[List[ProfileSuggestion], List[ProfileSuggestion]]:
+        """``(open, reviewed)`` for the queue surface, over one connection.
+
+        Two reads rather than one over all statuses, because the two halves are
+        not the same thing: the open card is the decision being asked for and
+        needs its evidence; the reviewed trail is a trace of decisions already
+        made, is capped, and is rendered from three fields. Splitting here also
+        makes "open first, then reviewed" a property of the query rather than a
+        claim the ``ORDER BY created_at DESC`` does not make.
+        """
+        own = connection is None
+        conn = connection or await self._connect()
+        try:
+            open_rows = await self.list_suggestions(
+                principal, statuses=OPEN_STATE, connection=conn
+            )
+            reviewed = await self.list_suggestions(
+                principal,
+                statuses=REVIEWED_STATES,
+                limit=reviewed_limit,
+                connection=conn,
+            )
+            return open_rows, reviewed
         finally:
             if own:
                 await conn.close()
@@ -1273,6 +1376,9 @@ async def _complete_profile_goals(profile_dir: Path, principal: "Principal") -> 
         try:
             from hermes_cli.datastore import get_store
 
+            # "prod" is hard-coded by decision (FG-30 §4.2 T3 Q2): the retire
+            # path is a one-tier C3 consumer with no dev context. See
+            # _resolve_store for the full reasoning.
             registry = GoalRegistryStore(get_store("supabase-app", "prod"))
             goals = await registry.list_goals(principal, status="active")
             profile_goal_ids = {g.id for g in goals if g.tier == "profile"}
@@ -1394,6 +1500,386 @@ async def idle_profiles(
 
 
 # ---------------------------------------------------------------------------
+# Commit-to-channel (FG-30 §4.2 T2)
+# ---------------------------------------------------------------------------
+
+#: Platforms whose identity is a single bot token. The collision check and
+#: the write both key off this map. Channels with more complex credentials
+#: (WhatsApp, Signal, email) are not committable through this path — they have
+#: their own setup wizards — and are deliberately absent here.
+_PLATFORM_TOKEN_KEYS: Dict[str, Tuple[str, ...]] = {
+    "telegram": ("TELEGRAM_BOT_TOKEN",),
+    "discord": ("DISCORD_BOT_TOKEN",),
+    "slack": ("SLACK_BOT_TOKEN",),
+}
+
+#: The single shared-credential env name above is what makes a channel. On
+#: commit the chosen platform's first key is written.
+def _platform_token_key(platform: str) -> str:
+    keys = _PLATFORM_TOKEN_KEYS.get(platform)
+    if not keys:
+        raise ValueError(
+            f"commit-channel: platform '{platform}' is not supported here "
+            f"(bot-token platforms: {sorted(_PLATFORM_TOKEN_KEYS)}). Use "
+            f"`hermes gateway setup` for credential-platform setup."
+        )
+    return keys[0]
+
+
+class ChannelCollisionError(Exception):
+    """Raised when another profile already holds the token being committed."""
+
+    def __init__(self, platform: str, holder: str) -> None:
+        self.platform = platform
+        self.holder = holder
+        super().__init__(
+            f"That {platform} token is already used by profile '{holder}'. "
+            f"Give this profile its own token — one bot cannot be polled by two "
+            f"profiles, and reusing it would interleave two sub-goals on one chat."
+        )
+
+
+class ChannelWriteError(RuntimeError):
+    """Raised when the token did not land in the profile's ``.env``.
+
+    ``config.save_env_value`` returns *silently* when the key is admin-managed
+    (``is_managed()`` / ``managed_scope.is_env_managed(key)``) — it prints to
+    stderr and returns. Without a read-back, ``commit_channel`` would report a
+    successful commit over an unwritten ``.env``, which is worse than a refusal
+    because the owner stops looking. The check is the read-back, not a trust in
+    the writer's return value.
+    """
+
+    def __init__(self, profile: str, key: str) -> None:
+        self.profile = profile
+        self.key = key
+        super().__init__(
+            f"commit-channel: the {key} token was not written to profile "
+            f"'{profile}' .env — the key may be managed by your administrator. "
+            f"Run `hermes doctor` or check stderr above; the profile is still "
+            f"channel-less."
+        )
+
+
+def _read_env_value(profile_dir: Path, key: str) -> Optional[str]:
+    """Read a single ``.env`` value from a profile's own file (not the process)."""
+    env_path = profile_dir / ".env"
+    try:
+        text = env_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, _, v = line.partition("=")
+        if k.strip() == key:
+            return v.strip().strip("\"'") or None
+    return None
+
+
+class CollisionCheckUnavailable(RuntimeError):
+    """Raised when the collision check cannot complete, so it must refuse.
+
+    The previous behaviour returned ``None`` on any enumeration failure, which
+    is fail-open: a filesystem state we do not understand produces "no collision",
+    so the pre-write refusal disappears exactly when it is most needed. A
+    refusal here tells the owner the check could not be completed — the gateway's
+    ``EX_CONFIG`` stop stays the backstop, but it is not the UX.
+    """
+
+    def __init__(self, detail: str) -> None:
+        super().__init__(
+            f"commit-channel: could not check for a token collision ({detail}). "
+            f"Refusing rather than committing a token whose uniqueness is "
+            f"unverified — run `hermes doctor` and retry."
+        )
+
+
+def find_token_collision(
+    platform: str,
+    token: str,
+    *,
+    skip_profile: str,
+) -> Optional[str]:
+    """Return the name of another profile holding ``token`` (pre-write refusal).
+
+    A pre-write refusal: the gateway's runtime same-token exit (``EX_CONFIG``
+    via the finish script's permanent stop) is the backstop, not the UX —
+    discovering a collision as "the service will not start" is a bad way to
+    learn you pasted the wrong token. This names the holder up front.
+
+    Per-platform, not global: two platforms may legitimately use the same-shaped
+    string, so only the same platform's token key is compared. The token is
+    matched exactly (it is a credential, not prose).
+
+    Scope: profiles' own ``.env`` files, because that is where the box's units
+    read from (``EnvironmentFile=<HERMES_HOME>/.env``). A token supplied to
+    another profile's gateway through a unit's ``Environment=`` line is **not**
+    visible here and is not detected — the process environment of *this* command
+    cannot see another unit's environment, so checking it would catch nothing
+    while reading like a guarantee. That path keeps the gateway's ``EX_CONFIG``
+    permanent stop as its only net; see §4.3 F3.
+
+    **Enumeration failure is a refusal, not a pass**: an unreadable profiles
+    root raises :class:`CollisionCheckUnavailable` rather than returning
+    ``None``. Returning ``None`` here would fail open, and the precise failure
+    §4.2 T2 asks this check to prevent — two gateways polling one bot,
+    interleaving two sub-goals on one chat — is exactly what slips through a
+    fail-open gap.
+    """
+    token = (token or "").strip()
+    if not token:
+        return None
+    key = _platform_token_key(platform)
+    try:
+        from hermes_cli.profiles import _get_default_hermes_home, _get_profiles_root
+
+        candidates: List[Tuple[str, Path]] = []
+        default_home = _get_default_hermes_home()
+        if default_home.is_dir():
+            candidates.append(("default", default_home))
+        root = _get_profiles_root()
+        if root.is_dir():
+            for entry in sorted(root.iterdir()):
+                if entry.is_dir() and entry.name != "default":
+                    candidates.append((entry.name, entry))
+    except Exception as exc:
+        # Not "no collision" — the check could not be completed, so refuse.
+        raise CollisionCheckUnavailable(
+            f"profile enumeration failed: {exc}"
+        ) from exc
+
+    for name, path in candidates:
+        if name == skip_profile:
+            continue
+        existing = _read_env_value(path, key)
+        if existing and existing == token:
+            return name
+
+    return None
+
+
+def commit_channel(
+    profile_name: str,
+    *,
+    platform: str,
+    token: str,
+    allowed_users: Optional[str] = None,
+    start_service: bool = True,
+) -> Dict[str, Any]:
+    """Give an adopted profile its own messaging channel (FG-30 §3, §4.2 T2).
+
+    §3 says an adopted profile starts channel-less and "gains a channel when
+    the owner commits" — nothing implemented that commit, so the owner had to
+    hand-edit the new profile's ``.env`` and run the generic gateway commands,
+    which is precisely the friction §3 exists to remove.
+
+    This is composition, not new machinery. It:
+
+    1. **refuses a token already used by another profile *before* writing it**,
+       naming the holder (the gateway's ``EX_CONFIG`` permanent stop is the
+       backstop, not the UX — see ``find_token_collision``);
+    2. writes the platform's token into **that profile's own ``.env``** — never
+       the process environment (#219/#220) — by overriding ``HERMES_HOME`` for
+       the write so ``save_env_value`` lands in the right file;
+    3. registers and starts the profile's gateway service (the service name is
+       ``HERMES_HOME``-derived, so the override scopes it correctly), reusing
+       the existing ``gateway install``/``start`` machinery; and
+    4. reports the handle the owner should now message (best-effort — it needs
+       the platform's API and a live network).
+
+    Returns a dict with ``profile``, ``platform``, and ``handle`` (or
+    ``handle: None`` when the lookup was skipped or failed).
+    """
+    from hermes_cli.profiles import get_profile_dir, normalize_profile_name
+
+    canon = normalize_profile_name(profile_name)
+    profile_dir = get_profile_dir(canon)
+    if not profile_dir.is_dir():
+        raise FileNotFoundError(
+            f"commit-channel: profile '{canon}' does not exist at {profile_dir}"
+        )
+    token = (token or "").strip()
+    if not token:
+        raise ValueError("commit-channel: a non-empty token is required")
+
+    # 1. Refuse a collision before touching the profile's .env.
+    holder = find_token_collision(platform, token, skip_profile=canon)
+    if holder is not None:
+        raise ChannelCollisionError(platform, holder)
+
+    # 2. Write into the profile's own .env under a HERMES_HOME override.
+    from hermes_constants import (
+        reset_hermes_home_override,
+        set_hermes_home_override,
+    )
+    from hermes_cli.config import ensure_hermes_home, save_env_value
+
+    override = set_hermes_home_override(profile_dir)
+    try:
+        ensure_hermes_home()
+        key = _platform_token_key(platform)
+        save_env_value(key, token)
+        if platform == "telegram" and allowed_users:
+            save_env_value("TELEGRAM_ALLOWED_USERS", allowed_users.replace(" ", ""))
+        elif platform == "discord" and allowed_users:
+            save_env_value("DISCORD_ALLOWED_GUILDS", allowed_users.replace(" ", ""))
+    finally:
+        reset_hermes_home_override(override)
+
+    # F2: read the value back before reporting success. ``save_env_value``
+    # returns silently when the key is admin-managed (it prints to stderr and
+    # returns), so without a read-back we'd print "✓ has a channel" over an
+    # unwritten .env — a successful-looking commit that configured nothing,
+    # which is worse than a refusal because the owner stops looking.
+    # ``profile_has_channel`` already exists in this module and is exactly the
+    # assertion the doctor uses; the precise key check confirms *this* token
+    # landed, not just any channel key.
+    written = _read_env_value(profile_dir, key)
+    if written != token:
+        # Not "is there a value" but "is it *this* value": a profile whose .env
+        # already held an older token for the same key would otherwise read back
+        # truthy and report a successful commit while the gateway keeps serving
+        # the previous bot — a wrong-channel success, which is the same lie the
+        # read-back exists to prevent.
+        raise ChannelWriteError(canon, key)
+
+    # 3. Register + start the profile's gateway service (best-effort; the
+    #    service manager may be unavailable in this environment — e.g. a test
+    #    box without systemd — and that is not a reason to lose the write).
+    #    F4: distinguish "skipped" (no service manager here) from "failed"
+    #    (the manager was there but install/start did not leave it running),
+    #    so ``--no-start`` and an operational failure do not read the same.
+    service_status: ServiceStartStatus = "unavailable"
+    if start_service:
+        service_status = _start_profile_gateway(canon, profile_dir)
+
+    # 4. Report the handle (best-effort). A failure here is not a failure of
+    #    the commit — the channel is configured and the service is started.
+    handle = _resolve_handle(platform, token) if start_service else None
+
+    return {
+        "profile": canon,
+        "platform": platform,
+        "handle": handle,
+        "service_started": service_status == "started",
+        "service_status": service_status,
+        "channel_less": False,
+    }
+
+
+#: The outcome of trying to install+start the profile's gateway service.
+#: ``"started"`` — service is running; ``"unavailable"`` — there is no service
+#: manager on this platform (Termux, an unsupported OS), so the start was
+#: *skipped*, not failed; ``"failed"`` — the service manager was there but the
+#: install/start raised, or ran and the service is still not running. F4: the
+#: CLI distinguishes "skipped" from "failed" so ``--no-start`` and a real
+#: operational failure do not print the same line.
+ServiceStartStatus = Literal["started", "unavailable", "failed"]
+
+
+def _start_profile_gateway(canon: str, profile_dir: Path) -> ServiceStartStatus:
+    """Install + start this profile's gateway service under a HOME override.
+
+    Reuses ``hermes gateway install``/``start``: the service name is derived
+    from ``HERMES_HOME`` (``get_service_name`` → ``_profile_suffix``), so
+    overriding HOME scopes the slot to this profile. Returns a tri-state:
+
+    * ``"started"`` — the service is installed and running.
+    * ``"unavailable"`` — there is no service manager to use (Termux, or an
+      OS the gateway has no install path for). This is a *skip*, not a failure:
+      the credential is written and ``hermes doctor`` reports the profile as
+      channel-configured-but-stopped with the exact start command.
+    * ``"failed"`` — the service manager was present but install/start raised,
+      or ran and left the service not-running. Distinct from ``--no-start``
+      so the owner is told *which* happened and where to look (``gateway.log``).
+    """
+    try:
+        from hermes_constants import (
+            reset_hermes_home_override,
+            set_hermes_home_override,
+        )
+
+        override = set_hermes_home_override(profile_dir)
+        try:
+            from hermes_cli.gateway import (
+                _is_service_installed,
+                _is_service_running,
+                is_macos,
+                is_termux,
+                is_windows,
+                launchd_start,
+                supports_systemd_services,
+                systemd_install,
+                systemd_start,
+            )
+
+            def _installed() -> bool:
+                return bool(_is_service_installed())
+
+            if not _installed():
+                if is_termux():
+                    return "unavailable"
+                if supports_systemd_services():
+                    systemd_install()
+                elif is_macos():
+                    from hermes_cli.gateway import launchd_install
+
+                    launchd_install()
+                elif is_windows():
+                    from hermes_cli import gateway_windows
+
+                    if not _installed():
+                        gateway_windows.install()
+                else:
+                    return "unavailable"
+            if not _is_service_running():
+                if supports_systemd_services():
+                    systemd_start()
+                elif is_macos():
+                    launchd_start()
+                elif is_windows():
+                    from hermes_cli import gateway_windows
+
+                    gateway_windows.start()
+            return "started" if _is_service_running() else "failed"
+        finally:
+            reset_hermes_home_override(override)
+    except Exception as exc:
+        log.warning("commit-channel: could not start gateway service: %s", exc)
+        return "failed"
+
+
+def _resolve_handle(platform: str, token: str) -> Optional[str]:
+    """Best-effort: ask the platform who this token belongs to, for the report.
+
+    Network + the platform's API are required, neither of which a commit should
+    depend on succeeding. Returns ``@username`` for telegram, the bot's id for
+    the others, or ``None`` when the lookup is not attempted or fails.
+    """
+    if platform != "telegram":
+        return None
+    try:
+        import httpx
+
+        resp = httpx.get(
+            f"https://api.telegram.org/bot{token}/getMe", timeout=10.0
+        )
+        if resp.status_code != 200:
+            return None
+        data = resp.json()
+        if not data.get("ok"):
+            return None
+        me = data.get("result", {})
+        uname = me.get("username")
+        return f"@{uname}" if uname else str(me.get("id") or "") or None
+    except Exception as exc:
+        log.debug("commit-channel: could not resolve handle: %s", exc)
+        return None
+
+
+# ---------------------------------------------------------------------------
 # Digest rendering
 # ---------------------------------------------------------------------------
 
@@ -1428,8 +1914,15 @@ def idle_lines(
 __all__ = [
     "DEFAULT_GENERATION_INTERVAL",
     "DEFAULT_IDLE_WEEKS",
+    "ChannelCollisionError",
+    "ChannelWriteError",
+    "CollisionCheckUnavailable",
     "OPEN_STATE",
+    "REVIEWED_HISTORY_LIMIT",
+    "REVIEWED_STATES",
+    "commit_channel",
     "evidence_identity",
+    "find_token_collision",
     "inherit_profile_config",
     "profile_has_channel",
     "ProfileSuggestion",

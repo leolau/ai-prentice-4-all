@@ -290,4 +290,41 @@ def build_profile_parser(subparsers, *, cmd_profile: Callable) -> None:
         help="Skip confirmation prompt",
     )
 
+    profile_commit_channel = profile_subparsers.add_parser(
+        "commit-channel",
+        help="Give an adopted (channel-less) profile its own messaging channel — "
+             "writes the platform token into the profile's own .env, refuses a "
+             "token already used by another profile, and starts its gateway service",
+    )
+    profile_commit_channel.add_argument(
+        "profile_name",
+        help="Profile to give a channel (must already exist)",
+    )
+    profile_commit_channel.add_argument(
+        "--platform",
+        default="telegram",
+        help="Bot-token platform to commit (default: telegram). "
+             "Currently: telegram, discord, slack.",
+    )
+    profile_commit_channel.add_argument(
+        "--token",
+        default=None,
+        help="The platform bot token to write into the profile's .env. If "
+             "omitted, you are prompted for it (it is never echoed to stdout "
+             "in logs).",
+    )
+    profile_commit_channel.add_argument(
+        "--allowed-users",
+        default=None,
+        help="Optional comma-separated allowlist (e.g. Telegram user ids or "
+             "Discord guild ids). If omitted, the bot responds to everyone.",
+    )
+    profile_commit_channel.add_argument(
+        "--no-start",
+        action="store_true",
+        help="Write the token without installing/starting the gateway service "
+             "(the profile will show as channel-configured-but-stopped in "
+             "`hermes doctor`).",
+    )
+
     profile_parser.set_defaults(func=cmd_profile)

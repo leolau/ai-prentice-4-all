@@ -14191,17 +14191,31 @@ async def capacity_headroom_endpoint(request: Request):
 
 @app.get("/api/profiles/suggestions")
 async def list_profile_suggestions_endpoint(request: Request):
-    """List pending profile suggestions for the active profile."""
+    """This profile's open suggestion, and a capped trail of reviewed ones.
+
+    Two keys rather than one list of every status: ``suggestions`` is the open
+    card (at most one, §1.1) with its evidence — the decision being asked for —
+    and ``reviewed`` is a capped trail of decisions already made, projected to
+    what the trail renders. Without the trail an adopt vanishes the card the
+    owner was just looking at; with the *full* rows it would ship every past
+    ``evidence`` blob, and those carry §4.2 T3's ``participants`` roster to any
+    enrolled reader of the screen.
+    """
     from hermes_cli.profile_suggestion import ProfileSuggestionStore
 
     store = ProfileSuggestionStore(_comms_app_store())
     principal = await _comms_resolve_principal(request)
     try:
-        suggestions = await store.list_suggestions(principal)
-        return {"suggestions": [s.as_dict() for s in suggestions]}
+        open_rows, reviewed = await store.queue(principal)
+        return {
+            "suggestions": [s.as_dict() for s in open_rows],
+            "reviewed": [s.as_summary_dict() for s in reviewed],
+        }
     except Exception as exc:
         _log.exception("GET /api/profiles/suggestions failed")
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=500, detail="Profile suggestions are unavailable."
+        ) from exc
 
 
 @app.post("/api/profiles/suggestions/{suggestion_id}/adopt")
@@ -14230,15 +14244,28 @@ async def adopt_profile_suggestion_endpoint(request: Request, suggestion_id: str
 
 @app.post("/api/profiles/suggestions/{suggestion_id}/dismiss")
 async def dismiss_profile_suggestion_endpoint(request: Request, suggestion_id: str):
-    """Dismiss a profile suggestion (owner only)."""
+    """Dismiss a profile suggestion (owner only).
+
+    Accepts an optional ``reason`` in the JSON body — recorded in the C5
+    audit trail. A dismissal is permanent for that evidence (latched on
+    ``dedup_key``), so the owner is asked to confirm once and plainly on
+    the surface; the reason is the place to say why.
+    """
     from hermes_cli.profile_suggestion import ProfileSuggestionStore
 
     store = ProfileSuggestionStore(_comms_app_store())
     principal = await _comms_resolve_principal(request)
     if not principal.is_owner:
         raise HTTPException(status_code=403, detail="only the owner may dismiss")
+    reason = ""
     try:
-        suggestion = await store.dismiss(principal, suggestion_id)
+        body = await request.json()
+        if isinstance(body, dict) and isinstance(body.get("reason"), str):
+            reason = body["reason"].strip()
+    except Exception:
+        pass
+    try:
+        suggestion = await store.dismiss(principal, suggestion_id, reason=reason)
         return {"ok": True, "name": suggestion.proposed_name}
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc

@@ -532,6 +532,9 @@ async def weekly_digest(
         )
 
         suggestion_store = ProfileSuggestionStore(get_store("supabase-app", "prod"))
+        # "prod" hard-coded by decision (FG-30 §4.2 T3 Q2): the digest's
+        # suggestion render is a one-tier C3 consumer with no dev context;
+        # the same assumption is recorded in profile_suggestion._resolve_store.
         suggestion = await suggestion_store.digest_suggestion(principal)
         suggestion_lines = suggestion_digest_lines(suggestion)
         if suggestion_lines:

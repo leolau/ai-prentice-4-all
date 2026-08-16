@@ -393,6 +393,67 @@ export interface ProfilesResponse {
   profiles: ProfileSummary[];
 }
 
+/**
+ * FG-30 — a profile suggestion: a proposal (with evidence) that work in one
+ * profile has clustered into a distinct sub-goal deserving its own profile.
+ *
+ * `evidence` is the JSONB the suggestion was raised on, returned verbatim
+ * by the Python API. Per §4.2 T3 Q1 the aux-LLM prompt no longer carries the
+ * roster, but the stored blob still does; a renderer must not surface it raw
+ * (see the suggestion queue screen, which renders the prompt slice).
+ */
+export interface ProfileSuggestion {
+  id: string;
+  proposed_name: string;
+  proposed_role: string;
+  proposed_goal: string;
+  parent_goal_id: string | null;
+  rationale: string;
+  evidence: Record<string, unknown>;
+  dedup_key: string;
+  origin_profile: string;
+  status: "proposed" | "adopted" | "dismissed";
+  reviewed_by: string | null;
+  reviewed_at: string | null;
+  created_at: string | null;
+}
+
+/**
+ * A reviewed suggestion as the trail renders it. Deliberately narrower than
+ * `ProfileSuggestion`: no `evidence`, because that blob carries the
+ * `participants` roster (§4.2 T3) and the trail shows status, role and goal.
+ */
+export interface ProfileSuggestionSummary {
+  id: string;
+  proposed_name: string;
+  proposed_role: string;
+  proposed_goal: string;
+  status: "proposed" | "adopted" | "dismissed";
+  reviewed_by: string | null;
+  reviewed_at: string | null;
+  created_at: string | null;
+}
+
+export interface ProfileSuggestionsResponse {
+  /** The open card — at most one (§1.1), with its evidence. */
+  suggestions: ProfileSuggestion[];
+  /** A capped trail of decisions already made, without evidence. */
+  reviewed: ProfileSuggestionSummary[];
+}
+
+/** Owner-only adoption returns the new profile's path and goal (§3). */
+export interface ProfileSuggestionAdoptResponse {
+  ok: boolean;
+  name: string;
+  path: string;
+  goal: string;
+}
+
+export interface ProfileSuggestionDismissResponse {
+  ok: boolean;
+  name: string;
+}
+
 /** One conversation's persisted transcript from `GET /api/sessions/{id}/messages`. */
 export interface ChatMessagesResponse {
   session_id: string;
