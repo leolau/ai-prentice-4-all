@@ -10,7 +10,7 @@ import { DirectoryPanel } from "@/components/users/DirectoryPanel";
 import { IdentityActivityPanel } from "@/components/users/IdentityActivityPanel";
 import { InvitationLink } from "@/components/users/InvitationLink";
 import { UserRow } from "@/components/users/UserRow";
-import { errorMessage, sendJson } from "@/components/users/api";
+import { PAGE_SIZE, errorMessage, sendJson } from "@/components/users/api";
 import { optimisticRoleChange } from "@/components/users/optimistic";
 import type {
   DirectoryResponse,
@@ -20,11 +20,6 @@ import type {
   MembersResponse,
   Role,
 } from "@/types";
-
-// Matches DEFAULT_PAGE_SIZE in hermes_cli/members.py: the server-rendered first
-// page and the client's own fetches must ask for the same number of rows, or
-// paging jumps by one amount and renders another.
-export const PAGE_SIZE = 50;
 
 export interface UsersViewProps {
   /** The acting principal's role — decides which surfaces are even rendered. */

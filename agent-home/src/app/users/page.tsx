@@ -1,5 +1,6 @@
 import { MobileShell } from "@/components/MobileShell";
-import { PAGE_SIZE, UsersView } from "@/components/users/UsersView";
+import { UsersView } from "@/components/users/UsersView";
+import { PAGE_SIZE } from "@/components/users/api";
 import { apiClientForRequest, requirePrincipal } from "@/lib/auth/principal";
 import type { DirectoryResponse, MembersResponse } from "@/types";
 
