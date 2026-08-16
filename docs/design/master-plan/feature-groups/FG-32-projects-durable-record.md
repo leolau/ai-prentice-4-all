@@ -1627,7 +1627,11 @@ Two reviews, both merged as documents, carry the findings and the fix recipes.
   the shipped seam to use, and the test that would have caught it.
 - [`docs/reviews/2026-08-17-projects-end-to-end-review.md`](../../../reviews/2026-08-17-projects-end-to-end-review.md)
   — re-verification of all 17 against the current tree (16 open, F8 fixed by
-  step 8b) plus five new findings on steps 8b–11.
+  step 8b) plus five new findings on steps 8b–11, each with the call site, the
+  runtime effect, the fix against a shipped seam and the test that catches it.
+  Its closing section is the **ordered fix checklist** for all 21 open items,
+  grouped into five independently shippable blocks — that is the list to work
+  from.
 
 The design-relevant ones, in the order the second review recommends fixing them:
 

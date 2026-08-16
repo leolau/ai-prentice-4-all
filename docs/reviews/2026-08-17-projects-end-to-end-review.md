@@ -74,6 +74,11 @@ Nothing from #270 has been fixed. Steps 9–11 were new work, not repair work.
 
 ## New findings
 
+Each entry below is written the way the #270 entries are: **where** it is,
+**what happens** at runtime, **the fix** against a seam that already exists in
+the tree, and **the test** that would have caught it. Line numbers are at
+`7c737474f`.
+
 ### E1 — "human-only" is enforced in one place, and the agent's own route patches it out (high, contract)
 
 Three acts are human-only by design: accepting an output (§6.1 — the top rung
@@ -103,14 +108,57 @@ crossing"). In the shipped code:
 
 `--actor` acting as any principal is the inherited `goal_tree_cmd`/`todos_cmd`
 convention (`goal_tree_cmd.py:544`) and is *not* a Projects defect — the
-machine operator's terminal is trusted. The defect is narrower and worth fixing
-on its own terms: the human-only acts need one shared gate, applied at all
-three routes, that the agent's own surface cannot satisfy. Options that keep
-the operator surface working: let the CLI patch only the principal seams and
-require an explicit `--as-human` confirmation that writes the acting subject,
-or move the human check to a per-act `accepted_by`/`scored_by` provenance the
-CLI must supply from a real session. Whichever is chosen, `SKILL.md` should
-stop describing an unenforced rule as a rule.
+machine operator's terminal is trusted. The defect is narrower: the human-only
+acts need **one** gate, applied at all three routes, that the agent's own
+surface cannot silently satisfy.
+
+**The fix.** Three changes, all local:
+
+1. Extract the gate the score route already has into a helper next to
+   `_require_write`, so there is one place to reason about:
+
+   ```python
+   async def _require_human(request: Request, act: str) -> str:
+       """§8.1/§8.2: a human act needs a verified interactive subject."""
+       subject = await _interactive_subject(request)
+       if not subject:
+           raise HTTPException(
+               status_code=403,
+               detail=f"{act} is a human act — no verified session, no {act}",
+           )
+       return subject
+   ```
+
+2. Call it in the two routes that lack it — `accept_output_route`
+   (`projects_api.py:998-1005`) and `activate_directive_route`
+   (`projects_api.py:1717-1728`) — and replace the inline check in
+   `score_run_route` (`projects_api.py:2096-2102`) with it. Same for
+   `activate_playbook_rev` if the intent is that a lead activates it in person.
+   Record the returned subject alongside the existing `by`/`scored_by`
+   provenance so the record says *which* human crossed the line.
+3. Make the CLI's claim on that gate explicit instead of automatic. Today
+   `_Api.__init__` patches `_interactive_subject` unconditionally
+   (`projects_cli.py:63-93`). Patch it **only** when the operator passes a new
+   `--as-human` flag, and have the three human verbs fail without it:
+
+   ```text
+   $ hermes projects score my-proj 7 4
+   refused: scoring is a human act (§8.1). Re-run with --as-human if you
+   are the operator making this judgement yourself.
+   ```
+
+   The principal seams (`_principal_read`/`_principal_write`) keep their
+   unconditional patch — that is the machine-operator convention and is fine.
+
+Then delete the prose in `skills/productivity/projects/SKILL.md:107-122` that
+describes the rule as if it were enforced, and replace it with what the agent
+will actually see: these verbs refuse, and the agent's move is to raise an ask
+(§5.3) rather than to score itself.
+
+**The tests.** Through the *router* (no session → 403) for all three acts, and
+through the *CLI* — `hermes projects score …` without `--as-human` exits
+non-zero and writes nothing. The existing CLI score test passes today only
+because the harness patches the gate; that is the test to change.
 
 ### E2 — `from_todo.profile` is recorded but never honoured, and a rollback strands the provenance row (medium)
 
@@ -128,12 +176,48 @@ a profile-scoped store, under the caller's principal, as
 `projects_schedule._cron_in_profile` does) or reject a `profile` that is not
 the serving one with a 422 that says so.
 
+**The fix.** The cheap, correct version is to reject what is not supported
+rather than to pretend: in `create_card` (`projects_api.py:1436-1446`), if
+`from_todo.profile` is present and is not the serving profile, raise
+
+```python
+raise HTTPException(
+    status_code=422,
+    detail="a to-do can only be promoted from the profile serving this "
+           "request — open that profile's Projects to promote it there",
+)
+```
+
+and stop forwarding `profile` from `AddToProjectSheet.tsx:127-145` unless the
+sheet actually knows a foreign profile. If cross-profile promotion *is* wanted,
+it is a real feature, not a parameter: resolve the profile's store the way
+`projects_schedule._cron_in_profile` re-targets `cron.jobs`, read it under the
+caller's own principal (never a service principal — that would cross the FG-27
+boundary the design forbids), and keep the 404-not-403 behaviour for a to-do
+the caller cannot see.
+
 Second half: when the stage move fails, the card is deleted
 (`projects_api.py:1505-1516`) but the `project_links` row written inside
 `_create_sync` is **not** — the project keeps a `kind='todo'` pointer to a
 promotion that did not happen, and because the insert is `INSERT OR IGNORE`,
 re-promoting the same to-do later leaves the stale `label`/`added_by` in place.
-Roll the link back with the card.
+Roll the link back with the card — `projects_db.remove_project_link` already
+exists (`projects_db.py:1845`):
+
+```python
+def _rollback_sync() -> None:
+    with _board_conn(project) as bconn:
+        kanban_db.delete_task(bconn, str(result["task_id"]))
+    with projects_db.connect_closing() as pconn:
+        projects_db.remove_project_link(
+            pconn, project_id=project.id, kind="todo", ref=todo.id
+        )
+```
+
+**The tests.** A promotion whose `set_stage` raises leaves **no** card *and* no
+`kind='todo'` link (the current test only asserts the card is gone); a
+promotion naming a foreign profile is refused with 422 and does not touch the
+local to-do of the same id.
 
 ### E3 — step 11's event tail has no consumer anywhere (medium)
 
@@ -147,7 +231,45 @@ not realised: a run promoted in the background is invisible until the human
 reloads. Under `AGENTS.md` this is the "speculative infrastructure" shape — an
 endpoint with no consumer. Either wire the poller (a `since`-cursor hook on the
 board panel is a small diff, and `latest_event_id` was built for exactly it) or
-drop the endpoint until the consumer lands. The `summarise` half of step 11 is
+drop the endpoint until the consumer lands.
+
+**The fix (wire it).** A `since`-cursor hook, seeded from the first response's
+`latest_event_id`, polling while the tab is visible, and calling
+`router.refresh()` when the cursor moves — that is the whole feature, because
+the server already re-derives progress, health and the rollup on read:
+
+```tsx
+// useProjectEvents(slug): poll only while visible; refresh on movement.
+const since = useRef(0);
+useEffect(() => {
+  if (document.visibilityState !== "visible") return;
+  const tick = async () => {
+    const res = await fetch(
+      `/api/projects/${encodeURIComponent(slug)}/events?since=${since.current}`,
+    );
+    if (!res.ok) return;                       // never surface a poll error
+    const data = await res.json();
+    if (data.latest_event_id > since.current) {
+      since.current = data.latest_event_id;    // head, not the last event
+      router.refresh();
+    }
+  };
+  const id = setInterval(tick, 15_000);
+  return () => clearInterval(id);
+}, [slug, router]);
+```
+
+Seed `since.current` from the *first* poll rather than 0, or the first tick
+refreshes for history the page already rendered. If the answer is "not in v1",
+then delete the route, the BFF route, the client method and the type in the
+same PR — the design section can keep the plan.
+
+**The tests.** A component test asserting the hook refreshes when
+`latest_event_id` grows and does **not** refresh when it is unchanged; plus a
+BFF route test (§Test coverage below) that a poll failure is swallowed rather
+than rendered.
+
+The `summarise` half of step 11 is
 *not* in this position: the CLI writes it (`projects_cli.py:398-415`), `SKILL.md`
 documents it, and the detail header renders it.
 
@@ -162,6 +284,23 @@ every poll (`projects_api.py:1341-1348`), which is an O(cards) read per client
 per interval. A join against `tasks.project_id` with the C2 visibility clause
 would replace both the id list and the extra read.
 
+**The fix.** Give `events_tail` a project-scoped overload that never builds an
+id list — the visibility clause `list_tasks` already uses is the same one:
+
+```sql
+SELECT e.* FROM task_events e JOIN tasks t ON t.id = e.task_id
+ WHERE t.project_id = ? AND (<the C2 visibility clause for :principal>)
+   AND e.id > ? ORDER BY e.id ASC LIMIT ?
+```
+
+with the matching `MAX(e.id)` head query. Keep the current id-list signature
+for its existing callers; the route (`projects_api.py:1341-1348`) switches to
+the overload and drops its `list_tasks` read entirely.
+
+**The test.** A project with 1,200 visible cards returns a tail rather than
+raising `OperationalError` — the invariant is "the tail does not care how many
+cards the project has", which is exactly the kind of contract §16 asks for.
+
 ### E5 — the derived project score silently disappears behind 25 unscored runs (low)
 
 `_derived_score` reads at most the last 25 runs and *then* takes the first five
@@ -170,6 +309,23 @@ recent runs reports no score at all, though §8.1 says the project score is the
 mean of the last five *scores*. Either select `WHERE score_user IS NOT NULL
 ORDER BY run_no DESC LIMIT 5` in the store, or say in the payload that the
 window is the last 25 runs.
+
+**The fix.** Add a store helper beside `list_project_runs`
+(`projects_db.py:2302`) and call it from `_derived_score`:
+
+```python
+def last_scored_runs(conn, project_id: str, *, limit: int = 5) -> List[dict]:
+    """§8.1: the last *scored* runs — the window is scores, not runs."""
+    return [dict(r) for r in conn.execute(
+        "SELECT * FROM project_runs WHERE project_id = ? "
+        "AND score_user IS NOT NULL ORDER BY run_no DESC LIMIT ?",
+        (project_id, int(limit)),
+    ).fetchall()]
+```
+
+**The test.** Score runs 1–5, leave runs 6–40 unscored: the project still
+reports the mean of runs 1–5. Re-scoring run 1 still moves it (the existing
+contract must keep passing).
 
 ## Test coverage — what the 185 green tests still do not cover
 
@@ -208,3 +364,73 @@ diffs against seams that already exist in the tree.
 
 Recommended order: E1 + F1a/F1b/F1c/F4 (small, and they are what a human sees
 and trusts), then H1–H4 (the seams), then M1/M2/F2/F3, then E2–E5.
+
+## Fix checklist — every open item, in the order to do them
+
+21 open items. The recipe for H·/M·/L·/F· lives in
+[`2026-08-13-projects-steps-1-8-review.md`](./2026-08-13-projects-steps-1-8-review.md)
+(#270) under the same id; the recipe for E· is above. Suggested grouping is one
+PR per block — each block is independently shippable and independently testable.
+
+**Block 1 — what a human sees and trusts (do first).**
+
+- [ ] E1 · one `_require_human` gate on accept-output, activate-directive and
+      score; CLI claims it only under `--as-human`; `SKILL.md` stops asserting
+      an unenforced rule.
+- [ ] F1a · `OutputsPanel` handles the ack envelope (or the route returns the
+      row); the accepted row must lose its Accept button without a reload, and
+      `offers_closure` must surface.
+- [ ] F1b · `RunView` reads `data.run`, and renders `budget_gate` when present —
+      today the thing holding the run is invisible.
+- [ ] F1c · `GuidancePanel` refreshes instead of casting `{id, applies_from}`
+      into a `ProjectDirective`.
+- [ ] F4 · `router.refresh()` after every `RunView` write.
+
+**Block 2 — the run lifecycle's four seams (the real risk).**
+
+- [ ] H1 · approvals through `hermes_cli.human_comms.NotificationStore.create`;
+      remove the fail-open `except` — a swallowed approval is worse than a 500.
+- [ ] H2 · bind runs to a real C8 trace (`interactions.create_trace` +
+      `bind_trace`), store that `trace_id`, read cost through the shipped
+      ledger; only then is `budget_usd_per_run` enforceable.
+- [ ] H3 · `_enabled_toolsets_for_profile` must read the **host profile's**
+      config, not the caller's; narrowing may never grant (invariant 14).
+- [ ] H4 · pass `profile_home` to `spawn_seeded_session` so a run executes in
+      the profile its row records.
+
+**Block 3 — health, list and routing.**
+
+- [ ] M1 · a repeatable project that has never run is `stalled`.
+- [ ] M2 · filter **before** the page slice and take `next_cursor` from the last
+      row of the slice, not the last emitted row (today paging loses rows).
+- [ ] F2 · the Attention chip must include `stalled`, which outranks attention.
+- [ ] F3 · `@router.get("")` / `@router.post("")` — drop the 307 on every list
+      and create.
+- [ ] M3 · an instance owner/admin who is not a member still sees contact
+      addresses.
+- [ ] F5 · a `waiting` run is always in the brief, however old.
+- [ ] F6/F7 · stop leaking upstream detail through the BFF; render a 404 as
+      "no such project", not as a load error.
+
+**Block 4 — the later steps.**
+
+- [ ] E2 · reject (or honour) a foreign `from_todo.profile`; roll the
+      `project_links` row back with the card.
+- [ ] E3 · wire the event tail to the detail page, or delete the endpoint.
+- [ ] E4 · project-scoped `events_tail` join, so >999 cards does not 500.
+- [ ] E5 · derive the project score from the last five *scores*, not from
+      scores within the last 25 runs.
+- [ ] L1 · `toolsets`/`skills` as rows rather than CSV.
+- [ ] L2 · profile-imported legacy projects violate the mandatory-field
+      invariant (NULL `goal`, no outputs, no host profile) — decide whether they
+      are quarantined, completed on first open, or migrated.
+
+**Block 5 — close the two holes that hid all of the above.**
+
+- [ ] One contract per run seam asserting the *default* implementation resolves
+      a real symbol (this is what makes H1–H4 impossible to reintroduce).
+- [ ] One test per BFF write feeding the actual upstream envelope through the
+      panel's state update (this is the whole F1 class).
+- [ ] The three §16 contracts with no test today: CLI scoring refused without a
+      human, foreign-profile promotion refused, event tail above the SQLite
+      variable limit.
