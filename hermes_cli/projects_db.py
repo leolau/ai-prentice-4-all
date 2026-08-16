@@ -28,6 +28,7 @@ The schema is intentionally additive: column additions go through
 from __future__ import annotations
 
 import contextlib
+import json
 import logging
 import os
 import re
@@ -36,7 +37,7 @@ import sqlite3
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterable, List, Optional
+from typing import Any, Iterable, List, Optional
 
 from hermes_cli.sqlite_util import add_column_if_missing as _add_column_if_missing, write_txn
 from hermes_constants import get_hermes_home
@@ -298,6 +299,21 @@ CREATE TABLE IF NOT EXISTS project_run_cards (
     step_key  TEXT,                  -- the playbook step it came from, when any
     PRIMARY KEY (run_id, task_id)
 );
+
+-- Skill candidates a run's retro proposed (design §8.2 row 3). The row adds
+-- no mechanism — the shipped background-review loop still distils skills and
+-- FG-29 still promotes them; a project's contribution is *provenance*: the
+-- candidate records the project and run it came from.
+CREATE TABLE IF NOT EXISTS project_skill_candidates (
+    id          TEXT PRIMARY KEY,
+    project_id  TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    run_no      INTEGER NOT NULL,
+    name        TEXT NOT NULL,
+    body        TEXT NOT NULL,
+    created_at  INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_project_skill_candidates
+    ON project_skill_candidates(project_id, created_at DESC);
 """
 
 
@@ -517,6 +533,65 @@ def default_name_from_goal(goal: str) -> str:
         if len(words) > 6:
             g = " ".join(words[:6])
     return g.strip()[:NAME_MAX_CHARS].strip()
+
+
+VALID_VISIBILITIES = ("shared", "private")
+
+
+def _validate_cadence(value: str) -> str:
+    v = str(value or "").strip()
+    if v not in VALID_CADENCES:
+        raise ValueError(f"cadence must be one of {sorted(VALID_CADENCES)}")
+    return v
+
+
+def _validate_autonomy(value: str) -> str:
+    v = str(value or "").strip()
+    if v not in VALID_AUTONOMY_LEVELS:
+        raise ValueError(f"autonomy must be one of {sorted(VALID_AUTONOMY_LEVELS)}")
+    return v
+
+
+def _validate_visibility(value: str) -> str:
+    v = str(value or "").strip()
+    if v not in VALID_VISIBILITIES:
+        raise ValueError(f"visibility must be one of {sorted(VALID_VISIBILITIES)}")
+    return v
+
+
+def _validate_max_in_progress(value) -> int:
+    try:
+        n = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("max_in_progress must be an integer") from exc
+    if n < 1:
+        raise ValueError("max_in_progress must be >= 1")
+    return n
+
+
+def _opt_str(value) -> Optional[str]:
+    if value is None:
+        return None
+    s = str(value).strip()
+    return s or None
+
+
+def _opt_int(value) -> Optional[int]:
+    if value is None or value == "":
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("expected an integer") from exc
+
+
+def _opt_float(value) -> Optional[float]:
+    if value is None or value == "":
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("expected a number") from exc
 
 
 @dataclass
@@ -911,6 +986,62 @@ def update_project(
     return cur.rowcount > 0
 
 
+def update_project_fields(
+    conn: sqlite3.Connection,
+    project_id: str,
+    fields: dict,
+) -> bool:
+    """Patch the §2.2 record fields :func:`update_project` does not cover.
+
+    ``status`` is intentionally NOT accepted here — status transitions go
+    through :func:`set_project_status`, which owns the planning-exit gate.
+    Unknown fields raise ``ValueError`` so a router typo is loud.
+    """
+    writers = {
+        "cadence": lambda v: _validate_cadence(v),
+        "due_at": _opt_int,
+        "review_every": _opt_str,
+        "target_audience": _opt_str,
+        "score_rubric": _opt_str,
+        "visibility": _validate_visibility,
+        "definition_of_done": _opt_str,
+        "max_in_progress": _validate_max_in_progress,
+        "budget_usd_per_run": _opt_float,
+        "autonomy": lambda v: _validate_autonomy(v),
+        # §4.1 instruments: stored as comma lists; the narrowing
+        # intersection happens at run spawn time, never at write time.
+        "toolsets": _opt_str,
+        "skills": _opt_str,
+        # §3.2 schedule wiring: the cron store is authoritative; these are
+        # the project-side halves of the link (``schedule`` text, the job
+        # id in the host profile's store, and the ``next_run_at`` display
+        # cache refreshed on read).
+        "schedule": _opt_str,
+        "cron_job_id": _opt_str,
+        "next_run_at": _opt_int,
+    }
+    sets: List[str] = []
+    params: List[Any] = []
+    for key, value in fields.items():
+        if key == "status":
+            raise ValueError(
+                "status changes go through set_project_status (the "
+                "planning-exit gate)"
+            )
+        if key not in writers:
+            raise ValueError(f"unknown project field: {key!r}")
+        sets.append(f"{key} = ?")
+        params.append(writers[key](value))
+    if not sets:
+        return False
+    params.append(project_id)
+    with write_txn(conn):
+        cur = conn.execute(
+            f"UPDATE projects SET {', '.join(sets)} WHERE id = ?", params
+        )
+    return cur.rowcount > 0
+
+
 def set_project_status(
     conn: sqlite3.Connection, project_id: str, status: str
 ) -> bool:
@@ -1294,6 +1425,8 @@ def add_project_link(
     A link is a pointer, never a copy — the authority stays in the profile
     that owns the referenced object. Re-inserting the same link is a no-op.
     """
+    if kind not in VALID_LINK_KINDS:
+        raise ValueError(f"link kind must be one of {sorted(VALID_LINK_KINDS)}")
     now = int(time.time())
     with write_txn(conn):
         cur = conn.execute(
@@ -1351,6 +1484,888 @@ def get_project_profiles(
         for r in conn.execute(
             "SELECT * FROM project_profiles WHERE project_id = ?",
             (project_id,),
+        ).fetchall()
+    ]
+
+
+def remove_project_profile(
+    conn: sqlite3.Connection, project_id: str, profile: str
+) -> bool:
+    """Detach a profile from a project. The caller owns the guardrails
+    (the API refuses to detach the last one); the store just removes."""
+    with write_txn(conn):
+        cur = conn.execute(
+            "DELETE FROM project_profiles WHERE project_id = ? AND profile = ?",
+            (project_id, profile),
+        )
+    return cur.rowcount > 0
+
+
+# ---------------------------------------------------------------------------
+# Outputs, deliveries, contacts (design §2.2 / §6.1; API step 3)
+# ---------------------------------------------------------------------------
+
+VALID_LINK_KINDS = (
+    "file", "arrival", "todo", "goal", "memory",
+    "conversation", "sample", "reference", "url",
+)
+VALID_OUTPUT_KINDS = ("artifact", "file", "message", "decision", "report", "code")
+VALID_OUTPUT_STATUSES = ("pending", "in_progress", "delivered", "accepted", "dropped")
+
+
+def _new_row_id(prefix: str) -> str:
+    return f"{prefix}_{secrets.token_hex(6)}"
+
+
+def add_project_output(
+    conn: sqlite3.Connection,
+    *,
+    project_id: str,
+    title: str,
+    spec: Optional[str] = None,
+    kind: str = "artifact",
+    required: bool = True,
+    recurring: bool = False,
+) -> str:
+    """Declare a deliverable [3]. Returns the new output id.
+
+    ``seq`` is assigned after the current last row, so outputs list in
+    declaration order. Declaring the deliverable before automating its
+    production is what keeps a run from succeeding at nothing (§6.1).
+    """
+    title = str(title or "").strip()
+    if not title:
+        raise ValueError("output title is required")
+    if kind not in VALID_OUTPUT_KINDS:
+        raise ValueError(f"output kind must be one of {sorted(VALID_OUTPUT_KINDS)}")
+    oid = _new_row_id("o")
+    now = _now()
+    with write_txn(conn):
+        row = conn.execute(
+            "SELECT COALESCE(MAX(seq), 0) AS m FROM project_outputs "
+            "WHERE project_id = ?",
+            (project_id,),
+        ).fetchone()
+        conn.execute(
+            """INSERT INTO project_outputs
+               (id, project_id, seq, title, spec, kind, required, recurring,
+                status, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)""",
+            (oid, project_id, int(row["m"]) + 1, title, spec, kind,
+             1 if required else 0, 1 if recurring else 0, now),
+        )
+    return oid
+
+
+def get_project_outputs(
+    conn: sqlite3.Connection, project_id: str
+) -> List[dict]:
+    """Read a project's outputs in declaration order."""
+    return [
+        dict(r)
+        for r in conn.execute(
+            "SELECT * FROM project_outputs WHERE project_id = ? ORDER BY seq",
+            (project_id,),
+        ).fetchall()
+    ]
+
+
+def update_project_output(
+    conn: sqlite3.Connection,
+    output_id: str,
+    *,
+    title: Optional[str] = None,
+    spec: Optional[str] = None,
+    kind: Optional[str] = None,
+    required: Optional[bool] = None,
+    recurring: Optional[bool] = None,
+    status: Optional[str] = None,
+) -> bool:
+    """Patch an output row. Setting ``status='delivered'`` stamps
+    ``delivered_at``; ``accepted`` is reserved for :func:`accept_project_output`
+    (only a human accepts — §6.1)."""
+    sets: List[str] = []
+    params: List[Any] = []
+    if title is not None:
+        t = str(title).strip()
+        if not t:
+            raise ValueError("output title cannot be empty")
+        sets.append("title = ?")
+        params.append(t)
+    if spec is not None:
+        sets.append("spec = ?")
+        params.append(spec)
+    if kind is not None:
+        if kind not in VALID_OUTPUT_KINDS:
+            raise ValueError(f"output kind must be one of {sorted(VALID_OUTPUT_KINDS)}")
+        sets.append("kind = ?")
+        params.append(kind)
+    if required is not None:
+        sets.append("required = ?")
+        params.append(1 if required else 0)
+    if recurring is not None:
+        sets.append("recurring = ?")
+        params.append(1 if recurring else 0)
+    if status is not None:
+        if status not in VALID_OUTPUT_STATUSES or status == "accepted":
+            raise ValueError(
+                "output status must be one of "
+                f"{sorted(s for s in VALID_OUTPUT_STATUSES if s != 'accepted')}; "
+                "acceptance goes through the human-only accept route"
+            )
+        sets.append("status = ?")
+        params.append(status)
+        if status == "delivered":
+            sets.append("delivered_at = ?")
+            params.append(_now())
+    if not sets:
+        return False
+    params.append(output_id)
+    with write_txn(conn):
+        cur = conn.execute(
+            f"UPDATE project_outputs SET {', '.join(sets)} WHERE id = ?", params
+        )
+    return cur.rowcount > 0
+
+
+def accept_project_output(
+    conn: sqlite3.Connection,
+    output_id: str,
+    *,
+    accepted_by: str,
+) -> bool:
+    """Human-only acceptance (§6.1): the run may deliver, only a person
+    accepts. Accepting a ``recurring`` output stamps the acceptance but the
+    row's deliveries keep accumulating."""
+    with write_txn(conn):
+        cur = conn.execute(
+            "UPDATE project_outputs SET status = 'accepted', accepted_at = ?, "
+            "accepted_by = ? WHERE id = ? AND status != 'dropped'",
+            (_now(), accepted_by, output_id),
+        )
+    return cur.rowcount > 0
+
+
+def remove_project_output(conn: sqlite3.Connection, output_id: str) -> bool:
+    """Delete an output row — refused for the last required output.
+
+    A project's outputs are the denominator its progress is measured in;
+    silently emptying it would turn every later run into effort mistaken
+    for delivery (§15.9).
+    """
+    with write_txn(conn):
+        row = conn.execute(
+            "SELECT project_id, required FROM project_outputs WHERE id = ?",
+            (output_id,),
+        ).fetchone()
+        if row is None:
+            return False
+        if row["required"]:
+            others = conn.execute(
+                "SELECT COUNT(*) AS n FROM project_outputs "
+                "WHERE project_id = ? AND required = 1 AND id != ?",
+                (row["project_id"], output_id),
+            ).fetchone()["n"]
+            if not others:
+                raise ValueError(
+                    "refusing to delete the last required output; declare a "
+                    "replacement first or drop the project"
+                )
+        conn.execute("DELETE FROM project_outputs WHERE id = ?", (output_id,))
+    return True
+
+
+def record_output_delivery(
+    conn: sqlite3.Connection,
+    *,
+    output_id: str,
+    run_id: Optional[str] = None,
+    task_id: Optional[str] = None,
+    link_kind: Optional[str] = None,
+    link_ref: Optional[str] = None,
+    profile: Optional[str] = None,
+    label: Optional[str] = None,
+    note: Optional[str] = None,
+) -> str:
+    """One delivery row per produced output (§6.1). Recurring outputs
+    accumulate one row per run."""
+    did = _new_row_id("d")
+    with write_txn(conn):
+        exists = conn.execute(
+            "SELECT 1 FROM project_outputs WHERE id = ?", (output_id,)
+        ).fetchone()
+        if exists is None:
+            raise ValueError(f"unknown output: {output_id!r}")
+        conn.execute(
+            """INSERT INTO project_output_deliveries
+               (id, output_id, run_id, task_id, link_kind, link_ref, profile,
+                label, note, delivered_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (did, output_id, run_id, task_id, link_kind, link_ref, profile,
+             label, note, _now()),
+        )
+    return did
+
+
+def get_output_deliveries(
+    conn: sqlite3.Connection,
+    *,
+    output_id: Optional[str] = None,
+    project_id: Optional[str] = None,
+    run_id: Optional[str] = None,
+) -> List[dict]:
+    """Deliveries for one output, one run, or a whole project, newest first."""
+    if output_id is not None:
+        rows = conn.execute(
+            "SELECT * FROM project_output_deliveries WHERE output_id = ? "
+            "ORDER BY delivered_at DESC, id DESC",
+            (output_id,),
+        ).fetchall()
+    elif run_id is not None:
+        rows = conn.execute(
+            "SELECT * FROM project_output_deliveries WHERE run_id = ? "
+            "ORDER BY delivered_at DESC, id DESC",
+            (run_id,),
+        ).fetchall()
+    elif project_id is not None:
+        rows = conn.execute(
+            "SELECT d.* FROM project_output_deliveries d "
+            "JOIN project_outputs o ON o.id = d.output_id "
+            "WHERE o.project_id = ? ORDER BY d.delivered_at DESC, d.id DESC",
+            (project_id,),
+        ).fetchall()
+    else:
+        raise ValueError("output_id or project_id is required")
+    return [dict(r) for r in rows]
+
+
+def add_project_contact(
+    conn: sqlite3.Connection,
+    *,
+    project_id: str,
+    name: str,
+    role: Optional[str] = None,
+    org: Optional[str] = None,
+    platform: Optional[str] = None,
+    address: Optional[str] = None,
+    user_id: Optional[str] = None,
+    notes: Optional[str] = None,
+    created_by: Optional[str] = None,
+) -> str:
+    """Add a contact [10]. ``address`` is PII: members-only in responses."""
+    name = str(name or "").strip()
+    if not name:
+        raise ValueError("contact name is required")
+    cid = _new_row_id("c")
+    with write_txn(conn):
+        conn.execute(
+            """INSERT INTO project_contacts
+               (id, project_id, name, role, org, platform, address, user_id,
+                notes, created_by, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (cid, project_id, name, role, org, platform, address, user_id,
+             notes, created_by, _now()),
+        )
+    return cid
+
+
+def get_project_contacts(
+    conn: sqlite3.Connection, project_id: str
+) -> List[dict]:
+    """Read a project's contacts, newest first."""
+    return [
+        dict(r)
+        for r in conn.execute(
+            "SELECT * FROM project_contacts WHERE project_id = ? "
+            "ORDER BY created_at DESC",
+            (project_id,),
+        ).fetchall()
+    ]
+
+
+def update_project_contact(
+    conn: sqlite3.Connection,
+    contact_id: str,
+    **fields: Any,
+) -> bool:
+    """Patch contact fields (name, role, org, platform, address, user_id,
+    notes). Unknown fields are refused."""
+    allowed = {"name", "role", "org", "platform", "address", "user_id", "notes"}
+    sets: List[str] = []
+    params: List[Any] = []
+    for key, value in fields.items():
+        if key not in allowed:
+            raise ValueError(f"unknown contact field: {key!r}")
+        if key == "name" and not str(value or "").strip():
+            raise ValueError("contact name cannot be empty")
+        sets.append(f"{key} = ?")
+        params.append(value)
+    if not sets:
+        return False
+    params.append(contact_id)
+    with write_txn(conn):
+        cur = conn.execute(
+            f"UPDATE project_contacts SET {', '.join(sets)} WHERE id = ?",
+            params,
+        )
+    return cur.rowcount > 0
+
+
+def remove_project_contact(conn: sqlite3.Connection, contact_id: str) -> bool:
+    with write_txn(conn):
+        cur = conn.execute(
+            "DELETE FROM project_contacts WHERE id = ?", (contact_id,)
+        )
+    return cur.rowcount > 0
+
+
+def remove_project_link(
+    conn: sqlite3.Connection,
+    *,
+    project_id: str,
+    kind: str,
+    profile: str,
+    ref: str,
+) -> bool:
+    """Detach a link pointer. The referenced object is never touched."""
+    with write_txn(conn):
+        cur = conn.execute(
+            "DELETE FROM project_links "
+            "WHERE project_id = ? AND kind = ? AND profile = ? AND ref = ?",
+            (project_id, kind, profile, ref),
+        )
+    return cur.rowcount > 0
+
+
+# ---------------------------------------------------------------------------
+# Playbook (design §7)
+# ---------------------------------------------------------------------------
+
+VALID_STEP_MODES = ("card", "inline")
+
+
+def validate_playbook_steps(steps: Any) -> List[dict]:
+    """Validate a ``steps`` array **at save time** (design §7.1).
+
+    Refuses the whole array with the offending keys named: missing/blank
+    ``key`` or ``title``, duplicate keys, an unknown ``mode``, and a
+    ``depends_on`` graph that is cyclic or references an unknown key. A
+    cycle discovered at 09:00 on Monday is a silent no-run, so the refusal
+    happens when the method is written, not when it fires.
+    """
+    if not isinstance(steps, list):
+        raise ValueError("playbook steps must be a JSON array")
+    seen: set = set()
+    cleaned: List[dict] = []
+    for i, step in enumerate(steps):
+        if not isinstance(step, dict):
+            raise ValueError(f"step #{i + 1} must be an object")
+        key = str(step.get("key") or "").strip()
+        if not key:
+            raise ValueError(f"step #{i + 1} has no key")
+        if key in seen:
+            raise ValueError(f"duplicate step key: {key!r}")
+        seen.add(key)
+        title = str(step.get("title") or "").strip()
+        if not title:
+            raise ValueError(f"step {key!r} has no title")
+        mode = str(step.get("mode") or "card").strip()
+        if mode not in VALID_STEP_MODES:
+            raise ValueError(
+                f"step {key!r}: mode must be one of {sorted(VALID_STEP_MODES)}"
+            )
+        deps = step.get("depends_on") or []
+        if not isinstance(deps, list):
+            raise ValueError(f"step {key!r}: depends_on must be an array")
+        cleaned.append(
+            {
+                "key": key,
+                "title": title,
+                "body": str(step.get("body") or ""),
+                "mode": mode,
+                "assignee": step.get("assignee"),
+                "depends_on": [str(d) for d in deps],
+                "checkpoint": bool(step.get("checkpoint")),
+            }
+        )
+
+    for step in cleaned:
+        for dep in step["depends_on"]:
+            if dep not in seen:
+                raise ValueError(
+                    f"step {step['key']!r} depends on unknown key {dep!r}"
+                )
+
+    # Cycle detection (iterative DFS), naming the keys on the cycle path.
+    WHITE, GRAY, BLACK = 0, 1, 2
+    color = {s["key"]: WHITE for s in cleaned}
+    deps_of = {s["key"]: s["depends_on"] for s in cleaned}
+
+    def _visit(root: str) -> None:
+        stack = [(root, iter(deps_of[root]))]
+        path = [root]
+        color[root] = GRAY
+        while stack:
+            node, it = stack[-1]
+            advanced = False
+            for dep in it:
+                if color[dep] == GRAY:
+                    cycle = path[path.index(dep):] + [dep]
+                    raise ValueError(
+                        "playbook steps contain a cycle: "
+                        + " -> ".join(cycle)
+                    )
+                if color[dep] == WHITE:
+                    color[dep] = GRAY
+                    path.append(dep)
+                    stack.append((dep, iter(deps_of[dep])))
+                    advanced = True
+                    break
+            if not advanced:
+                color[node] = BLACK
+                path.pop()
+                stack.pop()
+
+    for step in cleaned:
+        if color[step["key"]] == WHITE:
+            _visit(step["key"])
+    return cleaned
+
+
+def save_playbook_rev(
+    conn: sqlite3.Connection,
+    *,
+    project_id: str,
+    body: str = "",
+    steps: Any,
+    created_by: Optional[str] = None,
+    note: Optional[str] = None,
+) -> int:
+    """Create playbook revision N+1 with ``active=0`` (design §7.2).
+
+    A new revision is a proposal: it changes nothing until a human
+    activates it, and a running run keeps its pinned rev either way.
+    Returns the new rev number.
+    """
+    cleaned = validate_playbook_steps(steps)
+    with write_txn(conn):
+        row = conn.execute(
+            "SELECT COALESCE(MAX(rev), 0) AS m FROM project_playbook "
+            "WHERE project_id = ?",
+            (project_id,),
+        ).fetchone()
+        rev = int(row["m"]) + 1
+        conn.execute(
+            """INSERT INTO project_playbook
+               (project_id, rev, body, steps, active, created_by, created_at, note)
+               VALUES (?, ?, ?, ?, 0, ?, ?, ?)""",
+            (project_id, rev, str(body or ""), json.dumps(cleaned),
+             created_by, _now(), note),
+        )
+    return rev
+
+
+def activate_playbook_rev(
+    conn: sqlite3.Connection,
+    project_id: str,
+    rev: int,
+    *,
+    note: Optional[str] = None,
+) -> bool:
+    """Human-only activation (§7.2): exactly one rev is active at a time."""
+    with write_txn(conn):
+        exists = conn.execute(
+            "SELECT 1 FROM project_playbook WHERE project_id = ? AND rev = ?",
+            (project_id, rev),
+        ).fetchone()
+        if exists is None:
+            return False
+        conn.execute(
+            "UPDATE project_playbook SET active = 0, activated_at = NULL "
+            "WHERE project_id = ?",
+            (project_id,),
+        )
+        conn.execute(
+            "UPDATE project_playbook SET active = 1, activated_at = ?, "
+            "note = COALESCE(?, note) WHERE project_id = ? AND rev = ?",
+            (_now(), note, project_id, rev),
+        )
+    return True
+
+
+def get_playbook(
+    conn: sqlite3.Connection,
+    project_id: str,
+    rev: Optional[int] = None,
+) -> Optional[dict]:
+    """One playbook revision; ``rev=None`` returns the active one."""
+    if rev is None:
+        row = conn.execute(
+            "SELECT * FROM project_playbook WHERE project_id = ? AND active = 1",
+            (project_id,),
+        ).fetchone()
+    else:
+        row = conn.execute(
+            "SELECT * FROM project_playbook WHERE project_id = ? AND rev = ?",
+            (project_id, int(rev)),
+        ).fetchone()
+    if row is None:
+        return None
+    d = dict(row)
+    try:
+        d["steps"] = json.loads(d.get("steps") or "[]")
+    except (TypeError, ValueError):
+        d["steps"] = []
+    return d
+
+
+def list_playbook_revs(conn: sqlite3.Connection, project_id: str) -> List[dict]:
+    rows = conn.execute(
+        "SELECT project_id, rev, body, active, created_by, created_at, "
+        "activated_at, note FROM project_playbook WHERE project_id = ? "
+        "ORDER BY rev DESC",
+        (project_id,),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# Directives (design §5)
+# ---------------------------------------------------------------------------
+
+VALID_DIRECTIVE_KINDS = ("directive", "feedback")
+VALID_DIRECTIVE_SCOPES = ("project", "run", "card")
+
+
+def add_project_directive(
+    conn: sqlite3.Connection,
+    *,
+    project_id: str,
+    kind: str,
+    body: str,
+    scope: str = "project",
+    target_ref: Optional[str] = None,
+    rating: Optional[str] = None,
+    author_user_id: str,
+    max_active: int = 20,
+    active: bool = True,
+) -> str:
+    """Add guidance (§5). The active set is capped: adding directive N+1 is
+    refused with *retire one first* — a monotonically growing instruction
+    list is a tax on every run (§5.2).
+
+    ``active=False`` proposes the directive (§8.2): it lands inactive and
+    consumes no cap slot until a member activates it."""
+    if kind not in VALID_DIRECTIVE_KINDS:
+        raise ValueError(f"kind must be one of {sorted(VALID_DIRECTIVE_KINDS)}")
+    if scope not in VALID_DIRECTIVE_SCOPES:
+        raise ValueError(f"scope must be one of {sorted(VALID_DIRECTIVE_SCOPES)}")
+    text = str(body or "").strip()
+    if not text:
+        raise ValueError("directive body must not be empty")
+    if not str(author_user_id or "").strip():
+        raise ValueError("author_user_id is required")
+    if rating is not None and rating not in ("good", "bad"):
+        raise ValueError("rating must be 'good' or 'bad'")
+    with write_txn(conn):
+        if active:
+            n = conn.execute(
+                "SELECT COUNT(*) AS n FROM project_directives "
+                "WHERE project_id = ? AND active = 1",
+                (project_id,),
+            ).fetchone()["n"]
+            if n >= max_active:
+                raise ValueError(
+                    f"directive cap reached ({max_active} active): retire one first"
+                )
+        did = _new_row_id("dir")
+        conn.execute(
+            """INSERT INTO project_directives
+               (id, project_id, kind, body, scope, target_ref, rating,
+                author_user_id, created_at, active)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (did, project_id, kind, text, scope, target_ref, rating,
+             str(author_user_id).strip(), _now(), 1 if active else 0),
+        )
+    return did
+
+
+def activate_project_directive(
+    conn: sqlite3.Connection,
+    directive_id: str,
+    *,
+    max_active: int = 20,
+) -> bool:
+    """Activate a **proposed** directive (§8.2): any member may cross it.
+
+    Only rows that were proposed (``active=0`` and never retired) can be
+    activated; the active-set cap is enforced at the crossing, not at
+    proposal time. Returns False when there is nothing to activate.
+    Raises ValueError when the cap blocks the crossing."""
+    with write_txn(conn):
+        row = conn.execute(
+            "SELECT project_id FROM project_directives "
+            "WHERE id = ? AND active = 0 AND retired_at IS NULL",
+            (directive_id,),
+        ).fetchone()
+        if row is None:
+            return False
+        n = conn.execute(
+            "SELECT COUNT(*) AS n FROM project_directives "
+            "WHERE project_id = ? AND active = 1",
+            (row["project_id"],),
+        ).fetchone()["n"]
+        if n >= max_active:
+            raise ValueError(
+                f"directive cap reached ({max_active} active): retire one first"
+            )
+        conn.execute(
+            "UPDATE project_directives SET active = 1 WHERE id = ?",
+            (directive_id,),
+        )
+    return True
+
+
+def retire_project_directive(conn: sqlite3.Connection, directive_id: str) -> bool:
+    """Retire, never delete (§5.2): the record of what the agent was told
+    when run 9 executed must survive."""
+    with write_txn(conn):
+        cur = conn.execute(
+            "UPDATE project_directives SET active = 0, retired_at = ? "
+            "WHERE id = ? AND active = 1",
+            (_now(), directive_id),
+        )
+    return cur.rowcount > 0
+
+
+def list_project_directives(
+    conn: sqlite3.Connection,
+    project_id: str,
+    *,
+    active_only: bool = True,
+) -> List[dict]:
+    sql = "SELECT * FROM project_directives WHERE project_id = ?"
+    if active_only:
+        sql += " AND active = 1"
+    # Newest first; ``rowid`` breaks same-second ties in insertion order so
+    # a later instruction visibly wins (§5.2).
+    sql += " ORDER BY created_at DESC, rowid DESC"
+    return [dict(r) for r in conn.execute(sql, (project_id,)).fetchall()]
+
+
+def list_proposed_directives(
+    conn: sqlite3.Connection,
+    project_id: str,
+) -> List[dict]:
+    """Proposed-but-inactive directives (§8.2): ``active=0`` and never
+    retired — the rows a run's retro proposed, waiting for a member."""
+    rows = conn.execute(
+        "SELECT * FROM project_directives "
+        "WHERE project_id = ? AND active = 0 AND retired_at IS NULL "
+        "ORDER BY created_at DESC, rowid DESC",
+        (project_id,),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# Skill candidates (design §8.2 row 3) — provenance only, no mechanism
+# ---------------------------------------------------------------------------
+
+
+def add_skill_candidate(
+    conn: sqlite3.Connection,
+    *,
+    project_id: str,
+    run_no: int,
+    name: str,
+    body: str,
+) -> str:
+    """Record a skill a run's retro proposed. The row is pure provenance —
+    it records the project and run the candidate came from; the shipped
+    skills loop (§8.2) does the distilling and promoting."""
+    candidate_name = str(name or "").strip()
+    if not candidate_name:
+        raise ValueError("skill candidate name must not be empty")
+    text = str(body or "").strip()
+    if not text:
+        raise ValueError("skill candidate body must not be empty")
+    cid = _new_row_id("skc")
+    with write_txn(conn):
+        conn.execute(
+            """INSERT INTO project_skill_candidates
+               (id, project_id, run_no, name, body, created_at)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (cid, project_id, int(run_no), candidate_name, text, _now()),
+        )
+    return cid
+
+
+def list_skill_candidates(
+    conn: sqlite3.Connection,
+    project_id: str,
+) -> List[dict]:
+    rows = conn.execute(
+        "SELECT * FROM project_skill_candidates WHERE project_id = ? "
+        "ORDER BY created_at DESC, rowid DESC",
+        (project_id,),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# Runs (design §6)
+# ---------------------------------------------------------------------------
+
+VALID_RUN_TRIGGERS = ("schedule", "manual", "event", "review")
+VALID_RUN_STATUSES = (
+    "running", "waiting", "blocked", "done", "failed", "cancelled",
+)
+
+
+def open_project_run(
+    conn: sqlite3.Connection,
+    *,
+    project_id: str,
+    trigger: str,
+    triggered_by: Optional[str] = None,
+    profile: str,
+    playbook_rev: Optional[int] = None,
+    trace_id: Optional[str] = None,
+) -> dict:
+    """Open the run row: ``run_no = max+1``, status ``running`` (§6)."""
+    if trigger not in VALID_RUN_TRIGGERS:
+        raise ValueError(f"trigger must be one of {sorted(VALID_RUN_TRIGGERS)}")
+    if not str(profile or "").strip():
+        raise ValueError("run profile is required")
+    rid = _new_row_id("run")
+    with write_txn(conn):
+        row = conn.execute(
+            "SELECT COALESCE(MAX(run_no), 0) AS m FROM project_runs "
+            "WHERE project_id = ?",
+            (project_id,),
+        ).fetchone()
+        run_no = int(row["m"]) + 1
+        conn.execute(
+            """INSERT INTO project_runs
+               (id, project_id, run_no, trigger, triggered_by, profile,
+                playbook_rev, status, started_at, trace_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, 'running', ?, ?)""",
+            (rid, project_id, run_no, trigger, triggered_by,
+             str(profile).strip(), playbook_rev, _now(), trace_id),
+        )
+    return get_project_run_by_id(conn, rid)
+
+
+def get_project_run_by_id(
+    conn: sqlite3.Connection, run_id: str
+) -> Optional[dict]:
+    row = conn.execute(
+        "SELECT * FROM project_runs WHERE id = ?", (run_id,)
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def get_project_run(
+    conn: sqlite3.Connection, project_id: str, run_no: int
+) -> Optional[dict]:
+    row = conn.execute(
+        "SELECT * FROM project_runs WHERE project_id = ? AND run_no = ?",
+        (project_id, int(run_no)),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def list_project_runs(
+    conn: sqlite3.Connection, project_id: str, *, limit: int = 50
+) -> List[dict]:
+    return [
+        dict(r)
+        for r in conn.execute(
+            "SELECT * FROM project_runs WHERE project_id = ? "
+            "ORDER BY run_no DESC LIMIT ?",
+            (project_id, int(limit)),
+        ).fetchall()
+    ]
+
+
+_RUN_PATCH_FIELDS = {
+    "status", "session_id", "trace_id", "outcome", "summary", "retro",
+    "retro_at", "score_self", "score_user", "score_note", "scored_by",
+    "scored_at", "error", "ended_at",
+}
+
+
+def update_project_run(
+    conn: sqlite3.Connection, run_id: str, **fields: Any
+) -> bool:
+    """Patch run fields. ``score_user`` is NOT writable through this
+    helper's callers in the router for agent principals — the human-only
+    rule is enforced at the seam (§16)."""
+    sets: List[str] = []
+    params: List[Any] = []
+    for key, value in fields.items():
+        if key not in _RUN_PATCH_FIELDS:
+            raise ValueError(f"unknown run field: {key!r}")
+        if key == "status" and value not in VALID_RUN_STATUSES:
+            raise ValueError(f"status must be one of {sorted(VALID_RUN_STATUSES)}")
+        sets.append(f"{key} = ?")
+        params.append(value)
+    if not sets:
+        return False
+    params.append(run_id)
+    with write_txn(conn):
+        cur = conn.execute(
+            f"UPDATE project_runs SET {', '.join(sets)} WHERE id = ?", params
+        )
+    return cur.rowcount > 0
+
+
+def close_project_run(
+    conn: sqlite3.Connection,
+    run_id: str,
+    *,
+    status: str,
+    outcome: Optional[str] = None,
+    summary: Optional[str] = None,
+    error: Optional[str] = None,
+) -> bool:
+    """Close a run: terminal status + machine-set outcome (§6.1)."""
+    if status not in ("done", "failed", "cancelled", "blocked"):
+        raise ValueError("a run closes into done | failed | cancelled | blocked")
+    return update_project_run(
+        conn,
+        run_id,
+        status=status,
+        outcome=outcome,
+        summary=summary,
+        error=error,
+        ended_at=_now(),
+    )
+
+
+def link_run_card(
+    conn: sqlite3.Connection,
+    run_id: str,
+    task_id: str,
+    step_key: Optional[str] = None,
+) -> bool:
+    """Record that a card belongs to a run — the mapping lives here so the
+    shared board learns nothing about Projects (no run_id on tasks)."""
+    with write_txn(conn):
+        cur = conn.execute(
+            "INSERT OR IGNORE INTO project_run_cards (run_id, task_id, step_key) "
+            "VALUES (?, ?, ?)",
+            (run_id, task_id, step_key),
+        )
+    return cur.rowcount > 0
+
+
+def get_run_cards(conn: sqlite3.Connection, run_id: str) -> List[dict]:
+    return [
+        dict(r)
+        for r in conn.execute(
+            "SELECT * FROM project_run_cards WHERE run_id = ?", (run_id,)
         ).fetchall()
     ]
 

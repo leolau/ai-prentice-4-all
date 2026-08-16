@@ -45,6 +45,16 @@ describe("nav-items", () => {
     expect(primaryHrefs).not.toContain("/graph");
   });
 
+  // Projects took the secondary slot deliberately: the primary bar was
+  // budgeted for To-dos (projects design ed.2 Q3), and the Home card is the
+  // one-tap surface while the list is young.
+  it("has Projects in secondary nav, never in primary", () => {
+    const primaryHrefs = PRIMARY_NAV.map((i) => i.href);
+    const secondaryHrefs = SECONDARY_NAV.map((i) => i.href);
+    expect(secondaryHrefs).toContain("/projects");
+    expect(primaryHrefs).not.toContain("/projects");
+  });
+
   it("keeps primary nav at or below five tabs", () => {
     expect(PRIMARY_NAV.length).toBeLessThanOrEqual(5);
   });

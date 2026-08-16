@@ -1197,6 +1197,500 @@ export interface EntityGoalResponse {
   effective: "next_session";
 }
 
+// ── Projects (design ed.3.2 §2–§9, §12) ─────────────────────────────────────
+
+export type ProjectStatus = "planning" | "active" | "paused" | "done" | "archived";
+export type ProjectCadence = "one_off" | "repeatable" | "standing";
+export type ProjectAutonomy = "manual" | "supervised" | "autonomous";
+export type ProjectVisibility = "shared" | "private";
+/** The §9.2 ladder, derived on read — never stored. */
+export type ProjectHealth = "ok" | "attention" | "stalled";
+export type ProjectMemberRole = "lead" | "member" | "viewer";
+export type ProjectLinkKind =
+  | "file"
+  | "arrival"
+  | "todo"
+  | "goal"
+  | "memory"
+  | "conversation"
+  | "sample"
+  | "reference"
+  | "url";
+export type ProjectOutputKind =
+  | "artifact"
+  | "file"
+  | "message"
+  | "decision"
+  | "report"
+  | "code";
+export type ProjectOutputStatus =
+  | "pending"
+  | "in_progress"
+  | "delivered"
+  | "accepted"
+  | "dropped";
+export type ProjectRunStatus =
+  | "running"
+  | "waiting"
+  | "blocked"
+  | "done"
+  | "failed"
+  | "cancelled";
+export type ProjectRunTrigger = "schedule" | "manual" | "event" | "review";
+
+export interface ProjectFolder {
+  path: string;
+  label: string | null;
+  is_primary: boolean;
+  added_at: number;
+}
+
+/** The project row as `to_dict()` returns it (folders ride with detail). */
+export interface Project {
+  id: string;
+  slug: string;
+  name: string;
+  description: string | null;
+  icon: string | null;
+  color: string | null;
+  board_slug: string | null;
+  primary_path: string | null;
+  archived: boolean;
+  created_at: number;
+  /** [1] the goal sentence — what success means (distinct from `name`). */
+  goal: string | null;
+  visibility: ProjectVisibility;
+  owner_user_id: string | null;
+  status: ProjectStatus;
+  cadence: ProjectCadence;
+  /** §3.2 schedule text ("every 60m" / cron expression); cron store is authoritative. */
+  schedule: string | null;
+  /** Standing projects: review period like "30d" / "2w" / "1m". */
+  review_every: string | null;
+  autonomy: ProjectAutonomy;
+  max_in_progress: number;
+  budget_usd_per_run: number | null;
+  definition_of_done: string | null;
+  target_audience: string | null;
+  score_rubric: string | null;
+  /** CSV narrowing filters; intersected with the host profile at spawn (§4.1). */
+  toolsets: string | null;
+  skills: string | null;
+  due_at: number | null;
+  host_profile: string | null;
+  cron_job_id: string | null;
+  summary: string | null;
+  summary_at: number | null;
+  last_reviewed_at: number | null;
+  /** Display cache only (§3.2) — refreshed on read, never a decision input. */
+  next_run_at: number | null;
+}
+
+export interface ProjectCardRollup {
+  total: number;
+  done: number;
+  running: number;
+  blocked: number;
+}
+
+/**
+ * The §9.1 progress ladder: first rung that applies. `cards` always rides
+ * along — it says whether progress is currently moving.
+ */
+export type ProjectProgress =
+  | {
+      rung: "standing";
+      label: string;
+      headline: string;
+      cards: ProjectCardRollup;
+    }
+  | {
+      rung: "outputs";
+      label: string;
+      headline: string;
+      accepted: number;
+      required: number;
+      cards: ProjectCardRollup;
+    }
+  | {
+      rung: "goal";
+      label: string;
+      headline: string;
+      metric: Record<string, unknown>;
+      cards: ProjectCardRollup;
+    }
+  | {
+      rung: "cards";
+      label: string;
+      headline: string;
+      cards: ProjectCardRollup;
+    };
+
+/** One row of `GET /api/registry/projects`. */
+export type ProjectListItem = Project & {
+  progress: ProjectProgress;
+  member_count: number;
+  health: ProjectHealth;
+};
+
+export interface ProjectsResponse {
+  items: ProjectListItem[];
+  next_cursor: string | null;
+}
+
+/** [3] a deliverable, declared before the work. */
+export interface ProjectOutput {
+  id: string;
+  project_id: string;
+  seq: number;
+  title: string;
+  spec: string | null;
+  kind: ProjectOutputKind;
+  /** SQLite int — truthy means required. */
+  required: number;
+  recurring: number;
+  status: ProjectOutputStatus;
+  delivered_at: number | null;
+  accepted_at: number | null;
+  accepted_by: string | null;
+  created_at: number;
+}
+
+/** One delivery of an output — which run/card produced it, what the artefact is. */
+export interface ProjectDelivery {
+  id: string;
+  output_id: string;
+  run_id: string | null;
+  task_id: string | null;
+  link_kind: string | null;
+  link_ref: string | null;
+  profile: string | null;
+  label: string | null;
+  note: string | null;
+  delivered_at: number;
+}
+
+export interface ProjectOutputWithDeliveries extends ProjectOutput {
+  deliveries: ProjectDelivery[];
+}
+
+/** A person on the project (box-wide user id). */
+export interface ProjectMember {
+  project_id: string;
+  user_id: string;
+  role: ProjectMemberRole;
+  added_by: string | null;
+  added_at: number;
+}
+
+/** An instrument the work runs on (a profile, not a person). */
+export interface ProjectProfileRow {
+  project_id: string;
+  profile: string;
+  role: string;
+  added_by: string | null;
+  added_at: number;
+}
+
+/**
+ * [10] a person involved who is not a user of this box. `address` is PII:
+ * the Python layer drops it entirely for viewers, so it is optional here.
+ */
+export interface ProjectContact {
+  id: string;
+  project_id: string;
+  name: string;
+  role: string | null;
+  org: string | null;
+  platform: string | null;
+  address?: string | null;
+  user_id: string | null;
+  notes: string | null;
+  created_by: string | null;
+  created_at: number;
+}
+
+/** A pointer, never an authority (§11 rule 5). */
+export interface ProjectLink {
+  project_id: string;
+  kind: ProjectLinkKind;
+  profile: string;
+  ref: string;
+  label: string | null;
+  added_by: string | null;
+  added_at: number;
+  /** Set on the detail read: url links resolve trivially; others wait for the owning store. */
+  resolved?: boolean | null;
+}
+
+/** The last N runs as one-line rows. */
+export interface ProjectRunBrief {
+  run_no: number;
+  status: ProjectRunStatus;
+  trigger: ProjectRunTrigger;
+  started_at: number;
+  ended_at: number | null;
+  duration_seconds: number | null;
+  outcome: string | null;
+  score_user: number | null;
+  /**
+   * §8.2: present only when it diverges from `score_user` by ≥2 —
+   * presence IS the learning signal.
+   */
+  score_self?: number;
+}
+
+/** One card's live board state, joined onto a run row. */
+export interface ProjectRunCard {
+  task_id: string;
+  step_key: string | null;
+  status: string | null;
+  title: string | null;
+}
+
+/** The full run row (§6) as the detail/list reads return it. */
+export interface ProjectRun {
+  id: string;
+  project_id: string;
+  run_no: number;
+  trigger: ProjectRunTrigger;
+  triggered_by: string | null;
+  profile: string;
+  playbook_rev: number | null;
+  status: ProjectRunStatus;
+  started_at: number;
+  ended_at: number | null;
+  session_id: string | null;
+  trace_id: string | null;
+  outcome: string | null;
+  summary: string | null;
+  retro: string | null;
+  retro_at: number | null;
+  score_self: number | null;
+  score_user: number | null;
+  score_note: string | null;
+  scored_by: string | null;
+  scored_at: number | null;
+  error: string | null;
+  /** Joined fields — present on the detail read. */
+  cards?: ProjectRunCard[];
+  cost?: number | null;
+  cost_recorded?: boolean;
+  duration_seconds?: number;
+  deliveries?: ProjectDelivery[] | number;
+}
+
+/** The method, one revision (§7). `steps` is parsed JSON on the detail read. */
+export interface PlaybookStep {
+  key: string;
+  title: string;
+  body?: string | null;
+  assignee?: string | null;
+  needs?: string[];
+  checkpoint?: boolean;
+  [extra: string]: unknown;
+}
+
+export interface PlaybookRev {
+  project_id: string;
+  rev: number;
+  body: string;
+  steps?: PlaybookStep[];
+  active: number;
+  created_by: string | null;
+  created_at: number;
+  activated_at: number | null;
+  note: string | null;
+}
+
+export interface ProjectPlaybookResponse {
+  active: PlaybookRev | null;
+  revisions: PlaybookRev[];
+}
+
+/** Standing instruction or feedback (§5) — durable, compiled into future runs. */
+export interface ProjectDirective {
+  id: string;
+  project_id: string;
+  kind: "directive" | "feedback";
+  body: string;
+  scope: "project" | "run" | "card";
+  target_ref: string | null;
+  rating: string | null;
+  author_user_id: string;
+  created_at: number;
+  active: number;
+  retired_at: number | null;
+  superseded_by: string | null;
+}
+
+export interface ProjectDirectivesResponse {
+  directives: ProjectDirective[];
+  /**
+   * §8.2: what runs proposed in their retros — inactive until a member
+   * activates them (`POST /directives/:id/activate`).
+   */
+  proposed?: ProjectDirective[];
+  /** §5.1: guidance never applies mid-conversation. */
+  applies_from: string;
+}
+
+/** The whole record in one read (`GET /{slug}`). */
+export interface ProjectDetail extends Project {
+  /**
+   * Optional in practice: the Python payload pops `folders` out of the base
+   * row and the detail read does not re-attach it yet. Read defensively.
+   */
+  folders?: ProjectFolder[];
+  outputs: ProjectOutputWithDeliveries[];
+  members: ProjectMember[];
+  profiles: ProjectProfileRow[];
+  contacts: ProjectContact[];
+  links: Partial<Record<ProjectLinkKind, ProjectLink[]>>;
+  progress: ProjectProgress;
+  /**
+   * §8.1 derived score — the mean of the last five `score_user` values,
+   * never an all-time number; null until somebody scores a run.
+   */
+  score: ProjectScore | null;
+  health: ProjectHealth;
+  next_run_at: number | null;
+  runs: ProjectRunBrief[];
+  card_rollup: ProjectCardRollup;
+  recent_events: TaskEventRow[];
+}
+
+/** §8.1: the project's derived score, recomputed on every read. */
+export interface ProjectScore {
+  mean: number;
+  /** How many of the last five scored runs went into the mean. */
+  runs: number;
+}
+
+/** A kanban `task_events` row as the detail read tails it. */
+export interface TaskEventRow {
+  id: number | string;
+  task_id: string;
+  kind: string;
+  payload: Record<string, unknown> | null;
+  created_at: number;
+}
+
+/** One doctor finding (§15 failure mode 1). */
+export interface ProjectDoctorFinding {
+  code: string;
+  severity: "info" | "attention" | "stalled";
+  message: string;
+}
+
+export interface ProjectsDoctorItem {
+  slug: string;
+  name: string;
+  cadence: ProjectCadence;
+  findings: ProjectDoctorFinding[];
+}
+
+export interface ProjectsDoctorResponse {
+  items: ProjectsDoctorItem[];
+}
+
+export interface ProjectDoctorDetail {
+  slug: string;
+  health: ProjectHealth;
+  findings: ProjectDoctorFinding[];
+  clean: boolean;
+}
+
+/** `PUT /{slug}/schedule` result — both halves of the link. */
+export interface ProjectScheduleResult {
+  schedule: string;
+  cron_job_id: string;
+  next_run_at: number | null;
+  schedule_display?: string | null;
+}
+
+/** `PATCH /{slug}/tools` — the resolved intersection with the host profile (§4.1). */
+export interface ProjectToolsResolution {
+  toolsets: string[];
+  skills: string[];
+  host_profile: string | null;
+  effective_toolsets: string[];
+  dropped_toolsets: string[];
+  effective_skills: string[];
+  dropped_skills: string[];
+  skills_truncated: boolean;
+}
+
+/** A task row on the project board, as `kanban_view.task_dict` returns it. */
+export interface ProjectBoardTask {
+  id: string;
+  title: string;
+  body: string | null;
+  status: string;
+  assignee: string | null;
+  priority: number;
+  created_at: number;
+  started_at: number | null;
+  completed_at: number | null;
+  tenant: string | null;
+  project_id: string | null;
+  result: string | null;
+  current_step_key: string | null;
+  [extra: string]: unknown;
+}
+
+/** A column of the project's board (`GET /{slug}/board`). */
+export interface ProjectBoardColumn {
+  name: string;
+  tasks: ProjectBoardTask[];
+}
+
+/** The derived age metrics `kanban_view.task_dict` joins onto every task. */
+export interface ProjectCardAge {
+  created_age_seconds: number | null;
+  started_age_seconds: number | null;
+  time_to_complete_seconds: number | null;
+}
+
+/**
+ * `GET /{slug}/cards/{task_id}` — `kanban_view.task_dict` verbatim: the
+ * board row plus the age metrics and (when the caller passes one) the
+ * latest run summary.
+ */
+export interface ProjectCardDetail extends ProjectBoardTask {
+  age?: ProjectCardAge | null;
+  latest_summary?: string | null;
+}
+
+export interface ProjectBoardView {
+  columns: ProjectBoardColumn[];
+  tenants?: string[];
+  assignees?: string[];
+  latest_event_id?: number | null;
+  now?: number;
+}
+
+/** Creating a project — the §2.2 mandatory four plus the optional rest. */
+export interface CreateProjectPayload {
+  goal: string;
+  description: string;
+  outputs: (string | { title: string; spec?: string; kind?: ProjectOutputKind; required?: boolean; recurring?: boolean })[];
+  host_profile: string;
+  name?: string;
+  slug?: string;
+  icon?: string;
+  color?: string;
+  board_slug?: string;
+  primary_path?: string;
+  folders?: { path: string; label?: string; is_primary?: boolean }[];
+  cadence?: ProjectCadence;
+  autonomy?: ProjectAutonomy;
+  target_audience?: string;
+  definition_of_done?: string;
+  visibility?: ProjectVisibility;
+  goal_link?: { ref: string; profile?: string; label?: string };
+}
+
 /**
  * FG-31 — capacity headroom. One derived verdict plus the reading behind it.
  *

@@ -38,8 +38,14 @@ export const PRIMARY_NAV: NavItem[] = [
 /**
  * Secondary destinations — linked from Home on mobile, and given a dedicated
  * "More" section in the desktop sidebar where there is room for them.
+ *
+ * Projects rides here, not in the primary bar: the primary bar was budgeted
+ * for To-dos on 2026-08-11 and re-litigating it before Projects has any real
+ * data would be churn (projects design ed.2 Q3). The Home card is the
+ * one-tap surface while the list is still young.
  */
 export const SECONDARY_NAV: NavItem[] = [
+  { href: "/projects", label: "Projects", glyph: "▦", hint: "What runs on its own" },
   { href: "/graph", label: "Graph", glyph: "◈", hint: "GTS Centre" },
   { href: "/files", label: "Files", glyph: "▤", hint: "Everything that arrived" },
   { href: "/activity", label: "Activity", glyph: "≋", hint: "Interaction traces" },
