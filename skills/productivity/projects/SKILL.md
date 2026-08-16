@@ -102,25 +102,32 @@ conversations, samples — is a pointer. A link whose target disappears renders
 from its cached label as "no longer available"; never paste content into the
 record.
 
-### 3b. Declare the output before doing the work, and never accept your own
+### 3b. Declare the output before doing the work — accepting it is never yours
 
-`outputs add` is proposable by the agent; `outputs accept` is human-only, and
-a run that produced nothing must close `no_output` rather than narrate effort.
-Delivery is a pointer too: `outputs deliver <id> --ref <where it lives>`.
+`outputs add` is proposable by the agent; `outputs accept` will refuse you
+("accepting an output is a human act — no verified session"). Deliver what
+you made — `outputs deliver <id> --ref <where it lives>` — then ask the user
+to accept it. A run that produced nothing must close `no_output` rather than
+narrate effort.
 
-### 4. Never move a card past a checkpoint, never activate a playbook, never widen autonomy
+### 4. Human acts refuse you — checkpoints, activation, autonomy
 
-Those are human acts by design. A checkpoint card holds its successors until a
-human releases it; a playbook revision is a proposal until activated; autonomy
-only moves down from `supervised` with a human's explicit say-so.
+These are enforced, not conventions: `guidance activate`, `playbook
+activate`, `score` and `outputs accept` all answer a session-less caller
+with a 403, and a checkpoint card holds its successors until a human
+releases it. Your move when a project needs one of these is to ask the user,
+never to claim `--as-human` yourself — that flag is the operator's, for the
+moment they are making the judgement in person. Autonomy only ever moves
+down from `supervised`, and only with the user's explicit say-so.
 
 ### 5. Read the last run's retro and score before starting work
 
 That is what the record is for. `hermes projects runs <slug>` then
 `hermes projects retro <slug> <run_no>` — a low score with a note is the most
 specific instruction the project has. Scoring a run (`score <slug> <run_no>
-<1-5>`) is a human act: only pass the user's judgement through, never your
-own, and a `≤2` with a note is what teaches the project most.
+<1-5>`) is human-only and will refuse you; if the user tells you their
+score, pass exactly their judgement through with `--as-human` — never score
+on your own say-so, and a `≤2` with a note is what teaches the project most.
 
 ### 6. A project's `toolsets`/`skills` can only narrow what the profile allows
 

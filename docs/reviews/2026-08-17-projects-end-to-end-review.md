@@ -62,12 +62,12 @@ Nothing from #270 has been fixed. Steps 9–11 were new work, not repair work.
 | M3 | an instance owner/admin who is not a project member has `role is None`, so contact addresses are dropped from them too | **OPEN** | `projects_api.py:802` |
 | L1 | `toolsets`/`skills` stored as CSV strings | **OPEN** | `projects_run.py:646-652` |
 | L2 | profile-imported legacy projects land with NULL `goal`, no outputs and no host profile — the mandatory-field invariant does not hold for them | **OPEN** | `projects_db.py:2496-2517` |
-| F1a | accept-output returns an ack envelope; `OutputsPanel` merges it as a row, so the row stays `delivered`, the button stays, and `offers_closure` is never surfaced | **OPEN** | `projects_api.py:1021-1025` vs `OutputsPanel.tsx:38-59` |
-| F1b | continue-run returns `{run, promoted, budget_gate}`; `RunView` reads `data.status`, which never exists at the envelope level, so continuing appears to do nothing and the `budget_gate` holding the run is never shown | **OPEN** | `projects_run.py:786` vs `RunView.tsx:84-86` |
-| F1c | add-directive returns `{id, applies_from}`; `GuidancePanel` prepends it as a `ProjectDirective`, so the new directive renders with no body, author or date until reload | **OPEN** | `projects_api.py:1691` vs `GuidancePanel.tsx` |
+| F1a | accept-output returns an ack envelope; `OutputsPanel` merges it as a row, so the row stays `delivered`, the button stays, and `offers_closure` is never surfaced | **FIXED** — Block 1: the route returns the updated row + the offer; the panel merges and surfaces a closure notice | `projects_api.py:1021-1025` vs `OutputsPanel.tsx:38-59` |
+| F1b | continue-run returns `{run, promoted, budget_gate}`; `RunView` reads `data.status`, which never exists at the envelope level, so continuing appears to do nothing and the `budget_gate` holding the run is never shown | **FIXED** — Block 1: `RunView` unwraps `data.run` (or the bare row on cancel) and renders `budget_gate` | `projects_run.py:786` vs `RunView.tsx:84-86` |
+| F1c | add-directive returns `{id, applies_from}`; `GuidancePanel` prepends it as a `ProjectDirective`, so the new directive renders with no body, author or date until reload | **FIXED** — Block 1: the route returns the full directive row with `applies_from` flat beside it | `projects_api.py:1691` vs `GuidancePanel.tsx` |
 | F2 | the Attention chip filters `health=attention` by equality, so a `stalled` project — the one that outranks attention — is excluded from the very view meant to surface it | **OPEN** | `filters.ts:57,77-78` + `projects_api.py:511-512` vs `projects_schedule.py:405` |
 | F3 | `@router.get("/")` / `@router.post("/")` make every list and create pay a 307 (the todos router uses `""`) | **OPEN** | `projects_api.py:532,561` |
-| F4 | `RunView` never revalidates after a write — no `router.refresh()` on any path | **OPEN** | `RunView.tsx:62-115` |
+| F4 | `RunView` never revalidates after a write — no `router.refresh()` on any path | **FIXED** — Block 1: `router.refresh()` on every successful write | `RunView.tsx:62-115` |
 | F5 | a `waiting` run is hidden once it falls out of the five-run brief | **OPEN** | `projects_api.py:376-399` |
 | F6/F7 | upstream error detail/path leakage; 404s rendered as raw load errors | **OPEN** | BFF bridge + detail page |
 | F8 | step 8b (`from_todo`) not on `develop` | **FIXED** — landed in `ffb139319` (#279/#280); see E2 below | `projects_api.py:1400-1519` |
@@ -374,17 +374,20 @@ PR per block — each block is independently shippable and independently testabl
 
 **Block 1 — what a human sees and trusts (do first).**
 
-- [ ] E1 · one `_require_human` gate on accept-output, activate-directive and
+- [x] E1 · one `_require_human` gate on accept-output, activate-directive and
       score; CLI claims it only under `--as-human`; `SKILL.md` stops asserting
-      an unenforced rule.
-- [ ] F1a · `OutputsPanel` handles the ack envelope (or the route returns the
+      an unenforced rule. *(landed: the gate covers playbook-rev activation
+      too, and the subject rides the `by`/`scored_by` provenance)*
+- [x] F1a · `OutputsPanel` handles the ack envelope (or the route returns the
       row); the accepted row must lose its Accept button without a reload, and
-      `offers_closure` must surface.
-- [ ] F1b · `RunView` reads `data.run`, and renders `budget_gate` when present —
+      `offers_closure` must surface. *(the route returns the row + the offer;
+      the panel merges and surfaces a closure notice)*
+- [x] F1b · `RunView` reads `data.run`, and renders `budget_gate` when present —
       today the thing holding the run is invisible.
-- [ ] F1c · `GuidancePanel` refreshes instead of casting `{id, applies_from}`
-      into a `ProjectDirective`.
-- [ ] F4 · `router.refresh()` after every `RunView` write.
+- [x] F1c · `GuidancePanel` refreshes instead of casting `{id, applies_from}`
+      into a `ProjectDirective`. *(the route now returns the full directive
+      row with `applies_from` flat beside it)*
+- [x] F4 · `router.refresh()` after every `RunView` write.
 
 **Block 2 — the run lifecycle's four seams (the real risk).**
 

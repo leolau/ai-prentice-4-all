@@ -51,7 +51,7 @@ def env(tmp_path, monkeypatch):
         projects_run, "_available_skill_names", lambda: ["digest"]
     )
 
-    state = {"actor": OWNER, "enrolled": set()}
+    state = {"actor": OWNER, "enrolled": set(), "subject": OWNER.user_id}
 
     async def _resolve(request, *, allow_as=True):
         return state["actor"]
@@ -59,10 +59,16 @@ def env(tmp_path, monkeypatch):
     async def _enrolled(user_id):
         return set(state["enrolled"])
 
+    async def _subject(request):
+        # Playbook activation is a human act (§16); this file's scenarios
+        # run under a verified session, the refusal on the main surface.
+        return state["subject"]
+
     monkeypatch.setattr(
         "hermes_cli.web_server._comms_resolve_principal", _resolve, raising=False
     )
     monkeypatch.setattr(projects_api, "_enrolled_profiles", _enrolled)
+    monkeypatch.setattr(projects_api, "_interactive_subject", _subject)
 
     app = FastAPI()
     app.include_router(projects_api.router)

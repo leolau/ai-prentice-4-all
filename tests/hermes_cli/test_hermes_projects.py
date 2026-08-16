@@ -182,9 +182,10 @@ def test_card_add_from_todo_promotes(env, tmp_path, monkeypatch, capsys):
 # ---------------------------------------------------------------------------
 
 
-def test_score_verb_goes_through_the_human_gate(env, tmp_path, capsys):
-    """The CLI claims the operator surface — the same seam it patches for
-    principals lets `score` through the §8.1 human-only gate."""
+def test_score_verb_refuses_without_as_human(env, tmp_path, capsys):
+    """The CLI no longer patches the §8.1 gate in automatically: a plain
+    `score` is a session-less caller like any agent turn, and writes
+    nothing."""
     from hermes_cli import projects_db
 
     run, _capsys = env
@@ -195,7 +196,29 @@ def test_score_verb_goes_through_the_human_gate(env, tmp_path, capsys):
             conn, project_id=project.id, trigger="manual", profile="default"
         )
 
-    assert run("score", slug, "1", "3", "--note", "too formal") == 0
+    assert run("score", slug, "1", "3", "--note", "too formal") == 1
+    err = capsys.readouterr().err
+    assert "human act" in err
+    assert "--as-human" in err  # the hint names the operator's escape hatch
+    with projects_db.connect_closing() as conn:
+        run_row = projects_db.get_project_run(conn, project.id, 1)
+    assert run_row["score_user"] is None  # nothing was written
+
+
+def test_score_verb_with_as_human_is_the_operator(env, tmp_path, capsys):
+    """`--as-human` is the operator's explicit claim on the human surface;
+    with it, the judgement lands."""
+    from hermes_cli import projects_db
+
+    run, _capsys = env
+    slug = _create(run, capsys, tmp_path)
+    with projects_db.connect_closing() as conn:
+        project = projects_db.get_project(conn, slug)
+        projects_db.open_project_run(
+            conn, project_id=project.id, trigger="manual", profile="default"
+        )
+
+    assert run("--as-human", "score", slug, "1", "3", "--note", "too formal") == 0
     out = capsys.readouterr().out
     assert "Scored run 1" in out and "3/5" in out and "too formal" in out
 
@@ -253,8 +276,8 @@ def test_retro_proposals_land_inactive_and_activate(env, tmp_path, monkeypatch, 
         if token.startswith("dir_")
     ][0]
 
-    # Any member crosses it — and it applies from the next run.
-    assert run("guidance", slug, "activate", directive_id) == 0
+    # The operator crosses it in person — and it applies from the next run.
+    assert run("--as-human", "guidance", slug, "activate", directive_id) == 0
     out = capsys.readouterr().out
     assert "Activated instruction" in out and "next run" in out
 
