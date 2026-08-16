@@ -379,6 +379,69 @@ def test_the_default_globs_capture_the_unit_that_is_not_named_hermes(
     assert [f["component"] for f in findings] == ["unit:agent-home.service"]
 
 
+def test_a_unit_nobody_captured_is_drift(deployment):
+    """The hole `hermes-calendar-triage` went through.
+
+    That unit ran as root for weeks and every check passed, because they all
+    walked the manifest's units and none asked the box what *else* was
+    installed. An uncaptured unit is not in the reviewed privilege model and a
+    rebuild would not recreate it — both are drift.
+    """
+    _, units = deployment
+    (units / "hermes-calendar-triage.service").write_text(
+        "[Service]\nExecStart=/opt/data/triage.sh\n", encoding="utf-8"
+    )
+
+    findings = ds.check("systest-fixture")
+
+    assert [f["component"] for f in findings] == [
+        "unit:hermes-calendar-triage.service"
+    ]
+    assert findings[0]["severity"] == DRIFT
+    # The first question about an unknown unit is who it runs as.
+    assert "root (no User=)" in findings[0]["actual"]
+
+
+def test_an_uncaptured_dropin_is_drift_and_names_its_user(deployment):
+    """A drop-in is how a unit's `User=` is overridden without touching it."""
+    _, units = deployment
+    dropin = units / "hermes-gateway.service.d" / "99-local.conf"
+    dropin.write_text("[Service]\nUser=root\n", encoding="utf-8")
+
+    findings = ds.check("systest-fixture")
+
+    assert [f["component"] for f in findings] == [
+        "unit:hermes-gateway.service.d/99-local.conf"
+    ]
+    assert "runs as root" in findings[0]["actual"]
+
+
+def test_capturing_the_unknown_unit_clears_it(deployment, tmp_path):
+    """The finding must be actionable: capture is the fix, and it works."""
+    home, units = deployment
+    (units / "hermes-review-pass.timer").write_text(
+        "[Timer]\nOnCalendar=Mon *-*-* 08:00:00\n", encoding="utf-8"
+    )
+    assert ds.check("systest-fixture")
+
+    ds.capture("systest-fixture", home, units, ["hermes-*"], None, ["creds/*.json"])
+
+    assert ds.check("systest-fixture") == []
+
+
+def test_check_enumerates_the_box_the_way_capture_did(deployment, tmp_path):
+    """Both sides use `installed_units`, or "unknown" means two things."""
+    _, units = deployment
+    manifest = yaml.safe_load(
+        (tmp_path / "deploy" / "systest-fixture" / ds.MANIFEST_NAME).read_text(
+            encoding="utf-8"
+        )
+    )
+    assert set(manifest["units"]) == set(
+        ds.installed_units(units, manifest["unit_globs"])
+    )
+
+
 def test_a_new_secret_on_the_box_is_a_note_not_drift(deployment):
     """Adding a secret is normal; the report should say "capture this" rather
     than fail the weekly run."""

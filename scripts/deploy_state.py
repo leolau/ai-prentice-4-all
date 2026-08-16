@@ -481,20 +481,11 @@ def capture(
 
     units: dict[str, dict[str, str]] = {}
     unit_out = out / SYSTEMD_DIRNAME
-    for pattern in unit_globs:
-        for unit in sorted(systemd_dir.glob(pattern)):
-            if unit.is_file():
-                target = unit_out / unit.name
-                target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_bytes(unit.read_bytes())
-                units[unit.name] = {"sha256": file_facts(unit)["sha256"]}
-        for dropin_dir in sorted(systemd_dir.glob(pattern + ".d")):
-            for dropin in sorted(dropin_dir.glob("*.conf")):
-                name = f"{dropin_dir.name}/{dropin.name}"
-                target = unit_out / dropin_dir.name / dropin.name
-                target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_bytes(dropin.read_bytes())
-                units[name] = {"sha256": file_facts(dropin)["sha256"]}
+    for name, unit in installed_units(systemd_dir, unit_globs).items():
+        target = unit_out.joinpath(*name.split("/"))
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(unit.read_bytes())
+        units[name] = {"sha256": file_facts(unit)["sha256"]}
 
     credentials: list[dict[str, str]] = []
     for pattern in credential_globs:
@@ -553,6 +544,41 @@ def capture(
         "credentials": [entry["path"] for entry in credentials],
         "secrets_out": str(secrets_out) if secrets_out else None,
     }
+
+
+def _unit_user(unit: Path) -> str | None:
+    """The ``User=`` a unit declares, if it declares one.
+
+    Reported with an unknown unit because that is the question worth asking
+    first: `hermes-calendar-triage` was not merely uncaptured, it was the one
+    process on the box running as root.
+    """
+    try:
+        text = unit.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    match = re.search(r"^\s*User\s*=\s*(\S+)", text, re.M)
+    return match.group(1) if match else None
+
+
+def installed_units(
+    systemd_dir: Path, unit_globs: list[str] | tuple[str, ...]
+) -> dict[str, Path]:
+    """Every matching unit and drop-in on the box, keyed as the manifest keys it.
+
+    Shared by ``capture`` and ``check`` on purpose: the check's question is
+    "what is installed that the snapshot does not know about", and it can only
+    ask that if it enumerates the box exactly the way capture did.
+    """
+    found: dict[str, Path] = {}
+    for pattern in unit_globs:
+        for unit in sorted(systemd_dir.glob(pattern)):
+            if unit.is_file():
+                found[unit.name] = unit
+        for dropin_dir in sorted(systemd_dir.glob(pattern + ".d")):
+            for dropin in sorted(dropin_dir.glob("*.conf")):
+                found[f"{dropin_dir.name}/{dropin.name}"] = dropin
+    return found
 
 
 def check(deployment: str, state_root: Path | None = None) -> list[dict[str, str]]:
@@ -630,7 +656,31 @@ def check(deployment: str, state_root: Path | None = None) -> list[dict[str, str
                 })
 
     systemd_dir = Path(str(manifest["systemd_dir"]))
-    for name, expected in (manifest.get("units") or {}).items():
+    expected_units = manifest.get("units") or {}
+
+    # A unit the snapshot has never heard of is the failure this check was
+    # written for: `hermes-calendar-triage` ran as root for weeks because it was
+    # installed by hand, and every check passed — they all walked the manifest
+    # and none of them asked the box what else was there.
+    globs = [str(pattern) for pattern in manifest.get("unit_globs") or []]
+    for name, unit in installed_units(
+        systemd_dir, globs or list(DEFAULT_UNIT_GLOBS)
+    ).items():
+        if name in expected_units:
+            continue
+        facts = facts_or_note(unit, f"unit:{name}", findings)
+        runs_as = _unit_user(unit) if facts is not None else None
+        findings.append({
+            "severity": SEVERITY_DRIFT,
+            "component": f"unit:{name}",
+            "expected": "in the snapshot",
+            "actual": f"installed, runs as {runs_as or 'root (no User=)'}",
+            "detail": "a unit nobody captured — it is not in the reviewed"
+            " privilege model and a rebuild would not recreate it; capture it"
+            " or remove it",
+        })
+
+    for name, expected in expected_units.items():
         installed = systemd_dir / name
         committed = out / SYSTEMD_DIRNAME / name
         if not installed.is_file():
