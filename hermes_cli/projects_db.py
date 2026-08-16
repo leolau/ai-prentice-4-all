@@ -299,6 +299,21 @@ CREATE TABLE IF NOT EXISTS project_run_cards (
     step_key  TEXT,                  -- the playbook step it came from, when any
     PRIMARY KEY (run_id, task_id)
 );
+
+-- Skill candidates a run's retro proposed (design §8.2 row 3). The row adds
+-- no mechanism — the shipped background-review loop still distils skills and
+-- FG-29 still promotes them; a project's contribution is *provenance*: the
+-- candidate records the project and run it came from.
+CREATE TABLE IF NOT EXISTS project_skill_candidates (
+    id          TEXT PRIMARY KEY,
+    project_id  TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    run_no      INTEGER NOT NULL,
+    name        TEXT NOT NULL,
+    body        TEXT NOT NULL,
+    created_at  INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_project_skill_candidates
+    ON project_skill_candidates(project_id, created_at DESC);
 """
 
 
@@ -1942,10 +1957,10 @@ def save_playbook_rev(
         rev = int(row["m"]) + 1
         conn.execute(
             """INSERT INTO project_playbook
-               (project_id, rev, body, steps, active, created_by, created_at)
-               VALUES (?, ?, ?, ?, 0, ?, ?)""",
+               (project_id, rev, body, steps, active, created_by, created_at, note)
+               VALUES (?, ?, ?, ?, 0, ?, ?, ?)""",
             (project_id, rev, str(body or ""), json.dumps(cleaned),
-             created_by, _now()),
+             created_by, _now(), note),
         )
     return rev
 
@@ -2033,10 +2048,14 @@ def add_project_directive(
     rating: Optional[str] = None,
     author_user_id: str,
     max_active: int = 20,
+    active: bool = True,
 ) -> str:
     """Add guidance (§5). The active set is capped: adding directive N+1 is
     refused with *retire one first* — a monotonically growing instruction
-    list is a tax on every run (§5.2)."""
+    list is a tax on every run (§5.2).
+
+    ``active=False`` proposes the directive (§8.2): it lands inactive and
+    consumes no cap slot until a member activates it."""
     if kind not in VALID_DIRECTIVE_KINDS:
         raise ValueError(f"kind must be one of {sorted(VALID_DIRECTIVE_KINDS)}")
     if scope not in VALID_DIRECTIVE_SCOPES:
@@ -2049,25 +2068,62 @@ def add_project_directive(
     if rating is not None and rating not in ("good", "bad"):
         raise ValueError("rating must be 'good' or 'bad'")
     with write_txn(conn):
-        n = conn.execute(
-            "SELECT COUNT(*) AS n FROM project_directives "
-            "WHERE project_id = ? AND active = 1",
-            (project_id,),
-        ).fetchone()["n"]
-        if n >= max_active:
-            raise ValueError(
-                f"directive cap reached ({max_active} active): retire one first"
-            )
+        if active:
+            n = conn.execute(
+                "SELECT COUNT(*) AS n FROM project_directives "
+                "WHERE project_id = ? AND active = 1",
+                (project_id,),
+            ).fetchone()["n"]
+            if n >= max_active:
+                raise ValueError(
+                    f"directive cap reached ({max_active} active): retire one first"
+                )
         did = _new_row_id("dir")
         conn.execute(
             """INSERT INTO project_directives
                (id, project_id, kind, body, scope, target_ref, rating,
                 author_user_id, created_at, active)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1)""",
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (did, project_id, kind, text, scope, target_ref, rating,
-             str(author_user_id).strip(), _now()),
+             str(author_user_id).strip(), _now(), 1 if active else 0),
         )
     return did
+
+
+def activate_project_directive(
+    conn: sqlite3.Connection,
+    directive_id: str,
+    *,
+    max_active: int = 20,
+) -> bool:
+    """Activate a **proposed** directive (§8.2): any member may cross it.
+
+    Only rows that were proposed (``active=0`` and never retired) can be
+    activated; the active-set cap is enforced at the crossing, not at
+    proposal time. Returns False when there is nothing to activate.
+    Raises ValueError when the cap blocks the crossing."""
+    with write_txn(conn):
+        row = conn.execute(
+            "SELECT project_id FROM project_directives "
+            "WHERE id = ? AND active = 0 AND retired_at IS NULL",
+            (directive_id,),
+        ).fetchone()
+        if row is None:
+            return False
+        n = conn.execute(
+            "SELECT COUNT(*) AS n FROM project_directives "
+            "WHERE project_id = ? AND active = 1",
+            (row["project_id"],),
+        ).fetchone()["n"]
+        if n >= max_active:
+            raise ValueError(
+                f"directive cap reached ({max_active} active): retire one first"
+            )
+        conn.execute(
+            "UPDATE project_directives SET active = 1 WHERE id = ?",
+            (directive_id,),
+        )
+    return True
 
 
 def retire_project_directive(conn: sqlite3.Connection, directive_id: str) -> bool:
@@ -2095,6 +2151,66 @@ def list_project_directives(
     # a later instruction visibly wins (§5.2).
     sql += " ORDER BY created_at DESC, rowid DESC"
     return [dict(r) for r in conn.execute(sql, (project_id,)).fetchall()]
+
+
+def list_proposed_directives(
+    conn: sqlite3.Connection,
+    project_id: str,
+) -> List[dict]:
+    """Proposed-but-inactive directives (§8.2): ``active=0`` and never
+    retired — the rows a run's retro proposed, waiting for a member."""
+    rows = conn.execute(
+        "SELECT * FROM project_directives "
+        "WHERE project_id = ? AND active = 0 AND retired_at IS NULL "
+        "ORDER BY created_at DESC, rowid DESC",
+        (project_id,),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# Skill candidates (design §8.2 row 3) — provenance only, no mechanism
+# ---------------------------------------------------------------------------
+
+
+def add_skill_candidate(
+    conn: sqlite3.Connection,
+    *,
+    project_id: str,
+    run_no: int,
+    name: str,
+    body: str,
+) -> str:
+    """Record a skill a run's retro proposed. The row is pure provenance —
+    it records the project and run the candidate came from; the shipped
+    skills loop (§8.2) does the distilling and promoting."""
+    candidate_name = str(name or "").strip()
+    if not candidate_name:
+        raise ValueError("skill candidate name must not be empty")
+    text = str(body or "").strip()
+    if not text:
+        raise ValueError("skill candidate body must not be empty")
+    cid = _new_row_id("skc")
+    with write_txn(conn):
+        conn.execute(
+            """INSERT INTO project_skill_candidates
+               (id, project_id, run_no, name, body, created_at)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (cid, project_id, int(run_no), candidate_name, text, _now()),
+        )
+    return cid
+
+
+def list_skill_candidates(
+    conn: sqlite3.Connection,
+    project_id: str,
+) -> List[dict]:
+    rows = conn.execute(
+        "SELECT * FROM project_skill_candidates WHERE project_id = ? "
+        "ORDER BY created_at DESC, rowid DESC",
+        (project_id,),
+    ).fetchall()
+    return [dict(r) for r in rows]
 
 
 # ---------------------------------------------------------------------------

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 
 import pytest
 
@@ -209,6 +210,76 @@ def test_run_dry_without_a_playbook_explains_itself(env, tmp_path, capsys):
     assert run("run", slug, "--dry-run") == 1
     err = capsys.readouterr().err
     assert "no playbook" in err
+
+
+# ---------------------------------------------------------------------------
+# retro proposals + the member activation crossing (§8.2, step 10)
+# ---------------------------------------------------------------------------
+
+
+def test_retro_proposals_land_inactive_and_activate(env, tmp_path, monkeypatch, capsys):
+    import io
+
+    from hermes_cli import projects_db
+
+    run, _capsys = env
+    slug = _create(run, capsys, tmp_path)
+    with projects_db.connect_closing() as conn:
+        project = projects_db.get_project(conn, slug)
+        projects_db.open_project_run(
+            conn, project_id=project.id, trigger="manual", profile="default"
+        )
+
+    monkeypatch.setattr(
+        sys, "stdin", io.StringIO("Compiled and sent; the tone was too formal.")
+    )
+    assert run(
+        "retro", slug, "1", "--write",
+        "--propose", "directive=Never email before 9am",
+        "--propose", "skill=Keep the digest conversational.",
+    ) == 0
+    out = capsys.readouterr().out
+    assert "Retro saved for run 1" in out
+    assert "proposed directive" in out and "inactive" in out
+    assert "recorded skill candidate" in out
+
+    # The proposal shows up in the guidance list, awaiting a member.
+    assert run("guidance", slug) == 0
+    out = capsys.readouterr().out
+    assert "Never email before 9am" in out
+    assert "inactive until a member activates" in out
+    directive_id = [
+        token for token in out.replace("(", " ").replace(")", " ").split()
+        if token.startswith("dir_")
+    ][0]
+
+    # Any member crosses it — and it applies from the next run.
+    assert run("guidance", slug, "activate", directive_id) == 0
+    out = capsys.readouterr().out
+    assert "Activated instruction" in out and "next run" in out
+
+    assert run("guidance", slug) == 0
+    out = capsys.readouterr().out
+    assert "Never email before 9am" in out
+    assert "inactive until a member activates" not in out
+
+
+def test_retro_refuses_a_malformed_proposal(env, tmp_path, monkeypatch, capsys):
+    import io
+
+    from hermes_cli import projects_db
+
+    run, _capsys = env
+    slug = _create(run, capsys, tmp_path)
+    with projects_db.connect_closing() as conn:
+        project = projects_db.get_project(conn, slug)
+        projects_db.open_project_run(
+            conn, project_id=project.id, trigger="manual", profile="default"
+        )
+
+    monkeypatch.setattr(sys, "stdin", io.StringIO("A retro."))
+    assert run("retro", slug, "1", "--write", "--propose", "memory=x") == 2
+    assert "kind one of" in capsys.readouterr().err
 
 
 def test_doctor_healthy_box(env, capsys):

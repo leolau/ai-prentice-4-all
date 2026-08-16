@@ -22,6 +22,9 @@ export function GuidancePanel({
   const [directives, setDirectives] = useState<ProjectDirective[]>(
     initial?.directives ?? [],
   );
+  const [proposed, setProposed] = useState<ProjectDirective[]>(
+    initial?.proposed ?? [],
+  );
   const [draft, setDraft] = useState("");
   const [busy, setBusy] = useState(false);
   const [busyId, setBusyId] = useState<string | null>(null);
@@ -64,6 +67,28 @@ export function GuidancePanel({
       );
       if (!res.ok) throw new Error("retire");
       setDirectives((prev) => prev.filter((row) => row.id !== directiveId));
+    } catch {
+      setError("That didn't stick — try again.");
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  /** §8.2: a run proposed it in its retro; any member may cross it. */
+  const activate = async (directiveId: string) => {
+    setBusyId(directiveId);
+    setError(null);
+    try {
+      const res = await fetch(
+        `/api/projects/${encodeURIComponent(slug)}/directives/${encodeURIComponent(directiveId)}/activate`,
+        { method: "POST" },
+      );
+      if (!res.ok) throw new Error("activate");
+      const row = proposed.find((p) => p.id === directiveId);
+      setProposed((prev) => prev.filter((p) => p.id !== directiveId));
+      if (row) {
+        setDirectives((prev) => [{ ...row, active: 1 }, ...prev]);
+      }
     } catch {
       setError("That didn't stick — try again.");
     } finally {
@@ -136,6 +161,42 @@ export function GuidancePanel({
               </li>
             ) : null}
           </ul>
+
+          {proposed.length > 0 ? (
+            <div className="mt-3" data-component="ProposedDirectives">
+              <h3 className="text-xs font-medium text-[var(--color-muted)]">
+                Proposed by runs — inactive until you activate
+              </h3>
+              <ul className="mt-1.5 flex flex-col gap-2">
+                {proposed.map((directive) => (
+                  <li
+                    key={directive.id}
+                    className="rounded-lg border border-dashed border-[var(--color-border)] bg-[var(--color-surface-2)] px-3 py-2 text-sm"
+                  >
+                    <p>{directive.body}</p>
+                    <p className="mt-1 flex items-center justify-between text-xs text-[var(--color-muted)]">
+                      <span>
+                        {directive.author_user_id} ·{" "}
+                        {agoLabel(directive.created_at)}
+                      </span>
+                      <BusyRegion
+                        busy={busyId === directive.id}
+                        label="Activating…"
+                      >
+                        <button
+                          type="button"
+                          onClick={() => void activate(directive.id)}
+                          className="text-[var(--color-accent)] underline"
+                        >
+                          Activate
+                        </button>
+                      </BusyRegion>
+                    </p>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
 
           {error ? (
             <p className="mt-2 text-sm text-red-300">{error}</p>

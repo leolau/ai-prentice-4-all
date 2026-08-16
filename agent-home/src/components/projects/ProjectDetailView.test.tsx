@@ -14,6 +14,7 @@ import { RunView } from "@/components/projects/RunView";
 import { BoardPanel } from "@/components/projects/panels/BoardPanel";
 import { BriefPanel } from "@/components/projects/panels/BriefPanel";
 import { FilesPanel } from "@/components/projects/panels/FilesPanel";
+import { GuidancePanel } from "@/components/projects/panels/GuidancePanel";
 import { LinkRow } from "@/components/projects/panels/LinkRow";
 import { MemoriesPanel } from "@/components/projects/panels/MemoriesPanel";
 import { OutputsPanel } from "@/components/projects/panels/OutputsPanel";
@@ -27,6 +28,7 @@ import type {
   ProjectBoardTask,
   ProjectBoardView,
   ProjectDetail,
+  ProjectDirective,
   ProjectLink,
   ProjectOutputWithDeliveries,
   ProjectPlaybookResponse,
@@ -242,6 +244,55 @@ describe("detail panels", () => {
     expect(html).toContain("Draft it");
     expect(html).toContain("Send it");
     expect(html).toContain("revision 3");
+  });
+
+  it("PlanPanel shows a retro's proposed revision awaiting activation", () => {
+    const playbook: ProjectPlaybookResponse = {
+      active: null,
+      revisions: [
+        {
+          project_id: "prj_1",
+          rev: 2,
+          body: "Draft, then read it aloud before sending.",
+          steps: [],
+          active: 0,
+          created_by: "leo",
+          created_at: NOW - 3_600,
+          activated_at: null,
+          note: "proposed by run 14",
+        },
+      ],
+    };
+    const html = renderToStaticMarkup(<PlanPanel playbook={playbook} />);
+    expect(html).toContain('data-component="ProposedRevisions"');
+    expect(html).toContain("awaiting activation");
+    expect(html).toContain("proposed by run 14");
+  });
+
+  it("GuidancePanel shows proposed directives with the member's Activate", () => {
+    const proposed: ProjectDirective = {
+      id: "dir_1",
+      project_id: "prj_1",
+      kind: "directive",
+      body: "Never email before 9am",
+      scope: "project",
+      target_ref: null,
+      rating: null,
+      author_user_id: "leo",
+      created_at: NOW - 3_600,
+      active: 0,
+      retired_at: null,
+      superseded_by: null,
+    };
+    const html = renderToStaticMarkup(
+      <GuidancePanel
+        slug="monday-digest"
+        initial={{ directives: [], proposed: [proposed], applies_from: "next run" }}
+      />,
+    );
+    expect(html).toContain('data-component="ProposedDirectives"');
+    expect(html).toContain("Never email before 9am");
+    expect(html).toContain("Activate");
   });
 
   it("PeoplePanel marks the host profile", () => {
