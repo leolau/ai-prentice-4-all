@@ -2,8 +2,10 @@ import Link from "next/link";
 
 import { LogoutButton } from "@/components/LogoutButton";
 import { MobileShell } from "@/components/MobileShell";
-import { requirePrincipal } from "@/lib/auth/principal";
+import { ProjectsHomeCard } from "@/components/projects/ProjectsHomeCard";
+import { apiClientForRequest, requirePrincipal } from "@/lib/auth/principal";
 import { scopedSelect } from "@/lib/supabase/context";
+import type { ProjectListItem } from "@/types";
 
 // The seam proof reads the live principal (cookie) + Supabase, so it must
 // render per-request, never at build time.
@@ -33,6 +35,18 @@ export default async function HomePage() {
     });
   } catch (err) {
     readError = err instanceof Error ? err.message : "scoped read failed";
+  }
+
+  // The first-class Projects card (§13): active projects with their health
+  // and next run. Best-effort like the nav badge — a projects fetch failure
+  // must not blank Home, so the card simply stays absent.
+  let activeProjects: ProjectListItem[] | null = null;
+  try {
+    const client = await apiClientForRequest();
+    const response = await client.projects({ status: "active", limit: 5 });
+    activeProjects = response.items;
+  } catch {
+    activeProjects = null;
   }
 
   return (
@@ -96,6 +110,8 @@ export default async function HomePage() {
           never sees rows it may not.
         </p>
       </section>
+
+      {activeProjects ? <ProjectsHomeCard items={activeProjects} /> : null}
 
       <nav
         data-component="HomeLinks"

@@ -1,7 +1,8 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
-import { PAGE_SIZE, UsersView } from "@/components/users/UsersView";
+import { UsersView } from "@/components/users/UsersView";
+import { PAGE_SIZE } from "@/components/users/api";
 import type { DirectoryResponse, Member, MembersResponse } from "@/types";
 
 const DIRECTORY: DirectoryResponse = {
