@@ -61,6 +61,9 @@ export function RunsPanel({
                   {durationLabel(run.duration_seconds)}
                   {run.outcome ? ` · ${run.outcome}` : ""}
                   {run.score_user != null ? ` · ${run.score_user}/5` : ""}
+                  {run.score_self != null
+                    ? ` · self ${run.score_self}/5 ⚠ diverges`
+                    : ""}
                 </span>
                 <Pill tone={RUN_TONE[run.status]}>{run.status}</Pill>
               </Link>

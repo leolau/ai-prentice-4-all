@@ -181,6 +181,27 @@ def test_card_add_from_todo_promotes(env, tmp_path, monkeypatch, capsys):
 # ---------------------------------------------------------------------------
 
 
+def test_score_verb_goes_through_the_human_gate(env, tmp_path, capsys):
+    """The CLI claims the operator surface — the same seam it patches for
+    principals lets `score` through the §8.1 human-only gate."""
+    from hermes_cli import projects_db
+
+    run, _capsys = env
+    slug = _create(run, capsys, tmp_path)
+    with projects_db.connect_closing() as conn:
+        project = projects_db.get_project(conn, slug)
+        projects_db.open_project_run(
+            conn, project_id=project.id, trigger="manual", profile="default"
+        )
+
+    assert run("score", slug, "1", "3", "--note", "too formal") == 0
+    out = capsys.readouterr().out
+    assert "Scored run 1" in out and "3/5" in out and "too formal" in out
+
+    assert run("show", slug) == 0
+    assert "score: 3.0 (last 1 runs)" in capsys.readouterr().out
+
+
 def test_run_dry_without_a_playbook_explains_itself(env, tmp_path, capsys):
     run, _capsys = env
     slug = _create(run, capsys, tmp_path)

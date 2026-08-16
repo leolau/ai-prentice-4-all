@@ -1563,6 +1563,23 @@ export class HermesApiClient {
     );
   }
 
+  /** §8.1: score a run 1–5 — human-only, editable, never agent-writable. */
+  async scoreProjectRun(
+    slug: string,
+    runNo: number,
+    payload: { score: number; note?: string },
+  ): Promise<{
+    scored: number;
+    score_user: number;
+    score_note: string | null;
+    by: string;
+  }> {
+    return this.request(
+      `/api/registry/projects/${encodeURIComponent(slug)}/runs/${encodeURIComponent(runNo)}/score`,
+      { method: "POST", json: payload },
+    );
+  }
+
   /** Set toolsets/skills; returns the resolved host-profile intersection (§4.1). */
   async setProjectTools(
     slug: string,
