@@ -1466,7 +1466,11 @@ export interface ProjectDirectivesResponse {
 
 /** The whole record in one read (`GET /{slug}`). */
 export interface ProjectDetail extends Project {
-  folders: ProjectFolder[];
+  /**
+   * Optional in practice: the Python payload pops `folders` out of the base
+   * row and the detail read does not re-attach it yet. Read defensively.
+   */
+  folders?: ProjectFolder[];
   outputs: ProjectOutputWithDeliveries[];
   members: ProjectMember[];
   profiles: ProjectProfileRow[];
@@ -1534,10 +1538,45 @@ export interface ProjectToolsResolution {
   skills_truncated: boolean;
 }
 
+/** A task row on the project board, as `kanban_view.task_dict` returns it. */
+export interface ProjectBoardTask {
+  id: string;
+  title: string;
+  body: string | null;
+  status: string;
+  assignee: string | null;
+  priority: number;
+  created_at: number;
+  started_at: number | null;
+  completed_at: number | null;
+  tenant: string | null;
+  project_id: string | null;
+  result: string | null;
+  current_step_key: string | null;
+  [extra: string]: unknown;
+}
+
 /** A column of the project's board (`GET /{slug}/board`). */
 export interface ProjectBoardColumn {
   name: string;
-  tasks: Record<string, unknown>[];
+  tasks: ProjectBoardTask[];
+}
+
+/** The derived age metrics `kanban_view.task_dict` joins onto every task. */
+export interface ProjectCardAge {
+  created_age_seconds: number | null;
+  started_age_seconds: number | null;
+  time_to_complete_seconds: number | null;
+}
+
+/**
+ * `GET /{slug}/cards/{task_id}` — `kanban_view.task_dict` verbatim: the
+ * board row plus the age metrics and (when the caller passes one) the
+ * latest run summary.
+ */
+export interface ProjectCardDetail extends ProjectBoardTask {
+  age?: ProjectCardAge | null;
+  latest_summary?: string | null;
 }
 
 export interface ProjectBoardView {

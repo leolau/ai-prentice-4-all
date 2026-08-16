@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useState } from "react";
 
 import { surfaceGlyph } from "@/components/inbox/IncomingRow";
+import { AddToProjectSheet } from "@/components/projects/AddToProjectSheet";
 import { TodoCompleteForm } from "@/components/todos/TodoCompleteForm";
 import { STAGE_LABEL, sourceGlyph } from "@/components/todos/TodoRow";
 import { formatWhen } from "@/components/files/FilesView";
@@ -48,6 +49,7 @@ export function TodoDetailView({ todo }: { todo: TodoDetail }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [sessionLink, setSessionLink] = useState<string | null>(null);
+  const [addOpen, setAddOpen] = useState(false);
 
   async function post(path: string, body: unknown) {
     setBusy(true);
@@ -127,6 +129,15 @@ export function TodoDetailView({ todo }: { todo: TodoDetail }) {
                 {STAGE_VERB[stage]}
               </button>
             ))}
+          {/* "Add to project" (§13): the user is here when they realise the
+              to-do belongs to something bigger — link it from both ends. */}
+          <button
+            type="button"
+            onClick={() => setAddOpen(true)}
+            className="rounded-lg border border-[var(--color-border)] px-2 py-1 text-[var(--color-muted)] transition hover:border-[var(--color-accent)] hover:text-[var(--color-accent)]"
+          >
+            Add to project
+          </button>
         </div>
 
         {/* “Work on this” moves to working AND spawns a seeded session.
@@ -349,6 +360,13 @@ export function TodoDetailView({ todo }: { todo: TodoDetail }) {
             ))}
           </ul>
         </div>
+      ) : null}
+
+      {addOpen ? (
+        <AddToProjectSheet
+          onClose={() => setAddOpen(false)}
+          prefill={{ kind: "todo", ref: current.id, label: current.title }}
+        />
       ) : null}
     </div>
   );

@@ -56,6 +56,7 @@ import type {
   ProfilesResponse,
   Project,
   ProjectBoardView,
+  ProjectCardDetail,
   ProjectContact,
   ProjectDetail,
   ProjectDirectivesResponse,
@@ -1245,7 +1246,7 @@ export class HermesApiClient {
   async projectCard(
     slug: string,
     taskId: string,
-  ): Promise<Record<string, unknown>> {
+  ): Promise<ProjectCardDetail> {
     return this.request(
       `/api/registry/projects/${encodeURIComponent(slug)}/cards/${encodeURIComponent(taskId)}`,
     );

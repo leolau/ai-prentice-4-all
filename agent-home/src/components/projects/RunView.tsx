@@ -1,0 +1,303 @@
+"use client";
+
+import Link from "next/link";
+import { useRouter } from "next/navigation";
+import { useState } from "react";
+
+import {
+  dateTimeLabel,
+  durationLabel,
+} from "@/components/projects/format";
+import { BusyRegion } from "@/components/ui/BusyRegion";
+import { Pill, type Tone } from "@/components/ui/Pill";
+import type { ProjectDelivery, ProjectRun, ProjectRunStatus } from "@/types";
+
+const RUN_TONE: Record<ProjectRunStatus, Tone> = {
+  running: "accent",
+  waiting: "warning",
+  blocked: "danger",
+  done: "success",
+  failed: "danger",
+  cancelled: "muted",
+};
+
+function deliveryLabel(delivery: ProjectDelivery): string {
+  const what = delivery.label ?? delivery.link_ref ?? "an artefact";
+  const how =
+    delivery.run_id != null
+      ? "on a run"
+      : delivery.task_id != null
+        ? "from a card"
+        : "by hand";
+  return `${what} — delivered ${how}`;
+}
+
+/**
+ * One run's page (§7): what it did — cards, deliveries, cost, outcome — and
+ * the two things a human writes about it afterwards, the retro and (step 9b)
+ * the score. Continue passes a checkpoint; Cancel stops promoting without
+ * killing a worker; "Repeat this run" starts a new one on the same method.
+ */
+export function RunView({
+  slug,
+  run: initial,
+}: {
+  slug: string;
+  run: ProjectRun;
+}) {
+  const router = useRouter();
+  const [run, setRun] = useState(initial);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [retroDraft, setRetroDraft] = useState(initial.retro ?? "");
+  const [retroSaved, setRetroSaved] = useState(false);
+
+  const slugPath = `/api/projects/${encodeURIComponent(slug)}`;
+  const runPath = `${slugPath}/runs/${run.run_no}`;
+
+  const post = async (
+    path: string,
+    body?: Record<string, unknown>,
+    /** Continue/cancel answer with the updated run row; merge it in. */
+    mergeUpdatedRun = false,
+  ): Promise<boolean> => {
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await fetch(path, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: body !== undefined ? JSON.stringify(body) : undefined,
+      });
+      const data = (await res.json().catch(() => ({}))) as {
+        detail?: string;
+      };
+      if (!res.ok) {
+        setError(data.detail ?? "That did not go through.");
+        return false;
+      }
+      if (mergeUpdatedRun) {
+        const updated = data as Partial<ProjectRun>;
+        if (updated.status) setRun({ ...run, ...updated });
+      }
+      return true;
+    } catch {
+      setError("Could not reach the server.");
+      return false;
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const saveRetro = async () => {
+    const text = retroDraft.trim();
+    if (!text) return;
+    setRetroSaved(false);
+    if (await post(`${runPath}/retro`, { retro: text })) {
+      setRun({ ...run, retro: text });
+      setRetroSaved(true);
+    }
+  };
+
+  const deliveries = Array.isArray(run.deliveries) ? run.deliveries : [];
+  const cards = run.cards ?? [];
+  const live =
+    run.status === "running" ||
+    run.status === "waiting" ||
+    run.status === "blocked";
+
+  return (
+    <div data-component="RunView" className="flex flex-col gap-4">
+      <BusyRegion busy={busy} label={busy ? "Talking to the agent…" : undefined}>
+        <div className="flex flex-col gap-4">
+          {/* ── Headline ──────────────────────────────────────────── */}
+          <header
+            data-component="RunHeader"
+            className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface)] p-4"
+          >
+            <div className="flex items-center gap-2">
+              <h1 className="min-w-0 flex-1 truncate text-lg font-semibold">
+                Run #{run.run_no}
+              </h1>
+              <Pill tone={RUN_TONE[run.status]}>{run.status}</Pill>
+            </div>
+            <p className="mt-1 text-xs text-[var(--color-muted)]">
+              {run.trigger} · on {run.profile} · started{" "}
+              {dateTimeLabel(run.started_at)} ·{" "}
+              {durationLabel(run.duration_seconds)}
+              {run.playbook_rev != null ? ` · plan rev ${run.playbook_rev}` : ""}
+            </p>
+            <p className="mt-1 text-xs text-[var(--color-muted)]">
+              cost:{" "}
+              {run.cost != null
+                ? `$${run.cost.toFixed(2)}`
+                : run.cost_recorded === false
+                  ? "not recorded"
+                  : "—"}
+            </p>
+            {run.outcome ? (
+              <p className="mt-2 text-sm">{run.outcome}</p>
+            ) : null}
+            {run.summary ? (
+              <p className="mt-1 text-sm text-[var(--color-muted)]">
+                {run.summary}
+              </p>
+            ) : null}
+            {run.error ? (
+              <p className="mt-1 text-sm text-red-400">{run.error}</p>
+            ) : null}
+            {run.score_user != null || run.score_self != null ? (
+              <p className="mt-2 text-xs text-[var(--color-muted)]">
+                score:
+                {run.score_user != null ? ` ${run.score_user}/5 (you)` : ""}
+                {run.score_self != null ? ` · ${run.score_self}/5 (self)` : ""}
+                {run.score_note ? ` — ${run.score_note}` : ""}
+              </p>
+            ) : null}
+
+            <div className="mt-3 flex flex-wrap gap-2">
+              {run.status === "waiting" ? (
+                <button
+                  type="button"
+                  onClick={() => void post(`${runPath}/continue`, undefined, true)}
+                  disabled={busy}
+                  className="rounded-xl bg-[var(--color-accent)] px-4 py-2 text-sm font-medium text-[var(--color-accent-fg)] disabled:opacity-50"
+                >
+                  Continue
+                </button>
+              ) : null}
+              {live ? (
+                <button
+                  type="button"
+                  onClick={() => void post(`${runPath}/cancel`, undefined, true)}
+                  disabled={busy}
+                  className="rounded-xl border border-red-500/50 px-4 py-2 text-sm text-red-400 disabled:opacity-50"
+                >
+                  Cancel
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() =>
+                    void post(
+                      `${slugPath}/runs`,
+                      run.playbook_rev != null
+                        ? { playbook_rev: run.playbook_rev }
+                        : {},
+                    ).then((ok) => {
+                      if (ok) router.push(`/projects/${encodeURIComponent(slug)}`);
+                    })
+                  }
+                  disabled={busy}
+                  className="rounded-xl border border-[var(--color-border)] px-4 py-2 text-sm disabled:opacity-50"
+                >
+                  Repeat this run
+                </button>
+              )}
+            </div>
+
+            {error ? (
+              <p className="mt-2 text-sm text-red-400" role="alert">
+                {error}
+              </p>
+            ) : null}
+          </header>
+
+          {/* ── Cards ─────────────────────────────────────────────── */}
+          <section
+            data-component="RunCards"
+            className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface)] p-4"
+          >
+            <h2 className="text-xs uppercase tracking-wide text-[var(--color-muted)]">
+              Cards
+            </h2>
+            {cards.length === 0 ? (
+              <p className="mt-2 text-sm text-[var(--color-muted)]">
+                This run worked without cards.
+              </p>
+            ) : (
+              <ul className="mt-2 flex flex-col gap-1.5">
+                {cards.map((card) => (
+                  <li key={card.task_id}>
+                    <Link
+                      href={`/projects/${encodeURIComponent(slug)}/cards/${encodeURIComponent(card.task_id)}`}
+                      className="flex items-center gap-2 rounded-lg bg-[var(--color-surface-2)] px-3 py-2 text-sm active:opacity-70"
+                    >
+                      <span className="min-w-0 flex-1 truncate">
+                        {card.title ?? card.task_id}
+                      </span>
+                      <span className="text-xs text-[var(--color-muted)]">
+                        {[card.step_key, card.status].filter(Boolean).join(" · ")}
+                      </span>
+                    </Link>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </section>
+
+          {/* ── Deliveries ────────────────────────────────────────── */}
+          <section
+            data-component="RunDeliveries"
+            className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface)] p-4"
+          >
+            <h2 className="text-xs uppercase tracking-wide text-[var(--color-muted)]">
+              Delivered
+            </h2>
+            {deliveries.length === 0 ? (
+              <p className="mt-2 text-sm text-[var(--color-muted)]">
+                Nothing was delivered on this run.
+              </p>
+            ) : (
+              <ul className="mt-2 flex flex-col gap-1.5">
+                {deliveries.map((delivery) => (
+                  <li
+                    key={delivery.id}
+                    className="rounded-lg bg-[var(--color-surface-2)] px-3 py-2 text-sm"
+                  >
+                    {deliveryLabel(delivery)}
+                    <span className="ml-2 text-xs text-[var(--color-muted)]">
+                      {dateTimeLabel(delivery.delivered_at)}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </section>
+
+          {/* ── Retro ─────────────────────────────────────────────── */}
+          <section
+            data-component="RunRetro"
+            className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface)] p-4"
+          >
+            <h2 className="text-xs uppercase tracking-wide text-[var(--color-muted)]">
+              Retrospective
+            </h2>
+            <textarea
+              className="mt-2 min-h-24 w-full rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-2)] px-3 py-2 text-sm"
+              placeholder="What worked, what didn't, what to change next time…"
+              value={retroDraft}
+              onChange={(e) => {
+                setRetroDraft(e.target.value);
+                setRetroSaved(false);
+              }}
+            />
+            <div className="mt-2 flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => void saveRetro()}
+                disabled={busy || !retroDraft.trim()}
+                className="rounded-xl bg-[var(--color-accent)] px-4 py-2 text-sm font-medium text-[var(--color-accent-fg)] disabled:opacity-50"
+              >
+                Save retro
+              </button>
+              {retroSaved ? (
+                <span className="text-xs text-[var(--color-muted)]">saved</span>
+              ) : null}
+            </div>
+          </section>
+        </div>
+      </BusyRegion>
+    </div>
+  );
+}
