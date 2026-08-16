@@ -393,6 +393,67 @@ export interface ProfilesResponse {
   profiles: ProfileSummary[];
 }
 
+/**
+ * FG-30 — a profile suggestion: a proposal (with evidence) that work in one
+ * profile has clustered into a distinct sub-goal deserving its own profile.
+ *
+ * `evidence` is the JSONB the suggestion was raised on, returned verbatim
+ * by the Python API. Per §4.2 T3 Q1 the aux-LLM prompt no longer carries the
+ * roster, but the stored blob still does; a renderer must not surface it raw
+ * (see the suggestion queue screen, which renders the prompt slice).
+ */
+export interface ProfileSuggestion {
+  id: string;
+  proposed_name: string;
+  proposed_role: string;
+  proposed_goal: string;
+  parent_goal_id: string | null;
+  rationale: string;
+  evidence: Record<string, unknown>;
+  dedup_key: string;
+  origin_profile: string;
+  status: "proposed" | "adopted" | "dismissed";
+  reviewed_by: string | null;
+  reviewed_at: string | null;
+  created_at: string | null;
+}
+
+/**
+ * A reviewed suggestion as the trail renders it. Deliberately narrower than
+ * `ProfileSuggestion`: no `evidence`, because that blob carries the
+ * `participants` roster (§4.2 T3) and the trail shows status, role and goal.
+ */
+export interface ProfileSuggestionSummary {
+  id: string;
+  proposed_name: string;
+  proposed_role: string;
+  proposed_goal: string;
+  status: "proposed" | "adopted" | "dismissed";
+  reviewed_by: string | null;
+  reviewed_at: string | null;
+  created_at: string | null;
+}
+
+export interface ProfileSuggestionsResponse {
+  /** The open card — at most one (§1.1), with its evidence. */
+  suggestions: ProfileSuggestion[];
+  /** A capped trail of decisions already made, without evidence. */
+  reviewed: ProfileSuggestionSummary[];
+}
+
+/** Owner-only adoption returns the new profile's path and goal (§3). */
+export interface ProfileSuggestionAdoptResponse {
+  ok: boolean;
+  name: string;
+  path: string;
+  goal: string;
+}
+
+export interface ProfileSuggestionDismissResponse {
+  ok: boolean;
+  name: string;
+}
+
 /** One conversation's persisted transcript from `GET /api/sessions/{id}/messages`. */
 export interface ChatMessagesResponse {
   session_id: string;
@@ -1628,4 +1689,53 @@ export interface CreateProjectPayload {
   definition_of_done?: string;
   visibility?: ProjectVisibility;
   goal_link?: { ref: string; profile?: string; label?: string };
+}
+
+/**
+ * FG-31 — capacity headroom. One derived verdict plus the reading behind it.
+ *
+ * `binding_constraint` is the point: a percentage does not tell the owner what
+ * to do, and when `hardware_helps` is false a bigger box cannot move the bound
+ * at all (SQLite's single writer), so the UI must not offer an upgrade there.
+ */
+export interface CapacityBound {
+  name: string;
+  state: "comfortable" | "watch" | "constrained";
+  reason: string;
+  hardware_helps: boolean;
+}
+
+export interface CapacityIndicators {
+  active_conversations: number;
+  per_profile: Record<string, number>;
+  cap_here: number | null;
+  /** Sum of every profile's cap; null when any profile leaves it unbounded. */
+  cap_box_wide: number | null;
+  available_mb: number | null;
+  total_mb: number | null;
+  hermes_rss_mb: number | null;
+  by_process: Record<string, number>;
+  write_lock_waits_per_hour: number | null;
+  write_lock_waited_s: number | null;
+  turn_p50_s: number | null;
+  turn_p95_s: number | null;
+  turn_samples: number;
+  profile_count: number;
+}
+
+export interface CapacityResponse {
+  state: "comfortable" | "watch" | "constrained";
+  headline: string;
+  summary: string;
+  binding_constraint: {
+    name: string;
+    reason: string;
+    hardware_helps: boolean;
+  } | null;
+  bounds: CapacityBound[];
+  recommendations: string[];
+  indicators: CapacityIndicators;
+  /** Indicators that could not be read — shown as unknown, never as zero. */
+  unavailable: string[];
+  collected_at: number;
 }

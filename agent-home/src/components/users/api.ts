@@ -6,11 +6,15 @@
  * gate is applied server-side (twice — the BFF for UX, Python as the authority).
  */
 
-// Matches DEFAULT_PAGE_SIZE in hermes_cli/members.py: the server-rendered first
-// page and the client's own fetches must ask for the same number of rows, or
-// paging jumps by one amount and renders another. Lives here — a plain,
-// server-safe module — because `app/users/page.tsx` needs it too, and a value
-// imported from the `"use client"` view arrives there as a broken proxy.
+/**
+ * Matches ``DEFAULT_PAGE_SIZE`` in `hermes_cli/members.py`: the server-rendered
+ * first page and the client's own fetches must ask for the same number of rows,
+ * or paging jumps by one amount and renders another.
+ *
+ * It lives here, in a plain module, rather than in `UsersView` — a server
+ * component may import a *component* from a `"use client"` module, but a plain
+ * value it receives is a client reference, not the number it was written as.
+ */
 export const PAGE_SIZE = 50;
 
 /** A refusal from a BFF route, carrying the status so callers can act on 403. */

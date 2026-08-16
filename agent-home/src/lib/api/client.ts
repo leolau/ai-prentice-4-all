@@ -17,6 +17,7 @@ import "server-only";
 import { hermesApiBaseUrl } from "@/lib/env";
 import type {
   AgentAttachmentPayload,
+  CapacityResponse,
   ChangeOpResponse,
   ChangesResponse,
   ChatMessagesResponse,
@@ -54,6 +55,9 @@ import type {
   OnboardingReadinessResponse,
   Principal,
   ProfilesResponse,
+  ProfileSuggestionAdoptResponse,
+  ProfileSuggestionDismissResponse,
+  ProfileSuggestionsResponse,
   Project,
   ProjectBoardView,
   ProjectCardDetail,
@@ -202,6 +206,60 @@ export class HermesApiClient {
    */
   async profiles(): Promise<ProfilesResponse> {
     return this.request("/api/profiles");
+  }
+
+  // --- Profile suggestions (FG-30) ---------------------------------------
+  // The Python API is the authority: it enforces owner-only adopt/dismiss by
+  // binding the requesting principal (`_comms_resolve_principal`, the #253
+  // fix), and the dedup_key latches a dismissal forever. These methods just
+  // forward; a 403 from upstream is the real gate, not a BFF re-derivation.
+
+  /**
+   * This profile's open suggestion (`suggestions`, at most one per §1.1) plus a
+   * capped `reviewed` trail so the owner keeps a trace of what they just did.
+   * The trail carries no `evidence` — that blob holds the participants roster.
+   * Any enrolled principal may read; adopt/dismiss are owner-only action routes.
+   */
+  async profileSuggestions(): Promise<ProfileSuggestionsResponse> {
+    return this.request("/api/profiles/suggestions");
+  }
+
+  /**
+   * Adopt a suggestion (owner only). Returns the new profile's path and
+   * goal — the new profile is channel-less until the owner commits one (§3).
+   */
+  async adoptProfileSuggestion(
+    suggestionId: string,
+  ): Promise<ProfileSuggestionAdoptResponse> {
+    return this.request(
+      `/api/profiles/suggestions/${encodeURIComponent(suggestionId)}/adopt`,
+      { method: "POST" },
+    );
+  }
+
+  /**
+   * Dismiss a suggestion (owner only). `reason` is optional and recorded in
+   * the C5 audit. A dismissal is **permanent** for that evidence: the
+   * `dedup_key` latches it, so the same cluster is never re-proposed (§1.1).
+   */
+  async dismissProfileSuggestion(
+    suggestionId: string,
+    reason?: string,
+  ): Promise<ProfileSuggestionDismissResponse> {
+    const json = reason ? { reason } : undefined;
+    return this.request(
+      `/api/profiles/suggestions/${encodeURIComponent(suggestionId)}/dismiss`,
+      { method: "POST", json },
+    );
+  }
+
+  /**
+   * FG-31 capacity headroom — one verdict naming the bound that produced it.
+   * Read-only, and box-wide: the active-session registry is profile-local, so
+   * Python aggregates every profile's leases rather than reporting this one's.
+   */
+  async capacity(): Promise<CapacityResponse> {
+    return this.request("/api/capacity");
   }
 
   /** Resolve the C1 principal + role for the current bridged session. */

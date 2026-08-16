@@ -458,9 +458,29 @@ def capture(
     credential_globs: list[str],
     secrets_out: Path | None = None,
     state_root: Path | None = None,
+    allow_narrowing: bool = False,
 ) -> dict[str, Any]:
     """Write the sanitized snapshot, manifest and unit copies into the repo."""
     out = deployment_dir(deployment, state_root)
+    if not allow_narrowing:
+        lost = _narrowed_coverage(
+            deployment,
+            {
+                "unit_globs": list(unit_globs),
+                "credential_globs": list(credential_globs),
+                "deploy_script": deploy_script,
+                "secrets_file": secrets_out,
+            },
+            state_root,
+        )
+        if lost:
+            raise StateError(
+                "this capture would record less than the last one did, so the"
+                " check would go on passing over things nobody is watching any"
+                " more:\n  " + "\n  ".join(lost) + "\nPass the missing argument(s),"
+                " or --allow-narrowing if the coverage is genuinely gone."
+            )
+
     config_path = hermes_home / "config.yaml"
     env_path = hermes_home / ".env"
 
@@ -481,20 +501,11 @@ def capture(
 
     units: dict[str, dict[str, str]] = {}
     unit_out = out / SYSTEMD_DIRNAME
-    for pattern in unit_globs:
-        for unit in sorted(systemd_dir.glob(pattern)):
-            if unit.is_file():
-                target = unit_out / unit.name
-                target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_bytes(unit.read_bytes())
-                units[unit.name] = {"sha256": file_facts(unit)["sha256"]}
-        for dropin_dir in sorted(systemd_dir.glob(pattern + ".d")):
-            for dropin in sorted(dropin_dir.glob("*.conf")):
-                name = f"{dropin_dir.name}/{dropin.name}"
-                target = unit_out / dropin_dir.name / dropin.name
-                target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_bytes(dropin.read_bytes())
-                units[name] = {"sha256": file_facts(dropin)["sha256"]}
+    for name, unit in installed_units(systemd_dir, unit_globs).items():
+        target = unit_out.joinpath(*name.split("/"))
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(unit.read_bytes())
+        units[name] = {"sha256": file_facts(unit)["sha256"]}
 
     credentials: list[dict[str, str]] = []
     for pattern in credential_globs:
@@ -553,6 +564,84 @@ def capture(
         "credentials": [entry["path"] for entry in credentials],
         "secrets_out": str(secrets_out) if secrets_out else None,
     }
+
+
+def _narrowed_coverage(
+    deployment: str, coverage: dict[str, Any], state_root: Path | None
+) -> list[str]:
+    """What the previous manifest watched and this one would stop watching.
+
+    Coverage is decided by the arguments on one long command line, and a
+    forgotten one does not fail: it writes a smaller record, after which `check`
+    reports "no drift" about a box it is no longer looking at. That happened —
+    a capture run without `--credential-glob`/`--deploy-script`/`--secrets-out`
+    silently dropped 15 credential files and the deploy script's hash, and the
+    next check passed. Narrowing must be deliberate.
+    """
+    path = deployment_dir(deployment, state_root) / MANIFEST_NAME
+    if not path.is_file():
+        return []
+    previous = load_yaml(path)
+    if not isinstance(previous, dict):
+        return []
+
+    lost: list[str] = []
+    for key, argument in (
+        ("deploy_script", "--deploy-script"),
+        ("secrets_file", "--secrets-out"),
+    ):
+        if previous.get(key) and not coverage.get(key):
+            lost.append(f"{key}: recorded before, absent now — pass {argument}")
+    for key, argument in (
+        ("credential_globs", "--credential-glob"),
+        ("unit_globs", "--unit-glob"),
+    ):
+        dropped = [
+            str(pattern)
+            for pattern in previous.get(key) or []
+            if pattern not in (coverage.get(key) or [])
+        ]
+        if dropped:
+            lost.append(
+                f"{key}: no longer covers {', '.join(dropped)} — pass"
+                f" {argument} for each"
+            )
+    return lost
+
+
+def _unit_user(unit: Path) -> str | None:
+    """The ``User=`` a unit declares, if it declares one.
+
+    Reported with an unknown unit because that is the question worth asking
+    first: `hermes-calendar-triage` was not merely uncaptured, it was the one
+    process on the box running as root.
+    """
+    try:
+        text = unit.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    match = re.search(r"^\s*User\s*=\s*(\S+)", text, re.M)
+    return match.group(1) if match else None
+
+
+def installed_units(
+    systemd_dir: Path, unit_globs: list[str] | tuple[str, ...]
+) -> dict[str, Path]:
+    """Every matching unit and drop-in on the box, keyed as the manifest keys it.
+
+    Shared by ``capture`` and ``check`` on purpose: the check's question is
+    "what is installed that the snapshot does not know about", and it can only
+    ask that if it enumerates the box exactly the way capture did.
+    """
+    found: dict[str, Path] = {}
+    for pattern in unit_globs:
+        for unit in sorted(systemd_dir.glob(pattern)):
+            if unit.is_file():
+                found[unit.name] = unit
+        for dropin_dir in sorted(systemd_dir.glob(pattern + ".d")):
+            for dropin in sorted(dropin_dir.glob("*.conf")):
+                found[f"{dropin_dir.name}/{dropin.name}"] = dropin
+    return found
 
 
 def check(deployment: str, state_root: Path | None = None) -> list[dict[str, str]]:
@@ -630,7 +719,31 @@ def check(deployment: str, state_root: Path | None = None) -> list[dict[str, str
                 })
 
     systemd_dir = Path(str(manifest["systemd_dir"]))
-    for name, expected in (manifest.get("units") or {}).items():
+    expected_units = manifest.get("units") or {}
+
+    # A unit the snapshot has never heard of is the failure this check was
+    # written for: `hermes-calendar-triage` ran as root for weeks because it was
+    # installed by hand, and every check passed — they all walked the manifest
+    # and none of them asked the box what else was there.
+    globs = [str(pattern) for pattern in manifest.get("unit_globs") or []]
+    for name, unit in installed_units(
+        systemd_dir, globs or list(DEFAULT_UNIT_GLOBS)
+    ).items():
+        if name in expected_units:
+            continue
+        facts = facts_or_note(unit, f"unit:{name}", findings)
+        runs_as = _unit_user(unit) if facts is not None else None
+        findings.append({
+            "severity": SEVERITY_DRIFT,
+            "component": f"unit:{name}",
+            "expected": "in the snapshot",
+            "actual": f"installed, runs as {runs_as or 'root (no User=)'}",
+            "detail": "a unit nobody captured — it is not in the reviewed"
+            " privilege model and a rebuild would not recreate it; capture it"
+            " or remove it",
+        })
+
+    for name, expected in expected_units.items():
         installed = systemd_dir / name
         committed = out / SYSTEMD_DIRNAME / name
         if not installed.is_file():
@@ -724,6 +837,12 @@ def _last_commit(root: Path, paths: tuple[str, ...]) -> str | None:
     return _git(root, "log", "-1", "--format=%H", "--", *paths) or None
 
 
+def _is_ancestor(root: Path, revision: str) -> bool:
+    """Whether HEAD contains `revision` — False if git cannot say."""
+    result = _git(root, "merge-base", "--is-ancestor", revision, "HEAD")
+    return result is not None
+
+
 def _describes_current_tooling(root: Path, doc_revision: str) -> list[str]:
     """Deployment-relevant paths changed after the doc was last written."""
     changed = _git(
@@ -743,8 +862,15 @@ def check_handover_doc(repo_root: Path | None = None) -> list[dict[str, str]]:
     Requiring its `Last verified` sha to equal HEAD sounds stricter and is worse:
     every deploy moves HEAD, so it would report drift on every deploy forever —
     including the one that ships the doc update — and a check that is always red
-    gets muted, which is how the doc went stale in the first place. A revision
-    behind HEAD with no deploy-tooling change since is *reported as a note*.
+    gets muted, which is how the doc went stale in the first place.
+
+    For the same reason a revision behind HEAD with nothing documented changed
+    since is *silent*, not a note. It used to be a note, and the note printed on
+    every deploy for four days saying nothing was wrong; amber that never goes
+    green is read as background colour, and then the red one is too. The one
+    behind-HEAD case still worth saying out loud is a documented revision this
+    checkout does not contain — that is a doc verified against something other
+    than this line of history, and its claims cannot be placed at all.
     """
     root = repo_root or REPO_ROOT
     doc = root / HANDOVER_DOC
@@ -793,13 +919,16 @@ def check_handover_doc(repo_root: Path | None = None) -> list[dict[str, str]]:
 
     changed = _describes_current_tooling(root, doc_revision)
     if not changed:
+        if _is_ancestor(root, documented):
+            return []
         return [{
             "severity": SEVERITY_NOTE,
             "component": "handover-doc",
-            "expected": f"{live[:9]} (deployed)",
+            "expected": f"a revision this checkout contains ({live[:9]} deployed)",
             "actual": f"{documented} (verified {match.group('date')})",
-            "detail": "verified at an earlier revision, but nothing it "
-            "documents has changed since",
+            "detail": "the documented revision is not in this history — the doc "
+            "was verified against a different line of development, so nothing "
+            "it claims can be placed against what is deployed",
         }]
     return [{
         "severity": SEVERITY_DRIFT,
@@ -863,6 +992,12 @@ def _add_capture_args(parser: argparse.ArgumentParser) -> None:
         help="glob under HERMES_HOME for credential files to inventory "
         "(repeatable); names and modes are recorded, never contents",
     )
+    parser.add_argument(
+        "--allow-narrowing",
+        action="store_true",
+        help="permit a capture that records less than the previous one — for "
+        "when coverage is genuinely gone, not when an argument was forgotten",
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -922,6 +1057,7 @@ def main(argv: list[str] | None = None) -> int:
                 args.credential_glob or [],
                 args.secrets_out,
                 args.state_root,
+                args.allow_narrowing,
             )
             print(
                 json.dumps(result, indent=2) if args.json else _capture_report(result)

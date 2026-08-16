@@ -285,6 +285,119 @@ class TestSendGate:
         assert event == "sent"
 
     @pytest.mark.asyncio
+    async def test_an_already_sent_todo_is_refused(self) -> None:
+        """A granted approval is single-use.
+
+        ``list_outbound`` returns the *parsed* event name, so the guard sees
+        ``"sent"`` rather than the ``action:sent:<channel>`` row shape it is
+        stored as. Pinning the parsed name here is what makes the guard
+        testable at all — mocking it to ``[]`` in every send test is how the
+        replay hole shipped twice.
+        """
+        from hermes_cli.todos_cmd import _send
+
+        action = ProposedAction(
+            channel="telegram", target="-1001234567890", body="x"
+        )
+        approval = _MockApproval(command=command_for("tsk_1", action))
+        store = MagicMock()
+        store._store = MagicMock()
+        store.record_outbound = AsyncMock()
+        store.list_outbound = AsyncMock(
+            return_value=[{"event": "sent", "actor": "user:leo", "at": None}]
+        )
+        notifications = MagicMock()
+        notifications.get_by_dedupe_key = AsyncMock(return_value=approval)
+
+        with (
+            patch("hermes_cli.human_comms.NotificationStore", return_value=notifications),
+            patch("hermes_cli.send_cmd._load_hermes_env"),
+            patch("tools.send_message_tool.send_message_tool") as delivery,
+        ):
+            rc = await _send(
+                store, PRINCIPAL, "tsk_1",
+                channel="telegram", target="-1001234567890",
+                account=None, thread=None,
+                json_mode=False,
+            )
+        assert rc == _SEND_MISSING
+        delivery.assert_not_called()
+        store.record_outbound.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_a_session_pointer_is_not_a_send(self) -> None:
+        """``record_session`` writes through the same outbound trail.
+
+        Its event parses to ``session``, so it must not read as a delivery
+        and block a first send.
+        """
+        from hermes_cli.todos_cmd import _send
+
+        action = ProposedAction(
+            channel="telegram", target="-1001234567890", body="x"
+        )
+        approval = _MockApproval(command=command_for("tsk_1", action))
+        store = MagicMock()
+        store._store = MagicMock()
+        store.record_outbound = AsyncMock()
+        store.list_outbound = AsyncMock(
+            return_value=[{"event": "session", "actor": "user:leo", "at": None}]
+        )
+        notifications = MagicMock()
+        notifications.get_by_dedupe_key = AsyncMock(return_value=approval)
+
+        with (
+            patch("hermes_cli.human_comms.NotificationStore", return_value=notifications),
+            patch("hermes_cli.send_cmd._load_hermes_env"),
+            patch("tools.send_message_tool.send_message_tool", return_value=json.dumps({"success": True})),
+        ):
+            rc = await _send(
+                store, PRINCIPAL, "tsk_1",
+                channel="telegram", target="-1001234567890",
+                account=None, thread=None,
+                json_mode=False,
+            )
+        assert rc == 0
+
+    @pytest.mark.asyncio
+    async def test_an_account_the_delivery_cannot_honour_is_refused(self) -> None:
+        """``send_message_tool._handle_send`` reads only ``target``/``message``.
+
+        Until it threads an account through to the adapter, an approval that
+        names one must refuse rather than deliver by whichever account the
+        platform config happens to resolve.
+        """
+        from hermes_cli.todos_cmd import _send
+
+        action = ProposedAction(
+            channel="telegram",
+            target="-1001234567890",
+            body="x",
+            account_id="work",
+        )
+        approval = _MockApproval(command=command_for("tsk_1", action))
+        store = MagicMock()
+        store._store = MagicMock()
+        store.record_outbound = AsyncMock()
+        store.list_outbound = AsyncMock(return_value=[])
+        notifications = MagicMock()
+        notifications.get_by_dedupe_key = AsyncMock(return_value=approval)
+
+        with (
+            patch("hermes_cli.human_comms.NotificationStore", return_value=notifications),
+            patch("hermes_cli.send_cmd._load_hermes_env"),
+            patch("tools.send_message_tool.send_message_tool") as delivery,
+        ):
+            rc = await _send(
+                store, PRINCIPAL, "tsk_1",
+                channel="telegram", target="-1001234567890",
+                account="work", thread=None,
+                json_mode=False,
+            )
+        assert rc == _SEND_ROUTING
+        delivery.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_failed_delivery_records_failed(self) -> None:
         from hermes_cli.todos_cmd import _send
 

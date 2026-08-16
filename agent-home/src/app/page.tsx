@@ -138,6 +138,47 @@ export default async function HomePage() {
           </span>
         </Link>
 
+        {/* FG-30 — the suggestion queue. Any enrolled principal may read it;
+         * only the owner gets adopt/dismiss buttons (the Python layer is the
+         * authority, returning 403 for a non-owner). The queue is
+         * profile-local — there is no cross-profile view (FG-28 has not
+         * shipped a switcher). */}
+        <Link
+          href="/profiles/suggestions"
+          data-component="ProfileSuggestionsLink"
+          className="flex items-center justify-between rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface)] p-4 active:opacity-70"
+        >
+          <span>
+            <span className="block text-sm font-medium">Profile suggestions</span>
+            <span className="block text-xs text-[var(--color-muted)]">
+              {principal.is_owner
+                ? "Review a proposed sub-goal"
+                : "Proposed sub-goals (read-only)"}
+            </span>
+          </span>
+          <span aria-hidden className="text-[var(--color-muted)]">
+            ›
+          </span>
+        </Link>
+
+        {/* FG-31: the answer to "when should I upgrade the box?", stated as a
+         * verdict rather than a graph. */}
+        <Link
+          href="/capacity"
+          data-component="CapacityLink"
+          className="flex items-center justify-between rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface)] p-4 active:opacity-70"
+        >
+          <span>
+            <span className="block text-sm font-medium">Capacity</span>
+            <span className="block text-xs text-[var(--color-muted)]">
+              Headroom, and when to upgrade the box
+            </span>
+          </span>
+          <span aria-hidden className="text-[var(--color-muted)]">
+            ›
+          </span>
+        </Link>
+
         <Link
           href="/onboarding"
           data-component="OnboardingLink"

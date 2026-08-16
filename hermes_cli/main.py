@@ -63,6 +63,10 @@ except ModuleNotFoundError:
 
 import os
 import sys
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:  # import-time cost is why the CLI imports lazily elsewhere
+    from hermes_cli.profile_suggestion import RetireResult
 
 
 def _set_process_title() -> None:
@@ -10809,6 +10813,25 @@ def _coalesce_session_name_args(argv: list) -> list:
     return result
 
 
+def _print_retired_goals(result: "RetireResult") -> None:
+    """Say whether the goals were actually closed, not just that we tried.
+
+    Archiving succeeds long before the goal update runs, so a bare "retired"
+    can sit over a profile whose goals are all still active — which is what the
+    box did until the status vocabulary was fixed. The reader needs to know
+    which of the two happened.
+    """
+    if result.goal_error:
+        print(
+            f"  ⚠ Goals NOT closed ({result.goal_error}). The archive is made "
+            "and the channel released, so this profile's goals are still "
+            "active under a profile nobody runs — fix the cause and retire "
+            "again; the retry is safe."
+        )
+    elif result.goals_completed:
+        print(f"  Goals closed: {result.goals_completed}")
+
+
 def cmd_profile(args):
     """Profile management — create, delete, list, switch, alias."""
     from hermes_cli.profiles import (
@@ -11441,6 +11464,265 @@ def cmd_profile(args):
                 f"{e.schema:<22} {health}"
             )
         print()
+
+    # ---------- FG-30: profile lifecycle (suggest, adopt, retire) ----------
+    elif action == "suggest":
+        import asyncio
+
+        from hermes_cli.datastore import get_store
+        from hermes_cli.goal_tree import GoalTreeStore, GoalRegistryStore
+        from hermes_cli.profile_suggestion import (
+            ProfileSuggestionStore,
+            generate_suggestion,
+        )
+        from hermes_cli.skill_promotion import SkillPromotionStore
+        from hermes_cli.access import PrincipalStore
+
+        async def _run_suggest():
+            registry = GoalRegistryStore()
+            tree = GoalTreeStore(registry)
+            app_store = get_store("supabase-app", "prod")
+            promotions = SkillPromotionStore(app_store)
+            principal = await PrincipalStore(app_store).get_owner()
+            if principal is None:
+                print("Error: no owner enrolled. Run 'hermes owner init <user_id>' first.")
+                sys.exit(1)
+            suggestion = await generate_suggestion(tree, promotions, principal)
+            if suggestion is None:
+                print("No profile suggestion generated this cycle.")
+                return
+            print(f"Suggested profile: {suggestion.proposed_name}")
+            print(f"  Role: {suggestion.proposed_role}")
+            print(f"  Goal: {suggestion.proposed_goal}")
+            print(f"  Rationale: {suggestion.rationale or '(none)'}")
+
+        asyncio.run(_run_suggest())
+
+    elif action == "suggestions":
+        import asyncio
+
+        from hermes_cli.datastore import get_store
+        from hermes_cli.access import PrincipalStore
+        from hermes_cli.profile_suggestion import ProfileSuggestionStore
+
+        async def _run_list():
+            app_store = get_store("supabase-app", "prod")
+            principal = await PrincipalStore(app_store).get_owner()
+            if principal is None:
+                print("Error: no owner enrolled.")
+                sys.exit(1)
+            store = ProfileSuggestionStore(app_store)
+            suggestions = await store.list_suggestions(principal)
+            if not suggestions:
+                print("No pending profile suggestions.")
+                return
+            for s in suggestions:
+                print(f"{s.id}  {s.proposed_name}")
+                print(f"  Role: {s.proposed_role}")
+                print(f"  Goal: {s.proposed_goal}")
+                print(f"  Rationale: {s.rationale or '(none)'}")
+
+        asyncio.run(_run_list())
+
+    elif action == "adopt":
+        import asyncio
+
+        from hermes_cli.datastore import get_store
+        from hermes_cli.access import PrincipalStore
+        from hermes_cli.profile_suggestion import ProfileSuggestionStore
+
+        async def _run_adopt():
+            app_store = get_store("supabase-app", "prod")
+            principal = await PrincipalStore(app_store).get_owner()
+            if principal is None:
+                print("Error: no owner enrolled.")
+                sys.exit(1)
+            store = ProfileSuggestionStore(app_store)
+            suggestion, profile_dir = await store.adopt(principal, args.suggestion_id)
+            print(f"✓ Adopted profile '{suggestion.proposed_name}'")
+            print(f"  Path: {profile_dir}")
+            print(f"  Goal: {suggestion.proposed_goal}")
+
+        asyncio.run(_run_adopt())
+
+    elif action == "dismiss":
+        import asyncio
+
+        from hermes_cli.datastore import get_store
+        from hermes_cli.access import PrincipalStore
+        from hermes_cli.profile_suggestion import ProfileSuggestionStore
+
+        async def _run_dismiss():
+            app_store = get_store("supabase-app", "prod")
+            principal = await PrincipalStore(app_store).get_owner()
+            if principal is None:
+                print("Error: no owner enrolled.")
+                sys.exit(1)
+            store = ProfileSuggestionStore(app_store)
+            suggestion = await store.dismiss(
+                principal, args.suggestion_id, reason=getattr(args, "reason", "")
+            )
+            print(f"✓ Dismissed suggestion '{suggestion.proposed_name}'")
+
+        asyncio.run(_run_dismiss())
+
+    elif action == "retire":
+        import asyncio
+
+        from hermes_cli.datastore import get_store
+        from hermes_cli.access import PrincipalStore
+        from hermes_cli.profile_suggestion import retire_profile as _retire_profile
+        from hermes_cli.skill_promotion import SkillPromotionStore
+
+        if not getattr(args, "yes", False):
+            try:
+                answer = input(f"Retire profile '{args.profile_name}'? [y/N] ").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                answer = ""
+            if answer not in {"y", "yes"}:
+                print("Cancelled.")
+                return
+
+        async def _run_retire():
+            app_store = get_store("supabase-app", "prod")
+            principal = await PrincipalStore(app_store).get_owner()
+            if principal is None:
+                print("Error: no owner enrolled.")
+                sys.exit(1)
+            promotions = SkillPromotionStore(app_store)
+            result = await _retire_profile(
+                args.profile_name, principal, promotions=promotions
+            )
+            print(f" Profile '{args.profile_name}' retired")
+            print(f"  Archive: {result.archive}")
+            _print_retired_goals(result)
+
+        asyncio.run(_run_retire())
+
+    elif action == "merge":
+        import asyncio
+
+        from hermes_cli.datastore import get_store
+        from hermes_cli.access import PrincipalStore
+        from hermes_cli.profile_suggestion import merge_profiles as _merge_profiles
+        from hermes_cli.skill_promotion import SkillPromotionStore
+
+        if not getattr(args, "yes", False):
+            try:
+                answer = input(
+                    f"Merge profile '{args.source}' into '{args.target}'? [y/N] "
+                ).strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                answer = ""
+            if answer not in {"y", "yes"}:
+                print("Cancelled.")
+                return
+
+        async def _run_merge():
+            app_store = get_store("supabase-app", "prod")
+            principal = await PrincipalStore(app_store).get_owner()
+            if principal is None:
+                print("Error: no owner enrolled.")
+                sys.exit(1)
+            promotions = SkillPromotionStore(app_store)
+            result = await _merge_profiles(
+                args.source, args.target, principal, promotions=promotions
+            )
+            print(f"✓ Profile '{args.source}' merged into '{args.target}'")
+            print(f"  Archive: {result.archive}")
+            _print_retired_goals(result)
+
+        asyncio.run(_run_merge())
+
+    elif action == "commit-channel":
+        from hermes_cli.profile_suggestion import (
+            ChannelCollisionError,
+            ChannelWriteError,
+            CollisionCheckUnavailable,
+            commit_channel as _commit_channel,
+        )
+
+        token = getattr(args, "token", None)
+        if not token:
+            try:
+                import getpass
+
+                token = getpass.getpass(
+                    f"  {args.platform} bot token for '{args.profile_name}': "
+                )
+            except (EOFError, KeyboardInterrupt):
+                print("\nCancelled.")
+                return
+        if not token or not token.strip():
+            print("Error: a non-empty token is required.")
+            return
+
+        try:
+            result = _commit_channel(
+                args.profile_name,
+                platform=args.platform,
+                token=token,
+                allowed_users=args.allowed_users,
+                start_service=not args.no_start,
+            )
+        except ChannelCollisionError as exc:
+            # Refused before the write — no .env touched, no service touched.
+            print(f"✗ {exc}")
+            sys.exit(1)
+        except CollisionCheckUnavailable as exc:
+            # The pre-write check could not complete — refuse rather than fail
+            # open. No .env touched.
+            print(f"✗ {exc}")
+            sys.exit(1)
+        except ChannelWriteError as exc:
+            # The token did not land in the .env (likely admin-managed). The
+            # profile is still channel-less; do not claim success.
+            print(f"✗ {exc}")
+            sys.exit(1)
+        except FileNotFoundError as exc:
+            print(f"✗ {exc}")
+            sys.exit(1)
+        except ValueError as exc:
+            print(f"✗ {exc}")
+            sys.exit(1)
+
+        print(f"✓ {result['profile']} now has a {result['platform']} channel")
+        if result.get("handle"):
+            print(f"  Handle: {result['handle']}")
+
+        # F4: distinguish "skipped" (--no-start or no service manager) from
+        # "failed" (the manager was there but install/start did not leave it
+        # running), so an operational failure is not read as a deliberate skip.
+        service_status = result.get("service_status", "unavailable")
+        if args.no_start:
+            print("  Service not started (--no-start): the channel is configured.")
+            print(
+                f"  Start it with `hermes -p {result['profile']} gateway start` "
+                f"when ready."
+            )
+        elif service_status == "started":
+            print("  Gateway service started.")
+        elif service_status == "failed":
+            # The credential is written (the commit succeeded); the service is
+            # not. Point at the log, not the start command alone.
+            print(
+                "  ✗ Gateway service failed to start — the channel is "
+                "configured but not serving."
+            )
+            print(
+                f"  Check `hermes logs --follow --gateway` (or gateway.log under "
+                f"this profile's home), then `hermes -p {result['profile']} "
+                f"gateway start`."
+            )
+        else:  # "unavailable" — no service manager on this platform
+            print(
+                "  No service manager on this platform — the channel is "
+                "configured but the gateway is not installed as a service."
+            )
+            print(
+                f"  Run the gateway manually, or `hermes doctor` to confirm the "
+                f"channel is configured."
+            )
 
 
 def _render_distribution_plan(plan) -> None:
