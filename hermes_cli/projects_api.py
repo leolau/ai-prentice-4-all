@@ -1,17 +1,21 @@
-"""HTTP routes for the Projects feature — API (design §12 / §17 steps 3–4).
+"""HTTP routes for the Projects feature — API (design §12 / §17 steps 3–5).
 
 The record API: read/write of the project itself plus the sub-objects the
 first page needs — outputs (+ deliveries + the human-only accept), members,
 profiles, contacts, links, the principal-filtered board and card creation —
 plus the run machinery (step 4): the playbook and its revisions (§7),
 directives/feedback guidance (§5), the run lifecycle (§6), and the
-toolsets/skills narrowing filter + autonomy route (§4/§4.1). Derived values
-are computed on read and never stored: progress (§9.1 ladder), health
-(§9.2, signals available at this step) and the card rollup.
+toolsets/skills narrowing filter + autonomy route (§4/§4.1) — plus the
+schedule wiring (step 5): ``PUT/DELETE /schedule`` against the host
+profile's cron job (§3.2), the ``next_run_at`` display cache, the full
+derived health (§9.2) and ``doctor`` (§15 failure mode 1). Derived values
+are computed on read and never stored: progress (§9.1 ladder), health and
+the card rollup.
 
 Mounted by ``web_server.py`` beside the todos and incomings routers, prefix
-``/api/registry/projects``. Calls ``projects_db``, ``kanban_db`` and
-``kanban_view`` directly — never the dashboard kanban plugin over HTTP.
+``/api/registry/projects``. Calls ``projects_db``, ``kanban_db``,
+``kanban_view`` and ``cron.jobs`` directly — never the dashboard kanban
+plugin over HTTP.
 
 Permissions are enforced here and only here (§11): the store has no RLS.
 
@@ -25,8 +29,8 @@ Permissions are enforced here and only here (§11): the store has no RLS.
   ``kanban_db.list_tasks`` — a project view must not become the way to read
   another user's ``private:`` card.
 
-Not in this step (later steps in §17): schedule + full health (step 5),
-score routes (step 9b), the ``from_todo`` card seam (step 8b).
+Not in this step (later steps in §17): score routes (step 9b), the
+``from_todo`` card seam (step 8b).
 """
 
 from __future__ import annotations
@@ -40,7 +44,7 @@ from typing import Any, Optional
 
 from fastapi import APIRouter, HTTPException, Request
 
-from hermes_cli import kanban_db, kanban_view, projects_db
+from hermes_cli import kanban_db, kanban_view, projects_db, projects_schedule
 
 logger = logging.getLogger(__name__)
 
@@ -306,24 +310,44 @@ def _derive_progress(
     }
 
 
-def _derive_health(project, card_rollup: dict) -> str:
-    """Health from the signals this step can see (§9.2).
+def _full_health(conn, project, card_rollup: dict, profiles: list) -> str:
+    """The complete §9.2 ladder, computed on read from runs + the cron
+    store. The cron round-trip only happens for scheduled projects — a
+    list page must not open every profile's store for nothing."""
+    runs = projects_db.list_project_runs(conn, project.id, limit=10)
+    cron_job = None
+    if getattr(project, "cron_job_id", None):
+        cron_job = projects_schedule.resolve_cron_job(project, profiles)
+    return projects_schedule.derive_health(
+        project,
+        card_rollup=card_rollup,
+        profiles=profiles,
+        runs=runs,
+        cron_job=cron_job,
+    )
 
-    Run- and cron-based signals (``waiting`` runs, unresolved
-    ``cron_job_id``, two-period staleness) join in steps 4–5; the ladder
-    here is the subset that is honest today.
-    """
-    if card_rollup.get("blocked"):
-        return "attention"
-    due = getattr(project, "due_at", None)
-    if (
-        getattr(project, "cadence", "one_off") == "one_off"
-        and due
-        and due < int(time.time())
-        and getattr(project, "status", "") not in ("done", "archived")
-    ):
-        return "attention"
-    return "ok"
+
+def _runs_brief(conn, project_id: str, *, limit: int = 5) -> list[dict]:
+    """The last N runs as one-line rows (§12 detail). Cost stays fail-open
+    and lives on the run-detail read, not here."""
+    out = []
+    for r in projects_db.list_project_runs(conn, project_id, limit=limit):
+        duration = None
+        if r.get("started_at") and r.get("ended_at"):
+            duration = int(r["ended_at"]) - int(r["started_at"])
+        out.append(
+            {
+                "run_no": r["run_no"],
+                "status": r["status"],
+                "trigger": r["trigger"],
+                "started_at": r.get("started_at"),
+                "ended_at": r.get("ended_at"),
+                "duration_seconds": duration,
+                "outcome": r.get("outcome"),
+                "score_user": r.get("score_user"),
+            }
+        )
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -397,6 +421,7 @@ def _list_sync(
     limit: int,
     cursor: Optional[tuple],
     enrolled: frozenset = frozenset(),
+    health: Optional[str] = None,
 ) -> dict:
     with projects_db.connect_closing() as conn:
         rows = projects_db.list_projects(conn, include_archived=include_archived)
@@ -433,13 +458,16 @@ def _list_sync(
                 p, outputs, deliveries, rollup,
                 [l for l in links if l["kind"] == "goal"],
             )
+            item_health = _full_health(conn, p, rollup, profiles)
+            if health and item_health != health:
+                continue
             out.append(
                 _project_payload(
                     p,
                     extra={
                         "progress": progress,
                         "member_count": len(members),
-                        "health": _derive_health(p, rollup),
+                        "health": item_health,
                     },
                 )
             )
@@ -471,6 +499,7 @@ async def list_projects(request: Request) -> dict[str, Any]:
         limit=limit,
         cursor=cursor,
         enrolled=enrolled,
+        health=params.get("health"),
     )
 
 
@@ -594,6 +623,52 @@ async def create_project_route(request: Request) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# GET /doctor — diagnosable breaks across readable projects (§15.1)
+#
+# Registered BEFORE ``GET /{slug}`` so the literal path wins over the slug
+# parameter. ``hermes projects doctor`` (step 9) calls this same surface.
+# ---------------------------------------------------------------------------
+
+
+def _doctor_sync(principal, enrolled: frozenset, slug: Optional[str]) -> dict:
+    items = []
+    with projects_db.connect_closing() as conn:
+        rows = projects_db.list_projects(conn, include_archived=False)
+        if slug:
+            rows = [p for p in rows if p.slug == slug]
+        for p in rows:
+            role = _member_role_sync(conn, p.id, principal.user_id)
+            profiles = projects_db.get_project_profiles(conn, p.id)
+            if not _can_read(p, role, principal, enrolled, profiles):
+                continue
+            runs = projects_db.list_project_runs(conn, p.id, limit=10)
+            cron_job = None
+            if getattr(p, "cron_job_id", None):
+                cron_job = projects_schedule.resolve_cron_job(p, profiles)
+            findings = projects_schedule.doctor_findings(
+                conn, p, profiles=profiles, runs=runs, cron_job=cron_job
+            )
+            if findings:
+                items.append(
+                    {
+                        "slug": p.slug,
+                        "name": p.name,
+                        "cadence": p.cadence,
+                        "findings": findings,
+                    }
+                )
+    return {"items": items}
+
+
+@router.get("/doctor")
+async def doctor_route(request: Request) -> dict[str, Any]:
+    principal = await _principal_read(request)
+    slug = request.query_params.get("slug")
+    enrolled = frozenset(await _enrolled_profiles(principal.user_id))
+    return await asyncio.to_thread(_doctor_sync, principal, enrolled, slug)
+
+
+# ---------------------------------------------------------------------------
 # GET /{slug} — the whole record in one read
 # ---------------------------------------------------------------------------
 
@@ -643,6 +718,13 @@ def _detail_sync(project, principal, *, include_address: bool) -> dict:
         links_by_kind.get("goal", []),
     )
 
+    with projects_db.connect_closing() as conn:
+        health = _full_health(conn, project, rollup, profiles)
+        runs_brief = _runs_brief(conn, project.id)
+        # ``next_run_at`` is a display cache (§3.2): refreshed on read,
+        # the cron store stays authoritative.
+        next_run_at = projects_schedule.refresh_next_run(conn, project)
+
     detail = _project_payload(project)
     detail.update(
         {
@@ -652,7 +734,9 @@ def _detail_sync(project, principal, *, include_address: bool) -> dict:
             "contacts": _contacts_payload(contacts, include_address=include_address),
             "links": links_by_kind,
             "progress": progress,
-            "health": _derive_health(project, rollup),
+            "health": health,
+            "next_run_at": next_run_at,
+            "runs": runs_brief,
             "card_rollup": rollup,
             "recent_events": events,
         }
@@ -699,6 +783,23 @@ async def patch_project(request: Request) -> dict[str, Any]:
             extra = {k: body[k] for k in extra_fields if k in body}
             if extra:
                 projects_db.update_project_fields(conn, project.id, extra)
+            if (
+                "cadence" in body
+                and project.cadence == "repeatable"
+                and str(body["cadence"]).strip() != "repeatable"
+                and project.cron_job_id
+            ):
+                # §3.1: leaving repeatable pauses and detaches the cron
+                # job — never deletes it — and records who changed it.
+                projects_schedule.detach_project_schedule(
+                    conn,
+                    project=project,
+                    reason=(
+                        f"cadence changed from repeatable to "
+                        f"'{str(body['cadence']).strip()}'"
+                    ),
+                    changed_by=principal.user_id,
+                )
             if "status" in body:
                 projects_db.set_project_status(
                     conn, project.id, str(body["status"])
@@ -1684,3 +1785,92 @@ async def patch_autonomy_route(request: Request) -> dict[str, Any]:
         return {"slug": fresh.slug, "autonomy": fresh.autonomy}
 
     return await asyncio.to_thread(_patch_sync)
+
+
+# ---------------------------------------------------------------------------
+# PUT/DELETE /{slug}/schedule — the host profile's cron job (§3.2)
+# ---------------------------------------------------------------------------
+
+
+@router.put("/{slug}/schedule")
+async def put_schedule_route(request: Request) -> dict[str, Any]:
+    """Create or update the cron job in the host profile's store. Lead
+    only — a schedule is an automation decision, not a judgement act.
+    §3.1 preconditions map to 409 naming what is missing; an invalid
+    schedule string maps to 422."""
+    project, _role, profiles, principal = await _require_write(request)
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="invalid JSON body")
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="expected a JSON object")
+
+    def _put_sync() -> dict:
+        with projects_db.connect_closing() as conn:
+            return projects_schedule.set_project_schedule(
+                conn,
+                project=project,
+                schedule=str(body.get("schedule") or ""),
+                profiles=profiles,
+                changed_by=principal.user_id,
+            )
+
+    try:
+        return await asyncio.to_thread(_put_sync)
+    except projects_schedule.SchedulePreconditionError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+
+@router.delete("/{slug}/schedule")
+async def delete_schedule_route(request: Request) -> dict[str, Any]:
+    """Remove the cron job and both halves of the link. Removing — not
+    pausing — keeps the store honest; the cadence-change path is the one
+    that pauses (§3.1)."""
+    project, _role, _profiles, _principal = await _require_write(request)
+
+    def _del_sync() -> dict:
+        with projects_db.connect_closing() as conn:
+            removed = projects_schedule.clear_project_schedule(
+                conn, project=project
+            )
+            return {"scheduled": False, "removed": removed}
+
+    return await asyncio.to_thread(_del_sync)
+
+
+@router.get("/{slug}/doctor")
+async def project_doctor_route(request: Request) -> dict[str, Any]:
+    """One project's diagnosable breaks, with the health they imply
+    (§9.2 / §15 failure mode 1)."""
+    project, _role, profiles, principal = await _require_read(request)
+
+    def _doc_sync() -> dict:
+        with projects_db.connect_closing() as conn:
+            runs = projects_db.list_project_runs(conn, project.id, limit=10)
+        cron_job = None
+        if getattr(project, "cron_job_id", None):
+            cron_job = projects_schedule.resolve_cron_job(project, profiles)
+        with _board_conn(project) as bconn:
+            rollup = _card_rollup_sync(bconn, project.id, principal)
+        with projects_db.connect_closing() as conn:
+            findings = projects_schedule.doctor_findings(
+                conn, project, profiles=profiles, runs=runs, cron_job=cron_job
+            )
+        health = projects_schedule.derive_health(
+            project,
+            card_rollup=rollup,
+            profiles=profiles,
+            runs=runs,
+            cron_job=cron_job,
+        )
+        return {
+            "slug": project.slug,
+            "health": health,
+            "findings": findings,
+            "clean": not findings,
+        }
+
+    return await asyncio.to_thread(_doc_sync)
