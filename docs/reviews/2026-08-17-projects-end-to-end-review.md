@@ -53,10 +53,10 @@ Nothing from #270 has been fixed. Steps 9–11 were new work, not repair work.
 
 | # | finding | status at `7c737474f` | evidence |
 |---|---|---|---|
-| H1 | checkpoint/budget approvals never raised (`from agent import human_comms` — module does not exist; the shipped seam is `hermes_cli.human_comms.NotificationStore.create`) | **OPEN** | `projects_run.py:528-546` |
-| H2 | budget unenforceable — `sum_cost_for_trace` does not exist and `trace_id` is a synthetic string never bound to a trace | **OPEN** | `projects_run.py:548-566`, `592-593`, `641` |
-| H3 | `_enabled_toolsets_for_profile(profile)` ignores its argument and reads the *calling* process's config, so a project can be granted a toolset the host profile disables (invariant 14) | **OPEN** | `projects_run.py:827-841` |
-| H4 | inline run spawns without `profile_home`, so a manual run executes in the server's profile while the run row records the host profile | **OPEN** | `projects_run.py:869-894` |
+| H1 | checkpoint/budget approvals never raised (`from agent import human_comms` — module does not exist; the shipped seam is `hermes_cli.human_comms.NotificationStore.create`) | **FIXED** — Block 2: approvals raise through `NotificationStore.create` (irreversible, owner-targeted, deduped per run); the fail-open `except` is gone — a broken surface fails the run | `projects_run.py:528-546` |
+| H2 | budget unenforceable — `sum_cost_for_trace` does not exist and `trace_id` is a synthetic string never bound to a trace | **FIXED** — Block 2: `start_run` mints a real C8 trace (`interactions.create_trace`, mode `prod`), binds it around the spawn and flushes it; cost reads through `InteractionLedger.get_trace` (sum of `kind='cost'` events); tracing off → no trace id, gate stays open | `projects_run.py:548-566`, `592-593`, `641` |
+| H3 | `_enabled_toolsets_for_profile(profile)` ignores its argument and reads the *calling* process's config, so a project can be granted a toolset the host profile disables (invariant 14) | **FIXED** — Block 2: toolsets and skills resolve inside `profile_runtime_scope` of the named profile; unknown profile fails closed (no grant) | `projects_run.py:827-841` |
+| H4 | inline run spawns without `profile_home`, so a manual run executes in the server's profile while the run row records the host profile | **FIXED** — Block 2: the default spawn passes `profile_home` (the host profile's dir) and `copy_context()` to `spawn_seeded_session` | `projects_run.py:869-894` |
 | M1 | a repeatable project that has *never* run is never `stalled` (`if last_start and …`) | **OPEN** | `projects_schedule.py:423-428` |
 | M2 | health/read filtering happens **after** the page slice, and `next_cursor` is taken from the last *emitted* row | **OPEN — and worse than reported: it loses rows, not just repeats them.** Rows between the last emitted row and the end of the slice are skipped permanently, and an all-filtered page returns `next_cursor=None`, ending pagination while matches remain | `projects_api.py:493-528` |
 | M3 | an instance owner/admin who is not a project member has `role is None`, so contact addresses are dropped from them too | **OPEN** | `projects_api.py:802` |
@@ -391,15 +391,25 @@ PR per block — each block is independently shippable and independently testabl
 
 **Block 2 — the run lifecycle's four seams (the real risk).**
 
-- [ ] H1 · approvals through `hermes_cli.human_comms.NotificationStore.create`;
+- [x] H1 · approvals through `hermes_cli.human_comms.NotificationStore.create`;
       remove the fail-open `except` — a swallowed approval is worse than a 500.
-- [ ] H2 · bind runs to a real C8 trace (`interactions.create_trace` +
+      *(Block 2: irreversible approvals, owner-targeted, deduped
+      `proj:{slug}:run:{n}:{kind}`; store failure logs ERROR and propagates)*
+- [x] H2 · bind runs to a real C8 trace (`interactions.create_trace` +
       `bind_trace`), store that `trace_id`, read cost through the shipped
       ledger; only then is `budget_usd_per_run` enforceable.
-- [ ] H3 · `_enabled_toolsets_for_profile` must read the **host profile's**
+      *(Block 2: trace minted in `start_run` (mode `prod`, actor = owner),
+      bound around the spawn, flushed before the gate; cost = sum of the
+      trace's `kind='cost'` events via `InteractionLedger.get_trace` — the
+      ledger has no cost column; tracing off → `trace_id` NULL, gate open,
+      `cost_recorded` false)*
+- [x] H3 · `_enabled_toolsets_for_profile` must read the **host profile's**
       config, not the caller's; narrowing may never grant (invariant 14).
-- [ ] H4 · pass `profile_home` to `spawn_seeded_session` so a run executes in
-      the profile its row records.
+      *(Block 2: resolved inside `profile_runtime_scope`; skills use the same
+      scope; unknown profile → empty grant)*
+- [x] H4 · pass `profile_home` to `spawn_seeded_session` so a run executes in
+      the profile its row records. *(Block 2: host profile's dir +
+      `copy_context()` — the trace binding rides the context)*
 
 **Block 3 — health, list and routing.**
 

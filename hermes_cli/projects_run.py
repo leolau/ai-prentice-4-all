@@ -15,17 +15,20 @@ HTTP seam over it. Everything here is deliberately built on shipped seams:
 - Toolsets/skills are a **narrowing filter, never a grant** (§4.1): the
   effective set is the intersection with what the host profile enables.
 
-Two upstream seams have not landed yet and are wired as fail-open hooks so
-the whole lifecycle is testable today: the FG-10 approval surface
-(``agent.human_comms``) and the C8 cost ledger. When they land, only the
-hooks change.
+Approvals ride the shipped FG-10 surface (``hermes_cli.human_comms.
+NotificationStore``) and run cost reads the shipped C8 ledger
+(``hermes_cli.interactions``): a run binds a real trace at start so its
+cost is queryable — never stored (§6).
 """
 
 from __future__ import annotations
 
+import asyncio
+import contextvars
 import datetime as _dt
 import json
 import logging
+import re
 import uuid
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
@@ -522,48 +525,145 @@ def close_run(
 
 
 # ---------------------------------------------------------------------------
-# Fail-open hooks for seams that have not landed yet
+# The run's human seams: approvals (FG-10) and cost (C8 ledger)
 # ---------------------------------------------------------------------------
 
-def raise_approval(project: projects_db.Project, run: dict, reason: str) -> None:
-    """Checkpoint / budget-stop approval via the FG-10 surface. The module
-    has not landed; fail open so the lifecycle keeps working."""
-    try:
-        from agent import human_comms  # type: ignore[attr-defined]
+def _approval_store(app_store, *, config):
+    """Seam over the FG-10 store construction so the default is testable."""
+    from hermes_cli.human_comms import NotificationStore
 
-        human_comms.create(  # pragma: no cover — lands with FG-10
+    return NotificationStore(app_store, config=config)
+
+
+def raise_approval(
+    project: projects_db.Project,
+    run: dict,
+    reason: str,
+    *,
+    kind: str = "checkpoint",
+) -> None:
+    """Checkpoint / budget-stop approval through the shipped FG-10 surface.
+
+    Raised with ``reversible=False`` so C6 never auto-answers it (§4: a
+    supervised run holds until a human passes the checkpoint). There is no
+    fail-open here: a swallowed approval is worse than a failed start, so a
+    store failure logs at ERROR and propagates.
+    """
+    target = project.owner_user_id
+    if not target:
+        raise RuntimeError(
+            f"project '{project.slug}' has no owner_user_id — cannot raise "
+            "a run approval"
+        )
+
+    async def _raise() -> None:
+        from hermes_cli.config import load_config
+        from hermes_cli.datastore import get_store
+
+        resolved = load_config() or {}
+        app_store = get_store("supabase-app", "prod", config=resolved)
+        store = _approval_store(app_store, config=resolved)
+        await store.initialize()
+        await store.create(
             kind="approval",
-            dedupe_key=(
-                f"project-checkpoint:{project.slug}:{run.get('run_no')}"
+            target_user_id=target,
+            title=(
+                f"Project '{project.name}' run {run.get('run_no')} "
+                f"needs you ({kind})"
             ),
             body=reason,
-        )
-    except Exception:  # noqa: BLE001
-        log.info(
-            "projects: approval hook skipped for %s run %s (%s)",
-            project.slug, run.get("run_no"), reason,
+            reversible=False,
+            dedupe_key=f"proj:{project.slug}:run:{run.get('run_no')}:{kind}",
         )
 
+    try:
+        asyncio.run(_raise())
+    except Exception:
+        log.error(
+            "projects: approval NOT raised for %s run %s (%s) — the "
+            "approval surface failed; refusing to continue silently",
+            project.slug, run.get("run_no"), reason, exc_info=True,
+        )
+        raise
 
-def run_cost(trace_id: Optional[str], *, reader: Optional[Callable] = None):
+
+_COST_AMOUNT_RE = re.compile(r"amount_usd=([0-9]*\.?[0-9]+)")
+
+
+def _cost_from_interactions(interactions) -> Optional[float]:
+    """Sum a trace's ``cost`` events. The ledger stores no cost column: the
+    adapters emit ``kind='cost'`` with ``amount_usd=…`` in the summary."""
+    total = 0.0
+    seen = False
+    for item in interactions:
+        if item.kind != "cost":
+            continue
+        match = _COST_AMOUNT_RE.search(item.summary or "")
+        if match:
+            seen = True
+            total += float(match.group(1))
+    return total if seen else None
+
+
+def _owner_principal(project: projects_db.Project):
+    """A read principal scoped to the project owner — the trace's actor."""
+    from hermes_cli.access import Principal
+
+    owner = project.owner_user_id or ""
+    return Principal(user_id=owner, display=owner, role="member")
+
+
+def _default_cost_reader(trace_id: str, principal) -> Optional[float]:
+    """The shipped reader: ``InteractionLedger.get_trace`` (§6 — cost is
+    never stored). Fail-open: a broken observability path reads as "not
+    recorded"; a run must never fail because observability is off."""
+
+    async def _read() -> Optional[float]:
+        from hermes_cli.config import load_config
+        from hermes_cli.datastore import SupabaseAppStore, get_store
+        from hermes_cli.interactions import InteractionLedger
+
+        resolved = load_config() or {}
+        store = get_store("supabase-app", "prod", config=resolved)
+        if not isinstance(store, SupabaseAppStore) or not store.dsn:
+            return None
+        ledger = InteractionLedger(store, config=resolved)
+        interactions, _rollup = await ledger.get_trace(trace_id, principal)
+        return _cost_from_interactions(interactions)
+
+    try:
+        return asyncio.run(_read())
+    except Exception:  # noqa: BLE001 — cost is observability, never fatal
+        log.warning(
+            "projects: cost read failed for trace %s — not recorded",
+            trace_id, exc_info=True,
+        )
+        return None
+
+
+def run_cost(
+    trace_id: Optional[str],
+    *,
+    reader: Optional[Callable] = None,
+    principal=None,
+):
     """Cost of a run, read from the C8 ledger — never stored (§6).
 
-    Fail-open contract: no trace or no ledger → ``None`` ("not recorded");
-    a run must never fail because observability is off.
+    Fail-open contract: no trace, no ledger, or no read principal →
+    ``None`` ("not recorded"); a run must never fail because observability
+    is off. An injected ``reader`` always wins — it is the test/override
+    seam and may map an untraced run to a number.
     """
-    if not trace_id:
-        return None
     if reader is not None:
         try:
             return reader(trace_id)
         except Exception:  # noqa: BLE001
             return None
-    try:  # pragma: no cover — lands with the C8 ledger
-        from hermes_cli.interactions import sum_cost_for_trace  # type: ignore
-
-        return sum_cost_for_trace(trace_id)
-    except Exception:  # noqa: BLE001
+    if not trace_id:
         return None
+    if principal is None:
+        return None
+    return _default_cost_reader(trace_id, principal)
 
 
 def budget_gate(
@@ -574,14 +674,16 @@ def budget_gate(
     budget = project.budget_usd_per_run
     if not budget:
         return None
-    cost = run_cost(run.get("trace_id"), reader=reader)
+    cost = run_cost(
+        run.get("trace_id"), reader=reader, principal=_owner_principal(project)
+    )
     if cost is None or float(cost) <= float(budget):
         return None
     reason = (
         f"run {run.get('run_no')} of project '{project.name}' has spent "
         f"${float(cost):.2f}; budget is ${float(budget):.2f} per run — continue?"
     )
-    raise_approval(project, run, reason)
+    raise_approval(project, run, reason, kind="budget")
     return reason
 
 
@@ -589,8 +691,30 @@ def budget_gate(
 # §6 — the run lifecycle orchestration
 # ---------------------------------------------------------------------------
 
-def _trace_id_for(run_no: int) -> str:
-    return f"proj-{uuid.uuid4().hex[:12]}"
+def _mint_run_trace(project: projects_db.Project, *, run_no: int, config):
+    """Mint the run's C8 trace — off-gateway surfaces pass ``mode='prod'``.
+
+    Returns ``(trace, ledger)``; ``(None, None)`` when action tracking is
+    disabled or the app store is not configured — then the run row carries
+    no trace and the budget gate has no numbers to enforce with.
+    """
+    try:
+        from hermes_cli import interactions
+
+        return interactions.create_trace(
+            config=config,
+            actor_user_id=project.owner_user_id or "",
+            session_key=f"projects:{project.slug}:run-{run_no}",
+            platform="projects",
+            mode="prod",
+        )
+    except Exception:  # noqa: BLE001 — observability must never break a run
+        log.warning(
+            "projects: C8 trace mint failed for %s run %s — budget not "
+            "enforceable for this run",
+            project.slug, run_no, exc_info=True,
+        )
+        return None, None
 
 
 def start_run(
@@ -638,15 +762,28 @@ def start_run(
         triggered_by=triggered_by,
         profile=host,
         playbook_rev=playbook["rev"],
-        trace_id=_trace_id_for(playbook["rev"]),
     )
+
+    # §6 + C8: the run binds a REAL trace so its cost is readable through
+    # the ledger (never stored). Without tracing there is no trace id and
+    # the budget gate has nothing to enforce with.
+    try:
+        from hermes_cli.config import load_config
+
+        full_cfg = load_config() or {}
+    except Exception:  # noqa: BLE001 — observability config is advisory
+        full_cfg = {}
+    trace, ledger = _mint_run_trace(project, run_no=run["run_no"], config=full_cfg)
+    if trace is not None:
+        projects_db.update_project_run(pconn, run["id"], trace_id=trace.trace_id)
+        run = dict(run, trace_id=trace.trace_id)
 
     # §4.1 — narrowing filter; drops are recorded on the run, never silent.
     cfg = projects_runtime_config()
     enabled = _enabled_toolsets_for_profile(host)
     requested = parse_csv_field(project.toolsets)
     effective, ts_dropped = resolve_toolsets(requested, enabled)
-    available = _available_skill_names()
+    available = _available_skill_names(host)
     req_skills = parse_csv_field(project.skills)
     eff_skills, sk_dropped, sk_truncated = resolve_skills(
         req_skills, available, cfg["max_skills"]
@@ -717,17 +854,32 @@ def start_run(
 
     session_info: Dict[str, Any] = {}
     if made["inline"]:
+        from hermes_cli import interactions
+
         spawner = spawn_inline or _default_spawn_inline
-        session_info = spawner(
-            project=project,
-            run=run,
-            guidance=guidance,
-            inline_steps=made["inline"],
-            enabled_toolsets=effective or None,
-        )
+        # The run's session binds the run's trace (contextvar), so its
+        # tool calls + cost events land under it; ``copy_context()`` in
+        # the spawn carries the binding into the session thread.
+        with interactions.bind_trace(trace):
+            session_info = spawner(
+                project=project,
+                run=run,
+                guidance=guidance,
+                inline_steps=made["inline"],
+                enabled_toolsets=effective or None,
+            )
         if session_info.get("session_id"):
             projects_db.update_project_run(
                 pconn, run["id"], session_id=session_info["session_id"]
+            )
+    if trace is not None and ledger is not None:
+        try:
+            asyncio.run(ledger.flush(trace))
+        except Exception:  # noqa: BLE001 — observability, never fatal
+            log.warning(
+                "projects: C8 trace flush failed for %s run %s — cost "
+                "reads as not recorded",
+                project.slug, run.get("run_no"), exc_info=True,
             )
 
     gate = budget_gate(project, run, reader=cost_reader)
@@ -826,26 +978,39 @@ def projects_db_close_and_fetch(
 
 def _enabled_toolsets_for_profile(profile: str) -> List[str]:
     """The host profile's enabled toolsets — the superset a project may
-    intersect with (§4.1)."""
+    intersect with (§4.1). Read inside the profile's runtime scope — never
+    the calling process's config; an unknown profile grants nothing."""
     try:
-        from hermes_cli.config import load_config
+        from agent.profile_runtime import profile_runtime_scope
+        from hermes_cli import profiles
+        from hermes_cli.config import load_config_readonly
 
-        cfg = load_config() or {}
-        ts = cfg.get("toolsets")
-        if isinstance(ts, list):
-            return [str(t) for t in ts]
+        home = profiles.get_profile_dir(profile)
+        if not home.is_dir():
+            return []  # unknown profile → fail closed: no grant
+        with profile_runtime_scope(home):
+            cfg = load_config_readonly() or {}
+            ts = cfg.get("toolsets")
+    except Exception:  # noqa: BLE001 — fail closed: no grant
         return []
-    except Exception:  # noqa: BLE001
-        return []
+    return [str(t) for t in ts] if isinstance(ts, list) else []
 
 
-def _available_skill_names() -> List[str]:
-    """Skills visible to the host profile through the shipped loader."""
+def _available_skill_names(profile: str) -> List[str]:
+    """Skills visible to the host profile through the shipped loader —
+    scanned inside the profile's runtime scope (the host's skills, never
+    the server's)."""
     try:
+        from agent.profile_runtime import profile_runtime_scope
         from agent.skill_commands import get_skill_commands
+        from hermes_cli import profiles
 
-        return list(get_skill_commands().keys())
-    except Exception:  # noqa: BLE001
+        home = profiles.get_profile_dir(profile)
+        if not home.is_dir():
+            return []  # unknown profile → fail closed: no grant
+        with profile_runtime_scope(home):
+            return list(get_skill_commands().keys())
+    except Exception:  # noqa: BLE001 — fail closed: no grant
         return []
 
 
@@ -894,11 +1059,20 @@ def _default_spawn_inline(
         "produce as an output delivery for this project."
     )
     session_id = f"proj-run-{run.get('run_no')}-{uuid.uuid4().hex[:8]}"
+    from hermes_cli import profiles
+
+    host_profile = run.get("profile")
     result = spawn_seeded_session(
         prompt,
         origin=f"projects:{project.slug}:run-{run.get('run_no')}",
         session_id=session_id,
+        # The run executes in the HOST profile's home — its memory, secrets
+        # and soul, matching the profile the run row records (§6).
+        profile_home=(
+            str(profiles.get_profile_dir(host_profile)) if host_profile else None
+        ),
         enabled_toolsets=list(enabled_toolsets) if enabled_toolsets else None,
+        context=contextvars.copy_context(),
     )
     return {
         "session_id": session_id,
