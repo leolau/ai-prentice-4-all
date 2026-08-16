@@ -1,5 +1,6 @@
 "use client";
 
+import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 
 import { Spinner } from "@/components/ui/Spinner";
@@ -24,6 +25,12 @@ export interface AddToProjectPrefill {
   label?: string;
 }
 
+/** The to-do this sheet may promote (§10) — set when opened from /todos. */
+export interface PromoteInfo {
+  todoId: string;
+  todoTitle: string;
+}
+
 /**
  * The "Add" sheet (§13): attach a pointer to a project. A link is never a
  * copy — the authority stays in the owning profile (§11 rule 5), so the form
@@ -31,21 +38,24 @@ export interface AddToProjectPrefill {
  *
  * Two modes: opened from the detail page the project is fixed; opened from a
  * to-do or an arrival it fetches the active projects and lets the user pick.
- * The promote action (a to-do becoming a card, §10) joins this same sheet in
- * the step-8b seam — the copy below already states the difference.
+ * With `promote`, the same sheet offers the §10 promotion — the to-do becomes
+ * a card in `triage` and moves to `working` (human-only, one-way).
  */
 export function AddToProjectSheet({
   onClose,
   fixedSlug,
   fixedName,
   prefill,
+  promote,
 }: {
   onClose: () => void;
   /** Set when opened from `/projects/[slug]` — the picker is skipped. */
   fixedSlug?: string;
   fixedName?: string;
   prefill?: AddToProjectPrefill;
+  promote?: PromoteInfo;
 }) {
+  const router = useRouter();
   const [projects, setProjects] = useState<
     { slug: string; name: string }[] | null
   >(fixedSlug ? [] : null);
@@ -107,6 +117,40 @@ export function AddToProjectSheet({
         return;
       }
       onClose();
+    } catch {
+      setError("Could not reach the server.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const promoteTodo = async () => {
+    if (!slug || !promote) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await fetch(
+        `/api/projects/${encodeURIComponent(slug)}/cards`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            from_todo: {
+              id: promote.todoId,
+              profile: profile.trim() || undefined,
+            },
+          }),
+        },
+      );
+      const data = (await res.json().catch(() => ({}))) as {
+        detail?: string;
+      };
+      if (!res.ok) {
+        setError(data.detail ?? "Could not promote the to-do.");
+        return;
+      }
+      onClose();
+      router.push(`/projects/${encodeURIComponent(slug)}`);
     } catch {
       setError("Could not reach the server.");
     } finally {
@@ -218,7 +262,8 @@ export function AddToProjectSheet({
 
         <p className="text-xs text-[var(--color-muted)]">
           Linking keeps a to-do a to-do — it only adds a pointer. Promoting
-          turns it into a card on the project&rsquo;s board.
+          turns it into a card on the project&rsquo;s board and moves the
+          to-do to working.
         </p>
 
         {error ? (
@@ -227,11 +272,26 @@ export function AddToProjectSheet({
           </p>
         ) : null}
 
+        {promote ? (
+          <button
+            type="button"
+            onClick={() => void promoteTodo()}
+            disabled={busy || !slug}
+            className="rounded-xl bg-[var(--color-accent)] px-4 py-2.5 text-sm font-medium text-[var(--color-accent-fg)] disabled:opacity-50"
+          >
+            {busy ? "Promoting…" : "Promote to card"}
+          </button>
+        ) : null}
+
         <button
           type="button"
           onClick={() => void add()}
           disabled={busy || !slug || !ref.trim()}
-          className="rounded-xl bg-[var(--color-accent)] px-4 py-2.5 text-sm font-medium text-[var(--color-accent-fg)] disabled:opacity-50"
+          className={
+            promote
+              ? "rounded-xl border border-[var(--color-border)] px-4 py-2.5 text-sm font-medium disabled:opacity-50"
+              : "rounded-xl bg-[var(--color-accent)] px-4 py-2.5 text-sm font-medium text-[var(--color-accent-fg)] disabled:opacity-50"
+          }
         >
           {busy ? "Adding…" : "Add link"}
         </button>

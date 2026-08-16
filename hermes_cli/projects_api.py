@@ -29,8 +29,8 @@ Permissions are enforced here and only here (§11): the store has no RLS.
   ``kanban_db.list_tasks`` — a project view must not become the way to read
   another user's ``private:`` card.
 
-Not in this step (later steps in §17): score routes (step 9b), the
-``from_todo`` card seam (step 8b).
+Not in this step (later steps in §17): score routes (step 9b). The
+``from_todo`` card seam (§10, step 8b) landed on ``POST /{slug}/cards``.
 """
 
 from __future__ import annotations
@@ -1268,14 +1268,48 @@ async def create_card(request: Request) -> dict[str, Any]:
 
     Cards created through the Projects surface land in ``triage`` — a
     project asking for work is not the same as a human approving it
-    (§10: promotion is not dispatch). The ``from_todo`` seam lands in
-    step 8b.
+    (§10: promotion is not dispatch).
+
+    The ``from_todo`` seam (§10, step 8b): ``{"from_todo": {"profile": …,
+    "id": …}}`` promotes a to-do into a card — human-only, one-way, no
+    reverse sync, no ``project_id`` on to-dos. The to-do is read under the
+    caller's own principal (not visible → 404); the card inherits its
+    title/description, a ``project_links(kind='todo')`` row records
+    provenance, and the to-do moves to ``working`` with a history entry
+    naming the card. If the stage move fails the card is rolled back — a
+    half-promotion would strand the work in neither place.
     """
     project, _role, _profiles, principal = await _require_write(
         request, judgement=True
     )
     body = await request.json()
     title = str(body.get("title") or "").strip()
+    card_body = body.get("body")
+
+    # ── The promotion seam (§10): validate the to-do BEFORE anything is
+    # created, so a bad ref fails with nothing to roll back.
+    from_todo = body.get("from_todo")
+    todo = None
+    todo_profile = "default"
+    if isinstance(from_todo, dict) and from_todo:
+        todo_id = str(from_todo.get("id") or "").strip()
+        todo_profile = str(from_todo.get("profile") or "default").strip()
+        if not todo_id:
+            raise HTTPException(
+                status_code=422, detail="from_todo needs an id"
+            )
+        from hermes_cli.todo_store import default_store
+
+        try:
+            todo = await default_store().get(principal, todo_id)
+        except Exception:  # noqa: BLE001 - store unreachable = not visible
+            todo = None
+        if todo is None:
+            raise HTTPException(
+                status_code=404, detail="to-do not found or not visible"
+            )
+        title = title or todo.title
+        card_body = card_body or todo.description
     if not title:
         raise HTTPException(status_code=422, detail="title is required")
 
@@ -1284,7 +1318,7 @@ async def create_card(request: Request) -> dict[str, Any]:
             tid = kanban_db.create_task(
                 bconn,
                 title=title,
-                body=body.get("body"),
+                body=card_body,
                 assignee=body.get("assignee"),
                 created_by=principal.user_id,
                 triage=True,
@@ -1296,12 +1330,60 @@ async def create_card(request: Request) -> dict[str, Any]:
                 # visibility (invisible to every non-owner) would be wrong.
                 visibility="shared",
             )
+            if todo is not None:
+                # Provenance pointer (§11 rule 5): the card came from this
+                # to-do. INSERT OR IGNORE — re-promoting is a no-op here.
+                with projects_db.connect_closing() as pconn:
+                    projects_db.add_project_link(
+                        pconn,
+                        project_id=project.id,
+                        kind="todo",
+                        profile=todo_profile,
+                        ref=todo.id,
+                        label=todo.title,
+                        added_by=principal.user_id,
+                    )
         return {"task_id": tid, "project_id": project.id, "status": "triage"}
 
     try:
-        return await asyncio.to_thread(_create_sync)
+        result = await asyncio.to_thread(_create_sync)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
+
+    if todo is not None:
+        # The to-do moves to ``working`` AFTER the card exists, with a
+        # history entry naming the card — the store's ``action:`` prefix
+        # convention puts it on the same timeline as the stage changes.
+        from hermes_cli.todo_store import TodoError, default_store
+
+        store = default_store()
+        actor = f"user:{principal.user_id}"
+        try:
+            await store.set_stage(
+                principal, todo.id, "working", actor=actor
+            )
+            await store.record_outbound(
+                principal,
+                todo.id,
+                event=f"card:{result['task_id']}",
+                channel="promote",
+                actor=actor,
+            )
+        except (TodoError, LookupError) as exc:
+            # Roll the card back: promotion is one atomic idea, and a card
+            # whose to-do refused to move would look dispatched when it
+            # was not.
+            def _rollback_sync() -> None:
+                with _board_conn(project) as bconn:
+                    kanban_db.delete_task(bconn, str(result["task_id"]))
+
+            await asyncio.to_thread(_rollback_sync)
+            raise HTTPException(
+                status_code=409,
+                detail=f"the to-do could not move to working: {exc}",
+            )
+        result["from_todo"] = {"profile": todo_profile, "id": todo.id}
+    return result
 
 
 @router.get("/{slug}/cards/{task_id}")
