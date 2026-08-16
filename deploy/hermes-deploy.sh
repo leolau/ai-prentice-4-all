@@ -171,3 +171,17 @@ echo "deploy OK ($AFTER)  backup: /opt/data/backups/deploy-$TS"
 # every deploy. Advisory here (a stale document must not block a deploy); the
 # weekly drift timer is what reports it.
 ./.venv/bin/python scripts/deploy_state.py handover || true
+
+# The deploy tool does not deploy itself: /opt/data/deploy-hermes.sh is a copy
+# installed by hand, so a merged fix to this script changes nothing on the box
+# until someone remembers to install it — and the deploy it was supposed to fix
+# reports success meanwhile. Found when the delete-pruning fix above merged,
+# deployed green, and did not run. Reported, not self-applied: a script that
+# rewrites itself while bash is still reading it is its own class of bug.
+SELF=$(readlink -f "$0")
+REVIEWED=$(readlink -f "$REPO/deploy/hermes-deploy.sh" 2>/dev/null || true)
+if [ -n "$REVIEWED" ] && [ "$SELF" != "$REVIEWED" ] && ! cmp -s "$SELF" "$REVIEWED"; then
+  echo "DEPLOY TOOL STALE: the running $SELF differs from the reviewed copy at $AFTER."
+  echo "  Everything above ran the old script. Install the new one and re-run:"
+  echo "    sudo install -m 755 -o root -g root $REVIEWED $SELF"
+fi
