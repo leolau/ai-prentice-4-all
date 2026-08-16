@@ -219,6 +219,25 @@ def _clone_all_copytree_ignore(source_dir: Path):
     return _ignore
 
 
+def unreadable_clone_sources(source_dir: Path, ignore) -> List[Path]:
+    """Entries a ``--clone-all`` copy would read and cannot.
+
+    Resolved *before* anything is written. A single file the running user
+    cannot open — on a shared box, typically one left root-owned by an earlier
+    root-run command — otherwise takes ``shutil.copytree`` down mid-copy, with
+    a traceback and a half-made profile still on disk.
+    """
+    blocked: List[Path] = []
+    for directory, dirnames, filenames in os.walk(source_dir):
+        skipped = set(ignore(directory, dirnames + filenames))
+        dirnames[:] = [name for name in dirnames if name not in skipped]
+        for name in dirnames + [f for f in filenames if f not in skipped]:
+            path = Path(directory) / name
+            if not os.access(path, os.R_OK):
+                blocked.append(path)
+    return blocked
+
+
 # Directories/files to exclude when exporting the default (~/.hermes) profile.
 # The default profile contains infrastructure (repo checkout, worktrees, DBs,
 # caches, binaries) that named profiles don't have.  We exclude those so the
@@ -1112,11 +1131,26 @@ def create_profile(
 
     if clone_all and source_dir:
         # Full copy of source profile (exclude sibling ~/.hermes/profiles/)
-        shutil.copytree(
-            source_dir,
-            profile_dir,
-            ignore=_clone_all_copytree_ignore(source_dir),
-        )
+        ignore = _clone_all_copytree_ignore(source_dir)
+        blocked = unreadable_clone_sources(source_dir, ignore)
+        if blocked:
+            listed = "\n  ".join(str(path) for path in blocked[:10])
+            more = "" if len(blocked) <= 10 else f"\n  … and {len(blocked) - 10} more"
+            raise PermissionError(
+                f"Cannot make a full copy of '{clone_from or 'active'}': "
+                f"{len(blocked)} path(s) are not readable as this user, so the "
+                "copy would stop partway through:\n  "
+                f"{listed}{more}\n"
+                "Fix their ownership or permissions (a root-run command often "
+                "leaves them behind), or clone without --clone-all."
+            )
+        try:
+            shutil.copytree(source_dir, profile_dir, ignore=ignore)
+        except (shutil.Error, OSError):
+            # A partial profile is worse than none: it exists, so a retry
+            # refuses, and it looks like a profile that was merely cloned badly.
+            shutil.rmtree(profile_dir, ignore_errors=True)
+            raise
         # Strip runtime files
         for stale in _CLONE_ALL_STRIP:
             (profile_dir / stale).unlink(missing_ok=True)

@@ -11042,7 +11042,12 @@ def cmd_profile(args):
         except SchemaOwnershipError as e:
             print(f"Error: {e}")
             sys.exit(1)
-        except (ValueError, FileExistsError, FileNotFoundError) as e:
+        except (
+            ValueError,
+            FileExistsError,
+            FileNotFoundError,
+            PermissionError,
+        ) as e:
             print(f"Error: {e}")
             sys.exit(1)
 
