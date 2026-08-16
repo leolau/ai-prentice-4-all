@@ -14147,6 +14147,45 @@ async def describe_profile_auto_endpoint(name: str, body: ProfileDescribeAuto):
 
 
 # ---------------------------------------------------------------------------
+# Capacity headroom (FG-31)
+# ---------------------------------------------------------------------------
+
+@app.get("/api/capacity")
+async def capacity_headroom_endpoint(request: Request):
+    """Where the box stands, for the agent-home headroom card.
+
+    Read-only and box-wide by design: the active-session registry is
+    profile-local, so the count is aggregated across every profile's home —
+    a per-profile reading would understate the load on the RAM they share.
+    Any enrolled principal may read it; nothing here is mutable, and the
+    recommendations are advice rather than an applied change.
+    """
+    from hermes_cli.capacity import as_dict, headroom
+
+    await _comms_resolve_principal(request)
+    try:
+        from hermes_cli.config import load_config
+
+        config = load_config()
+    except Exception:
+        config = {}
+    try:
+        idle: list[str] = []
+        try:
+            from hermes_cli.profile_suggestion import idle_profiles
+
+            idle = [name for name, _age in await idle_profiles()]
+        except Exception as exc:
+            _log.debug("capacity: idle profiles unavailable: %s", exc)
+        return as_dict(headroom(config, idle_profiles=idle))
+    except Exception:
+        _log.exception("GET /api/capacity failed")
+        raise HTTPException(
+            status_code=500, detail="Capacity indicators are unavailable."
+        )
+
+
+# ---------------------------------------------------------------------------
 # Profile suggestions (FG-30)
 # ---------------------------------------------------------------------------
 

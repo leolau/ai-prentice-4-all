@@ -1641,6 +1641,40 @@ fails open if the registry cannot be read or locked so users are not stranded.
 It is intended for a single host/profile runtime, not a shared `$HERMES_HOME`
 mounted across multiple machines.
 
+### Capacity headroom
+
+`hermes status`, `hermes doctor`, agent-home's **Capacity** screen and the weekly
+digest all report one headroom verdict — `comfortable`, `watch` or
+`constrained` — and name the bound that produced it. The thresholds live in
+`config.yaml`:
+
+```yaml
+capacity:
+  watch_session_ratio: 0.60          # share of the box-wide concurrency cap
+  constrained_session_ratio: 0.85
+  conversation_cost_mb: 250          # RAM one live conversation holds
+  profile_slab_mb: 150               # RAM one more profile costs
+  memory_margin_mb: 512              # free RAM to keep beyond that
+  watch_contention_per_hour: 6       # SQLite write-lock waits per hour
+  constrained_contention_per_hour: 30
+  watch_p95_s: 25                    # reply latency, p95
+  constrained_p95_s: 60
+  window_s: 86400                    # trailing window for waits and latency
+```
+
+Two things to know about the reading:
+
+- The active-conversation count is **box-wide**: every profile keeps its own
+  lease registry and enforces its own `max_concurrent_sessions`, so the box can
+  be asked for the sum of them while the RAM they compete for is shared.
+- **Write-lock waits are the one bound a bigger box does not fix.** They mean
+  SQLite is serialising concurrent writes, so the verdict recommends runtime
+  work rather than hardware, and says so explicitly.
+
+It is reporting only: a `constrained` verdict never lowers your cap or refuses
+work — the recommendations are cheapest-first (retire idle profiles, consolidate
+gateways) and any hardware advice states the load it was sized from.
+
 Control whether shared chats keep one conversation per room or one conversation per participant:
 
 ```yaml

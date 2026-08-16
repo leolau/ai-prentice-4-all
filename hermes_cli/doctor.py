@@ -323,6 +323,44 @@ def _check_stale_published_goals(issues: list[str]) -> None:
     )
 
 
+def _check_capacity_headroom(issues: list[str]) -> None:
+    """Say where the box stands, and what to do about it (FG-31).
+
+    ``hermes status`` reports the verdict; doctor is where the *actions* belong,
+    ordered cheap-first. A ``constrained`` box is reported, never throttled —
+    lowering the cap serves fewer people, which is the owner's decision.
+    """
+    from hermes_cli.capacity import COMFORTABLE, CONSTRAINED, headroom, summary_line
+
+    _section("Capacity headroom")
+    try:
+        from hermes_cli.config import load_config
+
+        config = load_config()
+    except Exception:
+        config = {}
+    try:
+        verdict = headroom(config)
+    except Exception as exc:
+        check_info(f"Capacity indicators unavailable ({exc})")
+        return
+
+    check_info(summary_line(verdict))
+    if verdict.state == COMFORTABLE:
+        check_ok(verdict.headline())
+    elif verdict.state == CONSTRAINED:
+        check_fail(verdict.headline())
+        issues.append(verdict.headline())
+    else:
+        check_warn(verdict.headline())
+    for recommendation in verdict.recommendations:
+        check_info(f"→ {recommendation}")
+    if verdict.indicators.unavailable:
+        check_info(
+            "Not measured: " + ", ".join(sorted(verdict.indicators.unavailable))
+        )
+
+
 def _check_app_datastore_binding(issues: list[str]) -> None:
     """Report which ``(database, schema)`` this profile's rows live in (FG-27).
 
@@ -1450,6 +1488,7 @@ def run_doctor(args):
     _check_s6_supervision(issues)
     _check_app_datastore_binding(issues)
     _check_stale_published_goals(issues)
+    _check_capacity_headroom(issues)
 
     if sys.platform != "win32":
         _section("Command Installation")

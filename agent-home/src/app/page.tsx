@@ -122,6 +122,24 @@ export default async function HomePage() {
           </span>
         </Link>
 
+        {/* FG-31: the answer to "when should I upgrade the box?", stated as a
+         * verdict rather than a graph. */}
+        <Link
+          href="/capacity"
+          data-component="CapacityLink"
+          className="flex items-center justify-between rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface)] p-4 active:opacity-70"
+        >
+          <span>
+            <span className="block text-sm font-medium">Capacity</span>
+            <span className="block text-xs text-[var(--color-muted)]">
+              Headroom, and when to upgrade the box
+            </span>
+          </span>
+          <span aria-hidden className="text-[var(--color-muted)]">
+            ›
+          </span>
+        </Link>
+
         <Link
           href="/onboarding"
           data-component="OnboardingLink"
