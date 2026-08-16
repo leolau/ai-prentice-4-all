@@ -1,6 +1,6 @@
 # Projects steps 1–8 — review findings
 
-Audience: the agent implementing `docs/design/projects-feature-design.md`.
+Audience: the agent implementing `docs/design/master-plan/feature-groups/FG-32-projects-durable-record.md`.
 Every finding names the call site, what actually happens, the shipped seam to
 use, and the test that would have caught it. Severities: **H/F-high** = the
 designed behaviour does not happen; **M/med** = wrong in a reachable case;
@@ -8,7 +8,7 @@ designed behaviour does not happen; **M/med** = wrong in a reachable case;
 
 # Steps 1–5 (backend)
 
-Reviewed at `bfbb2f4d2` (step 5) against `docs/design/projects-feature-design.md` (ed.3.2).
+Reviewed at `bfbb2f4d2` (step 5) against `docs/design/master-plan/feature-groups/FG-32-projects-durable-record.md` (ed.3.2).
 PRs: #251 (store), #252 (kanban_view), #254 (API), #258 (runs), #259 (schedule).
 Targeted suite: 137 passed (`tests/hermes_cli/test_projects_*.py`, `test_kanban_view.py`).
 
