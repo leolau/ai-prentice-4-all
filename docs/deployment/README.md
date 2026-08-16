@@ -41,6 +41,7 @@ prose is worse than an old date.
 | `os-patching.md` | unattended upgrades and the `needrestart` exemption |
 | `mcp-approval-gating.md` | which MCP tools require human approval |
 | `../../.agents/skills/testing-hermes-systest-box/SKILL.md` | how to reach the box at all (no SSH) and ~30 traps |
+| `../testing/uat-hermes-systest.md` | the acceptance suite to run against a deployed revision |
 
 ## The box
 
