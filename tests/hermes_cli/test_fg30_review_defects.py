@@ -511,29 +511,60 @@ def test_commit_channel_unknown_platform_is_refused(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_list_endpoint_default_returns_all_statuses_for_the_renderer() -> None:
+def test_list_endpoint_returns_the_open_card_and_a_projected_trail() -> None:
     """``ReviewedHistory`` renders rows the API never returned: dead code, and
     after an adopt the card vanished from the screen.
 
-    The route must default to all statuses (``proposed`` + ``adopted`` +
-    ``dismissed``) so the open/reviewed split is real. This is a static
-    property of the handler — the route passes ``statuses=SUGGESTION_STATES``
-    (or defaults to it) and never narrows to ``OPEN_STATE`` alone.
+    The route reaches the reviewed rows — but through ``queue()``, which reads
+    them separately, caps them, and projects them: a single all-statuses read
+    would ship every past ``evidence`` blob, and those carry §4.2 T3's
+    ``participants`` roster to any enrolled reader of the screen. The behaviour
+    over HTTP is asserted in ``test_fg30_suggestions_endpoint.py``; this pins
+    the wiring the route must not regress to.
     """
     from hermes_cli import web_server
-    from hermes_cli.profile_suggestion import SUGGESTION_STATES
 
     code = _code_of(web_server.list_profile_suggestions_endpoint)
     # The route resolves the caller (the #253 invariant), not the owner.
     assert "_comms_resolve_principal(request)" in code
     assert "get_owner" not in code
-    # F1: it does not pass only OPEN_STATE to list_suggestions. Either it
-    # passes SUGGESTION_STATES, or list_suggestions defaults to it — but it
-    # must never narrow to proposed-only. The route may take an optional
-    # ``?status=``; what matters is the *default* reaches all three.
-    assert "OPEN_STATE" not in code or "SUGGESTION_STATES" in code
-    # SUGGESTION_STATES is the set the default must cover.
-    assert {"proposed", "adopted", "dismissed"} == set(SUGGESTION_STATES)
+    # The trail reaches the renderer, projected rather than whole.
+    assert "store.queue(" in code
+    assert "as_summary_dict()" in code
+    # No query param the split makes redundant, and no leaked internals.
+    assert "query_params" not in code
+    assert "detail=str(exc)" not in code
+
+
+def test_the_reviewed_projection_drops_the_evidence_and_its_roster() -> None:
+    """The projection is where the roster is dropped, so pin it here too."""
+    from datetime import datetime as _dt
+
+    row = ps.ProfileSuggestion(
+        id="s1",
+        proposed_name="finance",
+        proposed_role="CFO",
+        proposed_goal="improve cashflow",
+        parent_goal_id=None,
+        rationale="three weeks of cashflow work",
+        evidence={"participants": [{"user_id": "mia", "role": "member"}]},
+        dedup_key="k1",
+        origin_profile="default",
+        status="adopted",
+        reviewed_by="leo",
+        reviewed_at=_dt(2026, 8, 16, tzinfo=timezone.utc),
+        created_at=_dt(2026, 8, 15, tzinfo=timezone.utc),
+    )
+    summary = row.as_summary_dict()
+
+    assert "evidence" not in summary and "dedup_key" not in summary
+    assert "mia" not in str(summary)
+    # What the trail renders is still there.
+    assert summary["status"] == "adopted"
+    assert summary["proposed_role"] == "CFO"
+    assert summary["proposed_goal"] == "improve cashflow"
+    # The open card is a decision being asked for, so it keeps its evidence.
+    assert row.as_dict()["evidence"]["participants"]
 
 
 # ---------------------------------------------------------------------------
@@ -605,6 +636,39 @@ def test_commit_channel_reports_channel_less_false_only_when_the_key_landed(
     assert result["service_started"] is False
 
 
+def test_commit_channel_refuses_when_an_older_token_is_what_reads_back(
+    tmp_path: Path,
+) -> None:
+    """The read-back asks "is it *this* token", not "is there a value".
+
+    A profile whose ``.env`` already held an older token for the same key reads
+    back truthy after a refused write, so a presence check reports a successful
+    commit while the gateway keeps serving the previous bot — a wrong-channel
+    success, which is the same lie the read-back exists to prevent.
+    """
+    _root, dirs = _profile_tree(tmp_path)
+    finance_env = dirs["finance"] / ".env"
+    finance_env.write_text("TELEGRAM_BOT_TOKEN=111:old-bot\n", encoding="utf-8")
+
+    import hermes_cli.config as cfg_mod
+
+    original = cfg_mod.save_env_value
+    cfg_mod.save_env_value = lambda key, value: None  # type: ignore[assignment]
+    try:
+        with pytest.raises(ps.ChannelWriteError):
+            ps.commit_channel(
+                "finance",
+                platform="telegram",
+                token="222:new-bot",
+                start_service=False,
+            )
+    finally:
+        cfg_mod.save_env_value = original  # type: ignore[assignment]
+
+    # The old token is still what the unit would load — and the owner was told.
+    assert "111:old-bot" in finance_env.read_text(encoding="utf-8")
+
+
 # ---------------------------------------------------------------------------
 # F3 — the collision check is fail-closed, not fail-open
 # ---------------------------------------------------------------------------
@@ -640,28 +704,31 @@ def test_find_token_collision_refuses_when_enumeration_fails(
     ).lower()
 
 
-def test_find_token_collision_reads_the_process_environment_as_a_second_source(
+def test_the_check_scope_is_profile_env_files_and_says_so(
     tmp_path: Path, monkeypatch
 ) -> None:
-    """A token set through ``Environment=`` or the shell is invisible to a
-    ``.env``-only scan. Reading the process env for *equality* neither
-    propagates nor writes a credential (not the #219/#220 hazard, which is
-    about *writing* the token into the process env), so it is a safe second
-    source.
+    """The scope is profiles' own ``.env`` files, and the docstring must not
+    promise more.
 
-    This is a presence check, not a cross-profile identity: the function does
-    not claim to name a holder from the process value (the process has no
-    profile identity), but it must not silently ignore a value it can see.
-    The implementation reads it defensively; the test pins that reading it
-    does not raise and does not return a false holder.
+    A token handed to another profile's gateway through a unit's
+    ``Environment=`` line is not visible here: this command's process
+    environment is not that unit's environment, so consulting ``os.environ``
+    would catch nothing while reading as a guarantee. The gap is real and named
+    in §4.3 — the gateway's ``EX_CONFIG`` permanent stop is its only net — so
+    what is pinned is that the check does not *claim* to cover it.
     """
-    _root, dirs = _profile_tree(tmp_path)
+    _root, _dirs = _profile_tree(tmp_path)
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "from-shell")
 
-    # No .env holds the token, so no named holder — the function returns None
-    # (the process value is a fallback signal, not a profile identity).
-    holder = ps.find_token_collision("telegram", "from-shell", skip_profile="finance")
-    assert holder is None
+    # A process value is not a holder: the process has no profile identity.
+    assert (
+        ps.find_token_collision("telegram", "from-shell", skip_profile="finance")
+        is None
+    )
+
+    doc = ps.find_token_collision.__doc__ or ""
+    assert "is not detected" in doc or "not visible" in doc
+    assert "os.environ" not in _code_of(ps.find_token_collision)
 
 
 # ---------------------------------------------------------------------------

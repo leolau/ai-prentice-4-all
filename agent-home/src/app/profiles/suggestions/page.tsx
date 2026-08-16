@@ -1,7 +1,11 @@
 import { MobileShell } from "@/components/MobileShell";
 import { ProfileSuggestionsView } from "@/components/profiles/ProfileSuggestionsView";
 import { apiClientForRequest, requirePrincipal } from "@/lib/auth/principal";
-import type { ProfileSuggestion, ProfileSuggestionsResponse } from "@/types";
+import type {
+  ProfileSuggestion,
+  ProfileSuggestionSummary,
+  ProfileSuggestionsResponse,
+} from "@/types";
 
 // Reads the live principal (cookie) + this profile's suggestions per request.
 // Never at build time — the row is profile-local (§1.4) and the adopt path
@@ -26,11 +30,13 @@ export default async function Page() {
   const principal = await requirePrincipal();
 
   let suggestions: ProfileSuggestion[] = [];
+  let reviewed: ProfileSuggestionSummary[] = [];
   let error: string | null = null;
   try {
     const client = await apiClientForRequest();
     const resp: ProfileSuggestionsResponse = await client.profileSuggestions();
     suggestions = resp.suggestions ?? [];
+    reviewed = resp.reviewed ?? [];
   } catch (err) {
     error = err instanceof Error ? err.message : "Failed to load suggestions";
   }
@@ -40,6 +46,7 @@ export default async function Page() {
       <ProfileSuggestionsView
         role={principal.role}
         suggestions={suggestions}
+        reviewed={reviewed}
         error={error}
       />
     </MobileShell>

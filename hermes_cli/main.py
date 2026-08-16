@@ -11637,8 +11637,8 @@ def cmd_profile(args):
                 args.profile_name,
                 platform=args.platform,
                 token=token,
-                allowed_users=getattr(args, "allowed_users", None),
-                start_service=not getattr(args, "no_start", False),
+                allowed_users=args.allowed_users,
+                start_service=not args.no_start,
             )
         except ChannelCollisionError as exc:
             # Refused before the write — no .env touched, no service touched.
@@ -11668,9 +11668,8 @@ def cmd_profile(args):
         # F4: distinguish "skipped" (--no-start or no service manager) from
         # "failed" (the manager was there but install/start did not leave it
         # running), so an operational failure is not read as a deliberate skip.
-        no_start = bool(getattr(args, "no_start", False))
         service_status = result.get("service_status", "unavailable")
-        if no_start:
+        if args.no_start:
             print("  Service not started (--no-start): the channel is configured.")
             print(
                 f"  Start it with `hermes -p {result['profile']} gateway start` "

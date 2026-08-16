@@ -34,13 +34,21 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import os
 import re
 import shutil
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence, Tuple
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Dict,
+    List,
+    Literal,
+    Optional,
+    Sequence,
+    Tuple,
+)
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     import asyncpg
@@ -60,6 +68,15 @@ SUGGESTION_STATES: Tuple[str, ...] = ("proposed", "adopted", "dismissed")
 
 #: The single open state.
 OPEN_STATE: Tuple[str, ...] = ("proposed",)
+
+#: The reviewed trail: what the owner already acted on.
+REVIEWED_STATES: Tuple[str, ...] = ("adopted", "dismissed")
+
+#: How many reviewed rows the queue surface returns. The trail is a trace of
+#: recent decisions, not an archive: it grows for the lifetime of the profile
+#: and every row carries an ``evidence`` blob, so an uncapped read hands a
+#: mobile screen an unbounded payload for a section that renders three fields.
+REVIEWED_HISTORY_LIMIT = 20
 
 #: How often generation runs — separate from FG-29's weekly digest clock.
 DEFAULT_GENERATION_INTERVAL = timedelta(days=30)
@@ -154,6 +171,27 @@ class ProfileSuggestion:
             "evidence": self.evidence,
             "dedup_key": self.dedup_key,
             "origin_profile": self.origin_profile,
+            "status": self.status,
+            "reviewed_by": self.reviewed_by,
+            "reviewed_at": self.reviewed_at.isoformat() if self.reviewed_at else None,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+        }
+
+    def as_summary_dict(self) -> dict:
+        """The reviewed-trail projection: what a decision *was*, nothing more.
+
+        Deliberately omits ``evidence``, which per §4.2 T3 carries the
+        ``participants`` roster — ``user_id``, display name and role of every
+        active principal. The full row is the material for a decision the owner
+        has not made yet; once reviewed, the trail renders status, role and goal,
+        so shipping the roster to every enrolled reader of the queue screen
+        would be a disclosure with no reader.
+        """
+        return {
+            "id": self.id,
+            "proposed_name": self.proposed_name,
+            "proposed_role": self.proposed_role,
+            "proposed_goal": self.proposed_goal,
             "status": self.status,
             "reviewed_by": self.reviewed_by,
             "reviewed_at": self.reviewed_at.isoformat() if self.reviewed_at else None,
@@ -892,22 +930,61 @@ class ProfileSuggestionStore:
         principal: "Principal",
         *,
         statuses: Sequence[str] = OPEN_STATE,
+        limit: Optional[int] = None,
         connection: Optional["asyncpg.Connection"] = None,
     ) -> List[ProfileSuggestion]:
-        """Suggestions in ``statuses``, newest first."""
+        """Suggestions in ``statuses``, newest first, at most ``limit`` rows.
+
+        ``limit`` is a SQL ``LIMIT``, not a slice of a full fetch: the reviewed
+        trail is unbounded over a profile's life and each row carries evidence.
+        """
         own = connection is None
         conn = connection or await self._connect()
         try:
             await self.initialize(connection=conn)
-            rows = await conn.fetch(
-                f"""
+            sql = f"""
                 SELECT {_SUGGESTION_COLUMNS} FROM {SUGGESTIONS_TABLE}
                 WHERE status = ANY($1::text[])
                 ORDER BY created_at DESC
-                """,
-                list(statuses),
-            )
+            """
+            if limit is None:
+                rows = await conn.fetch(sql, list(statuses))
+            else:
+                rows = await conn.fetch(sql + " LIMIT $2", list(statuses), int(limit))
             return [_row_to_suggestion(row) for row in rows]
+        finally:
+            if own:
+                await conn.close()
+
+    async def queue(
+        self,
+        principal: "Principal",
+        *,
+        reviewed_limit: int = REVIEWED_HISTORY_LIMIT,
+        connection: Optional["asyncpg.Connection"] = None,
+    ) -> Tuple[List[ProfileSuggestion], List[ProfileSuggestion]]:
+        """``(open, reviewed)`` for the queue surface, over one connection.
+
+        Two reads rather than one over all statuses, because the two halves are
+        not the same thing: the open card is the decision being asked for and
+        needs its evidence; the reviewed trail is a trace of decisions already
+        made, is capped, and is rendered from three fields. Splitting here also
+        makes "open first, then reviewed" a property of the query rather than a
+        claim the ``ORDER BY created_at DESC`` does not make.
+        """
+        own = connection is None
+        conn = connection or await self._connect()
+        try:
+            open_rows = await self.list_suggestions(
+                principal, statuses=OPEN_STATE, connection=conn
+            )
+            reviewed = await self.list_suggestions(
+                principal,
+                statuses=REVIEWED_STATES,
+                limit=reviewed_limit,
+                connection=conn,
+            )
+            return open_rows, reviewed
         finally:
             if own:
                 await conn.close()
@@ -1536,16 +1613,13 @@ def find_token_collision(
     string, so only the same platform's token key is compared. The token is
     matched exactly (it is a credential, not prose).
 
-    Two comparison sources, because on the box today the units use
-    ``EnvironmentFile=<HERMES_HOME>/.env`` (see ``docs/deployment/runtime-drift.md``)
-    but a unit using ``Environment=`` or the process environment is invisible to
-    a ``.env``-only scan. Reading the process env for *equality* neither
-    propagates nor writes a credential — it is not the #219/#220 hazard, which
-    is about *writing* the token into the process env. So:
-
-    1. profiles' ``.env`` files (the primary source, since the units load these),
-    2. the process environment for the same key (a supplementary source, so a
-       token set through ``Environment=`` or the shell is still caught).
+    Scope: profiles' own ``.env`` files, because that is where the box's units
+    read from (``EnvironmentFile=<HERMES_HOME>/.env``). A token supplied to
+    another profile's gateway through a unit's ``Environment=`` line is **not**
+    visible here and is not detected — the process environment of *this* command
+    cannot see another unit's environment, so checking it would catch nothing
+    while reading like a guarantee. That path keeps the gateway's ``EX_CONFIG``
+    permanent stop as its only net; see §4.3 F3.
 
     **Enumeration failure is a refusal, not a pass**: an unreadable profiles
     root raises :class:`CollisionCheckUnavailable` rather than returning
@@ -1582,21 +1656,6 @@ def find_token_collision(
         existing = _read_env_value(path, key)
         if existing and existing == token:
             return name
-
-    # Supplementary source: the process environment for the same key. A unit
-    # using Environment=, or an export in the shell that launched this command,
-    # is invisible to a .env-only scan. Reading for equality neither propagates
-    # nor writes the credential.
-    process_value = os.environ.get(key)
-    if process_value and process_value.strip() == token:
-        # The owner's own process holding the token is not a collision with
-        # *another* profile — it is the token they are committing. Only flag it
-        # when it belongs to a different profile context (the skip_profile is
-        # the one being committed to, so a process value equal to the token is
-        # almost certainly the source the owner pasted from). We do not raise
-        # here: the .env scan is authoritative for cross-profile collisions,
-        # and the process value is a fallback signal, not a profile identity.
-        pass
 
     return None
 
@@ -1678,7 +1737,12 @@ def commit_channel(
     # assertion the doctor uses; the precise key check confirms *this* token
     # landed, not just any channel key.
     written = _read_env_value(profile_dir, key)
-    if not written:
+    if written != token:
+        # Not "is there a value" but "is it *this* value": a profile whose .env
+        # already held an older token for the same key would otherwise read back
+        # truthy and report a successful commit while the gateway keeps serving
+        # the previous bot — a wrong-channel success, which is the same lie the
+        # read-back exists to prevent.
         raise ChannelWriteError(canon, key)
 
     # 3. Register + start the profile's gateway service (best-effort; the
@@ -1712,7 +1776,7 @@ def commit_channel(
 #: install/start raised, or ran and the service is still not running. F4: the
 #: CLI distinguishes "skipped" from "failed" so ``--no-start`` and a real
 #: operational failure do not print the same line.
-ServiceStartStatus = str  # one of {"started", "unavailable", "failed"}
+ServiceStartStatus = Literal["started", "unavailable", "failed"]
 
 
 def _start_profile_gateway(canon: str, profile_dir: Path) -> ServiceStartStatus:
@@ -1854,6 +1918,8 @@ __all__ = [
     "ChannelWriteError",
     "CollisionCheckUnavailable",
     "OPEN_STATE",
+    "REVIEWED_HISTORY_LIMIT",
+    "REVIEWED_STATES",
     "commit_channel",
     "evidence_identity",
     "find_token_collision",

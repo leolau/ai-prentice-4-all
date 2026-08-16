@@ -5,11 +5,19 @@ import { useState } from "react";
 import { BusyRegion } from "@/components/ui/BusyRegion";
 import { Pill } from "@/components/ui/Pill";
 import { ForwardError, sendJson } from "@/components/profiles/api";
-import type { ProfileSuggestion, ProfileSuggestionAdoptResponse, Role } from "@/types";
+import type {
+  ProfileSuggestion,
+  ProfileSuggestionAdoptResponse,
+  ProfileSuggestionSummary,
+  Role,
+} from "@/types";
 
 export interface ProfileSuggestionsViewProps {
   role: Role;
+  /** Open suggestions — at most one (§1.1), each with its evidence. */
   suggestions: ProfileSuggestion[];
+  /** The capped reviewed trail, without evidence (see `ProfileSuggestionSummary`). */
+  reviewed: ProfileSuggestionSummary[];
   error: string | null;
 }
 
@@ -39,11 +47,11 @@ interface EvidenceDetail {
 export function ProfileSuggestionsView({
   role,
   suggestions,
+  reviewed,
   error,
 }: ProfileSuggestionsViewProps) {
   const isOwner = role === "owner";
-  const open = suggestions.filter((s) => s.status === "proposed");
-  const reviewed = suggestions.filter((s) => s.status !== "proposed");
+  const open = suggestions;
 
   if (error) {
     return (
@@ -56,7 +64,7 @@ export function ProfileSuggestionsView({
     );
   }
 
-  if (suggestions.length === 0) {
+  if (open.length === 0 && reviewed.length === 0) {
     return (
       <p
         data-component="SuggestionsEmpty"
@@ -332,7 +340,7 @@ function EvidenceList({ evidence }: { evidence: Record<string, unknown> }) {
   );
 }
 
-function ReviewedHistory({ reviewed }: { reviewed: ProfileSuggestion[] }) {
+function ReviewedHistory({ reviewed }: { reviewed: ProfileSuggestionSummary[] }) {
   return (
     <section
       data-component="ReviewedHistory"

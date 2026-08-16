@@ -14191,31 +14191,31 @@ async def capacity_headroom_endpoint(request: Request):
 
 @app.get("/api/profiles/suggestions")
 async def list_profile_suggestions_endpoint(request: Request):
-    """List this profile's suggestions — open ones first, then the reviewed trail.
+    """This profile's open suggestion, and a capped trail of reviewed ones.
 
-    Defaults to **all** statuses (``proposed`` + ``adopted`` + ``dismissed``) so
-    the owner keeps a trace of what they just did: the queue surface splits open
-    from reviewed, and without the reviewed rows an adopt vanishes the card the
-    owner was looking at. An optional ``?status=proposed`` narrows the read for
-    a caller that only wants the open one (the digest).
+    Two keys rather than one list of every status: ``suggestions`` is the open
+    card (at most one, §1.1) with its evidence — the decision being asked for —
+    and ``reviewed`` is a capped trail of decisions already made, projected to
+    what the trail renders. Without the trail an adopt vanishes the card the
+    owner was just looking at; with the *full* rows it would ship every past
+    ``evidence`` blob, and those carry §4.2 T3's ``participants`` roster to any
+    enrolled reader of the screen.
     """
-    from hermes_cli.profile_suggestion import (
-        ProfileSuggestionStore,
-        SUGGESTION_STATES,
-    )
+    from hermes_cli.profile_suggestion import ProfileSuggestionStore
 
     store = ProfileSuggestionStore(_comms_app_store())
     principal = await _comms_resolve_principal(request)
-    wanted: tuple[str, ...] = SUGGESTION_STATES
-    raw = request.query_params.get("status")
-    if raw:
-        wanted = tuple(s for s in (raw,) if s in SUGGESTION_STATES) or SUGGESTION_STATES
     try:
-        suggestions = await store.list_suggestions(principal, statuses=wanted)
-        return {"suggestions": [s.as_dict() for s in suggestions]}
+        open_rows, reviewed = await store.queue(principal)
+        return {
+            "suggestions": [s.as_dict() for s in open_rows],
+            "reviewed": [s.as_summary_dict() for s in reviewed],
+        }
     except Exception as exc:
         _log.exception("GET /api/profiles/suggestions failed")
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=500, detail="Profile suggestions are unavailable."
+        ) from exc
 
 
 @app.post("/api/profiles/suggestions/{suggestion_id}/adopt")
