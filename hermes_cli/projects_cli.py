@@ -54,11 +54,14 @@ async def _resolve_principal(actor: Optional[str]):
 class _Api:
     """The projects router, in process, under one resolved principal.
 
-    Patching the two resolution seams is safe: a CLI invocation is a
+    Patching the two principal seams is safe: a CLI invocation is a
     short-lived single-actor process, and the patch is restored on close.
+    The human-only seam (§8.1/§8.2) is different: it is claimed only when
+    the operator passes ``--as-human`` — an agent turn driving this CLI
+    gets the router's 403 exactly like any session-less caller.
     """
 
-    def __init__(self, principal):
+    def __init__(self, principal, *, as_human: bool = False):
         from fastapi import FastAPI
         from fastapi.testclient import TestClient
 
@@ -68,9 +71,9 @@ class _Api:
             return principal
 
         async def _subject(request):
-            # The CLI is the human operator's terminal: the §8.1 human-only
-            # gate refuses session-less agent turns over HTTP, and claims
-            # the operator surface here exactly like the principal seams do.
+            # ``--as-human``: the operator says this terminal is them,
+            # making this judgement themselves — the claim is explicit,
+            # never automatic.
             return principal.user_id
 
         self._saved = (
@@ -80,7 +83,8 @@ class _Api:
         )
         projects_api._principal_read = _as  # noqa: SLF001
         projects_api._principal_write = _as  # noqa: SLF001
-        projects_api._interactive_subject = _subject  # noqa: SLF001
+        if as_human:
+            projects_api._interactive_subject = _subject  # noqa: SLF001
         app = FastAPI()
         app.include_router(projects_api.router)
         self.client = TestClient(app, raise_server_exceptions=False)
@@ -120,7 +124,14 @@ def _detail_of(resp) -> Optional[str]:
 
 
 def _fail(resp) -> int:
-    print(f"projects: {_detail_of(resp)}", file=sys.stderr)
+    detail = _detail_of(resp)
+    print(f"projects: {detail}", file=sys.stderr)
+    if resp.status_code == 403 and "human act" in detail:
+        print(
+            "projects: re-run with --as-human if you are the operator "
+            "making this judgement yourself.",
+            file=sys.stderr,
+        )
     return 1
 
 
@@ -1039,7 +1050,7 @@ def _run(coro) -> int:
 
 async def _dispatch(args: argparse.Namespace) -> int:
     principal = await _resolve_principal(args.actor)
-    api = _Api(principal)
+    api = _Api(principal, as_human=getattr(args, "as_human", False))
     try:
         verb = args.projects_command
         if verb == "list":
@@ -1106,6 +1117,16 @@ def register_projects_subparser(
         "--actor",
         default=None,
         help="Principal to act as (default: the enrolled owner)",
+    )
+    parser.add_argument(
+        "--as-human",
+        action="store_true",
+        help=(
+            "Claim the human-only surface (§8.1/§8.2) for accepting "
+            "outputs, scoring runs and activating directives/playbooks. "
+            "Use only when you — the operator — are making the judgement "
+            "yourself; an agent must never set this on its own say-so."
+        ),
     )
     sub = parser.add_subparsers(dest="projects_command", required=True)
 

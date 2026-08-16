@@ -28,7 +28,7 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_PROJECTS_DB", str(tmp_path / "projects.db"))
     monkeypatch.setenv("HERMES_KANBAN_DB", str(tmp_path / "kanban.db"))
 
-    state = {"actor": OWNER, "enrolled": set()}
+    state = {"actor": OWNER, "enrolled": set(), "subject": ""}
 
     async def _resolve(request, *, allow_as=True):
         return state["actor"]
@@ -36,10 +36,14 @@ def env(tmp_path, monkeypatch):
     async def _enrolled(user_id):
         return set(state["enrolled"])
 
+    async def _subject(request):
+        return state["subject"]
+
     monkeypatch.setattr(
         "hermes_cli.web_server._comms_resolve_principal", _resolve, raising=False
     )
     monkeypatch.setattr(projects_api, "_enrolled_profiles", _enrolled)
+    monkeypatch.setattr(projects_api, "_interactive_subject", _subject)
 
     app = FastAPI()
     app.include_router(projects_api.router)
@@ -291,7 +295,7 @@ def test_viewer_responses_omit_contact_address_members_do_not(env):
 def test_accept_flow_and_closure_offer(env):
     project = _create(env)
     _activate(env, project)
-    client, _state = env
+    client, state = env
     slug = project["slug"]
     with projects_db.connect_closing() as conn:
         oid = projects_db.get_project_outputs(conn, project["id"])[0]["id"]
@@ -304,15 +308,60 @@ def test_accept_flow_and_closure_offer(env):
     assert row["status"] == "delivered"
     assert row["delivered_at"]
 
+    state["subject"] = "leo"  # accepting is a human act (§16)
     resp = client.post(f"/api/registry/projects/{slug}/outputs/{oid}/accept")
     assert resp.status_code == 200
     body = resp.json()
     assert body["by"] == "leo"
+    # The updated row rides the response so a UI merges it without reload.
+    assert body["output"]["id"] == oid
+    assert body["output"]["status"] == "accepted"
     # one_off with every required output accepted → closure is offered,
     # never forced.
     assert body["offers_closure"] is True
     with projects_db.connect_closing() as conn:
         assert projects_db.get_project(conn, project["id"]).status == "active"
+
+
+def test_human_acts_refuse_a_session_less_caller(env):
+    """§16: accepting an output, activating a directive, activating a
+    playbook revision and scoring a run all need a verified interactive
+    subject — the role gate alone never suffices."""
+    project = _create(env)
+    _activate(env, project)
+    client, _state = env  # subject stays "" — an agent turn
+    slug = project["slug"]
+    with projects_db.connect_closing() as conn:
+        oid = projects_db.get_project_outputs(conn, project["id"])[0]["id"]
+        did = projects_db.add_project_directive(
+            conn, project_id=project["id"], kind="directive",
+            body="Never email before 9am", author_user_id="leo", active=False,
+        )
+        projects_db.save_playbook_rev(
+            conn, project_id=project["id"], body="The method", steps=[],
+            created_by="leo",
+        )
+        projects_db.open_project_run(
+            conn, project_id=project["id"], trigger="manual", profile="default",
+        )
+
+    resp = client.post(f"/api/registry/projects/{slug}/outputs/{oid}/accept")
+    assert resp.status_code == 403
+    assert "human act" in resp.json()["detail"]
+
+    resp = client.post(f"/api/registry/projects/{slug}/directives/{did}/activate")
+    assert resp.status_code == 403
+    assert "human act" in resp.json()["detail"]
+
+    resp = client.post(f"/api/registry/projects/{slug}/playbook/1/activate")
+    assert resp.status_code == 403
+    assert "human act" in resp.json()["detail"]
+
+    resp = client.post(
+        f"/api/registry/projects/{slug}/runs/1/score", json={"score": 4}
+    )
+    assert resp.status_code == 403
+    assert "human act" in resp.json()["detail"]
 
 
 def test_agent_cannot_accept_directly_through_status_patch(env):

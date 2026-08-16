@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useState } from "react";
 
 import { dateTimeLabel } from "@/components/projects/format";
@@ -34,6 +35,7 @@ export function OutputsPanel({
   const [outputs, setOutputs] = useState(initial);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [offersClosure, setOffersClosure] = useState(false);
 
   const accept = async (outputId: string) => {
     setBusyId(outputId);
@@ -44,13 +46,20 @@ export function OutputsPanel({
         { method: "POST" },
       );
       if (!res.ok) throw new Error("accept");
-      // The accept route returns the bare row; keep the joined deliveries.
-      const updated = (await res.json()) as Record<string, unknown>;
+      // The accept route answers with the updated row + the closure offer;
+      // merge the row (the joined deliveries survive the spread) so the
+      // Accept button disappears without a reload.
+      const payload = (await res.json()) as {
+        output?: Record<string, unknown>;
+        offers_closure?: boolean;
+      };
+      const updated = payload.output ?? {};
       setOutputs((prev) =>
         prev.map((row) =>
           row.id === outputId ? { ...row, ...updated } : row,
         ),
       );
+      if (payload.offers_closure) setOffersClosure(true);
     } catch {
       setError("That didn't stick — try again.");
     } finally {
@@ -81,6 +90,20 @@ export function OutputsPanel({
 
       {error ? (
         <p className="mt-2 text-sm text-red-300">{error}</p>
+      ) : null}
+
+      {offersClosure ? (
+        <p
+          data-component="ClosureOffer"
+          className="mt-2 rounded-lg border border-[var(--color-accent)]/40 bg-[var(--color-surface-2)] px-3 py-2 text-sm"
+        >
+          Every required output is now accepted — this project offers
+          closure. Decide it on{" "}
+          <Link href="/projects" className="text-[var(--color-accent)] underline">
+            /projects
+          </Link>
+          .
+        </p>
       ) : null}
 
       {sorted.length === 0 ? (

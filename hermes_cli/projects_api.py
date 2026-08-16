@@ -217,6 +217,24 @@ async def _require_write(request: Request, *, judgement: bool = False):
     return project, role, profiles, principal
 
 
+async def _require_human(request: Request, act: str) -> str:
+    """§8.1/§8.2: a human act needs a verified interactive subject.
+
+    The one gate every human-only route passes (§16): the role check says
+    *may this member judge*, this says *is a human actually judging*. An
+    agent turn, a service caller or a session-less CLI invocation has no
+    subject and is refused — the returned subject is the provenance to
+    record alongside the write.
+    """
+    subject = await _interactive_subject(request)
+    if not subject:
+        raise HTTPException(
+            status_code=403,
+            detail=f"{act} is a human act — no verified session, no {act}",
+        )
+    return subject
+
+
 # ---------------------------------------------------------------------------
 # Derived values: progress ladder (§9.1), card rollup, health (§9.2)
 # ---------------------------------------------------------------------------
@@ -996,18 +1014,22 @@ async def deliver_output(request: Request, output_id: str) -> dict[str, Any]:
 
 @router.post("/{slug}/outputs/{output_id}/accept")
 async def accept_output(request: Request, output_id: str) -> dict[str, Any]:
-    """Only a human accepts an output (§6.1) — a member judgement act.
+    """Only a human accepts an output (§6.1) — a member judgement act with
+    the identity gate on top (§16).
 
     Accepting the last required output of a ``one_off`` project *offers*
-    closure in the response; it never closes the project by itself."""
-    project, _role, _profiles, principal = await _require_write(
+    closure in the response; it never closes the project by itself. The
+    response carries the updated row so a UI can merge it without a
+    reload."""
+    project, _role, _profiles, _principal = await _require_write(
         request, judgement=True
     )
+    subject = await _require_human(request, "accepting an output")
 
     def _accept_sync() -> dict:
         with projects_db.connect_closing() as conn:
             if not projects_db.accept_project_output(
-                conn, output_id, accepted_by=principal.user_id
+                conn, output_id, accepted_by=subject
             ):
                 raise KeyError(output_id)
             outputs = projects_db.get_project_outputs(conn, project.id)
@@ -1018,9 +1040,11 @@ async def accept_output(request: Request, output_id: str) -> dict[str, Any]:
             offers_closure = (
                 all_accepted and getattr(project, "cadence", "one_off") == "one_off"
             )
+            row = next((o for o in outputs if o.get("id") == output_id), None)
             return {
+                "output": row,
                 "accepted": output_id,
-                "by": principal.user_id,
+                "by": subject,
                 "offers_closure": offers_closure,
             }
 
@@ -1618,9 +1642,11 @@ async def save_playbook_route(request: Request) -> dict[str, Any]:
 
 @router.post("/{slug}/playbook/{rev}/activate")
 async def activate_playbook_route(request: Request, rev: int) -> dict[str, Any]:
-    """Human-only activation (§7.2): lead/admin, records ``activated_at``
-    + ``note``. A mid-flight run is unaffected — it keeps its pinned rev."""
+    """Human-only activation (§7.2): lead/admin AND a verified session,
+    records ``activated_at`` + ``note``. A mid-flight run is unaffected —
+    it keeps its pinned rev."""
     project, _role, _profiles, _principal = await _require_write(request)
+    subject = await _require_human(request, "activating a playbook revision")
     body = await request.json() if request.headers.get("content-length") else {}
 
     def _activate_sync() -> dict:
@@ -1632,7 +1658,7 @@ async def activate_playbook_route(request: Request, rev: int) -> dict[str, Any]:
             raise HTTPException(
                 status_code=404, detail=f"playbook revision {rev} not found"
             )
-        return {"rev": rev, "active": True}
+        return {"rev": rev, "active": True, "by": subject}
 
     return await asyncio.to_thread(_activate_sync)
 
@@ -1688,7 +1714,13 @@ async def add_directive_route(request: Request) -> dict[str, Any]:
             except ValueError as exc:
                 status = 409 if "retire one first" in str(exc) else 422
                 raise HTTPException(status_code=status, detail=str(exc))
-        return {"id": did, "applies_from": "next run"}
+            row = conn.execute(
+                "SELECT * FROM project_directives WHERE id = ?", (did,)
+            ).fetchone()
+        # The full row, so a UI can show the new instruction — body, author,
+        # date — without a reload; ``applies_from`` rides flat beside it.
+        return {**(dict(row) if row else {"id": did}),
+                "applies_from": "next run"}
 
     return await asyncio.to_thread(_add_sync)
 
@@ -1718,13 +1750,14 @@ async def retire_directive_route(
 async def activate_directive_route(
     request: Request, directive_id: str
 ) -> dict[str, Any]:
-    """§8.2: a proposed directive crosses on **any member's** word — the
-    one learning-path crossing a plain member owns. The active-set cap is
-    enforced here, at the crossing, not at proposal time; like every
-    guidance write, it applies from the next run."""
+    """§8.2: a proposed directive crosses on a **human's** word — the one
+    learning-path crossing, so it carries the identity gate (§16). The
+    active-set cap is enforced here, at the crossing, not at proposal time;
+    like every guidance write, it applies from the next run."""
     project, _role, _profiles, _principal = await _require_write(
         request, judgement=True
     )
+    subject = await _require_human(request, "activating a directive")
 
     def _activate_sync() -> dict:
         cfg = projects_run.projects_runtime_config()
@@ -1749,7 +1782,10 @@ async def activate_directive_route(
                 )
             except ValueError as exc:
                 raise HTTPException(status_code=409, detail=str(exc))
-        return {"id": directive_id, "active": True, "applies_from": "next run"}
+        return {
+            "id": directive_id, "active": True, "applies_from": "next run",
+            "by": subject,
+        }
 
     try:
         return await asyncio.to_thread(_activate_sync)
@@ -2092,14 +2128,10 @@ async def score_run_route(request: Request, run_no: int) -> dict[str, Any]:
     on top: a caller without a verified interactive session is refused
     (§16). The derived project score (mean of the last five) moves on
     every read, including when an old run is re-scored."""
-    project, _role, _profiles, principal = await _require_write(
+    project, _role, _profiles, _principal = await _require_write(
         request, judgement=True
     )
-    if not await _interactive_subject(request):
-        raise HTTPException(
-            status_code=403,
-            detail="scoring a run is a human act (§8.1) — no session, no score",
-        )
+    subject = await _require_human(request, "scoring a run")
     try:
         body = await request.json()
     except Exception:
@@ -2128,14 +2160,14 @@ async def score_run_route(request: Request, run_no: int) -> dict[str, Any]:
                 run["id"],
                 score_user=score,
                 score_note=note,
-                scored_by=principal.user_id,
+                scored_by=subject,
                 scored_at=int(time.time()),
             )
             return {
                 "scored": run_no,
                 "score_user": score,
                 "score_note": note,
-                "by": principal.user_id,
+                "by": subject,
             }
 
     try:
