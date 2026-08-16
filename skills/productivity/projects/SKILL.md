@@ -34,6 +34,7 @@ hermes projects outputs   <slug> [list|add "<title>" [--spec s] [--optional] [--
                                  |deliver <id> --ref <r> [--note "…"] |accept <id>] [--json]
 hermes projects contacts  <slug> [list|add "<name>" [--role r] [--platform p] [--address a]] [--json]
 hermes projects tools     <slug> [show|set --toolsets a,b --skills x,y] [--json]
+hermes projects score     <slug> <run_no> <1-5> [--note "why that score"] [--json]
 hermes projects members   <slug> [--add <user> --role lead|member|viewer] [--json]
 hermes projects cards     <slug> [--status s] [--json]
 hermes projects card add  <slug> "<title>" [--assignee <profile>] [--from-todo <id>] [--json]
@@ -103,7 +104,9 @@ only moves down from `supervised` with a human's explicit say-so.
 
 That is what the record is for. `hermes projects runs <slug>` then
 `hermes projects retro <slug> <run_no>` — a low score with a note is the most
-specific instruction the project has.
+specific instruction the project has. Scoring a run (`score <slug> <run_no>
+<1-5>`) is a human act: only pass the user's judgement through, never your
+own, and a `≤2` with a note is what teaches the project most.
 
 ### 6. A project's `toolsets`/`skills` can only narrow what the profile allows
 

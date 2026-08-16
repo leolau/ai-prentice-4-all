@@ -67,12 +67,20 @@ class _Api:
         async def _as(request):
             return principal
 
+        async def _subject(request):
+            # The CLI is the human operator's terminal: the §8.1 human-only
+            # gate refuses session-less agent turns over HTTP, and claims
+            # the operator surface here exactly like the principal seams do.
+            return principal.user_id
+
         self._saved = (
             projects_api._principal_read,  # noqa: SLF001 - same package
             projects_api._principal_write,  # noqa: SLF001 - same package
+            projects_api._interactive_subject,  # noqa: SLF001 - same package
         )
         projects_api._principal_read = _as  # noqa: SLF001
         projects_api._principal_write = _as  # noqa: SLF001
+        projects_api._interactive_subject = _subject  # noqa: SLF001
         app = FastAPI()
         app.include_router(projects_api.router)
         self.client = TestClient(app, raise_server_exceptions=False)
@@ -83,6 +91,7 @@ class _Api:
         (
             projects_api._principal_read,  # noqa: SLF001
             projects_api._principal_write,  # noqa: SLF001
+            projects_api._interactive_subject,  # noqa: SLF001
         ) = self._saved
 
     def request(
@@ -202,6 +211,11 @@ def _cmd_show(api: _Api, args) -> int:
         print(f"  audience: {d['target_audience']}")
     if d.get("next_run_at"):
         print(f"  next run: {d['next_run_at']}")
+    score = d.get("score")
+    if score:
+        print(f"  score: {score.get('mean')} (last {score.get('runs')} runs)")
+    if d.get("score_rubric"):
+        print(f"  rubric: {d['score_rubric']}")
     progress = d.get("progress") or {}
     if progress.get("headline"):
         print(f"  progress: {progress['headline']}")
@@ -276,10 +290,21 @@ def _cmd_runs(api: _Api, args) -> int:
         dur = r.get("duration_seconds")
         dur_s = f"{dur // 60}m" if isinstance(dur, int) else ""
         retro = " retro" if r.get("retro") else ""
+        score = (
+            f" score={r['score_user']}/5" if r.get("score_user") is not None
+            else ""
+        )
+        diverges = ""
+        self_s, user_s = r.get("score_self"), r.get("score_user")
+        if (
+            self_s is not None and user_s is not None
+            and abs(int(self_s) - int(user_s)) >= 2
+        ):
+            diverges = f" self={self_s}/5 ⚠ diverges"
         print(
             f"run {r.get('run_no'):>3} [{r.get('status'):>8}] "
             f"{r.get('trigger')}  {dur_s} {cost_s} "
-            f"outcome={r.get('outcome') or '-'}{retro}"
+            f"outcome={r.get('outcome') or '-'}{score}{diverges}{retro}"
         )
     return 0
 
@@ -778,6 +803,29 @@ def _cmd_guidance(api: _Api, args) -> int:
     return 2
 
 
+def _cmd_score(api: _Api, args) -> int:
+    """``score_user`` (§8.1): human-only, editable — the CLI is the
+    operator's terminal, the router's session gate does the refusing."""
+    body: dict[str, Any] = {"score": args.score}
+    if args.note:
+        body["note"] = args.note
+    resp = api.request(
+        "POST", f"/{args.slug}/runs/{args.run_no}/score", json_body=body
+    )
+    if resp.status_code != 200:
+        return _fail(resp)
+    data = resp.json()
+    if args.json:
+        _print_json(data)
+    else:
+        note = f" — {data['score_note']}" if data.get("score_note") else ""
+        print(
+            f"Scored run {data.get('scored')} of {args.slug}: "
+            f"{data.get('score_user')}/5{note}."
+        )
+    return 0
+
+
 def _cmd_run(api: _Api, args) -> int:
     slug = args.slug
     if args.dry_run:
@@ -915,6 +963,8 @@ async def _dispatch(args: argparse.Namespace) -> int:
             return _cmd_run(api, args)
         if verb == "runs":
             return _cmd_runs(api, args)
+        if verb == "score":
+            return _cmd_score(api, args)
         if verb == "retro":
             return _cmd_retro(api, args)
         if verb == "doctor":
@@ -1105,6 +1155,16 @@ def register_projects_subparser(
     runs.add_argument("slug")
     runs.add_argument("--limit", type=int, default=10)
     runs.add_argument("--json", **json_flag)
+
+    score = sub.add_parser(
+        "score",
+        help="Score a run 1–5 (human-only, editable, §8.1)",
+    )
+    score.add_argument("slug")
+    score.add_argument("run_no", type=int)
+    score.add_argument("score", type=int, choices=range(1, 6), metavar="1-5")
+    score.add_argument("--note", default=None, help="Why that score")
+    score.add_argument("--json", **json_flag)
 
     retro = sub.add_parser("retro", help="A run's retrospective")
     retro.add_argument("slug")

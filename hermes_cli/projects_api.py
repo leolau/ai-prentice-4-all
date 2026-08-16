@@ -29,8 +29,10 @@ Permissions are enforced here and only here (§11): the store has no RLS.
   ``kanban_db.list_tasks`` — a project view must not become the way to read
   another user's ``private:`` card.
 
-Not in this step (later steps in §17): score routes (step 9b). The
-``from_todo`` card seam (§10, step 8b) landed on ``POST /{slug}/cards``.
+Not in this step (later steps in §17): the retro learning write-back
+(step 10). The ``from_todo`` card seam (§10, step 8b) landed on
+``POST /{slug}/cards``; the score routes (§8, step 9b) landed on
+``POST /{slug}/runs/{n}/score`` + ``score_self`` on the retro route.
 """
 
 from __future__ import annotations
@@ -70,6 +72,20 @@ async def _principal_write(request: Request):
     from hermes_cli.web_server import _comms_resolve_principal
 
     return await _comms_resolve_principal(request, allow_as=False)
+
+
+async def _interactive_subject(request: Request) -> str:
+    """The verified login subject, or ``""`` for a session-less caller.
+
+    The human-only seam (§8.1): an interactive console session — and the
+    agent-home BFF, which forwards the user's verified session cookie —
+    carries a subject; an agent turn, a service caller or an in-process
+    test client does not. Overridable by the CLI harness, which is the
+    human operator's terminal acting through the machine-operator surface.
+    """
+    from hermes_cli.web_server import _comms_session_subject
+
+    return _comms_session_subject(request)
 
 
 async def _enrolled_profiles(user_id: str) -> set[str]:
@@ -327,6 +343,31 @@ def _full_health(conn, project, card_rollup: dict, profiles: list) -> str:
     )
 
 
+def _divergent_self(run: dict) -> Optional[int]:
+    """§8.2 rule 2: ``score_self`` is reported only when it and
+    ``score_user`` differ by ≥2 — that gap is the learning signal, and
+    carrying it only when it *is* one keeps the runs table honest."""
+    self_score, user_score = run.get("score_self"), run.get("score_user")
+    if self_score is None or user_score is None:
+        return None
+    if abs(int(self_score) - int(user_score)) >= 2:
+        return int(self_score)
+    return None
+
+
+def _derived_score(conn, project_id: str) -> Optional[dict]:
+    """§8.1: the project's score is **derived** — the mean of the last
+    five ``score_user`` values, never an all-time number. Recomputed on
+    every read, so re-scoring an old run moves it."""
+    runs = projects_db.list_project_runs(conn, project_id, limit=25)
+    scored = [
+        int(r["score_user"]) for r in runs if r.get("score_user") is not None
+    ][:5]
+    if not scored:
+        return None
+    return {"mean": round(sum(scored) / len(scored), 1), "runs": len(scored)}
+
+
 def _runs_brief(conn, project_id: str, *, limit: int = 5) -> list[dict]:
     """The last N runs as one-line rows (§12 detail). Cost stays fail-open
     and lives on the run-detail read, not here."""
@@ -335,18 +376,22 @@ def _runs_brief(conn, project_id: str, *, limit: int = 5) -> list[dict]:
         duration = None
         if r.get("started_at") and r.get("ended_at"):
             duration = int(r["ended_at"]) - int(r["started_at"])
-        out.append(
-            {
-                "run_no": r["run_no"],
-                "status": r["status"],
-                "trigger": r["trigger"],
-                "started_at": r.get("started_at"),
-                "ended_at": r.get("ended_at"),
-                "duration_seconds": duration,
-                "outcome": r.get("outcome"),
-                "score_user": r.get("score_user"),
-            }
-        )
+        row = {
+            "run_no": r["run_no"],
+            "status": r["status"],
+            "trigger": r["trigger"],
+            "started_at": r.get("started_at"),
+            "ended_at": r.get("ended_at"),
+            "duration_seconds": duration,
+            "outcome": r.get("outcome"),
+            "score_user": r.get("score_user"),
+        }
+        divergent = _divergent_self(r)
+        if divergent is not None:
+            # Presence IS the signal: the brief carries score_self only
+            # when the ≥2 divergence makes it worth reading (§12).
+            row["score_self"] = divergent
+        out.append(row)
     return out
 
 
@@ -721,6 +766,7 @@ def _detail_sync(project, principal, *, include_address: bool) -> dict:
     with projects_db.connect_closing() as conn:
         health = _full_health(conn, project, rollup, profiles)
         runs_brief = _runs_brief(conn, project.id)
+        score = _derived_score(conn, project.id)
         # ``next_run_at`` is a display cache (§3.2): refreshed on read,
         # the cron store stays authoritative.
         next_run_at = projects_schedule.refresh_next_run(conn, project)
@@ -734,6 +780,7 @@ def _detail_sync(project, principal, *, include_address: bool) -> dict:
             "contacts": _contacts_payload(contacts, include_address=include_address),
             "links": links_by_kind,
             "progress": progress,
+            "score": score,
             "health": health,
             "next_run_at": next_run_at,
             "runs": runs_brief,
@@ -1748,8 +1795,10 @@ async def cancel_run_route(request: Request, run_no: int) -> dict[str, Any]:
 
 @router.post("/{slug}/runs/{run_no}/retro")
 async def run_retro_route(request: Request, run_no: int) -> dict[str, Any]:
-    """Write or edit the retrospective. (``score_self`` lands with step 9b;
-    ``score_user`` is human-only there.)"""
+    """Write or edit the retrospective. An optional ``score_self`` (1–5,
+    §8.1) rides with it — the run's own claim against ``score_rubric``,
+    written unprompted so self-scores stay comparable to human ones.
+    ``score_user`` is human-only on the ``/score`` route."""
     project, _role, _profiles, _principal = await _require_write(
         request, judgement=True
     )
@@ -1757,19 +1806,93 @@ async def run_retro_route(request: Request, run_no: int) -> dict[str, Any]:
     retro = str(body.get("retro") or "").strip()
     if not retro:
         raise HTTPException(status_code=422, detail="retro must not be empty")
+    score_self = body.get("score_self")
+    if score_self is not None:
+        try:
+            score_self = int(score_self)
+        except (TypeError, ValueError):
+            raise HTTPException(
+                status_code=422, detail="score_self must be an integer 1–5"
+            )
+        if not 1 <= score_self <= 5:
+            raise HTTPException(
+                status_code=422, detail="score_self must be between 1 and 5"
+            )
 
     def _retro_sync() -> dict:
         with projects_db.connect_closing() as conn:
             run = projects_db.get_project_run(conn, project.id, run_no)
             if run is None:
                 raise KeyError(run_no)
-            projects_db.update_project_run(
-                conn, run["id"], retro=retro, retro_at=int(time.time())
-            )
+            fields: dict = {"retro": retro, "retro_at": int(time.time())}
+            if score_self is not None:
+                fields["score_self"] = score_self
+            projects_db.update_project_run(conn, run["id"], **fields)
             return projects_db.get_project_run_by_id(conn, run["id"])
 
     try:
         return await asyncio.to_thread(_retro_sync)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="run not found")
+
+
+@router.post("/{slug}/runs/{run_no}/score")
+async def score_run_route(request: Request, run_no: int) -> dict[str, Any]:
+    """``score_user`` + ``score_note`` (§8.1): 1–5, optional, **human-only
+    and editable** — never agent-writable, re-scoring just overwrites.
+
+    A judgement act (``member``+), and the one write with an identity gate
+    on top: a caller without a verified interactive session is refused
+    (§16). The derived project score (mean of the last five) moves on
+    every read, including when an old run is re-scored."""
+    project, _role, _profiles, principal = await _require_write(
+        request, judgement=True
+    )
+    if not await _interactive_subject(request):
+        raise HTTPException(
+            status_code=403,
+            detail="scoring a run is a human act (§8.1) — no session, no score",
+        )
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        body = {}
+    try:
+        score = int(body.get("score"))
+    except (TypeError, ValueError):
+        raise HTTPException(
+            status_code=422, detail="score must be an integer 1–5"
+        )
+    if not 1 <= score <= 5:
+        raise HTTPException(
+            status_code=422, detail="score must be between 1 and 5"
+        )
+    note = str(body.get("note") or "").strip() or None
+
+    def _score_sync() -> dict:
+        with projects_db.connect_closing() as conn:
+            run = projects_db.get_project_run(conn, project.id, run_no)
+            if run is None:
+                raise KeyError(run_no)
+            projects_db.update_project_run(
+                conn,
+                run["id"],
+                score_user=score,
+                score_note=note,
+                scored_by=principal.user_id,
+                scored_at=int(time.time()),
+            )
+            return {
+                "scored": run_no,
+                "score_user": score,
+                "score_note": note,
+                "by": principal.user_id,
+            }
+
+    try:
+        return await asyncio.to_thread(_score_sync)
     except KeyError:
         raise HTTPException(status_code=404, detail="run not found")
 

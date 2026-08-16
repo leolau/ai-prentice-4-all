@@ -51,6 +51,11 @@ export function RunView({
   const [error, setError] = useState<string | null>(null);
   const [retroDraft, setRetroDraft] = useState(initial.retro ?? "");
   const [retroSaved, setRetroSaved] = useState(false);
+  const [scoreDraft, setScoreDraft] = useState<number | null>(
+    initial.score_user ?? null,
+  );
+  const [scoreNote, setScoreNote] = useState(initial.score_note ?? "");
+  const [scoreSaved, setScoreSaved] = useState(false);
 
   const slugPath = `/api/projects/${encodeURIComponent(slug)}`;
   const runPath = `${slugPath}/runs/${run.run_no}`;
@@ -96,6 +101,19 @@ export function RunView({
     if (await post(`${runPath}/retro`, { retro: text })) {
       setRun({ ...run, retro: text });
       setRetroSaved(true);
+    }
+  };
+
+  /** §8.1: the human judgement — one tap, editable, never the agent's. */
+  const saveScore = async () => {
+    if (scoreDraft == null) return;
+    setScoreSaved(false);
+    const note = scoreNote.trim();
+    const body: Record<string, unknown> = { score: scoreDraft };
+    if (note) body.note = note;
+    if (await post(`${runPath}/score`, body)) {
+      setRun({ ...run, score_user: scoreDraft, score_note: note || null });
+      setScoreSaved(true);
     }
   };
 
@@ -293,6 +311,60 @@ export function RunView({
               </button>
               {retroSaved ? (
                 <span className="text-xs text-[var(--color-muted)]">saved</span>
+              ) : null}
+            </div>
+          </section>
+          {/* ── Score ────────────────────────────────────────────── */}
+          <section
+            data-component="RunScore"
+            className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface)] p-4"
+          >
+            <h2 className="text-xs uppercase tracking-wide text-[var(--color-muted)]">
+              Your score
+            </h2>
+            <div className="mt-2 flex gap-1.5" role="group" aria-label="Score this run from 1 to 5">
+              {[1, 2, 3, 4, 5].map((n) => (
+                <button
+                  key={n}
+                  type="button"
+                  onClick={() => {
+                    setScoreDraft(n);
+                    setScoreSaved(false);
+                  }}
+                  disabled={busy}
+                  aria-pressed={scoreDraft === n}
+                  className={`h-9 w-9 rounded-xl border text-sm disabled:opacity-50 ${
+                    scoreDraft === n
+                      ? "border-[var(--color-accent)] bg-[var(--color-accent)] font-medium text-[var(--color-accent-fg)]"
+                      : "border-[var(--color-border)] bg-[var(--color-surface-2)]"
+                  }`}
+                >
+                  {n}
+                </button>
+              ))}
+            </div>
+            <input
+              className="mt-2 w-full rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-2)] px-3 py-2 text-sm"
+              placeholder="One line on why — optional"
+              value={scoreNote}
+              onChange={(e) => {
+                setScoreNote(e.target.value);
+                setScoreSaved(false);
+              }}
+            />
+            <div className="mt-2 flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => void saveScore()}
+                disabled={busy || scoreDraft == null}
+                className="rounded-xl bg-[var(--color-accent)] px-4 py-2 text-sm font-medium text-[var(--color-accent-fg)] disabled:opacity-50"
+              >
+                Save score
+              </button>
+              {scoreSaved ? (
+                <span className="text-xs text-[var(--color-muted)]">
+                  saved
+                </span>
               ) : null}
             </div>
           </section>

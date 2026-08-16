@@ -96,6 +96,7 @@ const PROJECT: ProjectDetail = {
     required: 2,
     cards: { total: 3, done: 1, running: 1, blocked: 1 },
   },
+  score: null,
   health: "attention",
   runs: [
     {

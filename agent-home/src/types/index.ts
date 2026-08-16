@@ -1372,6 +1372,11 @@ export interface ProjectRunBrief {
   duration_seconds: number | null;
   outcome: string | null;
   score_user: number | null;
+  /**
+   * §8.2: present only when it diverges from `score_user` by ≥2 —
+   * presence IS the learning signal.
+   */
+  score_self?: number;
 }
 
 /** One card's live board state, joined onto a run row. */
@@ -1477,11 +1482,23 @@ export interface ProjectDetail extends Project {
   contacts: ProjectContact[];
   links: Partial<Record<ProjectLinkKind, ProjectLink[]>>;
   progress: ProjectProgress;
+  /**
+   * §8.1 derived score — the mean of the last five `score_user` values,
+   * never an all-time number; null until somebody scores a run.
+   */
+  score: ProjectScore | null;
   health: ProjectHealth;
   next_run_at: number | null;
   runs: ProjectRunBrief[];
   card_rollup: ProjectCardRollup;
   recent_events: TaskEventRow[];
+}
+
+/** §8.1: the project's derived score, recomputed on every read. */
+export interface ProjectScore {
+  mean: number;
+  /** How many of the last five scored runs went into the mean. */
+  runs: number;
 }
 
 /** A kanban `task_events` row as the detail read tails it. */
