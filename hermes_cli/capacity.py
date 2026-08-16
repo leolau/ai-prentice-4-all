@@ -60,10 +60,13 @@ class CapacityThresholds:
     #: Peak share of the concurrency cap that reads as approaching the bound.
     watch_session_ratio: float = 0.60
     constrained_session_ratio: float = 0.85
-    #: RAM a live conversation costs. PROVISIONAL — the systest calibration run
-    #: exists to replace this number, and the verdict says so while it is
-    #: unmeasured, rather than presenting an estimate as a measurement.
-    conversation_cost_mb: float = 250.0
+    #: RAM one more live conversation costs, **measured** on hermes-systest
+    #: (2026-08-16, FG-31 §Calibration): concurrent seeded conversations in one
+    #: process peaked at 154/209/248/295 MB RSS for 1/4/6/12, i.e. 13–19 MB of
+    #: margin per additional conversation, sub-linear as they share caches. 20
+    #: rounds that up; the first conversation's ~127 MB of agent machinery is
+    #: process cost, which ``profile_slab_mb`` already carries.
+    conversation_cost_mb: float = 20.0
     #: RAM one more profile costs (a gateway of its own, ~150 MB measured).
     profile_slab_mb: float = 150.0
     #: Working margin the box should keep free beyond one more profile.
@@ -75,6 +78,12 @@ class CapacityThresholds:
     #: Reply latency the owner actually experiences, p95.
     watch_p95_s: float = 25.0
     constrained_p95_s: float = 60.0
+    #: Turns the window must hold before p95 may decide the verdict. With a
+    #: handful of samples p95 *is* the slowest turn, so a single long agentic
+    #: reply pins the box to ``constrained`` for a day with nothing running.
+    #: Below this the latency is still reported — labelled as too small to
+    #: judge — and simply cannot bind.
+    min_latency_samples: float = 8.0
     #: Trailing window for contention and latency.
     window_s: float = 86400.0
 
@@ -152,6 +161,10 @@ class TurnLatency:
     samples: int = 0
     p50_s: Optional[float] = None
     p95_s: Optional[float] = None
+
+    def representative(self, thresholds: "CapacityThresholds") -> bool:
+        """Whether p95 over this many turns may decide the verdict."""
+        return self.samples >= int(thresholds.min_latency_samples)
 
 
 @dataclass
@@ -412,6 +425,12 @@ def collect_indicators(
     indicators.latency = collect_turn_latency(thresholds, now=now)
     if not indicators.latency.samples:
         indicators.unavailable.append("turn latency")
+    elif not indicators.latency.representative(thresholds):
+        indicators.unavailable.append(
+            f"turn latency (only {indicators.latency.samples} interactive "
+            f"turn(s) in the window; {int(thresholds.min_latency_samples)} "
+            "needed to judge)"
+        )
     try:
         indicators.profile_count = max(1, len(_profile_homes()))
     except Exception as exc:
@@ -502,6 +521,8 @@ def _latency_bound(
 ) -> Optional[Bound]:
     if latency.p95_s is None:
         return None
+    if not latency.representative(thresholds):
+        return None
     detail = f"p95 {latency.p95_s:.1f}s over {latency.samples} turn(s)"
     pressure = latency.p95_s / max(thresholds.constrained_p95_s, 1e-6)
     if latency.p95_s >= thresholds.constrained_p95_s:
@@ -574,8 +595,8 @@ def _tier_advice(indicators: CapacityIndicators, thresholds: CapacityThresholds)
     )
     return (
         f"Size the next tier from the load, not the user count: {basis}. "
-        "The per-conversation figure is still an estimate — the systest "
-        "calibration run replaces it with a measurement."
+        "The per-conversation figure is measured (hermes-systest, 2026-08-16), "
+        "not estimated."
     )
 
 

@@ -166,9 +166,11 @@ def test_hardware_advice_states_its_measured_basis():
     verdict = derive_verdict(_indicators(active=13, cap=15, available_mb=8192.0))
     joined = " ".join(verdict.recommendations)
     assert "13 concurrent conversation(s)" in joined
-    # The per-conversation cost is an estimate until the systest run; say so
-    # rather than presenting it as a measurement.
-    assert "still an estimate" in joined
+    # The per-conversation cost is a measurement now (hermes-systest,
+    # 2026-08-16), and the advice says which — an unattributed number is the
+    # one a reader cannot check.
+    assert "measured (hermes-systest" in joined
+    assert "still an estimate" not in joined
 
 
 def test_idle_profiles_are_recommended_before_hardware():
@@ -473,3 +475,140 @@ def test_as_dict_carries_the_binding_constraint_and_its_fixability():
     assert payload["binding_constraint"]["hardware_helps"] is False
     assert payload["indicators"]["cap_box_wide"] == 15
     assert payload["recommendations"]
+
+
+# ── Latency is what a person waited for, over a sample big enough to judge ──
+#
+# Both behaviours below come from the live systest box (2026-08-16), where the
+# verdict read `constrained — turn latency, p95 1195.8s over 3 turn(s)` with
+# zero conversations running and 9.1 GB free. All three "turns" were scheduled
+# jobs, and the 20-minute one was a job waiting for the previous job.
+
+
+def test_a_scheduled_job_is_not_a_reply_someone_waited_for(tmp_path, monkeypatch):
+    db = _session_db(tmp_path, monkeypatch)
+    try:
+        base = time.time()
+        # The live box, reproduced: three cron runs, one of them 20 minutes,
+        # and one real conversation.
+        db.create_session("cron_142a6b4e9532_20260816", "cron")
+        db.append_message("cron_142a6b4e9532_20260816", "user", "job", timestamp=base)
+        db.append_message(
+            "cron_142a6b4e9532_20260816", "assistant", "", timestamp=base + 1195.8
+        )
+        db.create_session("cron_a012c36564c5_20260816", "cron")
+        db.append_message("cron_a012c36564c5_20260816", "user", "job", timestamp=base)
+        db.append_message(
+            "cron_a012c36564c5_20260816", "assistant", "", timestamp=base + 2.7
+        )
+        # A run whose row carries no source (the `unknown` default): the id
+        # convention is the only thing left to exclude it by.
+        db.create_session("cron_a7436d0c8f14_20260816", "unknown")
+        db.append_message("cron_a7436d0c8f14_20260816", "user", "job", timestamp=base)
+        db.append_message(
+            "cron_a7436d0c8f14_20260816", "assistant", "", timestamp=base + 600.0
+        )
+        # A backgrounded to-do run: /start returns at once, so nobody is
+        # waiting on this turn either.
+        db.create_session("todo-9", "todo")
+        db.append_message("todo-9", "user", "do the thing", timestamp=base)
+        db.append_message("todo-9", "assistant", "", timestamp=base + 420.0)
+        db.create_session("home-1", "agent_home")
+        db.append_message("home-1", "user", "hello", timestamp=base)
+        db.append_message("home-1", "assistant", "hi", timestamp=base + 6.5)
+
+        samples = db.recent_turn_latencies_s(window_s=3600.0, now=base + 1300)
+
+        assert samples == [6.5], "only the human turn is reply latency"
+    finally:
+        db.close()
+
+
+def test_seeded_origins_are_all_classified():
+    """Every ``spawn_seeded_session`` caller's origin must be classified.
+
+    A seeded session's ``origin`` becomes the agent's ``platform`` and so the
+    session's ``source``, which is what the latency filter reads. A new seeded
+    caller that nobody classifies silently puts a machine's runtime back into
+    the owner's reply latency — the live 2026-08-16 reading, one call site
+    later.
+    """
+    import re
+    from pathlib import Path
+
+    from hermes_state import NON_INTERACTIVE_SESSION_SOURCES
+
+    root = Path(__file__).resolve().parents[2]
+    found: set[str] = set()
+    for path in root.rglob("*.py"):
+        parts = set(path.parts)
+        if parts & {".venv", "venv", "tests", "node_modules", "site-packages"}:
+            continue
+        text = path.read_text(encoding="utf-8", errors="ignore")
+        for call in re.findall(r"spawn_seeded_session\(\s*(.*?)\n\s*\)", text, re.S):
+            found.update(re.findall(r"origin=\"([^\"]+)\"", call))
+
+    assert found, "no spawn_seeded_session call sites found — the scan broke"
+    assert found <= set(NON_INTERACTIVE_SESSION_SOURCES), (
+        f"unclassified seeded origin(s): {sorted(found - set(NON_INTERACTIVE_SESSION_SOURCES))}"
+    )
+
+
+def test_latency_cannot_bind_the_verdict_on_a_handful_of_turns():
+    thresholds = CapacityThresholds()
+    indicators = _indicators(active=1, cap=15)
+    indicators.latency = TurnLatency(samples=3, p50_s=6.7, p95_s=1195.8)
+
+    verdict = derive_verdict(indicators, thresholds)
+
+    assert verdict.state == COMFORTABLE, "3 turns cannot condemn an idle box"
+    assert all(bound.name != BOUND_LATENCY for bound in verdict.bounds)
+
+    # The reading is still reported — as a sample too small to judge, not as a
+    # measured zero, and not silently dropped.
+    indicators.unavailable.append("turn latency (only 3 interactive turn(s))")
+    payload = capacity.as_dict(derive_verdict(indicators, thresholds))
+    assert payload["indicators"]["turn_p95_s"] == 1195.8
+    assert payload["indicators"]["turn_samples"] == 3
+    assert any("turn latency" in name for name in payload["unavailable"])
+
+
+def test_a_representative_sample_still_binds():
+    thresholds = CapacityThresholds()
+    indicators = _indicators(active=1, cap=15)
+    indicators.latency = TurnLatency(
+        samples=int(thresholds.min_latency_samples), p50_s=40.0, p95_s=1195.8
+    )
+
+    verdict = derive_verdict(indicators, thresholds)
+
+    assert verdict.state == CONSTRAINED
+    assert verdict.binding is not None
+    assert verdict.binding.name == BOUND_LATENCY
+
+
+def test_a_small_sample_is_named_as_unjudged_by_collection(tmp_path, monkeypatch):
+    default_home = tmp_path / ".hermes"
+    monkeypatch.setenv("HERMES_HOME", str(default_home))
+    _write_registry(default_home, 1, 15)
+    monkeypatch.setattr(
+        capacity,
+        "collect_turn_latency",
+        lambda thresholds, now=None: TurnLatency(samples=1, p50_s=50.0, p95_s=50.0),
+    )
+
+    indicators = capacity.collect_indicators({"max_concurrent_sessions": 15})
+
+    assert any("turn latency" in name for name in indicators.unavailable)
+    assert any(
+        "1 interactive" in name and "8 needed" in name
+        for name in indicators.unavailable
+    ), indicators.unavailable
+    assert derive_verdict(indicators).state != CONSTRAINED
+
+
+def test_the_minimum_sample_size_is_a_config_setting():
+    thresholds = CapacityThresholds.from_config({"capacity": {"min_latency_samples": 2}})
+    latency = TurnLatency(samples=2, p50_s=90.0, p95_s=90.0)
+    assert latency.representative(thresholds)
+    assert not latency.representative(CapacityThresholds())

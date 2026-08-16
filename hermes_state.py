@@ -204,6 +204,25 @@ def get_last_init_error() -> Optional[str]:
     return _last_init_error
 
 
+#: ``sessions.source`` values written by machinery rather than by a person
+#: talking to the agent. Nobody is waiting on these turns, so they are not
+#: reply latency (FG-31): a scheduled job's runtime — including any wait for
+#: the previous job to release the terminal lock — would otherwise read as the
+#: owner's slowest reply of the day.
+#:
+#: These are exactly the ``origin=`` values passed to
+#: :func:`agent.seeded_session.spawn_seeded_session`, which becomes the agent's
+#: ``platform`` and so the session's ``source``. A new seeded caller must be
+#: classified here — ``test_seeded_origins_are_all_classified`` fails otherwise.
+NON_INTERACTIVE_SESSION_SOURCES: Tuple[str, ...] = ("cron", "todo")
+
+#: Session-id prefixes for the same autonomous runs, as a second gate: cron
+#: names its sessions ``cron_<job_id>_<ts>`` (``cron/scheduler.run_job``), and a
+#: run recorded with the ``unknown`` source default has no ``source`` to exclude
+#: it by.
+NON_INTERACTIVE_SESSION_ID_PREFIXES: Tuple[str, ...] = ("cron_",)
+
+
 # Distinctive opening shared by both background-review harness prompts
 # (_SKILL_REVIEW_PROMPT and _MEMORY_REVIEW_PROMPT in agent/background_review.py).
 # Matched case-sensitively against the leading content of a user/system message.
@@ -1263,10 +1282,24 @@ class SessionDB:
         same session, which is exactly the wait the owner experienced. Rows the
         agent wrote without being asked (tool results, system rows) never pair,
         so they cannot inflate the sample.
+
+        **Interactive sessions only.** A scheduled job is seeded with a ``user``
+        row holding the job prompt, so its whole runtime pairs as a "reply" —
+        and a job that waits for the previous one to release the terminal lock
+        pairs as a *twenty-minute* one. Nobody was waiting for it. Autonomous
+        sessions are therefore excluded by ``sessions.source`` and by the
+        ``cron_<job>_<ts>`` id convention (a run recorded without a source would
+        otherwise slip back in), so this series stays what it claims to be:
+        latency a person actually experienced.
         """
         now = time.time() if now is None else now
         floor = now - max(0.0, window_s)
-        sql = """
+        placeholders = ", ".join("?" for _ in NON_INTERACTIVE_SESSION_SOURCES)
+        prefix_clauses = " AND ".join(
+            "o.session_id NOT LIKE ? ESCAPE '\\'"
+            for _ in NON_INTERACTIVE_SESSION_ID_PREFIXES
+        )
+        sql = f"""
             WITH ordered AS (
                 SELECT session_id, role, timestamp,
                        LAG(timestamp) OVER (
@@ -1278,16 +1311,26 @@ class SessionDB:
                 FROM messages
                 WHERE timestamp >= ?
             )
-            SELECT (timestamp - prev_ts) AS delta
-            FROM ordered
-            WHERE role = 'assistant' AND prev_role = 'user' AND prev_ts IS NOT NULL
-              AND delta >= 0
-            ORDER BY timestamp DESC
+            SELECT (o.timestamp - o.prev_ts) AS delta
+            FROM ordered o
+            LEFT JOIN sessions s ON s.id = o.session_id
+            WHERE o.role = 'assistant' AND o.prev_role = 'user'
+              AND o.prev_ts IS NOT NULL
+              AND (o.timestamp - o.prev_ts) >= 0
+              AND COALESCE(s.source, '') NOT IN ({placeholders})
+              AND {prefix_clauses}
+            ORDER BY o.timestamp DESC
             LIMIT ?
         """
+        params: List[Any] = [floor]
+        params.extend(NON_INTERACTIVE_SESSION_SOURCES)
+        params.extend(
+            f"{prefix}%" for prefix in NON_INTERACTIVE_SESSION_ID_PREFIXES
+        )
+        params.append(int(limit))
         try:
             with self._lock:
-                rows = self._conn.execute(sql, (floor, int(limit))).fetchall()
+                rows = self._conn.execute(sql, tuple(params)).fetchall()
         except sqlite3.Error as exc:
             # Window functions need SQLite >= 3.25; degrade to "no samples"
             # rather than failing the surface that asked.

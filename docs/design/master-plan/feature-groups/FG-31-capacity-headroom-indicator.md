@@ -91,6 +91,40 @@ pairs each `assistant` row with the `user` row immediately before it in the same
 session. That is genuinely free, and it measures the wait the person actually
 experienced rather than internal timing.
 
+**Correction 3a — a transcript turn is not always a *reply*, and the live box
+proved it (2026-08-16).** As shipped, `recent_turn_latencies_s()` paired every
+`assistant` row with the `user` row before it, whoever wrote them. On the box
+that made the headline reading:
+
+```
+Headroom: constrained — turn latency, p95 1195.8s over 3 turn(s) — replies are slow
+```
+
+All three samples were **cron** sessions, and the 1195.8 s one had spent most of
+that time waiting for another cron job to release the terminal lock. Nobody was
+waiting on any of them; over the same window the human surfaces (`telegram`,
+`agent_home`) ran 5.9–32.5 s. So the indicator's most alarming state was reached
+by a box that was serving its owner perfectly well.
+
+Two changes, and they are separate faults:
+
+- **Machine turns are excluded.** `NON_INTERACTIVE_SESSION_SOURCES` is exactly
+  the set of `origin=` values passed to `spawn_seeded_session()` (`cron`,
+  `todo`) — that origin becomes the agent's `platform` and so the session's
+  `source` — plus the `cron_` session-id prefix for rows written before a source
+  was recorded. A new seeded caller that nobody classifies would silently put
+  machine runtime back into reply latency, so
+  `test_seeded_origins_are_all_classified` scans the tree's call sites and fails
+  on an unclassified origin. (This is not hypothetical: the calibration harness
+  below spawned sessions with a *new* origin and was counted as human traffic
+  until the deny-list was made a maintained set.)
+- **A handful of turns cannot bind the verdict.** With n=3, p95 *is* the slowest
+  turn, so one long agentic reply pins the box to `constrained` for a day.
+  `capacity.min_latency_samples` (8) is the floor: below it the latency is still
+  shown, labelled "only N interactive turn(s) in the window; 8 needed to judge",
+  and cannot decide the state. Reporting an unbindable reading beats hiding it —
+  the owner can see the number and its sample count.
+
 **Correction 4 — "the console" is the wrong surface.** Per **D20** `agent-home`
 is the user-facing UI and the dashboard is the operator console, so the card is
 `agent-home/src/app/capacity` behind a BFF route. Same correction FG-30's plan
@@ -222,15 +256,46 @@ which write-lock waits appear, and p95 turn latency at each step. Set the
 default thresholds from those measurements and record them here, including the
 per-conversation memory figure.
 
-### Calibration status — NOT DONE
+### Calibration — DONE (hermes-systest, 2026-08-16, revision `a56bc4a6f`)
 
-`conversation_cost_mb: 250` is an **estimate, not a measurement**, and the code
-says so where it is used: the hardware recommendation prints that the
-per-conversation figure "is still an estimate — the systest calibration run
-replaces it with a measurement". Nothing enforcing depends on it (it feeds sizing
-advice only, never a refusal), so the indicator stays honest while the number is
-unvalidated. The deploy plus the scripted load run on `hermes-systest` is the
-remaining work and needs Leo's go, since it touches the box.
+Method: N real conversations driven concurrently through
+`spawn_seeded_session()` — the same helper cron and `/start` use — inside **one**
+process, with that process's `VmRSS` sampled twice a second and `VmHWM` read at
+the end. One process is the right unit: it is what a multiplexed gateway is, and
+it is what the memory bound's arithmetic sizes.
+
+| concurrent conversations | peak RSS | marginal vs N=1 | turn p50 | turn max |
+|---|---|---|---|---|
+| 1 | 154.4 MB | — | 3.9 s | 3.9 s |
+| 4 | 209.1 MB | 18.2 MB/conv | 4.2 s | 9.2 s |
+| 6 | 248.0 MB | 18.7 MB/conv | 14.6 s | 16.3 s |
+| 12 | 295.1 MB | 12.8 MB/conv | 11.0 s | 19.2 s |
+
+(Interpreter + imports before any conversation: 27.3 MB.)
+
+**`conversation_cost_mb: 250` → `20`.** The guess was ~13× the measurement. The
+first conversation costs ~127 MB more than the bare process — agent machinery,
+tool and MCP schemas, memory load — but that is *process* cost, paid once and
+already carried by `profile_slab_mb: 150`; charging it per conversation is what
+made the old number so large. Beyond the first, each conversation costs 13–19 MB
+and the cost is **sub-linear** (they share caches), so 20 is a deliberate
+round-up rather than a fit.
+
+**Write-lock waits first appear under concurrency, and stay trivial.** Zero
+before the run; 19 events totalling 3.7 s of waiting across all four steps, i.e.
+≈0.8 waits/h against a `watch` threshold of 6/h. Twelve concurrent conversations
+on one SQLite state.db is not where the serialisation bound bites.
+
+**Latency thresholds survive the load.** Twelve concurrent agentic turns peaked
+at 19.2 s, under `watch_p95_s: 25` — so the defaults are not tuned to call a
+busy-but-healthy box `watch`.
+
+**What this does not measure.** These conversations are short and
+attachment-free; a long multi-turn conversation carrying documents holds more
+transcript and will cost more, which is why the config comment says to raise the
+figure if that is your load. And the figure is RSS in one process — profiles
+running as separate gateway processes pay `profile_slab_mb` each, which is the
+other term in the same sum.
 
 ## Dependencies
 
@@ -255,7 +320,7 @@ memory cost recorded; `scripts/run_tests.sh`, `ruff`, `ty` clean.
 - [x] Recommendations: cheap actions first; hardware with measured basis; SQLite bound flagged as not-fixable-by-hardware
 - [x] `config.yaml` thresholds (no env vars) — `capacity:`, with a test asserting an env var does **not** take effect
 - [x] Cross-profile correctness under one multiplexed gateway — the registry is profile-local; summed for the indicator, cap left per-profile
-- [ ] **Calibration load run on `hermes-systest`; per-conversation memory cost recorded here** — needs Leo's go (deploys to the box). Until then `conversation_cost_mb` is labelled an estimate wherever it is shown
+- [x] **Calibration load run on `hermes-systest`; per-conversation memory cost recorded here** — 2026-08-16 at revision `a56bc4a6f`: `conversation_cost_mb` 250 → **20** (measured 13–19 MB marginal, sub-linear), write-lock waits ≈0.8/h at 12 concurrent, p95 19.2 s. The run also exposed the latency defect in §1a Correction 3a
 
 ## Open questions
 
@@ -272,32 +337,27 @@ memory cost recorded; `scripts/run_tests.sh`, `ruff`, `ty` clean.
 
 | Date | Edition | Author | Change | Rationale |
 |------|---------|--------|--------|-----------|
+| 2026-08-16 | 3 | devin (for Leo) | Calibrated on `hermes-systest`; `conversation_cost_mb` 250 → 20; excluded machine turns from reply latency and gave p95 a sample floor | Leo: "ok go ahead". The load run answered the open number and, in doing so, caught the indicator being wrong about the box in front of it. `hermes doctor` read **constrained — turn latency, p95 1195.8s over 3 turn(s)** on a box that was serving its owner in 5.9–32.5 s: all three samples were **cron** sessions, and the worst one had spent most of its 20 minutes waiting for another cron job to release the terminal lock. A turn nobody is waiting on is not a reply, so the latency series now excludes the origins `spawn_seeded_session()` is called with (`cron`, `todo`), with a test that fails when a new seeded caller is left unclassified — the calibration harness itself was that new caller, which is why the guard exists rather than a fixed list. Separately, n=3 must not be allowed to decide anything: at that size p95 *is* the slowest turn, so `min_latency_samples: 8` lets a small sample be reported but not bind. On the number itself: 1/4/6/12 concurrent conversations peaked at 154/209/248/295 MB in one process, i.e. **13–19 MB marginal** and sub-linear — the 250 MB guess was ~13× high because it charged every conversation for the ~127 MB of agent machinery the *process* pays once, which `profile_slab_mb` already carries. Write-lock waits appeared under concurrency but stayed trivial (≈0.8/h at 12 against a 6/h watch line), and p95 at 12 concurrent was 19.2 s, under the 25 s watch line — so the thresholds are not tuned to call a busy-but-healthy box `watch`. | Leo: "Can you do the testing without FG-28?" → "ok go ahead" |
 | 2026-07-30 | 2 | devin (for Leo) | Implemented FG-31; corrected four false premises in the plan and recorded the calibration debt | Leo: "I have another agent working on F2-F4. I want you to start working on FG-31 now." Checking the plan against shipped code first — the pickup-readiness pass that caught FG-26's and FG-28's stale prompts — found four premises that did not hold, and two of them changed the design rather than the wording (§1a). The load-bearing one: the plan's headline test assumed the lease registry is box-wide, but `_state_dir()` is `get_hermes_home()/runtime/`, so it is **profile-local** — three profiles at 6 live conversations each would each report `6 / 15` while the box carried 18, which is precisely the misreading a headroom indicator exists to prevent. The indicator now sums every profile's registry through a read-only helper that takes no lock, while the **cap** is deliberately left per-profile because making it box-wide is a behaviour change and the owner's call. Second: the plan claimed "nothing needs new instrumentation", but write-lock waits — the one bound a bigger box cannot fix — were counted nowhere, so they had to be instrumented and *persisted*, since `hermes status` is a different process from the gateway; and timing the lock acquisition rather than counting retries matters because SQLite's own 1s busy handler absorbs most contention, which is why the first contention test read zero. Third, no completed-turn latency is stored anywhere, so it is derived from the transcript. Fourth, "the console" contradicts D20, so the card is in `agent-home`. The open question is answered report-only: nothing lowers the cap, because deciding to serve fewer people is the owner's decision. `conversation_cost_mb` remains an **estimate** and is labelled as one wherever it is shown — presenting an unmeasured number as a measurement is how an indicator loses the trust it exists to earn. | Leo: "I have another agent working on F2-F4. I want you to start working on FG-31 now. Is that ok?" |
 | 2026-08-10 | 1 | devin (for Leo) | Created FG doc | Leo asked whether the concurrency caveat I kept attaching to Phase 6 was a coding gap or a performance concern, and proposed a simple indicator telling the owner when to upgrade. Checking the code settled it: Hermes **is** concurrent — asyncio loop plus a thread pool for turns, live-agent tracking, a shipped cross-process active-session lease system with a `max_concurrent_sessions` cap that refuses politely, and SQLite in **WAL** mode so readers never block. What bounds it is capacity, in two specific places: SQLite's **single writer** serialises simultaneous writes (latency, never corruption) and each *active conversation* holds a live agent in RAM to keep its prompt cache warm, so RAM tracks concurrent conversations rather than user count. Hence: hundreds registered is fine, hundreds simultaneous is untested. That makes Leo's suggestion the right response — this FG surfaces the need for scale-out work in advance instead of pre-building it. Two design choices are load-bearing. The verdict **names its binding constraint** rather than showing a percentage, because "memory, driven by 9 concurrent conversations" tells the owner what to do and "78%" does not. And when the bound is write-lock waits the FG must say **a bigger box will not help** — recommending a useless upgrade would be worse than silence. All thresholds ship conservative and must be calibrated on the system-test box, since production has one principal and the current memory figures are idle snapshots missing the one number that matters most: RSS per additional live conversation. | Leo: "What is the concurrency issue? Is it a coding issue? There is no concurrent support or it is a performance concern in case when there are hundreds of users? If for performance concern, we need a simple performance indicator to remind the owner when is the time to upgrade the hardware" |
 
-## Cloud-agent prompt — for the calibration run only
+## Cloud-agent prompt — nothing left to pick up
 
-**The feature is built. Do not re-implement it.** §As implemented lists every
-file; §1a lists the four premises in the original plan that were false, so
-reading §§1–4 alone would send you to rebuild the wrong design. What is left is
-one task, and it needs Leo's authorisation because it touches the live box.
+**FG-31 is complete: built (#260), calibrated on `hermes-systest` (2026-08-16)
+and corrected for what the live box showed (§1a Correction 3a).** §As implemented
+lists every file; §1a lists the premises in the original plan that were false, so
+reading §§1–4 alone would send you to rebuild the wrong design.
 
-> Repo `leolau/ai-prentice-4-all`. Read `docs/design/master-plan/README.md`,
-> `AGENTS.md`, this doc — including §1a and §As implemented — and the
-> `testing-hermes-systest-box` skill. **No SSH**: the box is driven only through
-> `/home/ubuntu/run_on_box.sh`, and deploying needs Leo's explicit go.
->
-> Deploy the merged FG-31 code, then run a scripted concurrent load on
-> `hermes-systest` at increasing concurrency and record three numbers: **RSS per
-> additional live conversation** (the one figure `conversation_cost_mb: 250`
-> currently guesses), the concurrency at which write-lock waits first appear
-> (`SessionDB.read_write_contention()` now reports them), and p95 turn latency at
-> each step (`recent_turn_latencies_s()`).
->
-> Then set the `capacity:` defaults in `cli-config.yaml.example` from those
-> measurements, replace §Calibration status with the measured table, tick the last
-> checklist item, and drop the "still an estimate" wording from
-> `capacity._tier_advice` once the figure is real. Verify the reading
-> on the box against what you actually loaded it with — an indicator that cries
-> wolf gets ignored, and an indicator that is ignored is worse than none.
-> `scripts/run_tests.sh`, `ruff`, `ty` clean.
+If you are re-calibrating after a hardware or model change, the method is in
+§Calibration: N conversations driven concurrently through
+`spawn_seeded_session()` in one process, sampling that process's `VmRSS`; the
+marginal cost is the slope against N=1, **not** peak/N — dividing by N charges
+every conversation for the process's one-time agent machinery, which is how the
+250 MB guess got there. Deploying needs Leo's explicit go, and the box is driven
+only through `/home/ubuntu/run_on_box.sh` (no SSH — see the
+`testing-hermes-systest-box` skill).
+
+The one item still open is **not** FG-31's to decide: whether
+`max_concurrent_sessions` should become box-wide (today 3 profiles × 15 means the
+box can be asked for 45). The indicator reports the box-wide total; enforcing one
+is a behaviour change and the owner's call.
