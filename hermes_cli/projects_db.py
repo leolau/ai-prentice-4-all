@@ -1,7 +1,8 @@
 """Root-anchored first-class Project store.
 
 A **Project** is the durable record of a piece of work that can be reviewed,
-repeated and learnt from (see ``docs/design/projects-feature-design.md``).
+repeated and learnt from (see
+``docs/design/master-plan/feature-groups/FG-32-projects-durable-record.md``).
 It anchors:
 
 - **Desktop session grouping** — a session belongs to a project when its

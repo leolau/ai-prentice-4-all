@@ -17,7 +17,7 @@ depends_on:
 
 # Projects
 
-> **Superseded for implementation by** `docs/design/projects-feature-design.md`
+> **Superseded for implementation by** `docs/design/master-plan/feature-groups/FG-32-projects-durable-record.md`
 > (ed.3), which consolidates this plan and ed.2 into one standalone spec and adds
 > the four dimensions neither covers: cadence (one-off / repeatable / standing),
 > autonomy and its caps, guidance (durable directives and feedback), and runs /

@@ -212,6 +212,20 @@ checkboxes: the docs are written by whoever *finished* a piece of work, and
 nobody is assigned to notice when a neighbouring change makes their sentence
 false.
 
+### Phase 7 — FG-32 (the durable record of a piece of work)
+
+Phase 6 gave the entity its goals, its profiles and its people. Phase 7 gives
+it a place to keep **work**: a Project holds the owner's fifteen fields, the
+cards that execute it, and one row per occurrence, so a piece of work can be
+reviewed, repeated and learnt from. It adds no engine — schedules are `hermes
+cron` jobs in the host profile, sequencing is kanban parent links, asks are
+FG-10 + a to-do, cost is the C8 ledger — and no new core model tool: the agent
+reaches Projects through a CLI verb plus a skill (footprint rung 2).
+
+| FG | Title | Wave | Primary reuse anchors |
+|----|-------|------|-----------------------|
+| [32](./feature-groups/FG-32-projects-durable-record.md) | Projects: the durable record of a piece of work (fifteen fields · cadence · autonomy · guidance · runs · retro/learning) | **P7-A** — **IMPLEMENTED**, steps 1–11 merged (#251/#252/#254/#258/#259/#261/#263/#266/#271/#275/#276/#279/#280); **not** deployed or system-tested, and the end-to-end review (FG-32 §20, [`docs/reviews/2026-08-13-projects-steps-1-8-review.md`](../../reviews/2026-08-13-projects-steps-1-8-review.md)) has open defects | `hermes_cli/kanban_db.py` execution substrate, `hermes_cli/projects_db.py` (`board_slug`, `project_profiles`, `project_links`), `hermes_cli/todo_store.py`, `hermes_cli/human_comms.py` FG-10 approvals/asks, `cron/jobs.py` + `cron/scheduler.py` profile-scoped schedule engine, `agent/background_review.py` skills loop, `interactions.py` C8 `kind='cost'`, FG-27 isolation, FG-28 host profiles, FG-29 goals/promotion |
+
 ---
 
 ## 4. Cross-cutting shared contracts (Wave 0 — must merge FIRST)
@@ -390,6 +404,20 @@ WAVE P6-E — DONE (deployed, calibrated on the box 2026-08-16: conversation_cos
             and simultaneous conversations are not. This surfaces the need for
             runtime scale-out in advance instead of pre-building it, and names
             the binding constraint — including when a bigger box would NOT help.)
+
+WAVE P7-A — IMPLEMENTED, not yet deployed or system-tested (steps 1–11 merged;
+         open defects in FG-32 §20)
+  └─ FG-32  Projects: the durable record of a piece of work
+            (A Project holds the owner's fifteen fields, the cards that execute
+            it, and one row per occurrence, so work can be reviewed, REPEATED and
+            learnt from. Three axes carry the brief: cadence (one-off /
+            repeatable / standing), autonomy (manual / supervised / autonomous,
+            enforced at the existing triage→todo gate with max_in_progress and a
+            per-run budget), and guidance (durable attributed directives compiled
+            into the NEXT run's seed prompt — never mid-conversation, because the
+            system prompt is frozen for a conversation's life). Adds no engine
+            and no core tool: cron in the host profile, kanban links, FG-10 asks,
+            the C8 ledger, and a CLI verb + skill for the agent's route in.)
 ```
 
 **Phase-6 parallelization:** FG-24 and FG-29 share no files and can run as two

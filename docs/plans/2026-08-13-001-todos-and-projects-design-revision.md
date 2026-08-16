@@ -23,7 +23,7 @@ depends_on:
 
 > **Projects note:** the Projects half of this document (Part 2, and the Projects
 > rows of Part 3/4) is carried forward into
-> `docs/design/projects-feature-design.md` (ed.3), the standalone
+> `docs/design/master-plan/feature-groups/FG-32-projects-durable-record.md` (ed.3), the standalone
 > implementation spec that also designs cadence, autonomy, guidance, runs and the
 > learning loop. Implement Projects from that document. The To-dos half of this
 > document is unaffected and remains authoritative.
