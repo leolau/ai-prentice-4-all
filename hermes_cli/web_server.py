@@ -3676,9 +3676,11 @@ async def comms_member_activity(request: Request, _console_scope=Depends(require
 async def comms_delete_member(user_id: str, request: Request, _console_scope=Depends(require_console_scope)):
     """Remove an enrolment, resolving the rows it owns (**owner only**).
 
-    ``strategy=transfer|purge`` is required, because nothing cascades to
-    memories, files or GTS items: without an answer their rows would keep a
-    dangling ``owner_user_id`` that no principal resolves.
+    ``strategy=transfer|purge`` is required, because without an answer their
+    rows would keep a dangling ``owner_user_id`` that no principal resolves.
+    ``purge`` also erases the curated memory files about them in this profile
+    (and their cross-profile identity file if this was their last
+    participation on the box); ``transfer`` leaves both alone.
     """
     params = request.query_params
     strategy = (params.get("strategy") or "").strip()
@@ -12666,27 +12668,47 @@ async def set_memory_provider(body: MemoryProviderSelect):
 
 
 @app.post("/api/memory/reset")
-async def reset_memory(body: MemoryReset):
+async def reset_memory(body: MemoryReset, request: Request):
+    """Erase the acting principal's curated memory (FG-24 layout).
+
+    Scoped to the caller: since FG-24 an erase that walked two filenames left
+    every participation and person file in place while reporting success, and
+    an erase that walked all of them would let one principal delete the
+    agent's notes about everybody else. The profile-wide shared block goes
+    only for the roles allowed to write it.
+    """
+    from tools.memory_tool import SHARED_WRITE_ROLES, curated_memory_files
+
     target = (body.target or "all").strip().lower()
     if target not in {"all", "memory", "user"}:
         raise HTTPException(status_code=400, detail="target must be all, memory, or user")
 
-    mem_dir = get_hermes_home() / "memories"
+    try:
+        principal = await _comms_resolve_principal(request)
+        user_id: Optional[str] = principal.user_id
+        may_erase_shared = principal.role in SHARED_WRITE_ROLES
+    except HTTPException:
+        raise
+    except Exception:
+        # No directory configured: the single-user box, where the shared
+        # files are the caller's own memory.
+        user_id = None
+        may_erase_shared = True
+
     deleted = []
-    targets = []
-    if target in {"all", "memory"}:
-        targets.append("MEMORY.md")
-    if target in {"all", "user"}:
-        targets.append("USER.md")
-    for fname in targets:
-        path = mem_dir / fname
-        if path.exists():
-            try:
-                path.unlink()
-                deleted.append(fname)
-            except OSError as exc:
-                raise HTTPException(status_code=500, detail=f"Could not delete {fname}: {exc}")
-    return {"ok": True, "deleted": deleted}
+    for curated in curated_memory_files(
+        user_id=user_id, target=target, include_shared=may_erase_shared
+    ):
+        if not curated.path.exists():
+            continue
+        try:
+            curated.path.unlink()
+        except OSError as exc:
+            raise HTTPException(
+                status_code=500, detail=f"Could not delete {curated.path.name}: {exc}"
+            )
+        deleted.append({"file": curated.path.name, "scope": curated.scope})
+    return {"ok": True, "principal": user_id, "deleted": deleted}
 
 
 # ---------------------------------------------------------------------------

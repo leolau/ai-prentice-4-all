@@ -41,6 +41,7 @@ import tempfile
 import time
 import uuid
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from hermes_constants import get_hermes_home
 from typing import Dict, Any, List, Optional
@@ -119,6 +120,125 @@ def _contained_user_dir(parent: Path, user_id: str) -> Path:
             f"Refusing memory path for user_id {user_id!r}: {resolved} escapes {parent_resolved}"
         )
     return candidate
+
+
+@dataclass(frozen=True)
+class CuratedFile:
+    """One curated-memory file, with enough context to name it to a human."""
+
+    path: Path
+    #: What the file holds, in the words the owner sees before deleting it.
+    label: str
+    #: ``shared`` (profile-wide), ``participation`` (person × profile),
+    #: ``person`` (that person, every profile), ``legacy`` (pre-FG-24).
+    scope: str
+
+
+def curated_memory_files(
+    *,
+    user_id: Optional[str],
+    target: str = "all",
+    include_shared: bool = False,
+    all_principals: bool = False,
+) -> List[CuratedFile]:
+    """The curated files an erase would remove, in FG-24's layout.
+
+    Every maintenance path used to enumerate two filenames — ``MEMORY.md`` and
+    ``USER.md`` under ``memories/`` — which since FG-24 is neither the whole
+    tier nor, on a multi-principal box, the part anybody still writes to. This
+    is the one enumeration, so a path that erases memory and a path that
+    reports it cannot disagree.
+
+    ``include_shared`` is the caller's authority to erase the profile-wide
+    block (``SHARED_WRITE_ROLES``), not a display preference: a member erasing
+    their own memory must not take the shared block with it.
+
+    ``all_principals`` adds every *participation* directory in this profile.
+    It deliberately does **not** reach person-level identity: that file is
+    shared across every profile on the box, so one profile's owner is not the
+    person who gets to erase it.
+    """
+    base = get_memory_dir()
+    files: List[CuratedFile] = []
+    want_memory = target in {"all", "memory"}
+    want_user = target in {"all", "user"}
+
+    if include_shared and want_memory:
+        files.append(
+            CuratedFile(base / "MEMORY.md", "agent notes shared by this profile", "shared")
+        )
+    if include_shared and want_user:
+        # Pre-FG-24 profile-wide user profile. Migrated to persons/<uid>/ and
+        # normally absent; still listed so an un-migrated box is not silently
+        # left with it.
+        legacy = base / "USER.md"
+        if legacy.exists():
+            files.append(CuratedFile(legacy, "user profile (pre-FG-24)", "legacy"))
+
+    if want_memory:
+        for uid in (
+            _participation_user_ids() if all_principals else ([user_id] if user_id else [])
+        ):
+            files.append(
+                CuratedFile(
+                    get_memory_dir(uid) / "MEMORY.md",
+                    f"agent notes about {uid} in this profile",
+                    "participation",
+                )
+            )
+    if want_user and user_id:
+        files.append(
+            CuratedFile(
+                get_person_memory_dir(user_id) / "USER.md",
+                f"who {user_id} is (shared across profiles)",
+                "person",
+            )
+        )
+    return files
+
+
+def _participation_user_ids() -> List[str]:
+    """User ids with a participation directory in this profile."""
+    users_dir = get_memory_dir() / "users"
+    try:
+        return sorted(entry.name for entry in users_dir.iterdir() if entry.is_dir())
+    except OSError:
+        return []
+
+
+def person_memory_files_on_box(user_id: str) -> List[CuratedFile]:
+    """Every curated file about ``user_id`` anywhere on this instance.
+
+    Used when a person is removed rather than when memory is reset, so it
+    crosses profiles: ``memories/users/<uid>/`` under the default home and
+    under every ``profiles/<name>/``, plus ``persons/<uid>/``.
+    """
+    from hermes_cli.access import validate_user_id
+
+    user_id = validate_user_id(user_id)
+    home = get_hermes_home()
+    root = home.parent.parent if home.parent.name == "profiles" else home
+    homes = [root, *sorted((root / "profiles").glob("*"))]
+    files: List[CuratedFile] = []
+    for profile_home in homes:
+        if not profile_home.is_dir():
+            continue
+        participation = profile_home / "memories" / "users" / user_id
+        if participation.is_dir():
+            files.append(
+                CuratedFile(
+                    participation / "MEMORY.md",
+                    f"agent notes about {user_id} in {profile_home.name}",
+                    "participation",
+                )
+            )
+    person_dir = root / "persons" / user_id
+    if person_dir.is_dir():
+        files.append(
+            CuratedFile(person_dir / "USER.md", f"who {user_id} is", "person")
+        )
+    return files
+
 
 ENTRY_DELIMITER = "\n§\n"
 

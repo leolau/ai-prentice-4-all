@@ -58,6 +58,13 @@ AUDIT_TABLES: frozenset[str] = frozenset({"changes", "interactions",
                                           "interaction_rollups",
                                           "memory_audit"})
 
+#: Tables holding what the agent *learned about a person* rather than content
+#: that person authored. They are deleted under **both** strategies: a memory
+#: is not a document, and handing one person's memory to their successor is
+#: not a transfer of ownership, it is disclosure. ``transfer`` still moves
+#: everything else the person owned.
+MEMORY_TABLES: frozenset[str] = frozenset({"memories", "memory_projection"})
+
 
 @dataclass
 class OwnershipOutcome:
@@ -152,6 +159,16 @@ async def resolve_owned_rows(
     async with connection.transaction():
         for table, has_visibility in await owned_tables(connection, schema):
             qualified = f'{_quote(schema)}.{_quote(table)}'
+            if table in MEMORY_TABLES:
+                # Deleted under either strategy — see MEMORY_TABLES.
+                deleted = await connection.execute(
+                    f"DELETE FROM {qualified} WHERE {OWNER_COLUMN} = $1",
+                    user_id,
+                )
+                count = _affected(deleted)
+                if count:
+                    outcome.deleted[table] = count
+                continue
             if strategy == "purge" and has_visibility:
                 deleted = await connection.execute(
                     f"DELETE FROM {qualified} "
