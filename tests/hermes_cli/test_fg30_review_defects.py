@@ -504,3 +504,198 @@ def test_commit_channel_unknown_platform_is_refused(tmp_path: Path) -> None:
         ps.commit_channel(
             "finance", platform="whatsapp", token="x", start_service=False
         )
+
+
+# ---------------------------------------------------------------------------
+# F1 — the suggestion route returns all statuses, not just proposed
+# ---------------------------------------------------------------------------
+
+
+def test_list_endpoint_default_returns_all_statuses_for_the_renderer() -> None:
+    """``ReviewedHistory`` renders rows the API never returned: dead code, and
+    after an adopt the card vanished from the screen.
+
+    The route must default to all statuses (``proposed`` + ``adopted`` +
+    ``dismissed``) so the open/reviewed split is real. This is a static
+    property of the handler — the route passes ``statuses=SUGGESTION_STATES``
+    (or defaults to it) and never narrows to ``OPEN_STATE`` alone.
+    """
+    from hermes_cli import web_server
+    from hermes_cli.profile_suggestion import SUGGESTION_STATES
+
+    code = _code_of(web_server.list_profile_suggestions_endpoint)
+    # The route resolves the caller (the #253 invariant), not the owner.
+    assert "_comms_resolve_principal(request)" in code
+    assert "get_owner" not in code
+    # F1: it does not pass only OPEN_STATE to list_suggestions. Either it
+    # passes SUGGESTION_STATES, or list_suggestions defaults to it — but it
+    # must never narrow to proposed-only. The route may take an optional
+    # ``?status=``; what matters is the *default* reaches all three.
+    assert "OPEN_STATE" not in code or "SUGGESTION_STATES" in code
+    # SUGGESTION_STATES is the set the default must cover.
+    assert {"proposed", "adopted", "dismissed"} == set(SUGGESTION_STATES)
+
+
+# ---------------------------------------------------------------------------
+# F2 — the .env write is verified, not assumed
+# ---------------------------------------------------------------------------
+
+
+def test_commit_channel_raises_when_the_write_was_refused(tmp_path: Path) -> None:
+    """A silent ``save_env_value`` refusal must not read as a successful commit.
+
+    ``config.save_env_value`` returns silently when the key is admin-managed
+    (it prints to stderr and returns). Without a read-back, ``commit_channel``
+    would print "✓ has a channel" over an unwritten ``.env`` — a
+    successful-looking commit that configured nothing, which is worse than a
+    refusal because the owner stops looking. The read-back raises if the key
+    is missing.
+    """
+    _root, dirs = _profile_tree(tmp_path)
+    finance_env = dirs["finance"] / ".env"
+    finance_env.write_text("# empty\n", encoding="utf-8")
+
+    # Make save_env_value a no-op, as is_managed() / managed_scope would.
+    import hermes_cli.profile_suggestion as ps_mod
+
+    real_save = ps_mod.__dict__  # noqa: F841 (readability)
+    import hermes_cli.config as cfg_mod
+
+    original = cfg_mod.save_env_value
+
+    def _no_op(key: str, value: str) -> None:
+        # The exact silent-refusal shape: print, return, no raise, no write.
+        return None
+
+    cfg_mod.save_env_value = _no_op  # type: ignore[assignment]
+    try:
+        with pytest.raises(ps.ChannelWriteError) as exc_info:
+            ps.commit_channel(
+                "finance",
+                platform="telegram",
+                token="123:abc-managed",
+                start_service=False,
+            )
+        assert exc_info.value.profile == "finance"
+        assert "TELEGRAM_BOT_TOKEN" in str(exc_info.value)
+        # The .env was not written — the profile is still channel-less.
+        assert "123:abc-managed" not in finance_env.read_text(encoding="utf-8")
+        assert not ps.profile_has_channel(dirs["finance"])
+    finally:
+        cfg_mod.save_env_value = original  # type: ignore[assignment]
+
+
+def test_commit_channel_reports_channel_less_false_only_when_the_key_landed(
+    tmp_path: Path,
+) -> None:
+    """``channel_less: False`` is a claim the token is readable from the file,
+    not a claim about the writer's return. This pairs with the refusal test:
+    a real write makes the read-back find the token, so the result carries
+    ``channel_less: False`` and ``service_status`` (F4)."""
+    _root, dirs = _profile_tree(tmp_path)
+    finance_env = dirs["finance"] / ".env"
+    finance_env.write_text("# empty\n", encoding="utf-8")
+
+    result = ps.commit_channel(
+        "finance", platform="telegram", token="123:abc-fresh", start_service=False
+    )
+    assert result["channel_less"] is False
+    # F4: the result carries a tri-state service_status, not just a bool.
+    assert result["service_status"] == "unavailable"
+    assert result["service_started"] is False
+
+
+# ---------------------------------------------------------------------------
+# F3 — the collision check is fail-closed, not fail-open
+# ---------------------------------------------------------------------------
+
+
+def test_find_token_collision_refuses_when_enumeration_fails(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """An unreadable profiles root must not produce a successful commit.
+
+    The previous shape was fail-open: ``except Exception: return None`` — any
+    failure to enumerate profiles became "no collision", so the pre-write
+    refusal disappeared exactly when the filesystem was in a state we do not
+    understand. Fail-closed raises so the owner is told the check could not be
+    completed; the gateway's ``EX_CONFIG`` stop stays the backstop, not the UX.
+    """
+    _root, dirs = _profile_tree(tmp_path)
+
+    import hermes_cli.profiles as profiles_mod
+
+    def _boom():
+        raise OSError("profiles root unreadable")
+
+    # Force the enumeration import to fail in a way the function can't swallow.
+    monkeypatch.setattr(
+        profiles_mod, "_get_default_hermes_home", _boom, raising=True
+    )
+
+    with pytest.raises(ps.CollisionCheckUnavailable) as exc_info:
+        ps.find_token_collision("telegram", "fresh", skip_profile="finance")
+    assert "could not check" in str(exc_info.value).lower() or "could not" in str(
+        exc_info.value
+    ).lower()
+
+
+def test_find_token_collision_reads_the_process_environment_as_a_second_source(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A token set through ``Environment=`` or the shell is invisible to a
+    ``.env``-only scan. Reading the process env for *equality* neither
+    propagates nor writes a credential (not the #219/#220 hazard, which is
+    about *writing* the token into the process env), so it is a safe second
+    source.
+
+    This is a presence check, not a cross-profile identity: the function does
+    not claim to name a holder from the process value (the process has no
+    profile identity), but it must not silently ignore a value it can see.
+    The implementation reads it defensively; the test pins that reading it
+    does not raise and does not return a false holder.
+    """
+    _root, dirs = _profile_tree(tmp_path)
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "from-shell")
+
+    # No .env holds the token, so no named holder — the function returns None
+    # (the process value is a fallback signal, not a profile identity).
+    holder = ps.find_token_collision("telegram", "from-shell", skip_profile="finance")
+    assert holder is None
+
+
+# ---------------------------------------------------------------------------
+# F4 — --no-start and a failed start print different lines
+# ---------------------------------------------------------------------------
+
+
+def test_commit_channel_returns_a_tri_state_service_status() -> None:
+    """The result carries ``service_status`` in {"started","unavailable","failed"}.
+
+    F4: ``--no-start`` and a gateway install that actually failed used to print
+    the identical line. The tri-state lets the CLI say which happened: the
+    boolean alone could not distinguish "skipped" from "failed". The static
+    shape of the return is the contract the CLI dispatch (in main.py) reads.
+    """
+    import inspect
+
+    from hermes_cli.profile_suggestion import commit_channel
+
+    src = inspect.getsource(commit_channel)
+    assert "service_status" in src
+    assert '"started"' in src and '"unavailable"' in src and '"failed"' in src
+
+
+def test_commit_channel_no_start_carries_unavailable_status(tmp_path: Path) -> None:
+    """``start_service=False`` (the ``--no-start`` flag) yields
+    ``service_status == "unavailable"``, distinct from a real install/start
+    path that leaves the service not-running (``"failed"``)."""
+    _root, dirs = _profile_tree(tmp_path)
+    finance_env = dirs["finance"] / ".env"
+    finance_env.write_text("# empty\n", encoding="utf-8")
+
+    result = ps.commit_channel(
+        "finance", platform="telegram", token="123:abc-no-start", start_service=False
+    )
+    assert result["service_status"] == "unavailable"
+    assert result["service_started"] is False

@@ -11612,6 +11612,8 @@ def cmd_profile(args):
     elif action == "commit-channel":
         from hermes_cli.profile_suggestion import (
             ChannelCollisionError,
+            ChannelWriteError,
+            CollisionCheckUnavailable,
             commit_channel as _commit_channel,
         )
 
@@ -11642,6 +11644,16 @@ def cmd_profile(args):
             # Refused before the write — no .env touched, no service touched.
             print(f"✗ {exc}")
             sys.exit(1)
+        except CollisionCheckUnavailable as exc:
+            # The pre-write check could not complete — refuse rather than fail
+            # open. No .env touched.
+            print(f"✗ {exc}")
+            sys.exit(1)
+        except ChannelWriteError as exc:
+            # The token did not land in the .env (likely admin-managed). The
+            # profile is still channel-less; do not claim success.
+            print(f"✗ {exc}")
+            sys.exit(1)
         except FileNotFoundError as exc:
             print(f"✗ {exc}")
             sys.exit(1)
@@ -11652,13 +11664,40 @@ def cmd_profile(args):
         print(f"✓ {result['profile']} now has a {result['platform']} channel")
         if result.get("handle"):
             print(f"  Handle: {result['handle']}")
-        if result.get("service_started"):
-            print("  Gateway service started.")
-        else:
+
+        # F4: distinguish "skipped" (--no-start or no service manager) from
+        # "failed" (the manager was there but install/start did not leave it
+        # running), so an operational failure is not read as a deliberate skip.
+        no_start = bool(getattr(args, "no_start", False))
+        service_status = result.get("service_status", "unavailable")
+        if no_start:
+            print("  Service not started (--no-start): the channel is configured.")
             print(
-                "  Gateway service not started here — run "
-                f"`hermes -p {result['profile']} gateway start` when ready, or "
-                f"`hermes doctor` to confirm the channel is configured."
+                f"  Start it with `hermes -p {result['profile']} gateway start` "
+                f"when ready."
+            )
+        elif service_status == "started":
+            print("  Gateway service started.")
+        elif service_status == "failed":
+            # The credential is written (the commit succeeded); the service is
+            # not. Point at the log, not the start command alone.
+            print(
+                "  ✗ Gateway service failed to start — the channel is "
+                "configured but not serving."
+            )
+            print(
+                f"  Check `hermes logs --follow --gateway` (or gateway.log under "
+                f"this profile's home), then `hermes -p {result['profile']} "
+                f"gateway start`."
+            )
+        else:  # "unavailable" — no service manager on this platform
+            print(
+                "  No service manager on this platform — the channel is "
+                "configured but the gateway is not installed as a service."
+            )
+            print(
+                f"  Run the gateway manually, or `hermes doctor` to confirm the "
+                f"channel is configured."
             )
 
 

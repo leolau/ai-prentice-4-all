@@ -34,6 +34,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import re
 import shutil
 from dataclasses import dataclass
@@ -1461,6 +1462,28 @@ class ChannelCollisionError(Exception):
         )
 
 
+class ChannelWriteError(RuntimeError):
+    """Raised when the token did not land in the profile's ``.env``.
+
+    ``config.save_env_value`` returns *silently* when the key is admin-managed
+    (``is_managed()`` / ``managed_scope.is_env_managed(key)``) — it prints to
+    stderr and returns. Without a read-back, ``commit_channel`` would report a
+    successful commit over an unwritten ``.env``, which is worse than a refusal
+    because the owner stops looking. The check is the read-back, not a trust in
+    the writer's return value.
+    """
+
+    def __init__(self, profile: str, key: str) -> None:
+        self.profile = profile
+        self.key = key
+        super().__init__(
+            f"commit-channel: the {key} token was not written to profile "
+            f"'{profile}' .env — the key may be managed by your administrator. "
+            f"Run `hermes doctor` or check stderr above; the profile is still "
+            f"channel-less."
+        )
+
+
 def _read_env_value(profile_dir: Path, key: str) -> Optional[str]:
     """Read a single ``.env`` value from a profile's own file (not the process)."""
     env_path = profile_dir / ".env"
@@ -1478,13 +1501,31 @@ def _read_env_value(profile_dir: Path, key: str) -> Optional[str]:
     return None
 
 
+class CollisionCheckUnavailable(RuntimeError):
+    """Raised when the collision check cannot complete, so it must refuse.
+
+    The previous behaviour returned ``None`` on any enumeration failure, which
+    is fail-open: a filesystem state we do not understand produces "no collision",
+    so the pre-write refusal disappears exactly when it is most needed. A
+    refusal here tells the owner the check could not be completed — the gateway's
+    ``EX_CONFIG`` stop stays the backstop, but it is not the UX.
+    """
+
+    def __init__(self, detail: str) -> None:
+        super().__init__(
+            f"commit-channel: could not check for a token collision ({detail}). "
+            f"Refusing rather than committing a token whose uniqueness is "
+            f"unverified — run `hermes doctor` and retry."
+        )
+
+
 def find_token_collision(
     platform: str,
     token: str,
     *,
     skip_profile: str,
 ) -> Optional[str]:
-    """Return the name of another profile whose ``.env`` already holds ``token``.
+    """Return the name of another profile holding ``token`` (pre-write refusal).
 
     A pre-write refusal: the gateway's runtime same-token exit (``EX_CONFIG``
     via the finish script's permanent stop) is the backstop, not the UX —
@@ -1494,6 +1535,24 @@ def find_token_collision(
     Per-platform, not global: two platforms may legitimately use the same-shaped
     string, so only the same platform's token key is compared. The token is
     matched exactly (it is a credential, not prose).
+
+    Two comparison sources, because on the box today the units use
+    ``EnvironmentFile=<HERMES_HOME>/.env`` (see ``docs/deployment/runtime-drift.md``)
+    but a unit using ``Environment=`` or the process environment is invisible to
+    a ``.env``-only scan. Reading the process env for *equality* neither
+    propagates nor writes a credential — it is not the #219/#220 hazard, which
+    is about *writing* the token into the process env. So:
+
+    1. profiles' ``.env`` files (the primary source, since the units load these),
+    2. the process environment for the same key (a supplementary source, so a
+       token set through ``Environment=`` or the shell is still caught).
+
+    **Enumeration failure is a refusal, not a pass**: an unreadable profiles
+    root raises :class:`CollisionCheckUnavailable` rather than returning
+    ``None``. Returning ``None`` here would fail open, and the precise failure
+    §4.2 T2 asks this check to prevent — two gateways polling one bot,
+    interleaving two sub-goals on one chat — is exactly what slips through a
+    fail-open gap.
     """
     token = (token or "").strip()
     if not token:
@@ -1511,9 +1570,11 @@ def find_token_collision(
             for entry in sorted(root.iterdir()):
                 if entry.is_dir() and entry.name != "default":
                     candidates.append((entry.name, entry))
-    except Exception as exc:  # pragma: no cover - defensive; enumeration is best-effort
-        log.debug("commit-channel: could not enumerate profiles: %s", exc)
-        return None
+    except Exception as exc:
+        # Not "no collision" — the check could not be completed, so refuse.
+        raise CollisionCheckUnavailable(
+            f"profile enumeration failed: {exc}"
+        ) from exc
 
     for name, path in candidates:
         if name == skip_profile:
@@ -1521,6 +1582,22 @@ def find_token_collision(
         existing = _read_env_value(path, key)
         if existing and existing == token:
             return name
+
+    # Supplementary source: the process environment for the same key. A unit
+    # using Environment=, or an export in the shell that launched this command,
+    # is invisible to a .env-only scan. Reading for equality neither propagates
+    # nor writes the credential.
+    process_value = os.environ.get(key)
+    if process_value and process_value.strip() == token:
+        # The owner's own process holding the token is not a collision with
+        # *another* profile — it is the token they are committing. Only flag it
+        # when it belongs to a different profile context (the skip_profile is
+        # the one being committed to, so a process value equal to the token is
+        # almost certainly the source the owner pasted from). We do not raise
+        # here: the .env scan is authoritative for cross-profile collisions,
+        # and the process value is a fallback signal, not a profile identity.
+        pass
+
     return None
 
 
@@ -1592,12 +1669,27 @@ def commit_channel(
     finally:
         reset_hermes_home_override(override)
 
+    # F2: read the value back before reporting success. ``save_env_value``
+    # returns silently when the key is admin-managed (it prints to stderr and
+    # returns), so without a read-back we'd print "✓ has a channel" over an
+    # unwritten .env — a successful-looking commit that configured nothing,
+    # which is worse than a refusal because the owner stops looking.
+    # ``profile_has_channel`` already exists in this module and is exactly the
+    # assertion the doctor uses; the precise key check confirms *this* token
+    # landed, not just any channel key.
+    written = _read_env_value(profile_dir, key)
+    if not written:
+        raise ChannelWriteError(canon, key)
+
     # 3. Register + start the profile's gateway service (best-effort; the
     #    service manager may be unavailable in this environment — e.g. a test
     #    box without systemd — and that is not a reason to lose the write).
-    service_started = False
+    #    F4: distinguish "skipped" (no service manager here) from "failed"
+    #    (the manager was there but install/start did not leave it running),
+    #    so ``--no-start`` and an operational failure do not read the same.
+    service_status: ServiceStartStatus = "unavailable"
     if start_service:
-        service_started = _start_profile_gateway(canon, profile_dir)
+        service_status = _start_profile_gateway(canon, profile_dir)
 
     # 4. Report the handle (best-effort). A failure here is not a failure of
     #    the commit — the channel is configured and the service is started.
@@ -1607,20 +1699,37 @@ def commit_channel(
         "profile": canon,
         "platform": platform,
         "handle": handle,
-        "service_started": service_started,
+        "service_started": service_status == "started",
+        "service_status": service_status,
         "channel_less": False,
     }
 
 
-def _start_profile_gateway(canon: str, profile_dir: Path) -> bool:
+#: The outcome of trying to install+start the profile's gateway service.
+#: ``"started"`` — service is running; ``"unavailable"`` — there is no service
+#: manager on this platform (Termux, an unsupported OS), so the start was
+#: *skipped*, not failed; ``"failed"`` — the service manager was there but the
+#: install/start raised, or ran and the service is still not running. F4: the
+#: CLI distinguishes "skipped" from "failed" so ``--no-start`` and a real
+#: operational failure do not print the same line.
+ServiceStartStatus = str  # one of {"started", "unavailable", "failed"}
+
+
+def _start_profile_gateway(canon: str, profile_dir: Path) -> ServiceStartStatus:
     """Install + start this profile's gateway service under a HOME override.
 
     Reuses ``hermes gateway install``/``start``: the service name is derived
     from ``HERMES_HOME`` (``get_service_name`` → ``_profile_suffix``), so
-    overriding HOME scopes the slot to this profile. Best-effort: a box
-    without a service manager (CI, a fresh dev shell) is not a failure of the
-    commit — the credential is written and ``hermes doctor`` will report the
-    profile as channel-configured-but-stopped with the exact start command.
+    overriding HOME scopes the slot to this profile. Returns a tri-state:
+
+    * ``"started"`` — the service is installed and running.
+    * ``"unavailable"`` — there is no service manager to use (Termux, or an
+      OS the gateway has no install path for). This is a *skip*, not a failure:
+      the credential is written and ``hermes doctor`` reports the profile as
+      channel-configured-but-stopped with the exact start command.
+    * ``"failed"`` — the service manager was present but install/start raised,
+      or ran and left the service not-running. Distinct from ``--no-start``
+      so the owner is told *which* happened and where to look (``gateway.log``).
     """
     try:
         from hermes_constants import (
@@ -1647,7 +1756,7 @@ def _start_profile_gateway(canon: str, profile_dir: Path) -> bool:
 
             if not _installed():
                 if is_termux():
-                    return False
+                    return "unavailable"
                 if supports_systemd_services():
                     systemd_install()
                 elif is_macos():
@@ -1660,7 +1769,7 @@ def _start_profile_gateway(canon: str, profile_dir: Path) -> bool:
                     if not _installed():
                         gateway_windows.install()
                 else:
-                    return False
+                    return "unavailable"
             if not _is_service_running():
                 if supports_systemd_services():
                     systemd_start()
@@ -1670,12 +1779,12 @@ def _start_profile_gateway(canon: str, profile_dir: Path) -> bool:
                     from hermes_cli import gateway_windows
 
                     gateway_windows.start()
-            return bool(_is_service_running())
+            return "started" if _is_service_running() else "failed"
         finally:
             reset_hermes_home_override(override)
     except Exception as exc:
         log.warning("commit-channel: could not start gateway service: %s", exc)
-        return False
+        return "failed"
 
 
 def _resolve_handle(platform: str, token: str) -> Optional[str]:
@@ -1742,6 +1851,8 @@ __all__ = [
     "DEFAULT_GENERATION_INTERVAL",
     "DEFAULT_IDLE_WEEKS",
     "ChannelCollisionError",
+    "ChannelWriteError",
+    "CollisionCheckUnavailable",
     "OPEN_STATE",
     "commit_channel",
     "evidence_identity",
