@@ -1177,3 +1177,52 @@ export interface EntityGoalResponse {
   prompt_tier?: "stable" | "volatile" | "never";
   effective: "next_session";
 }
+
+/**
+ * FG-31 — capacity headroom. One derived verdict plus the reading behind it.
+ *
+ * `binding_constraint` is the point: a percentage does not tell the owner what
+ * to do, and when `hardware_helps` is false a bigger box cannot move the bound
+ * at all (SQLite's single writer), so the UI must not offer an upgrade there.
+ */
+export interface CapacityBound {
+  name: string;
+  state: "comfortable" | "watch" | "constrained";
+  reason: string;
+  hardware_helps: boolean;
+}
+
+export interface CapacityIndicators {
+  active_conversations: number;
+  per_profile: Record<string, number>;
+  cap_here: number | null;
+  /** Sum of every profile's cap; null when any profile leaves it unbounded. */
+  cap_box_wide: number | null;
+  available_mb: number | null;
+  total_mb: number | null;
+  hermes_rss_mb: number | null;
+  by_process: Record<string, number>;
+  write_lock_waits_per_hour: number | null;
+  write_lock_waited_s: number | null;
+  turn_p50_s: number | null;
+  turn_p95_s: number | null;
+  turn_samples: number;
+  profile_count: number;
+}
+
+export interface CapacityResponse {
+  state: "comfortable" | "watch" | "constrained";
+  headline: string;
+  summary: string;
+  binding_constraint: {
+    name: string;
+    reason: string;
+    hardware_helps: boolean;
+  } | null;
+  bounds: CapacityBound[];
+  recommendations: string[];
+  indicators: CapacityIndicators;
+  /** Indicators that could not be read — shown as unknown, never as zero. */
+  unavailable: string[];
+  collected_at: number;
+}

@@ -146,6 +146,32 @@ def _show_readiness(config: dict, deep: bool) -> None:
         ))
 
 
+def _show_capacity(config: dict) -> None:
+    """Where the owner stands before things get slow (FG-31).
+
+    One derived verdict naming the bound that produced it, because a percentage
+    does not tell the owner what to do. Recommendations are `hermes doctor`'s
+    job; status stays a reading.
+    """
+    from hermes_cli.capacity import COMFORTABLE, WATCH, headroom, summary_line
+
+    print()
+    print(color("◆ Capacity", Colors.CYAN, Colors.BOLD))
+    try:
+        verdict = headroom(config)
+    except Exception as exc:
+        print(f"  Headroom:     (unavailable: {exc})")
+        return
+    tone = {COMFORTABLE: Colors.GREEN, WATCH: Colors.YELLOW}.get(
+        verdict.state, Colors.RED
+    )
+    print(f"  Load:         {summary_line(verdict)}")
+    print(f"  Headroom:     {color(verdict.state, tone, Colors.BOLD)}")
+    if verdict.binding is not None and verdict.state != COMFORTABLE:
+        print(f"  Binding:      {verdict.binding.name} — {verdict.binding.reason}")
+        print(color("  Run 'hermes doctor' for what to do about it", Colors.DIM))
+
+
 def show_status(args):
     """Show status of all Hermes Agent components."""
     deep = getattr(args, 'deep', False)
@@ -603,6 +629,11 @@ def show_status(args):
             print("  Active:       (error reading sessions file)")
     else:
         print("  Active:       0")
+
+    # =========================================================================
+    # Capacity headroom (FG-31)
+    # =========================================================================
+    _show_capacity(config)
 
     # =========================================================================
     # Deep checks

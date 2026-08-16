@@ -45,6 +45,7 @@ export const SECONDARY_NAV: NavItem[] = [
   { href: "/activity", label: "Activity", glyph: "≋", hint: "Interaction traces" },
   { href: "/users", label: "Users", glyph: "☰", hint: "Directory + enrolment" },
   { href: "/profiles/suggestions", label: "Suggestions", glyph: "⇲", hint: "Proposed sub-goals" },
+  { href: "/capacity", label: "Capacity", glyph: "◱", hint: "Headroom on this box" },
   { href: "/onboarding", label: "Getting started", glyph: "◐", hint: "FG-15 readiness" },
   { href: "/tools", label: "Tools", glyph: "⚙", hint: "FG-07 registry" },
   { href: "/core", label: "Core area", glyph: "▣", hint: "C7 boundary" },

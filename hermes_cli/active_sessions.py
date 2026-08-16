@@ -355,3 +355,16 @@ def active_session_registry_snapshot() -> list[dict[str, Any]]:
         entries = _prune_dead(_read_entries(state_path))
         _write_entries(state_path, entries)
         return entries
+
+
+def read_registry_for_home(home: Path) -> list[dict[str, Any]]:
+    """Live leases held under an arbitrary Hermes home, without writing.
+
+    The registry is **profile-local** — one file per home, so the cap it
+    enforces is per-profile while the resource it protects (a live agent's
+    RAM) is box-wide. Reading another profile's file is therefore the only
+    way to see the box's true load; it is read-only and takes no lock so a
+    reader can never stall the profile that owns the file (a stale entry is
+    pruned in memory and left on disk for that owner to reclaim).
+    """
+    return _prune_dead(_read_entries(Path(home) / "runtime" / "active_sessions.json"))

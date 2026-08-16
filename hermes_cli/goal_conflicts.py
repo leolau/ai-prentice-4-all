@@ -545,6 +545,7 @@ async def weekly_digest(
 
     # Idle profile detection (FG-30). Flag profiles with no sessions for
     # N weeks rather than waiting for someone to notice.
+    idle_names: List[str] = []
     try:
         from hermes_cli.profile_suggestion import (
             idle_lines as idle_digest_lines,
@@ -552,12 +553,36 @@ async def weekly_digest(
         )
 
         idle = await idle_profiles(now=now)
+        idle_names = [name for name, _age in idle]
         idle_lines_rendered = idle_digest_lines(idle)
         if idle_lines_rendered:
             lines.append("Profiles with no recent sessions:")
             lines.extend(f"  {line}" for line in idle_lines_rendered)
     except Exception as exc:
         log.warning("digest: idle profiles not rendered: %s", exc)
+
+    # Capacity headroom (FG-31). Arrives in the same review moment as
+    # everything else, and reuses the idle profiles just computed as its
+    # cheapest recommendation.
+    try:
+        from hermes_cli.capacity import (
+            COMFORTABLE,
+            digest_lines as capacity_digest_lines,
+            headroom,
+        )
+        from hermes_cli.config import load_config
+
+        verdict = headroom(load_config(), idle_profiles=idle_names)
+        # A comfortable box says the reading and the verdict, nothing to act on.
+        capacity_lines = (
+            capacity_digest_lines(verdict)[:2]
+            if verdict.state == COMFORTABLE
+            else capacity_digest_lines(verdict)
+        )
+        lines.append("Capacity:")
+        lines.extend(f"  {line}" for line in capacity_lines)
+    except Exception as exc:
+        log.warning("digest: capacity headroom not rendered: %s", exc)
 
     if not lines:
         lines.append("Nothing to review this week.")
