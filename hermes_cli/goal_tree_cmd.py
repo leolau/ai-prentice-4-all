@@ -337,6 +337,30 @@ async def _digest(actor: Optional[str]) -> int:
     return 0
 
 
+async def _review_pass(actor: Optional[str], *, deliver: bool) -> int:
+    """The scheduled review moment (see ``hermes_cli.review_pass``)."""
+    from hermes_cli.review_pass import run_review_pass
+
+    result = await run_review_pass(actor=actor, deliver=deliver)
+    if result.suggestion_name:
+        print(f"Profile suggestion generated: {result.suggestion_name}")
+    else:
+        print("No profile suggestion generated this cycle.")
+    if result.conflicts_alerted:
+        print(f"Sibling-goal conflicts alerted: {result.conflicts_alerted}")
+    if result.digest_title:
+        print(result.digest_title)
+        for line in result.digest_lines:
+            print(line)
+    if result.digest_notification_id:
+        print(f"  delivered as {result.digest_notification_id}")
+    elif deliver and not any(step == "digest" for step, _ in result.errors):
+        print("  (no digest delivered)")
+    for step, error in result.errors:
+        print(f"  ⚠ {step} step failed: {error}", file=sys.stderr)
+    return 1 if result.errors else 0
+
+
 async def _approve(actor: Optional[str], promotion_id: str, *, note: str) -> int:
     _tree_store, promotions, principal = await _promotion_store(actor)
     candidate = await promotions.get(principal, promotion_id)
@@ -487,6 +511,8 @@ def promotion_command(args: argparse.Namespace) -> int:
         return _run(_promotion_list(actor, all_states=args.all))
     if action == "digest":
         return _run(_digest(actor))
+    if action == "review-pass":
+        return _run(_review_pass(actor, deliver=not args.no_deliver))
     if action == "approve":
         return _run(_approve(actor, args.promotion_id, note=args.note))
     if action == "reject":
@@ -641,6 +667,18 @@ def register_promotion_subparser(subparsers: argparse._SubParsersAction) -> None
     )
 
     sub.add_parser("digest", help="The weekly review: candidates, demotions, conflicts")
+    review_pass = sub.add_parser(
+        "review-pass",
+        help=(
+            "Run the review moment on a schedule: generate the monthly "
+            "profile suggestion, alert on conflicts, deliver the digest"
+        ),
+    )
+    review_pass.add_argument(
+        "--no-deliver",
+        action="store_true",
+        help="Render the digest without writing notifications (a dry run)",
+    )
 
     approve = sub.add_parser(
         "approve",

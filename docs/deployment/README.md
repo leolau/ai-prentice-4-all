@@ -125,13 +125,22 @@ the tell. It is an npm **workspace** of the root `package.json` — install and
 build from the repo root (`npm ci && npm run build --workspace agent-home`), never
 from inside `agent-home/`, which would create a second unhoisted dep tree.
 
-Three timers:
+Four timers:
 
 ```
 hermes-drift-check.timer         Mondays 09:00   three checks, reports only on drift
 hermes-secret-backup.timer       daily 04:30     encrypted credential backup, pushes
 hermes-memory-projection.timer   daily 03:00     refits the memory explorer's 2-D map
+hermes-review-pass.timer         Mondays 08:00   the learning loop's review moment
 ```
+
+The review pass is the clock for FG-29/FG-30/FG-31: it generates the monthly
+profile suggestion, alerts on sibling-goal conflicts and delivers the weekly
+digest as a notification. Until it existed, every one of those outputs was
+reachable only by someone typing a command, so on this box none of them was
+ever produced — `generate_suggestion()`'s only caller was the interactive CLI.
+Generation self-gates to monthly inside the function, so the timer is weekly and
+the digest's dedupe key is the ISO week.
 
 The projection fit is a whole-corpus SVD, so it can never run in a page
 request; without the timer the map would keep showing the corpus as it was the
