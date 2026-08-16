@@ -204,6 +204,25 @@ def get_last_init_error() -> Optional[str]:
     return _last_init_error
 
 
+#: ``sessions.source`` values written by machinery rather than by a person
+#: talking to the agent. Nobody is waiting on these turns, so they are not
+#: reply latency (FG-31): a scheduled job's runtime — including any wait for
+#: the previous job to release the terminal lock — would otherwise read as the
+#: owner's slowest reply of the day.
+#:
+#: These are exactly the ``origin=`` values passed to
+#: :func:`agent.seeded_session.spawn_seeded_session`, which becomes the agent's
+#: ``platform`` and so the session's ``source``. A new seeded caller must be
+#: classified here — ``test_seeded_origins_are_all_classified`` fails otherwise.
+NON_INTERACTIVE_SESSION_SOURCES: Tuple[str, ...] = ("cron", "todo")
+
+#: Session-id prefixes for the same autonomous runs, as a second gate: cron
+#: names its sessions ``cron_<job_id>_<ts>`` (``cron/scheduler.run_job``), and a
+#: run recorded with the ``unknown`` source default has no ``source`` to exclude
+#: it by.
+NON_INTERACTIVE_SESSION_ID_PREFIXES: Tuple[str, ...] = ("cron_",)
+
+
 # Distinctive opening shared by both background-review harness prompts
 # (_SKILL_REVIEW_PROMPT and _MEMORY_REVIEW_PROMPT in agent/background_review.py).
 # Matched case-sensitively against the leading content of a user/system message.
@@ -444,6 +463,14 @@ _MALFORMED_SCHEMA_MARKERS = (
 # gateway opens against the same malformed file).
 _repair_attempted_paths: set[str] = set()
 _repair_attempt_lock = threading.Lock()
+
+
+def _bucket_sort_key(key: Any) -> float:
+    """Hourly-bucket key as a number; an unparseable key sorts oldest."""
+    try:
+        return float(key)
+    except (TypeError, ValueError):
+        return float("-inf")
 
 
 def is_malformed_db_error(exc: BaseException) -> bool:
@@ -905,12 +932,28 @@ class SessionDB:
     # pays almost nothing; the cadence is deliberately coarse so the one-off
     # merge cost is amortised far below the checkpoint cadence.
     _OPTIMIZE_EVERY_N_WRITES = 1000
+    # ── Write-contention accounting (FG-31) ──
+    # The retry loop below is the only place that knows the single-writer bound
+    # is actually biting. Nothing else can see it: contention costs latency,
+    # never an error, so without a record the owner learns about it as "Hermes
+    # feels slow". Counts are per-process and in memory, and `hermes status`
+    # runs in a different process from the gateway, so they are flushed into
+    # `state_meta` in coarse hourly buckets — the shared state.db is the one
+    # place every writer already meets.
+    _CONTENTION_META_KEY = "capacity_write_contention"
+    _CONTENTION_BUCKET_S = 3600
+    _CONTENTION_KEEP_BUCKETS = 24
+    # Below this, acquiring the write lock is indistinguishable from ordinary
+    # scheduling noise and is not contention worth reporting.
+    _CONTENTION_WAIT_FLOOR_S = 0.025
 
     def __init__(self, db_path: Path = None, read_only: bool = False):
         self.db_path = db_path or DEFAULT_DB_PATH
         self.read_only = read_only
 
         self._lock = threading.Lock()
+        self._contention_pending: Optional[Dict[str, float]] = None
+        self._flushing_contention = False
         self._write_count = 0
         self._fts_enabled = False
         self._trigram_available = False
@@ -1144,6 +1187,164 @@ class SessionDB:
                 self._warn_fts5_unavailable(exc)
             return False
 
+    def _note_write_contention(self, waited_s: float, *, exhausted: bool = False) -> None:
+        """Record that a write had to wait for the WAL write lock."""
+        pending = self._contention_pending
+        if pending is None:
+            pending = {"events": 0.0, "waited_s": 0.0, "exhausted": 0.0}
+            self._contention_pending = pending
+        pending["events"] += 1
+        pending["waited_s"] += max(0.0, float(waited_s))
+        if exhausted:
+            pending["exhausted"] += 1
+
+    def _flush_write_contention(self) -> None:
+        """Persist pending contention counts, piggybacked on a write that won.
+
+        Deliberately flushed *after* a successful write rather than during the
+        retry loop: the loop is already contended, so writing there would add a
+        writer to the queue it is measuring. ``_flushing_contention`` guards the
+        recursion, since the flush is itself a write.
+        """
+        pending = self._contention_pending
+        if not pending or self.read_only or self._flushing_contention:
+            return
+        self._contention_pending = None
+        self._flushing_contention = True
+        try:
+            bucket = str(int(time.time() // self._CONTENTION_BUCKET_S))
+            raw = self.get_meta(self._CONTENTION_META_KEY)
+            buckets: Dict[str, Dict[str, float]] = {}
+            if raw:
+                try:
+                    loaded = json.loads(raw)
+                    if isinstance(loaded, dict) and isinstance(loaded.get("buckets"), dict):
+                        buckets = {
+                            str(k): dict(v)
+                            for k, v in loaded["buckets"].items()
+                            if isinstance(v, dict)
+                        }
+                except Exception:
+                    buckets = {}
+            entry = buckets.setdefault(bucket, {"events": 0, "waited_s": 0.0, "exhausted": 0})
+            entry["events"] = float(entry.get("events", 0)) + pending["events"]
+            entry["waited_s"] = round(
+                float(entry.get("waited_s", 0.0)) + pending["waited_s"], 3
+            )
+            entry["exhausted"] = float(entry.get("exhausted", 0)) + pending["exhausted"]
+            for stale in sorted(buckets, key=lambda k: _bucket_sort_key(k))[
+                : max(0, len(buckets) - self._CONTENTION_KEEP_BUCKETS)
+            ]:
+                buckets.pop(stale, None)
+            self.set_meta(self._CONTENTION_META_KEY, json.dumps({"buckets": buckets}))
+        except Exception as exc:
+            # Never let accounting break the write that just succeeded.
+            logger.debug("write-contention flush skipped: %s", exc)
+        finally:
+            self._flushing_contention = False
+
+    def read_write_contention(self, *, window_s: float = 86400.0, now: Optional[float] = None) -> Dict[str, float]:
+        """Contention totals over the trailing ``window_s`` (FG-31 indicator)."""
+        now = time.time() if now is None else now
+        floor = (now - window_s) // self._CONTENTION_BUCKET_S
+        totals = {"events": 0.0, "waited_s": 0.0, "exhausted": 0.0}
+        raw = self.get_meta(self._CONTENTION_META_KEY)
+        if not raw:
+            return totals
+        try:
+            loaded = json.loads(raw)
+            buckets = loaded.get("buckets") if isinstance(loaded, dict) else None
+        except Exception:
+            return totals
+        if not isinstance(buckets, dict):
+            return totals
+        for key, entry in buckets.items():
+            if not isinstance(entry, dict) or _bucket_sort_key(key) < floor:
+                continue
+            for name in totals:
+                try:
+                    totals[name] += float(entry.get(name, 0) or 0)
+                except (TypeError, ValueError):
+                    continue
+        return totals
+
+    def recent_turn_latencies_s(
+        self,
+        *,
+        window_s: float = 86400.0,
+        now: Optional[float] = None,
+        limit: int = 2000,
+    ) -> List[float]:
+        """Reply latencies over the trailing window, newest first (FG-31).
+
+        Derived from the transcript rather than a new timing series: a turn is
+        an ``assistant`` row minus the ``user`` row immediately before it in the
+        same session, which is exactly the wait the owner experienced. Rows the
+        agent wrote without being asked (tool results, system rows) never pair,
+        so they cannot inflate the sample.
+
+        **Interactive sessions only.** A scheduled job is seeded with a ``user``
+        row holding the job prompt, so its whole runtime pairs as a "reply" —
+        and a job that waits for the previous one to release the terminal lock
+        pairs as a *twenty-minute* one. Nobody was waiting for it. Autonomous
+        sessions are therefore excluded by ``sessions.source`` and by the
+        ``cron_<job>_<ts>`` id convention (a run recorded without a source would
+        otherwise slip back in), so this series stays what it claims to be:
+        latency a person actually experienced.
+        """
+        now = time.time() if now is None else now
+        floor = now - max(0.0, window_s)
+        placeholders = ", ".join("?" for _ in NON_INTERACTIVE_SESSION_SOURCES)
+        prefix_clauses = " AND ".join(
+            "o.session_id NOT LIKE ? ESCAPE '\\'"
+            for _ in NON_INTERACTIVE_SESSION_ID_PREFIXES
+        )
+        sql = f"""
+            WITH ordered AS (
+                SELECT session_id, role, timestamp,
+                       LAG(timestamp) OVER (
+                           PARTITION BY session_id ORDER BY timestamp, id
+                       ) AS prev_ts,
+                       LAG(role) OVER (
+                           PARTITION BY session_id ORDER BY timestamp, id
+                       ) AS prev_role
+                FROM messages
+                WHERE timestamp >= ?
+            )
+            SELECT (o.timestamp - o.prev_ts) AS delta
+            FROM ordered o
+            LEFT JOIN sessions s ON s.id = o.session_id
+            WHERE o.role = 'assistant' AND o.prev_role = 'user'
+              AND o.prev_ts IS NOT NULL
+              AND (o.timestamp - o.prev_ts) >= 0
+              AND COALESCE(s.source, '') NOT IN ({placeholders})
+              AND {prefix_clauses}
+            ORDER BY o.timestamp DESC
+            LIMIT ?
+        """
+        params: List[Any] = [floor]
+        params.extend(NON_INTERACTIVE_SESSION_SOURCES)
+        params.extend(
+            f"{prefix}%" for prefix in NON_INTERACTIVE_SESSION_ID_PREFIXES
+        )
+        params.append(int(limit))
+        try:
+            with self._lock:
+                rows = self._conn.execute(sql, tuple(params)).fetchall()
+        except sqlite3.Error as exc:
+            # Window functions need SQLite >= 3.25; degrade to "no samples"
+            # rather than failing the surface that asked.
+            logger.debug("turn-latency query unavailable: %s", exc)
+            return []
+        out: List[float] = []
+        for row in rows:
+            value = row["delta"] if isinstance(row, sqlite3.Row) else row[0]
+            try:
+                out.append(float(value))
+            except (TypeError, ValueError):
+                continue
+        return out
+
     def _execute_write(self, fn: Callable[[sqlite3.Connection], T]) -> T:
         """Execute a write transaction with BEGIN IMMEDIATE and jitter retry.
 
@@ -1163,7 +1364,16 @@ class SessionDB:
         for attempt in range(self._WRITE_MAX_RETRIES):
             try:
                 with self._lock:
+                    began = time.perf_counter()
                     self._conn.execute("BEGIN IMMEDIATE")
+                    # Most contention never reaches the retry below: SQLite's
+                    # own busy handler absorbs waits under the 1s timeout, so a
+                    # retry-only counter would see nothing until it was already
+                    # severe. Timing the acquisition catches the wait the user
+                    # actually pays for.
+                    waited = time.perf_counter() - began
+                    if waited >= self._CONTENTION_WAIT_FLOOR_S:
+                        self._note_write_contention(waited)
                     try:
                         result = fn(self._conn)
                         self._conn.commit()
@@ -1174,6 +1384,7 @@ class SessionDB:
                             pass
                         raise
                 # Success — periodic best-effort checkpoint + FTS merge.
+                self._flush_write_contention()
                 self._write_count += 1
                 if self._write_count % self._CHECKPOINT_EVERY_N_WRITES == 0:
                     self._try_wal_checkpoint()
@@ -1189,8 +1400,10 @@ class SessionDB:
                             self._WRITE_RETRY_MIN_S,
                             self._WRITE_RETRY_MAX_S,
                         )
+                        self._note_write_contention(jitter)
                         time.sleep(jitter)
                         continue
+                    self._note_write_contention(0.0, exhausted=True)
                 # Non-lock error or retries exhausted — propagate.
                 raise
         # Retries exhausted (shouldn't normally reach here).

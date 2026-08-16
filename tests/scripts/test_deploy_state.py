@@ -379,6 +379,122 @@ def test_the_default_globs_capture_the_unit_that_is_not_named_hermes(
     assert [f["component"] for f in findings] == ["unit:agent-home.service"]
 
 
+def test_a_unit_nobody_captured_is_drift(deployment):
+    """The hole `hermes-calendar-triage` went through.
+
+    That unit ran as root for weeks and every check passed, because they all
+    walked the manifest's units and none asked the box what *else* was
+    installed. An uncaptured unit is not in the reviewed privilege model and a
+    rebuild would not recreate it — both are drift.
+    """
+    _, units = deployment
+    (units / "hermes-calendar-triage.service").write_text(
+        "[Service]\nExecStart=/opt/data/triage.sh\n", encoding="utf-8"
+    )
+
+    findings = ds.check("systest-fixture")
+
+    assert [f["component"] for f in findings] == [
+        "unit:hermes-calendar-triage.service"
+    ]
+    assert findings[0]["severity"] == DRIFT
+    # The first question about an unknown unit is who it runs as.
+    assert "root (no User=)" in findings[0]["actual"]
+
+
+def test_an_uncaptured_dropin_is_drift_and_names_its_user(deployment):
+    """A drop-in is how a unit's `User=` is overridden without touching it."""
+    _, units = deployment
+    dropin = units / "hermes-gateway.service.d" / "99-local.conf"
+    dropin.write_text("[Service]\nUser=root\n", encoding="utf-8")
+
+    findings = ds.check("systest-fixture")
+
+    assert [f["component"] for f in findings] == [
+        "unit:hermes-gateway.service.d/99-local.conf"
+    ]
+    assert "runs as root" in findings[0]["actual"]
+
+
+def test_capturing_the_unknown_unit_clears_it(deployment, tmp_path):
+    """The finding must be actionable: capture is the fix, and it works."""
+    home, units = deployment
+    (units / "hermes-review-pass.timer").write_text(
+        "[Timer]\nOnCalendar=Mon *-*-* 08:00:00\n", encoding="utf-8"
+    )
+    assert ds.check("systest-fixture")
+
+    ds.capture("systest-fixture", home, units, ["hermes-*"], None, ["creds/*.json"])
+
+    assert ds.check("systest-fixture") == []
+
+
+def test_check_enumerates_the_box_the_way_capture_did(deployment, tmp_path):
+    """Both sides use `installed_units`, or "unknown" means two things."""
+    _, units = deployment
+    manifest = yaml.safe_load(
+        (tmp_path / "deploy" / "systest-fixture" / ds.MANIFEST_NAME).read_text(
+            encoding="utf-8"
+        )
+    )
+    assert set(manifest["units"]) == set(
+        ds.installed_units(units, manifest["unit_globs"])
+    )
+
+
+def test_capture_refuses_to_quietly_watch_less_than_last_time(deployment):
+    """A forgotten argument used to shrink the record, silently.
+
+    Coverage is decided by arguments on one long command line. Re-running
+    `capture` without `--credential-glob` wrote a manifest with no credentials
+    in it and exited 0 — after which `check` reported "no drift" about files it
+    was no longer looking at. Happened for real on 2026-08-16: 15 credential
+    files and the deploy script's hash left the record and nothing said so.
+    """
+    home, units = deployment
+
+    with pytest.raises(ds.StateError) as caught:
+        ds.capture("systest-fixture", home, units, ["hermes-*"], None, [])
+
+    assert "--credential-glob" in str(caught.value)
+    # And the old record is intact, so the trail is not broken by the refusal.
+    assert ds.check("systest-fixture") == []
+
+
+def test_narrowing_is_allowed_when_it_is_deliberate(deployment):
+    home, units = deployment
+
+    ds.capture(
+        "systest-fixture", home, units, ["hermes-*"], None, [], allow_narrowing=True
+    )
+
+    assert ds.check("systest-fixture") == []
+
+
+def test_dropping_the_deploy_script_or_secrets_file_is_narrowing(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / "config.yaml").write_text(yaml.safe_dump(LIVE_CONFIG), encoding="utf-8")
+    (home / ".env").write_text(ENV_TEXT, encoding="utf-8")
+    units = tmp_path / "systemd"
+    units.mkdir()
+    (units / "hermes-gateway.service").write_text(
+        "[Service]\nUser=hermes\n", encoding="utf-8"
+    )
+    script = tmp_path / "deploy-hermes.sh"
+    script.write_text("#!/bin/bash\n", encoding="utf-8")
+    monkeypatch.setattr(ds, "DEPLOY_ROOT", tmp_path / "deploy")
+
+    ds.capture(
+        "narrow", home, units, ["hermes-*"], script, [], tmp_path / "secrets.env"
+    )
+    with pytest.raises(ds.StateError) as caught:
+        ds.capture("narrow", home, units, ["hermes-*"], None, [])
+
+    assert "--deploy-script" in str(caught.value)
+    assert "--secrets-out" in str(caught.value)
+
+
 def test_a_new_secret_on_the_box_is_a_note_not_drift(deployment):
     """Adding a secret is normal; the report should say "capture this" rather
     than fail the weekly run."""

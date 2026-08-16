@@ -1,0 +1,18 @@
+; Monday morning, after the nightly projection fit and before the working week:
+; the review is a moment a human is expected to act on, so it should be waiting
+; when they start rather than arriving mid-week.
+
+[Unit]
+Description=Weekly Hermes review pass
+
+[Timer]
+OnCalendar=Mon *-*-* 08:00:00
+RandomizedDelaySec=15m
+; A box that was off on Monday still runs the pass, once, rather than skipping
+; a week — and the digest's dedupe key is the ISO week, so a catch-up run
+; collapses onto the pending item instead of stacking a second one.
+Persistent=true
+Unit=hermes-review-pass.service
+
+[Install]
+WantedBy=timers.target

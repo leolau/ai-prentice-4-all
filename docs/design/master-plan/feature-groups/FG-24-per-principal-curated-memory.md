@@ -1,6 +1,6 @@
 # FG-24 — Per-principal curated memory (memory layers 1–2 become per-user)
 
-**Wave:** P6-A (Phase-6) · **Owner agent:** _unassigned_ · **Status:** PLAN — not started (**amended 2026-08-10** — see "Person level vs participation level" below)
+**Wave:** P6-A (Phase-6) · **Owner agent:** _unassigned_ · **Status:** DONE — implemented, deployed and system-tested on `hermes-systest` 2026-08-12 (**amended 2026-08-10** — see "Person level vs participation level" below). Two follow-ups are open and both are about the *rest of the box* not knowing about the new layout — see "Open — the layout is not known outside the memory tool"
 
 ## Summary
 
@@ -350,16 +350,48 @@ Baseline + cache-invariant tests green; per-principal isolation proven;
       background job still sees what the profile shares. A deployment with one
       principal, or none reachable (no database configured), keeps the
       pre-FG-24 single-user path exactly as before.
-- [ ] Legacy maintenance paths still know only the two pre-FG-24 files:
-      `hermes doctor`, `hermes profile` and the dashboard's memory
-      settings/reset, so a reset claims to erase everything while leaving every
-      participation and person file in place. Carried as follow-up work — it is
-      maintenance/UX over the new layout, not the isolation contract.
+- [ ] Legacy maintenance paths still know only the two pre-FG-24 files —
+      see "Open — the layout is not known outside the memory tool".
+
+## Open — the layout is not known outside the memory tool
+
+Re-checked on `develop` at `3afc06225` during the Phase-6 close-out pass
+(2026-08-16). `tools/memory_tool.py` is the only module that knows a
+participation or person file exists. Everything that *manages* memory still
+enumerates the two pre-FG-24 paths, and the consequences are larger than the
+"maintenance/UX" note this item used to carry:
+
+1. **Nothing can erase a person's curated memory.** `hermes memory reset`
+   (`hermes_cli/main.py`) and the dashboard's `POST /api/memory/reset`
+   (`hermes_cli/web_server.py`) unlink `memories/MEMORY.md` and
+   `memories/USER.md` and nothing else, while the CLI prints "This will
+   permanently erase the following memory files" and "New sessions will start
+   with a blank slate". Every `memories/users/<uid>/MEMORY.md` and
+   `persons/<uid>/USER.md` survives. FG-26's hard delete does not close it
+   either — `MemberService.delete_member` says so in its own refusal text
+   ("nothing cascades to memories, files or GTS items"), by design, because it
+   resolves *rows*. So a person can be deleted from the console, and the
+   deployment keeps the facts the agent curated about them, with no surface
+   that removes them. That is a deletion-request answer this deployment
+   currently cannot give.
+2. **`--clone-all` copies other people's participation memory into a new
+   profile.** `_clone_all_copytree_ignore` excludes history and infrastructure
+   at the profile root; `memories/` is copied whole, `users/<uid>/` included.
+   FG-24's contract is that a participation fact is visible in one profile to
+   one person — a clone hands the whole set to a profile that may enrol
+   entirely different people. `--clone` is correct (it names
+   `memories/MEMORY.md` and `memories/USER.md` explicitly), and FG-30's
+   adoption path is correct for the same reason; it is `--clone-all`'s
+   copy-everything default that predates the layout.
+3. `hermes doctor` reports the two files' sizes as the memory tier, so the
+   per-principal tier is invisible to the one command an owner runs to see
+   the state of the box.
 
 ## Audit log
 
 | Date | Edition | Author | Change | Rationale |
 |------|---------|--------|--------|-----------|
+| 2026-08-16 | 5 | devin (for Leo) | Phase-6 close-out: status corrected to DONE, and the "legacy maintenance paths" item re-read against `develop` and rewritten as three named findings | The header still said `PLAN — not started` four days after the live system test, which is the one error that invites a cold agent to rebuild something already running on the box. Re-checking the follow-up item made it bigger than the "maintenance/UX" note it carried: `hermes memory reset` and the dashboard's reset unlink only the two pre-FG-24 files while promising a blank slate, FG-26's hard delete deliberately does not cascade to files, so **no surface erases a person's curated memory at all**; and `--clone-all` copies `memories/` whole, handing every principal's participation memory to a profile that may enrol different people. Recorded, not fixed — the erase semantics are the owner's call (what should a reset destroy?), and `--clone-all`'s scope is a behaviour change. |
 | 2026-08-13 | 4 | devin (for Leo) | Implemented the unscoped-session ladder (`hermes_cli/principal_binding.py`, `agent/agent_init.py`, `MemoryStore(unresolved_principal=…)`, `hermes member local-principal`). Scoped it to curated memory only. | The owner's answer resolves *identity*, so the tempting move was to set the session's principal globally — but `_internal_user_id` also keys session continuity (C4), todos and goals, and a locally-inferred principal changing a session key would silently split conversations. FG-24 owns memory, so the binding is applied where the hole is and the wider question stays with FG-28's identity forwarding. The remaining decision was what to do when the ladder ends without an answer: refusing *all* writes (not just `shared`) is the only honest option, because in an unscoped store `memory` **is** the shared file — a "safe" fallback to the person's own block does not exist to fall back to. Reads stay open so the digest and pollers keep their context. |
 | 2026-08-12 | 3 | devin (for Leo) | Reviewed and system-tested on `hermes-systest`. Ticked the system-test item with its evidence and recorded the unscoped-session decision as the one open item. | Isolation, authority, the audited refusal and migration fidelity all hold live. The unscoped-session hole is a policy question the owner has now answered (resolve by login, else the setup/pairing binding, else ask once and remember), so it is written down as work rather than left as a review finding. |
 | 2026-08-11 | 3 | devin (for Leo) | Implemented. Recorded three deviations: person identity lives at `<root>/persons/<user_id>/USER.md` (not under the profile home), three snapshot blocks instead of four (no `shared_user` tier exists after the amendment), and `target=shared` is refused rather than aliased in an unscoped session. | The amendment makes identity person-level while `$HERMES_HOME` is profile-level; storing `USER.md` under the profile home would recreate the drifting-copies problem the amendment exists to remove, and a `shared_user` block would have no referent. |

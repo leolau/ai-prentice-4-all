@@ -21,6 +21,7 @@ import type {
   Role,
 } from "@/types";
 
+
 export interface UsersViewProps {
   /** The acting principal's role — decides which surfaces are even rendered. */
   role: Role;
