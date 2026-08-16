@@ -1656,12 +1656,21 @@ async def get_run_route(request: Request, run_no: int) -> dict[str, Any]:
 
 @router.post("/{slug}/runs")
 async def start_run_route(request: Request) -> dict[str, Any]:
-    """Start a run now (``trigger='manual'``); an optional ``playbook_rev``
-    repeats an old method — "do exactly what worked last time" (§7.2)."""
+    """Start a run now. ``trigger`` defaults to ``manual``; the CLI's
+    ``run`` verb (step 9) passes ``schedule``/``event``/``review`` through
+    the same gate — the cron job fires ``hermes projects run <slug>
+    --trigger schedule`` (§3.2). An optional ``playbook_rev`` repeats an
+    old method — "do exactly what worked last time" (§7.2)."""
     project, _role, _profiles, principal = await _require_write(
         request, judgement=True
     )
     body = await request.json() if request.headers.get("content-length") else {}
+    trigger = str(body.get("trigger") or "manual").strip()
+    if trigger not in projects_db.VALID_RUN_TRIGGERS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"trigger must be one of {sorted(projects_db.VALID_RUN_TRIGGERS)}",
+        )
 
     def _start_sync() -> dict:
         with projects_db.connect_closing() as conn:
@@ -1671,7 +1680,7 @@ async def start_run_route(request: Request) -> dict[str, Any]:
                         conn,
                         bconn,
                         project=project,
-                        trigger="manual",
+                        trigger=trigger,
                         triggered_by=principal.user_id,
                         playbook_rev=body.get("playbook_rev"),
                     )

@@ -12800,6 +12800,15 @@ def main():
     register_todos_subparser(subparsers)
 
     # =========================================================================
+    # projects command — the Projects feature's operator surface (design §14,
+    # rung 2: CLI + skill, no model tool). Drives the projects_api router in
+    # process. `hermes project` (singular) stays the folder-workspace command.
+    # =========================================================================
+    from hermes_cli.projects_cli import register_projects_subparser
+
+    register_projects_subparser(subparsers)
+
+    # =========================================================================
     # datastore command — the profile's resolved (database, schema) binding and
     # the whole-schema migration between profile names (FG-27)
     # =========================================================================
