@@ -442,6 +442,59 @@ def test_check_enumerates_the_box_the_way_capture_did(deployment, tmp_path):
     )
 
 
+def test_capture_refuses_to_quietly_watch_less_than_last_time(deployment):
+    """A forgotten argument used to shrink the record, silently.
+
+    Coverage is decided by arguments on one long command line. Re-running
+    `capture` without `--credential-glob` wrote a manifest with no credentials
+    in it and exited 0 — after which `check` reported "no drift" about files it
+    was no longer looking at. Happened for real on 2026-08-16: 15 credential
+    files and the deploy script's hash left the record and nothing said so.
+    """
+    home, units = deployment
+
+    with pytest.raises(ds.StateError) as caught:
+        ds.capture("systest-fixture", home, units, ["hermes-*"], None, [])
+
+    assert "--credential-glob" in str(caught.value)
+    # And the old record is intact, so the trail is not broken by the refusal.
+    assert ds.check("systest-fixture") == []
+
+
+def test_narrowing_is_allowed_when_it_is_deliberate(deployment):
+    home, units = deployment
+
+    ds.capture(
+        "systest-fixture", home, units, ["hermes-*"], None, [], allow_narrowing=True
+    )
+
+    assert ds.check("systest-fixture") == []
+
+
+def test_dropping_the_deploy_script_or_secrets_file_is_narrowing(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / "config.yaml").write_text(yaml.safe_dump(LIVE_CONFIG), encoding="utf-8")
+    (home / ".env").write_text(ENV_TEXT, encoding="utf-8")
+    units = tmp_path / "systemd"
+    units.mkdir()
+    (units / "hermes-gateway.service").write_text(
+        "[Service]\nUser=hermes\n", encoding="utf-8"
+    )
+    script = tmp_path / "deploy-hermes.sh"
+    script.write_text("#!/bin/bash\n", encoding="utf-8")
+    monkeypatch.setattr(ds, "DEPLOY_ROOT", tmp_path / "deploy")
+
+    ds.capture(
+        "narrow", home, units, ["hermes-*"], script, [], tmp_path / "secrets.env"
+    )
+    with pytest.raises(ds.StateError) as caught:
+        ds.capture("narrow", home, units, ["hermes-*"], None, [])
+
+    assert "--deploy-script" in str(caught.value)
+    assert "--secrets-out" in str(caught.value)
+
+
 def test_a_new_secret_on_the_box_is_a_note_not_drift(deployment):
     """Adding a secret is normal; the report should say "capture this" rather
     than fail the weekly run."""

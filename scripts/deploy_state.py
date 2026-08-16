@@ -458,9 +458,29 @@ def capture(
     credential_globs: list[str],
     secrets_out: Path | None = None,
     state_root: Path | None = None,
+    allow_narrowing: bool = False,
 ) -> dict[str, Any]:
     """Write the sanitized snapshot, manifest and unit copies into the repo."""
     out = deployment_dir(deployment, state_root)
+    if not allow_narrowing:
+        lost = _narrowed_coverage(
+            deployment,
+            {
+                "unit_globs": list(unit_globs),
+                "credential_globs": list(credential_globs),
+                "deploy_script": deploy_script,
+                "secrets_file": secrets_out,
+            },
+            state_root,
+        )
+        if lost:
+            raise StateError(
+                "this capture would record less than the last one did, so the"
+                " check would go on passing over things nobody is watching any"
+                " more:\n  " + "\n  ".join(lost) + "\nPass the missing argument(s),"
+                " or --allow-narrowing if the coverage is genuinely gone."
+            )
+
     config_path = hermes_home / "config.yaml"
     env_path = hermes_home / ".env"
 
@@ -544,6 +564,49 @@ def capture(
         "credentials": [entry["path"] for entry in credentials],
         "secrets_out": str(secrets_out) if secrets_out else None,
     }
+
+
+def _narrowed_coverage(
+    deployment: str, coverage: dict[str, Any], state_root: Path | None
+) -> list[str]:
+    """What the previous manifest watched and this one would stop watching.
+
+    Coverage is decided by the arguments on one long command line, and a
+    forgotten one does not fail: it writes a smaller record, after which `check`
+    reports "no drift" about a box it is no longer looking at. That happened —
+    a capture run without `--credential-glob`/`--deploy-script`/`--secrets-out`
+    silently dropped 15 credential files and the deploy script's hash, and the
+    next check passed. Narrowing must be deliberate.
+    """
+    path = deployment_dir(deployment, state_root) / MANIFEST_NAME
+    if not path.is_file():
+        return []
+    previous = load_yaml(path)
+    if not isinstance(previous, dict):
+        return []
+
+    lost: list[str] = []
+    for key, argument in (
+        ("deploy_script", "--deploy-script"),
+        ("secrets_file", "--secrets-out"),
+    ):
+        if previous.get(key) and not coverage.get(key):
+            lost.append(f"{key}: recorded before, absent now — pass {argument}")
+    for key, argument in (
+        ("credential_globs", "--credential-glob"),
+        ("unit_globs", "--unit-glob"),
+    ):
+        dropped = [
+            str(pattern)
+            for pattern in previous.get(key) or []
+            if pattern not in (coverage.get(key) or [])
+        ]
+        if dropped:
+            lost.append(
+                f"{key}: no longer covers {', '.join(dropped)} — pass"
+                f" {argument} for each"
+            )
+    return lost
 
 
 def _unit_user(unit: Path) -> str | None:
@@ -913,6 +976,12 @@ def _add_capture_args(parser: argparse.ArgumentParser) -> None:
         help="glob under HERMES_HOME for credential files to inventory "
         "(repeatable); names and modes are recorded, never contents",
     )
+    parser.add_argument(
+        "--allow-narrowing",
+        action="store_true",
+        help="permit a capture that records less than the previous one — for "
+        "when coverage is genuinely gone, not when an argument was forgotten",
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -972,6 +1041,7 @@ def main(argv: list[str] | None = None) -> int:
                 args.credential_glob or [],
                 args.secrets_out,
                 args.state_root,
+                args.allow_narrowing,
             )
             print(
                 json.dumps(result, indent=2) if args.json else _capture_report(result)
