@@ -1084,6 +1084,28 @@ def set_project_status(
     return cur.rowcount > 0
 
 
+def set_project_summary(
+    conn: sqlite3.Connection, project_id: str, summary: str
+) -> Optional[int]:
+    """Write the rolling \"where this stands\" (§2.2) and stamp ``summary_at``.
+
+    The one write entry point for ``summary`` — ``update_project_fields``
+    deliberately does not accept it, so the audit line (who summarised,
+    when) has exactly one place to come from. Returns ``summary_at``, or
+    ``None`` if the project does not exist.
+    """
+    summary = str(summary or "").strip()
+    if not summary:
+        raise ValueError("summary must not be empty")
+    now = _now()
+    with write_txn(conn):
+        cur = conn.execute(
+            "UPDATE projects SET summary = ?, summary_at = ? WHERE id = ?",
+            (summary, now, project_id),
+        )
+    return now if cur.rowcount > 0 else None
+
+
 # ---------------------------------------------------------------------------
 # project_members (people on the project; profiles live in project_profiles)
 # ---------------------------------------------------------------------------

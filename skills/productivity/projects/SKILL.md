@@ -44,6 +44,7 @@ hermes projects run       <slug> [--trigger schedule|manual|event|review]
                                  [--playbook-rev N] [--dry-run] [--json]
 hermes projects runs      <slug> [--limit 10] [--json]
 hermes projects retro     <slug> <run_no> [--write] [--propose KIND=BODY]… [--json]
+hermes projects summarise <slug>          # rolling "where this stands" — reads stdin
 hermes projects doctor    [--slug s] [--json]
 ```
 
@@ -71,6 +72,11 @@ to activate it, a directive waits for any member (`guidance activate <id>`),
 and a skill proposal is recorded as a candidate with this project and run as
 its provenance. Nothing on the learning path is automatic — propose, never
 cross.
+
+`hermes projects summarise <slug>` writes the rolling "where this stands"
+from stdin — one or two sentences a human actually reads, overwritten each
+time, never appended. Do it when you close a run: the summary is what a
+user sees before anything else on the project.
 
 ## Rules
 

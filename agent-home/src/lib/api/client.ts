@@ -65,6 +65,7 @@ import type {
   ProjectDetail,
   ProjectDirectivesResponse,
   ProjectDoctorDetail,
+  ProjectEventsResponse,
   ProjectLink,
   ProjectOutput,
   ProjectPlaybookResponse,
@@ -1281,6 +1282,28 @@ export class HermesApiClient {
   async projectBoard(slug: string): Promise<ProjectBoardView> {
     return this.request(
       `/api/registry/projects/${encodeURIComponent(slug)}/board`,
+    );
+  }
+
+  /** §12: the live-update event tail — pass the previous `latest_event_id`. */
+  async projectEvents(
+    slug: string,
+    since?: number,
+  ): Promise<ProjectEventsResponse> {
+    const query = since != null ? `?since=${encodeURIComponent(since)}` : "";
+    return this.request(
+      `/api/registry/projects/${encodeURIComponent(slug)}/events${query}`,
+    );
+  }
+
+  /** §2.2: write the rolling "where this stands" summary (§17 step 11). */
+  async summariseProject(
+    slug: string,
+    summary: string,
+  ): Promise<{ summary: string; summary_at: number }> {
+    return this.request(
+      `/api/registry/projects/${encodeURIComponent(slug)}/summarise`,
+      { method: "POST", json: { summary } },
     );
   }
 
