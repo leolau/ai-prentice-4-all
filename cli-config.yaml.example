@@ -682,8 +682,10 @@ capacity:
   watch_session_ratio: 0.60
   constrained_session_ratio: 0.85
   # RAM one live conversation holds, and what one more profile costs. Used only
-  # for sizing advice, never to refuse anything.
-  conversation_cost_mb: 250
+  # for sizing advice, never to refuse anything. The conversation figure is
+  # measured (12 concurrent conversations in one process cost ~13-19 MB each
+  # beyond the first); raise it if your conversations carry big attachments.
+  conversation_cost_mb: 20
   profile_slab_mb: 150
   # Free RAM the box should keep beyond the cost of one more profile.
   memory_margin_mb: 512
@@ -691,9 +693,14 @@ capacity:
   # not fix — waits mean writes are serialising, so the advice is runtime work.
   watch_contention_per_hour: 6
   constrained_contention_per_hour: 30
-  # Reply latency (p95, seconds) as experienced by whoever is talking.
+  # Reply latency (p95, seconds) as experienced by whoever is talking. Turns
+  # run by machinery (cron jobs, backgrounded to-dos) are not counted: nobody
+  # is waiting on them. min_latency_samples is how many interactive turns the
+  # window needs before p95 may decide the verdict — below it p95 is just the
+  # slowest turn, so the reading is shown but cannot bind.
   watch_p95_s: 25
   constrained_p95_s: 60
+  min_latency_samples: 8
   # Trailing window for the contention and latency readings.
   window_s: 86400
 
