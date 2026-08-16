@@ -157,7 +157,7 @@ Every FG must obey these or it will not merge:
 | [22](./feature-groups/FG-22-memory-visualizer.md) | Read-only memory visualizer on the operator dashboard | **V1→V4** (Phase-5) | `hermes_cli/memory_explorer.py` over FG-21's store, `_comms_resolve_principal` C1, `memory_projection` under the same C2 RLS as `memories`, `web/` SPA + `@observablehq/plot` |
 | [23](./feature-groups/FG-23-memory-on-agent-home.md) | The memory visualizer on `agent-home` (the phone) | **A0→A5** (Phase-5) | FG-22's `/api/memory/explorer/*` endpoints (unchanged), FG-20 BFF (`HermesApiClient`, `requirePrincipal`, `MobileShell`), `deploy/hermes-deploy.sh` + `deploy_state.py` |
 
-### Phase 6 — FG-24–29 (from one profile to an entity pursuing one goal)
+### Phase 6 — FG-24–31 (from one profile to an entity pursuing one goal)
 
 Phase 1 built multi-user for a handful of principals in one profile. Phase 6 is
 what an organisation of 500 actually needs: personal curated memory, a way to
@@ -176,8 +176,41 @@ FG-26 is scoped by profile rather than by group.
 | [26](./feature-groups/FG-26-users-groups-admin-console.md) | Users admin console + invitation activation (rescoped 2026-08-12: groups out with FG-25; profile assignment settled) | **P6-B** — **DONE**, deployed and system-tested on `hermes-systest` 2026-08-12 | `hermes_cli/members.py` (`MemberService`, `GoTrueAdminClient`), `/api/comms/members*`, FG-20 BFF + `MembersView.tsx`, C5/C8 |
 | [29](./feature-groups/FG-29-goal-tree-and-insight-promotion.md) | Goal tree + **skill** promotion (the ai4all spine: goals flow down by lifetime tier, skills flow up) | **P6-A′** — **DONE**, deployed and system-tested on `hermes-systest` 2026-08-11 | `hermes_cli/goal_registry.py` (`goals`/`goal_metrics`/`goal_progress` — already shipped by FG-04/FG-09), `hermes_cli/goal_management.py` one-service-four-frontends, `agent/system_prompt.py` stable+volatile tiers, FG-24 snapshot freeze, `agent/background_review.py` self-improvement loop + `skills.external_dirs` (already read-only to curators) |
 | [28](./feature-groups/FG-28-multi-profile-administration.md) | Multi-profile administration + **one gateway for all profiles** | **P6-C** — **IN PROGRESS**: item 1 done (the multiplexed-`os.environ` credential leaks, #219 + #220); nothing gates the rest | `hermes_cli/profiles.py` (`profiles_to_serve`), `_comms_resolve_principal` C1 (already 409s for unenrolled subjects), per-profile `principals` as the entitlement list, FG-20 BFF |
-| [30](./feature-groups/FG-30-profile-lifecycle-and-suggestion.md) | Profile lifecycle: suggest, adopt, retire (start with one profile; the loop proposes more) | **P6-D** (after FG-29) | `hermes_cli/profiles.py` (`create_profile` already takes `description`/`clone_config`, `delete_profile`, export/import, `profile.yaml`), `hermes_cli/profile_describer.py` aux-LLM "what this profile is good at", `agent/background_review.py` + `tools/skill_usage.py` evidence, FG-29 digest + promotion |
-| [31](./feature-groups/FG-31-capacity-headroom-indicator.md) | Capacity headroom indicator ("when should I upgrade the box?") | **P6-E** (independent; after FG-28) | `hermes_cli/active_sessions.py` (leases + `max_concurrent_sessions`, shipped), `gateway/run.py` `_running_agents`, `hermes_state.py` WAL busy/retry paths, `hermes status`/`doctor`, FG-29 digest |
+| [30](./feature-groups/FG-30-profile-lifecycle-and-suggestion.md) | Profile lifecycle: suggest, adopt, retire (start with one profile; the loop proposes more) | **P6-D** — **DONE**, deployed and system-tested on `hermes-systest` 2026-08-16 (#250/#253/#262/#265); its clock is `hermes-review-pass.timer` (#268/#269) | `hermes_cli/profiles.py` (`create_profile` already takes `description`/`clone_config`, `delete_profile`, export/import, `profile.yaml`), `hermes_cli/profile_describer.py` aux-LLM "what this profile is good at", `agent/background_review.py` + `tools/skill_usage.py` evidence, FG-29 digest + promotion |
+| [31](./feature-groups/FG-31-capacity-headroom-indicator.md) | Capacity headroom indicator ("when should I upgrade the box?") | **P6-E** — **DONE**, deployed and calibrated on `hermes-systest` 2026-08-16 (#260/#264); box-wide **cap** enforcement is an open decision for Leo | `hermes_cli/active_sessions.py` (leases + `max_concurrent_sessions`, shipped), `gateway/run.py` `_running_agents`, `hermes_state.py` WAL busy/retry paths, `hermes status`/`doctor`, FG-29 digest |
+
+#### Phase-6 close-out pass — 2026-08-16 (`develop` @ `3afc06225`)
+
+Every Phase-6 checklist read against the shipped code rather than against the
+previous doc. FG-30 and FG-31 close the phase and the master plan; FG-28 is the
+only FG still in progress and was **not** touched by this pass (another agent
+is in it). What the pass found:
+
+- **Four status headers were lying in the direction that costs most.** FG-24,
+  FG-27 and FG-29 each still read `PLAN — not started` while being
+  implemented, deployed and system-tested weeks earlier, and FG-31 read
+  "awaiting the calibration load run" after the run. The header is the first
+  line a cold agent reads, and "not started" is an invitation to rebuild
+  something that is live on the box.
+- **FG-30's checklist still pointed at a branch.** Three items said the work
+  existed "on `feat/fg30-remaining-tasks`" after #262 merged it — the
+  stranded-artifact shape that hid T1–T3 for two days, and the same one as
+  **#234, referenced by the FG-28 material and closed without ever merging**.
+  A doc that names a branch instead of a PR ages into a false claim the moment
+  the branch is deleted.
+- **Two code findings, both about the box not knowing what the code knows.**
+  FG-24's per-principal memory has no erase path and `--clone-all` copies other
+  people's participation memory into a new profile (FG-24 §"Open — the layout
+  is not known outside the memory tool"); the weekly digest silently drops
+  three of its six sections when they fail (FG-29 §"Open — the digest can lose
+  a section without saying so"). Neither is a regression: both are surfaces
+  that predate the feature and were never revisited when it landed.
+
+The pass has now run five times and found a stale claim every time. That is
+the argument for running it at the end of a phase rather than trusting the
+checkboxes: the docs are written by whoever *finished* a piece of work, and
+nobody is assigned to notice when a neighbouring change makes their sentence
+false.
 
 ---
 
@@ -295,7 +328,7 @@ only the FG-20 doc, keeps baseline + web build green, preserves the one-brain
 chat path (cache-safe), and re-runs the negative-access RLS + C6 checks. The
 existing `web/` operator console is left intact.
 
-### Phase 6 (FG-24–29 scale-out) — waves (start after Phase-5 `develop` is merged; FG-26's "assign profile" question is **resolved** — see §8)
+### Phase 6 (FG-24–31 scale-out) — waves (start after Phase-5 `develop` is merged; FG-26's "assign profile" question is **resolved** — see §8)
 
 ```
 WAVE P6-0 — DONE (deployed, system-tested 2026-08-11)
@@ -333,7 +366,9 @@ WAVE P6-C — IN PROGRESS, nothing gating it (item 1 done: the multiplexed-os.en
             the get_secret() migration: 6 of ~2,250 env reads done, and an
             unmigrated os.getenv returns the WRONG profile's value silently).
 
-WAVE P6-D — NEXT AFTER P6-C (FG-29 is done)
+WAVE P6-D — DONE (deployed, system-tested 2026-08-16; the review loop's clock,
+         hermes-review-pass.timer, shipped with it — before that nothing on the
+         box ever called generation, so the FG's headline behaviour had never run)
   └─ FG-30  profile lifecycle: suggest / adopt / retire
             (a deployment starts with ONE profile; the weekly digest proposes new
             sub-goal instruments from clustered skills+goals; adoption seeds only
@@ -344,7 +379,9 @@ WAVE P6-D — NEXT AFTER P6-C (FG-29 is done)
             not become sprawl. Also seeds a DEFAULT entity goal editable in
             agent-home settings — an edit is a publication event, not a text box.)
 
-WAVE P6-E (independent — can ship any time after FG-28)
+WAVE P6-E — DONE (deployed, calibrated on the box 2026-08-16: conversation_cost_mb
+         250 → 20, measured. The per-profile cap is left as it was — making it
+         box-wide is a behaviour change and Leo's call)
   └─ FG-31  capacity headroom indicator
             (Hermes IS concurrent — asyncio + thread pool, cross-process session
             leases with a cap, SQLite in WAL. What bounds it is capacity in two
