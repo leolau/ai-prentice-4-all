@@ -1,5 +1,6 @@
 import Link from "next/link";
 
+import { dayDistance } from "@/components/projects/format";
 import { Pill, type Tone } from "@/components/ui/Pill";
 import type { ProjectCadence, ProjectHealth, ProjectListItem } from "@/types";
 
@@ -31,15 +32,10 @@ const HEALTH_TONE: Record<ProjectHealth, Tone> = {
 /**
  * Epoch seconds → a distance the row can show: "today", "in 3d", "5d ago".
  * The list only ever needs the day grain — a run scheduled for 14:00 is
- * still "today" at 09:00.
+ * still "today" at 09:00. Lives in `format.ts`; re-exported here so the
+ * list-era imports keep working.
  */
-export function dayDistance(epochSeconds: number): string {
-  const days = Math.round(
-    (epochSeconds * 1000 - Date.now()) / 86_400_000,
-  );
-  if (days === 0) return "today";
-  return days > 0 ? `in ${days}d` : `${-days}d ago`;
-}
+export { dayDistance } from "@/components/projects/format";
 
 /**
  * One row of the `/projects` list. Pure and server-safe: the cadence glyph,

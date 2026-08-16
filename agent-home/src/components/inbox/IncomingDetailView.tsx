@@ -6,6 +6,7 @@ import { useState } from "react";
 import { surfaceGlyph } from "@/components/inbox/IncomingRow";
 import { surfaceLabel } from "@/components/inbox/IncomingsFilters";
 import { formatSize, formatWhen } from "@/components/files/FilesView";
+import { AddToProjectSheet } from "@/components/projects/AddToProjectSheet";
 import { Spinner } from "@/components/ui/Spinner";
 import type { IncomingDetail } from "@/types";
 
@@ -21,6 +22,7 @@ export function IncomingDetailView({ item }: { item: IncomingDetail }) {
   const [current, setCurrent] = useState(item);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [addOpen, setAddOpen] = useState(false);
 
   async function remember() {
     setBusy(true);
@@ -166,7 +168,23 @@ export function IncomingDetailView({ item }: { item: IncomingDetail }) {
         >
           To-dos from this
         </Link>
+        {/* "Add to project" (§13): an arrival that belongs to something
+            bigger gets linked from the place the user actually is. */}
+        <button
+          type="button"
+          onClick={() => setAddOpen(true)}
+          className="rounded-lg border border-[var(--color-border)] px-3 py-1.5"
+        >
+          Add to project
+        </button>
       </div>
+
+      {addOpen ? (
+        <AddToProjectSheet
+          onClose={() => setAddOpen(false)}
+          prefill={{ kind: "arrival", ref: current.id, label: title }}
+        />
+      ) : null}
     </div>
   );
 }
