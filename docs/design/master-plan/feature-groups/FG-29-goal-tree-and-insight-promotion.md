@@ -498,9 +498,14 @@ and promotion queue; full matrix on real Postgres; `scripts/run_tests.sh`,
       `../victim` installed as one contained directory and the victim outside
       the library survived (PR #205's containment, live).
 
-## Open — the digest can lose a section without saying so
+## Fixed — the digest can no longer lose a section without saying so
 
-Found in the Phase-6 close-out pass (2026-08-16, `develop` @ `3afc06225`).
+Found in the Phase-6 close-out pass (2026-08-16, `develop` @ `3afc06225`),
+fixed the same day: each of the three optional sections now contributes
+`<section>: unavailable — <error>: <reason>` instead of nothing, so the failure
+travels to the phone rather than to `agent.log`. The sections stay optional —
+one unconfigured store still costs only its own section. What was there:
+
 `weekly_digest()` assembles six sections. Three of them — the FG-30 profile
 suggestion, idle profiles, and FG-31 capacity — are wrapped in
 `except Exception: log.warning(...)` and contribute nothing when they fail, so
@@ -514,10 +519,8 @@ reporting success over goals it never closed, the review pass's swallowed
 `skill_promotions` failure, and #253's dead code behind `except Exception`): a
 step that cannot run reports as a step with nothing to say. The digest is the
 loop's only weekly output, and it runs unattended, so it is the worst place for
-it. The fix is small — render one line per failed section ("Capacity:
-unavailable — <reason>") rather than dropping it — and it keeps the property
-the `try` blocks exist for, that one unconfigured store must not cost the owner
-the rest of the digest.
+it. The fix keeps the property the `try` blocks exist for and adds the one
+thing they were missing: the owner is told which section is missing and why.
 
 ## Implementation notes (edition 2 → shipped)
 
