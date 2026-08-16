@@ -33,7 +33,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Optional, Tuple
 
 log = logging.getLogger(__name__)
@@ -45,7 +45,12 @@ DIGEST_KIND = "proactive_ask"
 
 
 def digest_dedupe_key(now: datetime) -> str:
-    """One digest per ISO week, whatever runs the pass and however often."""
+    """One digest per ISO week, whatever runs the pass and however often.
+
+    Computed from the pass's UTC clock: the same boundary the goal and
+    promotion rows are timestamped against, and a Monday-morning timer never
+    lands near enough to it for the offset to matter.
+    """
     year, week, _day = now.isocalendar()
     return f"entity-review:{year}-W{week:02d}"
 
@@ -85,7 +90,13 @@ async def run_review_pass(
     from hermes_cli.profile_suggestion import generate_suggestion
     from hermes_cli.skill_promotion import SkillPromotionStore
 
-    now = now or datetime.now()
+    # Timezone-aware, and UTC, because everything downstream compares it
+    # against ``TIMESTAMPTZ`` columns: a naive clock raises "can't subtract
+    # offset-naive and offset-aware datetimes" inside ``_generation_due``,
+    # which is exactly what the first live run did.
+    now = now or datetime.now(timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
     tree = default_tree_store()
     store = tree.registry._store
     principals = PrincipalStore(store)
@@ -96,6 +107,12 @@ async def run_review_pass(
         )
     await tree.registry.initialize()
     promotions = SkillPromotionStore(store)
+    # The interactive commands initialize this store before every use, so
+    # nothing ever noticed that a store which has only been *read* has no
+    # ``skill_promotions`` table at all. On the box the digest step failed with
+    # ``relation "skill_promotions" does not exist`` — the loop having never
+    # run, stated by the schema.
+    await promotions.initialize()
     result = ReviewPassResult()
 
     try:
@@ -111,7 +128,9 @@ async def run_review_pass(
             await notifications.initialize()
         conflicts = await detect_conflicts(tree, principal, now=now)
         if conflicts and deliver:
-            ids = await alert_owner(notifications, principal, conflicts, now=now)
+            # No ``now``: it reaches ``NotificationStore.create``, whose
+            # quiet-hours window is local wall-clock rather than UTC.
+            ids = await alert_owner(notifications, principal, conflicts)
             result.conflicts_alerted = len(ids)
     except Exception as exc:  # noqa: BLE001
         result.note_failure("conflicts", exc)
@@ -121,6 +140,7 @@ async def run_review_pass(
         result.digest_title = title
         result.digest_lines = list(lines)
         if deliver:
+            # Same reason ``now`` is withheld from ``alert_owner``.
             created = await notifications.create(
                 kind=DIGEST_KIND,
                 target_user_id=principal.user_id,
@@ -129,7 +149,6 @@ async def run_review_pass(
                 command="hermes promotion digest",
                 reversible=True,
                 dedupe_key=digest_dedupe_key(now),
-                now=now,
             )
             result.digest_notification_id = created.notification.id
     except Exception as exc:  # noqa: BLE001

@@ -13,14 +13,86 @@ deployment, and the way it was false for a year is that no test could tell.
 from __future__ import annotations
 
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Optional
 
 import pytest
 
 from hermes_cli import review_pass as rp
 
 REPO = Path(__file__).resolve().parents[2]
+
+
+# ---------------------------------------------------------------------------
+# The stores the pass resolves before it does anything, faked at their import
+# sites. Nothing here stands in for the three steps themselves — each test
+# supplies those, since they are what it is asserting about.
+# ---------------------------------------------------------------------------
+
+
+class _Principal:
+    user_id = "root"
+    display = "root"
+    role = "owner"
+    is_owner = True
+
+
+class _Registry:
+    _store = object()
+
+    async def initialize(self) -> None:
+        return None
+
+
+class _Tree:
+    registry = _Registry()
+
+
+class _Principals:
+    def __init__(self, _store: object) -> None:
+        pass
+
+    async def get_owner(self) -> _Principal:
+        return _Principal()
+
+
+class _Created:
+    class notification:  # noqa: N801 - a stand-in for the row
+        id = "notif-1"
+
+
+def _install_fakes(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    notifications: Optional[type] = None,
+    promotions: Optional[type] = None,
+) -> None:
+    class _Notifications:
+        def __init__(self, _store: object) -> None:
+            pass
+
+        async def initialize(self) -> None:
+            return None
+
+        async def create(self, **_kwargs: object) -> _Created:
+            return _Created()
+
+    class _Promotions:
+        def __init__(self, _store: object) -> None:
+            pass
+
+        async def initialize(self) -> None:
+            return None
+
+    monkeypatch.setattr("hermes_cli.goal_purpose.default_tree_store", lambda: _Tree())
+    monkeypatch.setattr("hermes_cli.access.PrincipalStore", _Principals)
+    monkeypatch.setattr(
+        "hermes_cli.human_comms.NotificationStore", notifications or _Notifications
+    )
+    monkeypatch.setattr(
+        "hermes_cli.skill_promotion.SkillPromotionStore", promotions or _Promotions
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -107,32 +179,6 @@ async def test_the_digest_is_still_delivered_when_generation_fails(
     """A digest is worth delivering even when the aux LLM is down."""
     delivered: dict[str, object] = {}
 
-    class _Principal:
-        user_id = "root"
-        display = "root"
-        role = "owner"
-        is_owner = True
-
-    class _Registry:
-        _store = object()
-
-        async def initialize(self) -> None:
-            return None
-
-    class _Tree:
-        registry = _Registry()
-
-    class _Principals:
-        def __init__(self, _store: object) -> None:
-            pass
-
-        async def get_owner(self) -> _Principal:
-            return _Principal()
-
-    class _Created:
-        class notification:  # noqa: N801 - a stand-in for the row
-            id = "notif-1"
-
     class _Notifications:
         def __init__(self, _store: object) -> None:
             pass
@@ -153,10 +199,7 @@ async def test_the_digest_is_still_delivered_when_generation_fails(
     async def _digest(*_args: object, **_kwargs: object):
         return "Weekly entity review", ["Capacity:", "  comfortable"]
 
-    monkeypatch.setattr("hermes_cli.goal_purpose.default_tree_store", lambda: _Tree())
-    monkeypatch.setattr("hermes_cli.access.PrincipalStore", _Principals)
-    monkeypatch.setattr("hermes_cli.human_comms.NotificationStore", _Notifications)
-    monkeypatch.setattr("hermes_cli.skill_promotion.SkillPromotionStore", lambda _s: object())
+    _install_fakes(monkeypatch, notifications=_Notifications)
     monkeypatch.setattr("hermes_cli.profile_suggestion.generate_suggestion", _boom)
     monkeypatch.setattr("hermes_cli.goal_conflicts.detect_conflicts", _no_conflicts)
     monkeypatch.setattr("hermes_cli.goal_conflicts.weekly_digest", _digest)
@@ -168,30 +211,86 @@ async def test_the_digest_is_still_delivered_when_generation_fails(
     assert result.errors and result.errors[0][0] == "suggestion"
 
 
+# ---------------------------------------------------------------------------
+# The two the box found: a naive clock, and a schema nobody had created
+# ---------------------------------------------------------------------------
+
+
 @pytest.mark.asyncio
-async def test_a_dry_run_writes_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
-    class _Principal:
-        user_id = "root"
-        display = "root"
-        role = "owner"
-        is_owner = True
+async def test_the_clock_handed_downstream_is_timezone_aware(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``_generation_due`` subtracts it from a ``TIMESTAMPTZ``.
 
-    class _Registry:
-        _store = object()
+    The first live run failed with "can't subtract offset-naive and
+    offset-aware datetimes": the pass carried a naive ``datetime.now()`` and
+    every row it is compared against is UTC-aware.
+    """
+    seen: dict[str, object] = {}
 
-        async def initialize(self) -> None:
-            return None
+    async def _capture(_tree, _promotions, _principal, **kwargs):
+        seen["now"] = kwargs.get("now")
+        return None
 
-    class _Tree:
-        registry = _Registry()
+    async def _no_conflicts(*_args: object, **_kwargs: object):
+        return []
 
-    class _Principals:
+    async def _digest(*_args: object, **_kwargs: object):
+        return "Weekly entity review", []
+
+    _install_fakes(monkeypatch)
+    monkeypatch.setattr("hermes_cli.profile_suggestion.generate_suggestion", _capture)
+    monkeypatch.setattr("hermes_cli.goal_conflicts.detect_conflicts", _no_conflicts)
+    monkeypatch.setattr("hermes_cli.goal_conflicts.weekly_digest", _digest)
+
+    await rp.run_review_pass(deliver=False)
+
+    now = seen["now"]
+    assert isinstance(now, datetime)
+    assert now.tzinfo is not None and now.utcoffset() == timedelta(0)
+
+
+@pytest.mark.asyncio
+async def test_the_promotion_schema_is_created_before_it_is_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The box had no ``skill_promotions`` table — the loop had never run.
+
+    Every interactive command initializes the store first (``_promotion_store``),
+    so a pass that only reads inherits a schema nobody created.
+    """
+    initialized: list[str] = []
+
+    class _Promotions:
         def __init__(self, _store: object) -> None:
             pass
 
-        async def get_owner(self) -> _Principal:
-            return _Principal()
+        async def initialize(self) -> None:
+            initialized.append("skill_promotions")
 
+    async def _none(*_args: object, **_kwargs: object):
+        return None
+
+    async def _no_conflicts(*_args: object, **_kwargs: object):
+        return []
+
+    async def _digest(*_args: object, **_kwargs: object):
+        assert initialized, "the digest read the promotion store before it existed"
+        return "Weekly entity review", []
+
+    _install_fakes(monkeypatch, promotions=_Promotions)
+    monkeypatch.setattr("hermes_cli.profile_suggestion.generate_suggestion", _none)
+    monkeypatch.setattr("hermes_cli.goal_conflicts.detect_conflicts", _no_conflicts)
+    monkeypatch.setattr("hermes_cli.goal_conflicts.weekly_digest", _digest)
+
+    result = await rp.run_review_pass(deliver=False)
+
+    assert initialized == ["skill_promotions"]
+    assert result.ok
+
+
+@pytest.mark.asyncio
+async def test_a_dry_run_writes_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
     class _Notifications:
         def __init__(self, _store: object) -> None:
             pass
@@ -214,10 +313,7 @@ async def test_a_dry_run_writes_nothing(monkeypatch: pytest.MonkeyPatch) -> None
     async def _digest(*_args: object, **_kwargs: object):
         return "Weekly entity review", ["Nothing to review this week."]
 
-    monkeypatch.setattr("hermes_cli.goal_purpose.default_tree_store", lambda: _Tree())
-    monkeypatch.setattr("hermes_cli.access.PrincipalStore", _Principals)
-    monkeypatch.setattr("hermes_cli.human_comms.NotificationStore", _Notifications)
-    monkeypatch.setattr("hermes_cli.skill_promotion.SkillPromotionStore", lambda _s: object())
+    _install_fakes(monkeypatch, notifications=_Notifications)
     monkeypatch.setattr("hermes_cli.profile_suggestion.generate_suggestion", _none)
     monkeypatch.setattr("hermes_cli.goal_conflicts.detect_conflicts", _conflict_pair)
     monkeypatch.setattr("hermes_cli.goal_conflicts.alert_owner", _alert)
