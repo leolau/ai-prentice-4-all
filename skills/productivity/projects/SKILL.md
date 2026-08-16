@@ -39,11 +39,11 @@ hermes projects members   <slug> [--add <user> --role lead|member|viewer] [--jso
 hermes projects cards     <slug> [--status s] [--json]
 hermes projects card add  <slug> "<title>" [--assignee <profile>] [--from-todo <id>] [--json]
 hermes projects playbook  <slug> [show|save <file.json> [--note "…"]|activate <rev> [--note "…"]] [--json]
-hermes projects guidance  <slug> [list|add "<body>" [--kind directive|feedback]|retire <id>] [--json]
+hermes projects guidance  <slug> [list|add "<body>" [--kind directive|feedback]|retire <id>|activate <id>] [--json]
 hermes projects run       <slug> [--trigger schedule|manual|event|review]
                                  [--playbook-rev N] [--dry-run] [--json]
 hermes projects runs      <slug> [--limit 10] [--json]
-hermes projects retro     <slug> <run_no> [--write] [--json]
+hermes projects retro     <slug> <run_no> [--write] [--propose KIND=BODY]… [--json]
 hermes projects doctor    [--slug s] [--json]
 ```
 
@@ -63,6 +63,14 @@ schedule on.
 Guidance added with `guidance add` applies **from the next run**, never the
 current one — say so when you add one. The list is capped; when it is full,
 retire one first.
+
+A retro may carry up to three concrete proposals (`retro … --write --propose
+KIND=BODY`, KIND = playbook | directive | skill) — what a run learnt (§8.2).
+Every proposal lands **inactive**: a playbook revision waits for a lead/admin
+to activate it, a directive waits for any member (`guidance activate <id>`),
+and a skill proposal is recorded as a candidate with this project and run as
+its provenance. Nothing on the learning path is automatic — propose, never
+cross.
 
 ## Rules
 

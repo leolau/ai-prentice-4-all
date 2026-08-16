@@ -1465,6 +1465,11 @@ export interface ProjectDirective {
 
 export interface ProjectDirectivesResponse {
   directives: ProjectDirective[];
+  /**
+   * §8.2: what runs proposed in their retros — inactive until a member
+   * activates them (`POST /directives/:id/activate`).
+   */
+  proposed?: ProjectDirective[];
   /** §5.1: guidance never applies mid-conversation. */
   applies_from: string;
 }

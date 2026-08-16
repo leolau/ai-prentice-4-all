@@ -29,10 +29,14 @@ Permissions are enforced here and only here (§11): the store has no RLS.
   ``kanban_db.list_tasks`` — a project view must not become the way to read
   another user's ``private:`` card.
 
-Not in this step (later steps in §17): the retro learning write-back
-(step 10). The ``from_todo`` card seam (§10, step 8b) landed on
+Not in this step (later steps in §17): the events feed + ``summarise``
+(step 11). The ``from_todo`` card seam (§10, step 8b) landed on
 ``POST /{slug}/cards``; the score routes (§8, step 9b) landed on
-``POST /{slug}/runs/{n}/score`` + ``score_self`` on the retro route.
+``POST /{slug}/runs/{n}/score`` + ``score_self`` on the retro route; the
+retro learning write-back (§8.2, step 10) landed as ``proposals`` on the
+retro route — playbook revisions and directives land inactive, skill
+candidates record project + run provenance — plus
+``POST /{slug}/directives/{id}/activate`` for the member crossing.
 """
 
 from __future__ import annotations
@@ -1559,8 +1563,11 @@ async def list_directives_route(request: Request) -> dict[str, Any]:
             rows = projects_db.list_project_directives(
                 conn, project.id, active_only=not include_retired
             )
+            proposed = projects_db.list_proposed_directives(conn, project.id)
         return {
             "directives": rows,
+            # §8.2: what runs proposed — inactive until a member activates.
+            "proposed": proposed,
             # §5.1: guidance never applies mid-conversation.
             "applies_from": "next run",
         }
@@ -1621,6 +1628,52 @@ async def retire_directive_route(
         return {"id": directive_id, "retired": True}
 
     return await asyncio.to_thread(_retire_sync)
+
+
+@router.post("/{slug}/directives/{directive_id}/activate")
+async def activate_directive_route(
+    request: Request, directive_id: str
+) -> dict[str, Any]:
+    """§8.2: a proposed directive crosses on **any member's** word — the
+    one learning-path crossing a plain member owns. The active-set cap is
+    enforced here, at the crossing, not at proposal time; like every
+    guidance write, it applies from the next run."""
+    project, _role, _profiles, _principal = await _require_write(
+        request, judgement=True
+    )
+
+    def _activate_sync() -> dict:
+        cfg = projects_run.projects_runtime_config()
+        with projects_db.connect_closing() as conn:
+            row = conn.execute(
+                "SELECT project_id, active, retired_at FROM project_directives "
+                "WHERE id = ?",
+                (directive_id,),
+            ).fetchone()
+            if (
+                row is None
+                or row["project_id"] != project.id
+                or row["active"]
+                or row["retired_at"] is not None
+            ):
+                raise KeyError(directive_id)
+            try:
+                projects_db.activate_project_directive(
+                    conn,
+                    directive_id,
+                    max_active=cfg["guidance_max_directives"],
+                )
+            except ValueError as exc:
+                raise HTTPException(status_code=409, detail=str(exc))
+        return {"id": directive_id, "active": True, "applies_from": "next run"}
+
+    try:
+        return await asyncio.to_thread(_activate_sync)
+    except KeyError:
+        raise HTTPException(
+            status_code=404,
+            detail="directive not found, already active, or retired",
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1793,13 +1846,64 @@ async def cancel_run_route(request: Request, run_no: int) -> dict[str, Any]:
         raise HTTPException(status_code=404, detail="run not found")
 
 
+VALID_PROPOSAL_KINDS = ("playbook", "directive", "skill")
+
+
+def _parse_proposals(body: dict) -> list[dict]:
+    """The retro's at-most-three concrete proposals (§8.1). Each is a dict
+    with a ``kind`` — playbook | directive | skill — and a non-empty
+    ``body``; nothing here is applied yet, everything materializes
+    inactive (§8.2)."""
+    proposals = body.get("proposals")
+    if proposals is None:
+        return []
+    if not isinstance(proposals, list):
+        raise HTTPException(
+            status_code=422, detail="proposals must be a list"
+        )
+    if len(proposals) > 3:
+        raise HTTPException(
+            status_code=422,
+            detail="at most three concrete proposals per retro (§8.1)",
+        )
+    cleaned: list[dict] = []
+    for i, p in enumerate(proposals):
+        if not isinstance(p, dict):
+            raise HTTPException(
+                status_code=422, detail=f"proposal {i + 1} must be an object"
+            )
+        kind = str(p.get("kind") or "").strip()
+        if kind not in VALID_PROPOSAL_KINDS:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"proposal {i + 1}: kind must be one of "
+                    f"{sorted(VALID_PROPOSAL_KINDS)}"
+                ),
+            )
+        text = str(p.get("body") or "").strip()
+        if not text:
+            raise HTTPException(
+                status_code=422,
+                detail=f"proposal {i + 1}: body must not be empty",
+            )
+        cleaned.append({"kind": kind, "body": text, "raw": p})
+    return cleaned
+
+
 @router.post("/{slug}/runs/{run_no}/retro")
 async def run_retro_route(request: Request, run_no: int) -> dict[str, Any]:
     """Write or edit the retrospective. An optional ``score_self`` (1–5,
     §8.1) rides with it — the run's own claim against ``score_rubric``,
     written unprompted so self-scores stay comparable to human ones.
-    ``score_user`` is human-only on the ``/score`` route."""
-    project, _role, _profiles, _principal = await _require_write(
+    ``score_user`` is human-only on the ``/score`` route.
+
+    The retro may carry ``proposals`` — at most three (§8.1), one per §8.2
+    destination, and each lands **inactive**: a playbook revision (``note``
+    naming the run) a lead/admin activates, a directive row any member
+    activates, and a skill candidate recording this project and run as its
+    provenance. Nothing on the learning path is automatic."""
+    project, _role, profiles, principal = await _require_write(
         request, judgement=True
     )
     body = await request.json()
@@ -1818,6 +1922,63 @@ async def run_retro_route(request: Request, run_no: int) -> dict[str, Any]:
             raise HTTPException(
                 status_code=422, detail="score_self must be between 1 and 5"
             )
+    proposals = _parse_proposals(body)
+    profile_names = {p["profile"] for p in profiles}
+
+    def _materialize(conn, run_no: int) -> list[dict]:
+        """One connection, all crossings inactive (§8.2)."""
+        landed: list[dict] = []
+        for p in proposals:
+            if p["kind"] == "playbook":
+                try:
+                    cleaned = projects_db.validate_playbook_steps(
+                        p["raw"].get("steps") or []
+                    )
+                except ValueError as exc:
+                    raise HTTPException(status_code=422, detail=str(exc))
+                for step in cleaned:
+                    assignee = step.get("assignee")
+                    if assignee and profile_names and assignee not in profile_names:
+                        raise HTTPException(
+                            status_code=422,
+                            detail=(
+                                f"step {step['key']!r}: assignee {assignee!r} "
+                                f"is not one of the project's profiles "
+                                f"{sorted(profile_names)}"
+                            ),
+                        )
+                rev = projects_db.save_playbook_rev(
+                    conn,
+                    project_id=project.id,
+                    body=p["body"],
+                    steps=cleaned,
+                    created_by=principal.user_id,
+                    note=f"proposed by run {run_no}",
+                )
+                landed.append({"kind": "playbook", "rev": rev, "active": False})
+            elif p["kind"] == "directive":
+                did = projects_db.add_project_directive(
+                    conn,
+                    project_id=project.id,
+                    kind="directive",
+                    body=p["body"],
+                    author_user_id=principal.user_id,
+                    active=False,
+                )
+                landed.append({"kind": "directive", "id": did, "active": False})
+            else:  # skill — provenance only (§8.2 row 3)
+                name = str(p["raw"].get("name") or "").strip() or (
+                    f"know-how from run {run_no}"
+                )
+                cid = projects_db.add_skill_candidate(
+                    conn,
+                    project_id=project.id,
+                    run_no=run_no,
+                    name=name,
+                    body=p["body"],
+                )
+                landed.append({"kind": "skill", "id": cid})
+        return landed
 
     def _retro_sync() -> dict:
         with projects_db.connect_closing() as conn:
@@ -1828,7 +1989,9 @@ async def run_retro_route(request: Request, run_no: int) -> dict[str, Any]:
             if score_self is not None:
                 fields["score_self"] = score_self
             projects_db.update_project_run(conn, run["id"], **fields)
-            return projects_db.get_project_run_by_id(conn, run["id"])
+            payload = projects_db.get_project_run_by_id(conn, run["id"])
+            payload["proposals"] = _materialize(conn, run_no)
+            return payload
 
     try:
         return await asyncio.to_thread(_retro_sync)

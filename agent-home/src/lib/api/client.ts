@@ -1510,6 +1510,17 @@ export class HermesApiClient {
     );
   }
 
+  /** §8.2: a member activates a proposed directive — applies next run. */
+  async activateProjectDirective(
+    slug: string,
+    directiveId: string,
+  ): Promise<{ id: string; active: true; applies_from: string }> {
+    return this.request(
+      `/api/registry/projects/${encodeURIComponent(slug)}/directives/${encodeURIComponent(directiveId)}/activate`,
+      { method: "POST", json: {} },
+    );
+  }
+
   /** The record: every run with duration, outcome, deliveries, scores. */
   async projectRuns(slug: string): Promise<{ runs: ProjectRun[] }> {
     return this.request(

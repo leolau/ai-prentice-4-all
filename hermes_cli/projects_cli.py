@@ -309,19 +309,76 @@ def _cmd_runs(api: _Api, args) -> int:
     return 0
 
 
+_PROPOSAL_KINDS = ("playbook", "directive", "skill")
+
+
+def _parse_propose_flags(values: list[str]) -> Optional[list[dict]]:
+    """``--propose kind=body`` (repeatable, max 3 — §8.1). Returns None on
+    a malformed flag after printing why."""
+    proposals: list[dict] = []
+    for raw in values or []:
+        kind, sep, body = raw.partition("=")
+        kind = kind.strip().lower()
+        if not sep or kind not in _PROPOSAL_KINDS or not body.strip():
+            print(
+                "projects: --propose takes kind=body with kind one of "
+                f"{', '.join(_PROPOSAL_KINDS)}",
+                file=sys.stderr,
+            )
+            return None
+        proposals.append({"kind": kind, "body": body.strip()})
+    if len(proposals) > 3:
+        print(
+            "projects: at most three concrete proposals per retro (§8.1)",
+            file=sys.stderr,
+        )
+        return None
+    return proposals
+
+
+def _print_proposals(landed: list[dict]) -> None:
+    for p in landed or []:
+        if p.get("kind") == "playbook":
+            print(
+                f"  proposed playbook revision {p.get('rev')} (inactive) — "
+                "a lead/admin activates it"
+            )
+        elif p.get("kind") == "directive":
+            print(
+                f"  proposed directive {p.get('id')} (inactive) — any "
+                "member activates it"
+            )
+        elif p.get("kind") == "skill":
+            print(
+                f"  recorded skill candidate {p.get('id')} — provenance: "
+                "this project and run"
+            )
+
+
 def _cmd_retro(api: _Api, args) -> int:
     if args.write:
         retro = sys.stdin.read().strip()
         if not retro:
             print("projects: nothing to write on stdin", file=sys.stderr)
             return 2
+        proposals = _parse_propose_flags(args.propose)
+        if proposals is None:
+            return 2
+        payload: dict[str, Any] = {"retro": retro}
+        if proposals:
+            payload["proposals"] = proposals
         resp = api.request(
             "POST", f"/{args.slug}/runs/{args.run_no}/retro",
-            json_body={"retro": retro},
+            json_body=payload,
         )
         if resp.status_code != 200:
             return _fail(resp)
+        data = resp.json()
+        if args.json:
+            _print_json(data)
+            return 0
         print(f"Retro saved for run {args.run_no} of {args.slug}.")
+        _print_proposals(data.get("proposals") or [])
         return 0
     resp = api.request("GET", f"/{args.slug}/runs/{args.run_no}")
     if resp.status_code != 200:
@@ -762,6 +819,11 @@ def _cmd_guidance(api: _Api, args) -> int:
             print("No standing instructions.")
         for dv in directives:
             print(f"  [{dv.get('kind')}] {dv.get('body')}  ({dv.get('id')})")
+        proposed = data.get("proposed") or []
+        if proposed:
+            print("Proposed by runs — inactive until a member activates:")
+            for dv in proposed:
+                print(f"  [{dv.get('kind')}] {dv.get('body')}  ({dv.get('id')})")
         print(f"({data.get('applies_from', 'next run')})")
         return 0
     if action == "add":
@@ -798,6 +860,28 @@ def _cmd_guidance(api: _Api, args) -> int:
         if resp.status_code != 200:
             return _fail(resp)
         print(f"Retired instruction {args.body_or_id}.")
+        return 0
+    if action == "activate":
+        if not args.body_or_id:
+            print(
+                "projects: guidance activate needs the proposed instruction id",
+                file=sys.stderr,
+            )
+            return 2
+        resp = api.request(
+            "POST", f"/{slug}/directives/{args.body_or_id}/activate",
+            json_body={},
+        )
+        if resp.status_code != 200:
+            return _fail(resp)
+        data = resp.json()
+        if args.json:
+            _print_json(data)
+        else:
+            print(
+                f"Activated instruction {args.body_or_id} — applies from the "
+                f"{data.get('applies_from', 'next run')}."
+            )
         return 0
     print(f"projects: unknown guidance action: {action}", file=sys.stderr)
     return 2
@@ -1126,7 +1210,7 @@ def register_projects_subparser(
     guidance.add_argument("slug")
     guidance.add_argument(
         "guidance_action", nargs="?", default="list",
-        choices=["list", "add", "retire"],
+        choices=["list", "add", "retire", "activate"],
     )
     guidance.add_argument("body_or_id", nargs="?", default="")
     guidance.add_argument(
@@ -1171,6 +1255,14 @@ def register_projects_subparser(
     retro.add_argument("run_no", type=int)
     retro.add_argument(
         "--write", action="store_true", help="Read the retro from stdin"
+    )
+    retro.add_argument(
+        "--propose", action="append", default=[],
+        metavar="KIND=BODY",
+        help=(
+            "A concrete proposal (repeatable, max 3 — §8.1): kind is "
+            "playbook, directive or skill; it lands inactive (§8.2)"
+        ),
     )
     retro.add_argument("--json", **json_flag)
 
