@@ -17,6 +17,7 @@ import "server-only";
 import { hermesApiBaseUrl } from "@/lib/env";
 import type {
   AgentAttachmentPayload,
+  CapacityResponse,
   ChangeOpResponse,
   ChangesResponse,
   ChatMessagesResponse,
@@ -186,6 +187,15 @@ export class HermesApiClient {
    */
   async profiles(): Promise<ProfilesResponse> {
     return this.request("/api/profiles");
+  }
+
+  /**
+   * FG-31 capacity headroom — one verdict naming the bound that produced it.
+   * Read-only, and box-wide: the active-session registry is profile-local, so
+   * Python aggregates every profile's leases rather than reporting this one's.
+   */
+  async capacity(): Promise<CapacityResponse> {
+    return this.request("/api/capacity");
   }
 
   /** Resolve the C1 principal + role for the current bridged session. */

@@ -671,6 +671,32 @@ tasks:
 # local runtime lease registry cannot be read or locked.
 max_concurrent_sessions: null
 
+# Capacity headroom (FG-31) — the thresholds behind the verdict in
+# `hermes status`, `hermes doctor`, agent-home's Capacity screen and the weekly
+# digest. Reporting only: nothing here throttles or resizes anything, and a
+# `constrained` verdict never lowers max_concurrent_sessions on your behalf.
+# Defaults are deliberately conservative; raise them once you know what your box
+# does under load.
+capacity:
+  # Share of the (box-wide) concurrency cap that reads as approaching the bound.
+  watch_session_ratio: 0.60
+  constrained_session_ratio: 0.85
+  # RAM one live conversation holds, and what one more profile costs. Used only
+  # for sizing advice, never to refuse anything.
+  conversation_cost_mb: 250
+  profile_slab_mb: 150
+  # Free RAM the box should keep beyond the cost of one more profile.
+  memory_margin_mb: 512
+  # SQLite write-lock waits per hour. This is the one bound a bigger box does
+  # not fix — waits mean writes are serialising, so the advice is runtime work.
+  watch_contention_per_hour: 6
+  constrained_contention_per_hour: 30
+  # Reply latency (p95, seconds) as experienced by whoever is talking.
+  watch_p95_s: 25
+  constrained_p95_s: 60
+  # Trailing window for the contention and latency readings.
+  window_s: 86400
+
 # When true, group/channel chats use one session per participant when the platform
 # provides a user ID. This is the secure default and prevents users in the same
 # room from sharing context, interrupts, and token costs. Set false only if you
