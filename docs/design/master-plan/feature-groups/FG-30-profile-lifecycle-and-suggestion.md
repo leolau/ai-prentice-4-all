@@ -1,6 +1,6 @@
 # FG-30 — Profile lifecycle: suggest, adopt, retire
 
-**Wave:** P6-D (after FG-29 — suggestion is an output of the same loop) · **Owner agent:** _unassigned_ · **Status:** IMPLEMENTED, PARTLY VERIFIED — the suggestion/adopt/retire layer shipped in #250 and its review defects are fixed in #253. T1–T3 and the §4.3 defects (F1–F4) are **merged into `develop`**, with the three findings against those fixes (§4.4 F5–F7) fixed in the same PR. Only the live system test on `hermes-systest` remains, which needs the box.
+**Wave:** P6-D (after FG-29 — suggestion is an output of the same loop) · **Owner agent:** _unassigned_ · **Status:** IMPLEMENTED AND SYSTEM-TESTED — the suggestion/adopt/retire layer shipped in #250, its review defects are fixed in #253, and T1–T3 + F1–F7 are merged in #262. The **live system test on `hermes-systest` passed on 2026-08-16** (§Live system test) after the one defect it found — retirement reporting success over goals it never closed — was fixed.
 
 ## Summary
 
@@ -519,6 +519,69 @@ new profile starts with the entity goal + promoted skills and none of the
 parent's memory — then retire it and confirm its skills were offered for
 promotion before the archive.
 
+### Live system test — `hermes-systest`, 2026-08-16 (revision `a56bc4a6f`, fix at `755f84bc4`)
+
+Run as the `hermes` service account against the live staging home
+(`HERMES_HOME=/opt/data/hermes-home-staging`) on a controlled profile,
+`systest30`, adopted from a controlled suggestion. What only the box could show
+is marked — the rest is confirmation that what the suite asserts is also true
+where it runs.
+
+| # | Property | Result |
+|---|----------|--------|
+| 1 | Adoption creates the profile with its own prod **and** dev schemas | pass — FG-27 isolation held |
+| 2 | The new profile gets its **profile-tier sub-goal** | pass |
+| 3 | The parent's **entity goal is published** into it (read-only copy) | pass — `published_copy=True` |
+| 4 | The child `.env` carries **none** of the parent's credentials | pass — no parent key present |
+| 5 | `commit-channel` **refuses the parent's own token** before writing | pass — named the holding profile; **box-only**: the collision set is other profiles' real `.env` files |
+| 6 | The committed token **reads back exactly** | pass — F7's equality read-back, on a real write |
+| 7 | Replacing a **stale** token reads back the *replacement* | pass — the F2→F7 case, live |
+| 8 | Retirement archives the profile and releases its channel | pass — archive written, gateway unit not left enabled |
+| 9 | Retirement **closes the profile's goals** | **failed**, then fixed — see below |
+
+**The defect (#9), and why no suite could see it.** `hermes profile retire`
+printed the archive path and exited 0 while every goal in the retired profile's
+schema stayed `active`:
+
+```
+retire: could not mark goals completed: Unknown goal status: 'completed'
+```
+
+`_complete_profile_goals()` set the status to `"completed"`, which is **not** in
+`GoalRegistryStore.GOAL_STATUSES` (`active`, `paused`, `done`, `cleared`), so
+`set_status()` raised on the first goal — and the whole helper sat inside
+`except Exception: log.warning(...)`, so the caller could not know. This is the
+third instance in this FG of the same shape (#253's two dead call sites, §4.3's
+F2), and it is the argument for the box test: the E2E suite exercises the store
+directly and never runs the retire path against a real registry, so a wrong
+*word* passed every gate the repository has.
+
+Fixed in `hermes_cli/profile_suggestion.py`:
+
+* the status is a named constant, `RETIRED_GOAL_STATUS = "done"`, tied by test
+  to the registry's own vocabulary rather than written out as prose;
+* `retire_profile()` returns a `RetireResult` (`archive`, `goals_completed`,
+  `goal_error`) and the CLI prints `Goals closed: N` or `⚠ Goals NOT closed
+  (<cause>)`. Retirement still does not abort — the archive is written and the
+  channel released before this step, so raising would strand the caller
+  mid-way; the retry is safe and idempotent.
+
+Re-verified on the box at `755f84bc4`, same profile:
+
+```
+ Profile 'systest30' retired
+  Archive: /opt/data/hermes-home-staging/archives/systest30.tar.gz
+  Goals closed: 1
+
+done    tier=profile   published_copy=False  SYSTEST30-GOAL verify FG-30 adoption
+active  tier=entity    published_copy=True   Describe what this system is for
+```
+
+The published entity copy **staying active is correct**, and worth recording so
+nobody "fixes" it: it belongs to the parent, and FG-29 §3 makes a published copy
+read-only in the receiving profile at the database level. Retiring a child must
+not close the whole system's entity goal.
+
 ## Dependencies
 
 - **Blocked by:** FG-29 (goal tree, promotion, digest), FG-27 L3+L1 (per-profile
@@ -540,13 +603,13 @@ console queue; full negative matrix on real Postgres; `scripts/run_tests.sh`,
 - [~] **Monthly** generation pass, one open suggestion at a time; rendered in FG-29's weekly digest (§1.1) — the interval is now enforced (edition 4); nothing *schedules* the pass, so it runs when `hermes profile suggest` is run
 - [x] No re-proposal of dismissed suggestions on the same evidence — latched on `dedup_key` over the evidence's *identity* (edition 4), reusing `cron/suggestions.py`'s contract rather than a second mechanism (§1.3)
 - [x] Adoption → `create_profile` with sub-goal, published entity goal, promoted skills through the shared tier; parent `.env` and un-promoted local skills **not** copied; person-level `USER.md` **asserted, not copied** (§2)
-- [~] Channel-less start + `hermes doctor` reporting (channel-less is read from the profile's own `.env`, not from whether its gateway happens to be running). **`hermes profile commit-channel <name>` exists** on `feat/fg30-remaining-tasks` — profile-local `.env` write, pre-write token-collision refusal naming the holder, gateway install/start. The §4.3 defects F2–F4 are fixed, and §4.4 F6/F7 with them: the read-back compares the token rather than merely finding one, and the collision check is fail-closed with its residual `Environment=` gap named rather than falsely covered. Not yet exercised on the box
-- [x] Retire/merge with one-time promotion offer + archive; owner-only, channel released, profile-tier **and** child goals completed, in the retired profile's own schema
+- [~] Channel-less start + `hermes doctor` reporting (channel-less is read from the profile's own `.env`, not from whether its gateway happens to be running). **`hermes profile commit-channel <name>` exists** on `feat/fg30-remaining-tasks` — profile-local `.env` write, pre-write token-collision refusal naming the holder, gateway install/start. The §4.3 defects F2–F4 are fixed, and §4.4 F6/F7 with them: the read-back compares the token rather than merely finding one, and the collision check is fail-closed with its residual `Environment=` gap named rather than falsely covered. **Exercised on the box 2026-08-16** — parent-token collision refused by name, exact read-back, stale-token replacement (§Live system test #5–7)
+- [x] Retire/merge with one-time promotion offer + archive; owner-only, channel released, profile-tier **and** child goals completed, in the retired profile's own schema — the completion was **broken on the box** until 2026-08-16 (`"completed"` is not a registry status, and the failure was swallowed); the status is now a constant tied to `GOAL_STATUSES` and a failed close is reported instead of logged (§Live system test #9)
 - [x] Idle-profile detection in the digest (a just-adopted profile is not reported idle on day one)
 - [x] Seeded default entity goal + settings/onboarding editor; editing bumps the publish revision (shipped by FG-29, verified here)
 - [~] **`agent-home`** (D20, **not** the dashboard): profile-local suggestion queue with evidence (§4.1) — **built** on `feat/fg30-remaining-tasks` (card not list, role + goal + rationale, owner-only actions gated in Python, dismiss reason + permanence warning, 401/403 route tests). §4.3 F1 is fixed and §4.4 F5 with it: the route returns the open card plus a **capped, evidence-free** reviewed trail (`queue()` → `suggestions` + `reviewed`), and the route is exercised over HTTP rather than only statically
 - [x] Two decisions for Leo, now decided and implemented: the roster is dropped from the aux-LLM prompt and kept as a local corroborating signal only (`_evidence_for_prompt()`); `"prod"` is a written one-tier assumption at both call sites (§4.3)
-- [~] Tests (E2E on real Postgres in `tests/hermes_cli/test_fg30_profile_suggestion_e2e.py`, plus `test_fg30_review_defects.py` for the properties that suite could not see). **System test on `hermes-systest` not run** — it needs the box, which no cloud agent can reach
+- [~] Tests (E2E on real Postgres in `tests/hermes_cli/test_fg30_profile_suggestion_e2e.py`, plus `test_fg30_review_defects.py` for the properties that suite could not see). **System test on `hermes-systest` passed 2026-08-16** (§Live system test) — nine properties, one defect found and fixed
 
 ## Re-read against the shipped implementation, edition 4
 
@@ -590,6 +653,7 @@ Two notes that are not defects:
 
 | Date | Edition | Author | Change | Rationale |
 |------|---------|--------|--------|-----------|
+| 2026-08-16 | 9 | devin (for Leo) | Live system test on `hermes-systest`; retirement closed no goals and said it had | Leo: "ok go ahead". Eight of the nine properties held on the box, including the three that only the box can show — `commit-channel` refusing the parent's real token by name, the exact read-back on a real write, and the stale-token replacement. The ninth is the reason the box test exists: `hermes profile retire` printed the archive path and exited 0 while every goal in the retired profile's schema stayed `active`, because `_complete_profile_goals()` set the status to `"completed"`, which is not in `GOAL_STATUSES` (`active`, `paused`, `done`, `cleared`) — and the `ValueError` was caught, logged at warning and dropped. A wrong *word* therefore passed `ruff`, `ty`, 53 unit tests and a Postgres E2E suite, because none of them runs retire against a real registry. That is the third occurrence of this shape in this FG (#253's two dead call sites, §4.3's F2), so the fix is aimed at the shape and not just the word: the status is a named constant tied by test to the registry's own vocabulary, and `retire_profile()` now returns a `RetireResult` whose `goal_error` the CLI prints — an operation that could not be completed must not read as one that succeeded. It deliberately still does not abort: the archive and the channel release happen first, so raising would strand the caller mid-retirement, and the retry is idempotent. Recorded so it is not "fixed" later: the published **entity** copy correctly stays active, because FG-29 §3 makes it read-only in the receiving profile and retiring a child must not close the whole system's goal. | Leo: "Can you do the testing without FG-28?" → "ok go ahead" |
 | 2026-08-10 | 1 | devin (for Leo) | Created FG doc | Leo's answer to the OPC-routing question turned out to be a new capability rather than a UX choice: **support both** — a channel per profile for clarity, but starting from one or a couple of profiles because "the human may not know what kind of profile does he/she needs", with the system **suggesting more profiles over time, as part of the learning and promotion**. Every other Phase-6 doc had assumed static, up-front profile structure. Profile creation becomes an *output* of the same loop FG-29 uses for skills: the evidence that distils a skill also shows where work clusters into a distinct sub-goal. Three holes that the suggestion mechanism opens are addressed here rather than left implicit: (a) a bot token needs a human at BotFather, so a mandatory credential step would block the routine act of adopting a suggestion — adopted profiles therefore start **channel-less** and earn a channel when the owner commits; (b) suggestion without **retirement/merge** produces sprawl, and each profile costs a memory, a channel and a thing to remember, so idle detection and a retire path with a one-time promotion offer are in scope; (c) **splitting memory** between a parent and a new profile is a judgement no heuristic makes well and nobody will do by hand, so adoption deliberately inherits only the unambiguous parts (sub-goal, promoted skills, person-level `USER.md`) — lossy but honest and automatable, and it gives skill promotion a second purpose, since a promoted skill is what a new instrument starts life with. | Leo: "We need to support both. Each profile should have its own bot/channel to make things more clear and efficient for both the human and the system. However, at the beginning, the human may not know what kind of profile does he/she needs. Therefore, the system should be able to start with just one profile or a couple of profiles and the ability to suggest more profiles to add over time, as part of the learning and promotion." |
 | 2026-08-14 | 3 | devin (for Leo) | Leo's two open questions closed (one open suggestion, monthly; role **and** goal both required) and three pickup defects fixed: the shipped `cron/suggestions.py` surface, the `USER.md` inheritance that is already true, and the unnamed UI surface | Leo answered both open questions, and answering the cadence one broke the doc's own wiring: it said suggestion generation "runs on the same weekly digest" as skill promotion, but **monthly** generation cannot share a weekly clock. Split explicitly — generation is its own monthly pass gated on no suggestion being open, rendering still rides `weekly_digest()`, which schedules nothing — because "same digest" would otherwise be implemented as "weekly", i.e. four times the intended volume against a mechanism whose dismissals latch forever. Role+goal are both required for a reason worth recording: a role has no end state, and §4's retire path fires when a sub-goal *completes*, so a role-only suggestion could never retire and would produce exactly the sprawl this FG bounds. Three defects found by reading the doc against shipped code rather than trusting it: (a) **`cron/suggestions.py` already implements this pattern** — consent-first proposals from four sources with `dedup_key`-latched dismissals — and the doc specified a fresh non-repetition rule, i.e. a second latching mechanism, which `AGENTS.md` rejects; the contract is now reused and the separate store is argued (JSON file vs `evidence` JSONB + goal/principal FKs) instead of assumed; (b) the "inherit the person-level `USER.md`" item is **already true** — FG-24 edition 3 put it at `<root>/persons/<user_id>/USER.md`, outside any profile home, so an implementer reading "inherited" as "copy on adoption" would reintroduce the drifting-copies problem that amendment exists to remove; it is now an assertion, and the test asserts by path; (c) the UI surface was "console", which under **D20** must be `agent-home` — read as the dashboard it would have put this FG's main surface in the frozen operator console. Also recorded: the queue is **profile-local** because `profile_suggestions` FKs profile-local `goals`/`principals`, and a cross-profile view needs FG-28's unshipped switcher — the FG-26 item-1 trap, named so nobody walks into it again. |
 | 2026-08-14 | 5 | devin (for Leo) | The three remaining items written up as cold-pickup tasks (§4.2), and the cloud-agent prompt rewritten for what is actually left | Leo asked for the remaining work to be in the file so another agent can do it. The prompt was the dangerous part, exactly as in FG-28 #222: it still opened with "add `profile_suggestions`… implement retire and merge", so a fresh agent would have rebuilt a layer that ships — and rebuilt it *without* the nine corrections, since the prompt describes the original intent, not the shipped code. It now points at §4.2, lists the invariants each fix installed (identity-only `dedup_key`, the `_generation_due` clock measured against any status, no `.env`/local-skill inheritance, `connect_for_publish` as the only crossing, `_comms_resolve_principal` on every route, merge-is-retirement), and states what a green suite here does not prove — the shipped 8 tests missed all nine defects, two of which `ty` alone could see. T1 is specified as a table of the four layers to mirror from FG-26's `/users` path so the queue is not invented from scratch; T2 as composition over `hermes gateway setup`/`install` plus a token-collision refusal *before* the write, since the gateway's `EX_CONFIG` stop is a backstop and not a UX; T3 as two questions to ask rather than guess — the aux-LLM prompt serialises the whole evidence dict, so every active principal's `user_id`, name and role leaves the box to name a profile, which naming does not need. |
@@ -606,9 +670,11 @@ Two notes that are not defects:
 > verbs, retire/merge or the digest wiring. **§4.2's three tasks are also
 > implemented** (`feat/fg30-remaining-tasks`) — do not rebuild those either.
 > **§4.3's four defects (F1–F4) and §4.4's three findings (F5–F7) are also
-> fixed and merged into `develop`.** If you are picking this up now, the only
-> work left is the **live system test on `hermes-systest`** (see §System
-> testing) — which needs the box, so it cannot be done from a cloud agent.
+> fixed and merged into `develop`, and the live system test on `hermes-systest`
+> passed on 2026-08-16** (§Live system test), so **there is nothing left to
+> pick up here**. If you are re-running the box test after a change, run the
+> nine properties in that section and treat #9 as the load-bearing one: it is
+> the only one no repository test can see.
 > §4.2 remains as the specification each task was built against. Read §"Re-read against the shipped implementation" too, for
 > the mistakes already made here so you do not repeat them.
 >

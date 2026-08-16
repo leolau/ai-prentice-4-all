@@ -1251,13 +1251,41 @@ class ProfileSuggestionStore:
 # ---------------------------------------------------------------------------
 
 
+#: The terminal status a retired profile's goals are moved to. Taken from the
+#: registry's own vocabulary (``goal_registry.GOAL_STATUSES``) rather than
+#: written out as prose: ``"completed"`` is not in it, and
+#: ``GoalRegistryStore.set_status`` raises on an unknown value — which is
+#: exactly how the live box retired a profile whose goals all stayed active.
+RETIRED_GOAL_STATUS = "done"
+
+
+@dataclass(frozen=True)
+class RetireResult:
+    """What a retirement actually achieved.
+
+    Archiving and goal completion can fail independently, and the archive is
+    made first — so the caller needs to be told which parts happened rather
+    than reading a bare path as "all of it did".
+    """
+
+    archive: Path
+    goals_completed: int
+    goal_error: Optional[str] = None
+
+    def __fspath__(self) -> str:
+        return str(self.archive)
+
+    def __str__(self) -> str:
+        return str(self.archive)
+
+
 async def retire_profile(
     name: str,
     principal: "Principal",
     *,
     promotions: "SkillPromotionStore",
     connection: Optional["asyncpg.Connection"] = None,
-) -> Path:
+) -> RetireResult:
     """Owner-only: offer skills once, archive, release the channel, mark goals.
 
     1. Offer the profile's skills for promotion **once** — the only way its
@@ -1265,10 +1293,13 @@ async def retire_profile(
        failed retirement can be retried instead of losing the one offer.
     2. Archive via ``export_profile`` (restorable).
     3. Release the channel: disable the gateway service.
-    4. Mark the profile's goals ``completed`` — the profile tier *and* the
+    4. Mark the profile's goals ``done`` — the profile tier *and* the
        operational goals under it, which would otherwise stay active under a
        profile nobody runs.
     5. Do NOT delete the profile directory — the archive is restorable.
+
+    Returns a :class:`RetireResult`: the archive exists even when step 4 could
+    not run, and the caller must be able to tell those apart.
     """
     if not principal.is_owner:
         raise PermissionError(
@@ -1306,10 +1337,14 @@ async def retire_profile(
     # 3. Release the channel: disable the gateway service.
     _release_channel(canon, profile_dir)
 
-    # 4. Mark the profile's goals completed.
-    await _complete_profile_goals(profile_dir, principal)
+    # 4. Mark the profile's goals done.
+    completed, goal_error = await _complete_profile_goals(profile_dir, principal)
 
-    return archive_path
+    return RetireResult(
+        archive=Path(archive_path),
+        goals_completed=completed,
+        goal_error=goal_error,
+    )
 
 
 async def _offer_skills_for_promotion(
@@ -1357,7 +1392,9 @@ def _release_channel(canon: str, profile_dir: Path) -> None:
         log.warning("retire: could not release channel for %s: %s", canon, exc)
 
 
-async def _complete_profile_goals(profile_dir: Path, principal: "Principal") -> None:
+async def _complete_profile_goals(
+    profile_dir: Path, principal: "Principal"
+) -> Tuple[int, Optional[str]]:
     """Complete the retired profile's goals — in *that* profile's schema.
 
     Resolves the store *under* the home override, so the connection and the
@@ -1382,13 +1419,19 @@ async def _complete_profile_goals(profile_dir: Path, principal: "Principal") -> 
             registry = GoalRegistryStore(get_store("supabase-app", "prod"))
             goals = await registry.list_goals(principal, status="active")
             profile_goal_ids = {g.id for g in goals if g.tier == "profile"}
+            completed = 0
             for goal in goals:
                 if goal.tier == "profile" or goal.parent_goal_id in profile_goal_ids:
-                    await registry.set_status(principal, goal.id, "completed")
+                    await registry.set_status(
+                        principal, goal.id, RETIRED_GOAL_STATUS
+                    )
+                    completed += 1
+            return completed, None
         finally:
             reset_hermes_home_override(token)
     except Exception as exc:
-        log.warning("retire: could not mark goals completed: %s", exc)
+        log.warning("retire: could not mark goals done: %s", exc)
+        return 0, f"{type(exc).__name__}: {exc}"
 
 
 async def merge_profiles(
@@ -1398,7 +1441,7 @@ async def merge_profiles(
     *,
     promotions: "SkillPromotionStore",
     connection: Optional["asyncpg.Connection"] = None,
-) -> Path:
+) -> RetireResult:
     """Owner-only: the source's skills go through promotion; the source retires.
 
     A merge is a retirement with a stated destination, so it ends where a

@@ -63,6 +63,10 @@ except ModuleNotFoundError:
 
 import os
 import sys
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:  # import-time cost is why the CLI imports lazily elsewhere
+    from hermes_cli.profile_suggestion import RetireResult
 
 
 def _set_process_title() -> None:
@@ -10809,6 +10813,25 @@ def _coalesce_session_name_args(argv: list) -> list:
     return result
 
 
+def _print_retired_goals(result: "RetireResult") -> None:
+    """Say whether the goals were actually closed, not just that we tried.
+
+    Archiving succeeds long before the goal update runs, so a bare "retired"
+    can sit over a profile whose goals are all still active — which is what the
+    box did until the status vocabulary was fixed. The reader needs to know
+    which of the two happened.
+    """
+    if result.goal_error:
+        print(
+            f"  ⚠ Goals NOT closed ({result.goal_error}). The archive is made "
+            "and the channel released, so this profile's goals are still "
+            "active under a profile nobody runs — fix the cause and retire "
+            "again; the retry is safe."
+        )
+    elif result.goals_completed:
+        print(f"  Goals closed: {result.goals_completed}")
+
+
 def cmd_profile(args):
     """Profile management — create, delete, list, switch, alias."""
     from hermes_cli.profiles import (
@@ -11567,11 +11590,12 @@ def cmd_profile(args):
                 print("Error: no owner enrolled.")
                 sys.exit(1)
             promotions = SkillPromotionStore(app_store)
-            archive = await _retire_profile(
+            result = await _retire_profile(
                 args.profile_name, principal, promotions=promotions
             )
             print(f" Profile '{args.profile_name}' retired")
-            print(f"  Archive: {archive}")
+            print(f"  Archive: {result.archive}")
+            _print_retired_goals(result)
 
         asyncio.run(_run_retire())
 
@@ -11601,11 +11625,12 @@ def cmd_profile(args):
                 print("Error: no owner enrolled.")
                 sys.exit(1)
             promotions = SkillPromotionStore(app_store)
-            archive = await _merge_profiles(
+            result = await _merge_profiles(
                 args.source, args.target, principal, promotions=promotions
             )
             print(f"✓ Profile '{args.source}' merged into '{args.target}'")
-            print(f"  Archive: {archive}")
+            print(f"  Archive: {result.archive}")
+            _print_retired_goals(result)
 
         asyncio.run(_run_merge())
 
