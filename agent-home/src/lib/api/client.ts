@@ -198,8 +198,10 @@ export class HermesApiClient {
   // forward; a 403 from upstream is the real gate, not a BFF re-derivation.
 
   /**
-   * Pending profile suggestions for the active profile (read-only, any
-   * enrolled principal). At most one is `proposed` at a time (§1.1).
+   * This profile's suggestions — open (``proposed``) first, then the reviewed
+   * trail (``adopted``/``dismissed``) so the owner keeps a trace of what they
+   * just did. At most one is `proposed` at a time (§1.1). Any enrolled
+   * principal may read; adopt/dismiss are owner-only action routes.
    */
   async profileSuggestions(): Promise<ProfileSuggestionsResponse> {
     return this.request("/api/profiles/suggestions");

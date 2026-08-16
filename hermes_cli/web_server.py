@@ -14152,13 +14152,27 @@ async def describe_profile_auto_endpoint(name: str, body: ProfileDescribeAuto):
 
 @app.get("/api/profiles/suggestions")
 async def list_profile_suggestions_endpoint(request: Request):
-    """List pending profile suggestions for the active profile."""
-    from hermes_cli.profile_suggestion import ProfileSuggestionStore
+    """List this profile's suggestions — open ones first, then the reviewed trail.
+
+    Defaults to **all** statuses (``proposed`` + ``adopted`` + ``dismissed``) so
+    the owner keeps a trace of what they just did: the queue surface splits open
+    from reviewed, and without the reviewed rows an adopt vanishes the card the
+    owner was looking at. An optional ``?status=proposed`` narrows the read for
+    a caller that only wants the open one (the digest).
+    """
+    from hermes_cli.profile_suggestion import (
+        ProfileSuggestionStore,
+        SUGGESTION_STATES,
+    )
 
     store = ProfileSuggestionStore(_comms_app_store())
     principal = await _comms_resolve_principal(request)
+    wanted: tuple[str, ...] = SUGGESTION_STATES
+    raw = request.query_params.get("status")
+    if raw:
+        wanted = tuple(s for s in (raw,) if s in SUGGESTION_STATES) or SUGGESTION_STATES
     try:
-        suggestions = await store.list_suggestions(principal)
+        suggestions = await store.list_suggestions(principal, statuses=wanted)
         return {"suggestions": [s.as_dict() for s in suggestions]}
     except Exception as exc:
         _log.exception("GET /api/profiles/suggestions failed")
