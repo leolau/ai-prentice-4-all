@@ -240,6 +240,23 @@ def person_memory_files_on_box(user_id: str) -> List[CuratedFile]:
     return files
 
 
+def erase_curated_file(curated: CuratedFile) -> None:
+    """Delete one curated file, and the principal directory it just emptied.
+
+    A left-behind ``memories/users/<uid>/`` is a person this profile still
+    appears to know: it is what ``--all-principals`` enumerates, and what a
+    member deletion reads to decide whether an identity file is still in use.
+    """
+    curated.path.unlink()
+    if curated.scope not in {"participation", "person"}:
+        return
+    try:
+        curated.path.parent.rmdir()
+    except OSError:
+        # Something else lives there — leaving the directory is correct.
+        pass
+
+
 ENTRY_DELIMITER = "\n§\n"
 
 #: Write targets. ``memory``/``user`` are the principal's own tiers;
