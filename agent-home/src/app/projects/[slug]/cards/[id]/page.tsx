@@ -1,5 +1,8 @@
+import { notFound } from "next/navigation";
+
 import { MobileShell } from "@/components/MobileShell";
 import { CardDetailView } from "@/components/projects/CardDetailView";
+import { HermesApiError } from "@/lib/api/client";
 import { apiClientForRequest, requirePrincipal } from "@/lib/auth/principal";
 import type { ProjectCardDetail } from "@/types";
 
@@ -21,11 +24,12 @@ export default async function Page({
 
   // Fetch under the try, render outside it.
   let card: ProjectCardDetail | null = null;
-  let cardError: string | null = null;
   try {
     card = await client.projectCard(slug, id);
   } catch (err) {
-    cardError = err instanceof Error ? err.message : "Failed to load";
+    // 404 = no such card (or no such project for this caller) — Next's
+    // not-found, not a load error that prints upstream detail (F7).
+    if (err instanceof HermesApiError && err.status === 404) notFound();
   }
 
   if (!card) {
@@ -35,7 +39,7 @@ export default async function Page({
           data-component="CardPageError"
           className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface)] p-4 text-sm text-[var(--color-muted)]"
         >
-          Couldn&apos;t load this card ({cardError}).
+          Couldn&apos;t load this card right now.
         </div>
       </MobileShell>
     );

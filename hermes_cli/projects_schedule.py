@@ -393,6 +393,20 @@ def _review_period_seconds(review_every: Optional[str]) -> int:
 # ---------------------------------------------------------------------------
 
 
+def _epoch_from_timestamp(value) -> int:
+    """Best-effort epoch seconds from a stored timestamp. The cron store
+    writes ISO strings, the projects store writes epoch ints; an
+    unparseable value is 0, which simply leaves the anchor unset."""
+    if value in (None, ""):
+        return 0
+    if isinstance(value, (int, float)):
+        return int(value)
+    try:
+        return int(datetime.fromisoformat(str(value)).timestamp())
+    except ValueError:
+        return 0
+
+
 def derive_health(
     project,
     *,
@@ -424,7 +438,13 @@ def derive_health(
         last_start = max(
             (int(r.get("started_at") or 0) for r in runs), default=0
         )
-        if last_start and last_start < now - 2 * period:
+        # A schedule that has never fired is measured from when it was
+        # wired: the cron job's own creation, falling back to the project
+        # record. Silence since then IS the failure mode (§9.2).
+        anchor = last_start or _epoch_from_timestamp(
+            (cron_job or {}).get("created_at")
+        ) or int(getattr(project, "created_at", 0) or 0)
+        if anchor and anchor < now - 2 * period:
             return "stalled"
 
     # ---- attention -------------------------------------------------------

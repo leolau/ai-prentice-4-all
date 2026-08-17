@@ -1,5 +1,8 @@
+import { notFound } from "next/navigation";
+
 import { MobileShell } from "@/components/MobileShell";
 import { RunView } from "@/components/projects/RunView";
+import { HermesApiError } from "@/lib/api/client";
 import { apiClientForRequest, requirePrincipal } from "@/lib/auth/principal";
 import type { ProjectRun } from "@/types";
 
@@ -35,11 +38,12 @@ export default async function Page({
   const client = await apiClientForRequest();
   // Fetch under the try, render outside it.
   let run: ProjectRun | null = null;
-  let runError: string | null = null;
   try {
     run = await client.projectRun(slug, runNoInt);
   } catch (err) {
-    runError = err instanceof Error ? err.message : "Failed to load";
+    // 404 = no such run (or no such project for this caller) — Next's
+    // not-found, not a load error that prints upstream detail (F7).
+    if (err instanceof HermesApiError && err.status === 404) notFound();
   }
 
   if (!run) {
@@ -49,7 +53,7 @@ export default async function Page({
           data-component="RunPageError"
           className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface)] p-4 text-sm text-[var(--color-muted)]"
         >
-          Couldn&apos;t load run {runNoInt} ({runError}).
+          Couldn&apos;t load run {runNoInt} right now.
         </div>
       </MobileShell>
     );
