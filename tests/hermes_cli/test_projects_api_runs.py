@@ -462,6 +462,26 @@ def test_tools_route_validates_names_and_shows_the_intersection(env):
     assert resp.status_code == 403
 
 
+def test_tools_route_rejects_names_that_would_split_the_csv(env):
+    """L1: both columns are stored comma-joined, so a name carrying a
+    separator (or any other structural character) is refused at write
+    time — before the unknown-name check — rather than silently round-
+    tripping as two unknown names."""
+    project = _active_project(env)
+    client, _state = env
+    for payload in (
+        {"toolsets": ["web,coding"]},
+        {"toolsets": ["web coding"]},
+        {"skills": ["di,gest"]},
+    ):
+        resp = client.patch(
+            f"/api/registry/projects/{project['slug']}/tools", json=payload
+        )
+        assert resp.status_code == 422, (payload, resp.text)
+        detail = resp.json()["detail"]
+        assert "invalid" in detail
+
+
 def test_autonomy_is_a_lead_route_not_a_judgement_act(env):
     project = _active_project(env)
     client, state = env

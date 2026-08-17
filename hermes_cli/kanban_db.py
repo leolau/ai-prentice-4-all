@@ -3243,6 +3243,45 @@ def events_tail(
     return latest, [_event_from_row(r) for r in rows]
 
 
+def project_events_tail(
+    conn: sqlite3.Connection,
+    project_id: str,
+    *,
+    principal: Optional[Principal] = None,
+    since_id: int = 0,
+    limit: int = 200,
+) -> tuple[int, list[Event]]:
+    """Return ``(latest_event_id, events)`` for one project's visible cards.
+
+    The project-scoped twin of :func:`events_tail` (E4): a ``JOIN`` against
+    ``tasks.project_id`` with the same C2 visibility clause ``list_tasks``
+    applies, instead of expanding every task id into an ``IN (…)`` list —
+    which trips SQLite's bound-variable cap (~999 on many builds) the moment
+    a long-running project outgrows it, and re-lists every card on every
+    poll. Same head/cursor semantics as :func:`events_tail`; archived cards
+    stay excluded, as on the board read.
+    """
+    clause = "t.project_id = ? AND t.status != 'archived'"
+    params: list[Any] = [project_id]
+    if principal is not None and not principal.is_owner:
+        clause += " AND (t.visibility = 'shared' OR t.visibility = ?)"
+        params.append(principal.private_visibility)
+    head = conn.execute(
+        "SELECT MAX(e.id) AS m FROM task_events e "
+        "JOIN tasks t ON t.id = e.task_id WHERE " + clause,
+        params,
+    ).fetchone()
+    latest = int(head["m"]) if head and head["m"] is not None else 0
+    rows = conn.execute(
+        "SELECT e.* FROM task_events e "
+        "JOIN tasks t ON t.id = e.task_id WHERE "
+        + clause
+        + " AND e.id > ? ORDER BY e.id ASC LIMIT ?",
+        [*params, int(since_id), int(limit)],
+    ).fetchall()
+    return latest, [_event_from_row(r) for r in rows]
+
+
 def _append_event(
     conn: sqlite3.Connection,
     task_id: str,

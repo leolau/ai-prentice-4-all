@@ -60,8 +60,8 @@ Nothing from #270 has been fixed. Steps 9–11 were new work, not repair work.
 | M1 | a repeatable project that has *never* run is never `stalled` (`if last_start and …`) | **OPEN** | `projects_schedule.py:423-428` |
 | M2 | health/read filtering happens **after** the page slice, and `next_cursor` is taken from the last *emitted* row | **OPEN — and worse than reported: it loses rows, not just repeats them.** Rows between the last emitted row and the end of the slice are skipped permanently, and an all-filtered page returns `next_cursor=None`, ending pagination while matches remain | `projects_api.py:493-528` |
 | M3 | an instance owner/admin who is not a project member has `role is None`, so contact addresses are dropped from them too | **OPEN** | `projects_api.py:802` |
-| L1 | `toolsets`/`skills` stored as CSV strings | **OPEN** | `projects_run.py:646-652` |
-| L2 | profile-imported legacy projects land with NULL `goal`, no outputs and no host profile — the mandatory-field invariant does not hold for them | **OPEN** | `projects_db.py:2496-2517` |
+| L1 | `toolsets`/`skills` stored as CSV strings | **FIXED** — Block 4: CSV kept (the UI's `ToolsPanel` already splits CSV); names are validated against `^[A-Za-z0-9_.:-]+$` at write time in `patch_tools_route`, before the unknown-name check — a separator can no longer round-trip as two unknown names | `projects_run.py:646-652` |
+| L2 | profile-imported legacy projects land with NULL `goal`, no outputs and no host profile — the mandatory-field invariant does not hold for them | **FIXED** — Block 4: quarantined — imports land with `status='needs_completion'`; leaving the status or scheduling is refused until a goal, an output and a host profile exist, each refusal naming what is missing; doctor emits a `needs_completion` finding and the list row renders it instead of an empty goal | `projects_db.py:2496-2517` |
 | F1a | accept-output returns an ack envelope; `OutputsPanel` merges it as a row, so the row stays `delivered`, the button stays, and `offers_closure` is never surfaced | **FIXED** — Block 1: the route returns the updated row + the offer; the panel merges and surfaces a closure notice | `projects_api.py:1021-1025` vs `OutputsPanel.tsx:38-59` |
 | F1b | continue-run returns `{run, promoted, budget_gate}`; `RunView` reads `data.status`, which never exists at the envelope level, so continuing appears to do nothing and the `budget_gate` holding the run is never shown | **FIXED** — Block 1: `RunView` unwraps `data.run` (or the bare row on cancel) and renders `budget_gate` | `projects_run.py:786` vs `RunView.tsx:84-86` |
 | F1c | add-directive returns `{id, applies_from}`; `GuidancePanel` prepends it as a `ProjectDirective`, so the new directive renders with no body, author or date until reload | **FIXED** — Block 1: the route returns the full directive row with `applies_from` flat beside it | `projects_api.py:1691` vs `GuidancePanel.tsx` |
@@ -427,16 +427,35 @@ PR per block — each block is independently shippable and independently testabl
 
 **Block 4 — the later steps.**
 
-- [ ] E2 · reject (or honour) a foreign `from_todo.profile`; roll the
-      `project_links` row back with the card.
-- [ ] E3 · wire the event tail to the detail page, or delete the endpoint.
-- [ ] E4 · project-scoped `events_tail` join, so >999 cards does not 500.
-- [ ] E5 · derive the project score from the last five *scores*, not from
-      scores within the last 25 runs.
-- [ ] L1 · `toolsets`/`skills` as rows rather than CSV.
-- [ ] L2 · profile-imported legacy projects violate the mandatory-field
+- [x] E2 · reject (or honour) a foreign `from_todo.profile`; roll the
+      `project_links` row back with the card. *(Block 4: the seam honours
+      only the profile serving the request — a foreign `profile` is a 422
+      before the to-do store is touched; a `set_stage` failure now rolls
+      the `project_links(kind='todo')` row back with the card; the sheet
+      names no profile of its own)*
+- [x] E3 · wire the event tail to the detail page, or delete the endpoint.
+      *(Block 4: wired — `useProjectEvents` polls `/events` every 15s,
+      seeding its cursor from the first response's `latest_event_id` and
+      `router.refresh()`-ing when the head moves; mounted in
+      `ProjectDetailView`)*
+- [x] E4 · project-scoped `events_tail` join, so >999 cards does not 500.
+      *(Block 4: `kanban_db.project_events_tail` — one join against
+      `tasks.project_id` with the C2 visibility clause; no id list, no
+      card re-list)*
+- [x] E5 · derive the project score from the last five *scores*, not from
+      scores within the last 25 runs. *(Block 4:
+      `projects_db.last_scored_runs` — the window is the last five
+      `score_user` rows; an unscored streak can no longer hide the score,
+      and a re-score still moves it)*
+- [x] L1 · `toolsets`/`skills` as rows rather than CSV. *(Block 4: the
+      recipe's cheapest-correct option — CSV kept, names validated against
+      `^[A-Za-z0-9_.:-]+$` at write time, before the unknown-name check)*
+- [x] L2 · profile-imported legacy projects violate the mandatory-field
       invariant (NULL `goal`, no outputs, no host profile) — decide whether they
-      are quarantined, completed on first open, or migrated.
+      are quarantined, completed on first open, or migrated. *(Block 4:
+      quarantined — `needs_completion` status; activation and scheduling
+      refuse with the missing fields named, doctor flags it, the list row
+      shows "needs completion" instead of an empty goal)*
 
 **Block 5 — close the two holes that hid all of the above.**
 

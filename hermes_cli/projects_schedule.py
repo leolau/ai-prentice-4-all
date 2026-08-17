@@ -167,6 +167,22 @@ def set_project_schedule(
     (§3.1: a schedule with no method is a timer that produces nothing).
     One-shot schedules are refused: a repeatable project fires forever.
     """
+    if getattr(project, "status", "") == "needs_completion":
+        # L2: an imported legacy project is quarantined until a human
+        # completes it — a schedule on such a row would fire runs with no
+        # goal, no outputs and no host profile to run them in.
+        missing = []
+        if not str(getattr(project, "goal", "") or "").strip():
+            missing.append("a goal")
+        if not _host_of(profiles):
+            missing.append("a host profile")
+        if not projects_db.get_project_outputs(conn, project.id):
+            missing.append("at least one output")
+        raise SchedulePreconditionError(
+            "this project was imported from a legacy store and needs "
+            "completion before it can be scheduled — missing "
+            + ", ".join(missing or ["the mandatory fields"])
+        )
     if getattr(project, "cadence", "one_off") != "repeatable":
         raise SchedulePreconditionError(
             "only a repeatable project can carry a schedule — set cadence "
@@ -465,6 +481,7 @@ def derive_health(
 # ---------------------------------------------------------------------------
 
 _SEVERITY = {
+    "needs_completion": "attention",
     "no_active_playbook": "attention",
     "no_schedule": "info",
     "host_profile_missing": "stalled",
@@ -497,6 +514,23 @@ def doctor_findings(
     def _add(code: str, detail: str) -> None:
         findings.append(
             {"code": code, "severity": _SEVERITY[code], "detail": detail}
+        )
+
+    if getattr(project, "status", "") == "needs_completion":
+        # L2: surface the quarantine on the list page — the row shows
+        # "needs completion" instead of an empty goal.
+        missing = []
+        if not str(getattr(project, "goal", "") or "").strip():
+            missing.append("a goal")
+        if not projects_db.get_project_outputs(conn, project.id):
+            missing.append("at least one output")
+        if not any(p.get("role") == "host" for p in profiles):
+            missing.append("a host profile")
+        _add(
+            "needs_completion",
+            "imported from a legacy store — needs completion before it can "
+            "be activated or scheduled: missing "
+            + ", ".join(missing or ["the mandatory fields"]),
         )
 
     if cadence == "repeatable":
