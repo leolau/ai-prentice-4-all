@@ -8,6 +8,7 @@ import {
   dateTimeLabel,
   durationLabel,
 } from "@/components/projects/format";
+import { unwrapRunEnvelope } from "@/components/projects/envelopes";
 import { BusyRegion } from "@/components/ui/BusyRegion";
 import { Pill, type Tone } from "@/components/ui/Pill";
 import type { ProjectDelivery, ProjectRun, ProjectRunStatus } from "@/types";
@@ -85,14 +86,12 @@ export function RunView({
       if (mergeUpdatedRun) {
         // Continue answers with {run, promoted, budget_gate}; cancel with
         // the bare run row. Unwrap whichever came back.
-        const envelope = data as {
-          run?: Partial<ProjectRun>;
-          budget_gate?: string | null;
-        };
-        const updated = (envelope.run ?? data) as Partial<ProjectRun>;
-        if (updated.status) setRun((prev) => ({ ...prev, ...updated }));
+        const { run: updated, budgetGate } = unwrapRunEnvelope(
+          data as Record<string, unknown>,
+        );
+        if (updated) setRun((prev) => ({ ...prev, ...updated }));
         // The thing holding the run must be visible, not silent.
-        setBudgetGate(envelope.budget_gate ?? null);
+        setBudgetGate(budgetGate);
       }
       router.refresh(); // revalidate the page's server data after a write
       return true;

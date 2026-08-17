@@ -459,10 +459,32 @@ PR per block — each block is independently shippable and independently testabl
 
 **Block 5 — close the two holes that hid all of the above.**
 
-- [ ] One contract per run seam asserting the *default* implementation resolves
+- [x] One contract per run seam asserting the *default* implementation resolves
       a real symbol (this is what makes H1–H4 impossible to reintroduce).
-- [ ] One test per BFF write feeding the actual upstream envelope through the
-      panel's state update (this is the whole F1 class).
-- [ ] The three §16 contracts with no test today: CLI scoring refused without a
+      *(Block 5: `tests/hermes_cli/test_projects_run_seams_defaults.py` —
+      the REAL seam functions, no seam monkeypatching: H1 resolves the
+      shipped `NotificationStore` and refuses a non-Supabase store; H2 walks
+      `InteractionLedger.get_trace` and sums `kind='cost'` summaries, reading
+      "not recorded" without a DSN; H3 reads the profile home's config inside
+      `profile_runtime_scope`, never the caller's, and an unknown profile
+      grants nothing; H4 passes the host profile's home, origin and a copied
+      context to `spawn_seeded_session`)*
+- [x] One test per BFF write feeding the actual upstream envelope through the
+      panel's state update (this is the whole F1 class). *(Block 5:
+      `envelopes.ts` collects the three write envelopes into pure
+      state-update helpers (accept merge + closure offer, continue/cancel run
+      unwrap + budget gate, directive prepend); `envelopes.test.ts` feeds the
+      exact upstream answers through them and
+      `api/projects/write-envelopes.test.ts` proves the mirror routes pass
+      those envelopes through untouched)*
+- [x] The three §16 contracts with no test today: CLI scoring refused without a
       human, foreign-profile promotion refused, event tail above the SQLite
-      variable limit.
+      variable limit. *(All three landed before Block 5 reached them: CLI
+      scoring by Block 1's `test_score_verb_refuses_without_as_human` /
+      `test_score_verb_with_as_human_is_the_operator` in
+      `test_hermes_projects.py` (the fixture patches only the principal
+      lookup, so the router's real session gate runs); foreign-profile
+      promotion by Block 4's
+      `test_promote_foreign_profile_is_refused_before_touching_the_todo`; the
+      >999-card event tail by Block 4's
+      `test_events_tail_survives_more_than_999_cards`)*

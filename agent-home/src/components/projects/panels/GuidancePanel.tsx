@@ -3,6 +3,7 @@
 import { useState } from "react";
 
 import { agoLabel } from "@/components/projects/format";
+import { prependDirective } from "@/components/projects/envelopes";
 import { BusyRegion } from "@/components/ui/BusyRegion";
 import type { ProjectDirective, ProjectDirectivesResponse } from "@/types";
 
@@ -47,8 +48,12 @@ export function GuidancePanel({
         },
       );
       if (!res.ok) throw new Error("add");
-      const created = (await res.json()) as ProjectDirective;
-      setDirectives((prev) => [created, ...prev]);
+      // The full new row — body, author, date — with `applies_from` riding
+      // flat beside it; prepend it so the instruction shows without a reload.
+      const created = (await res.json()) as ProjectDirective & {
+        applies_from?: string;
+      };
+      setDirectives((prev) => prependDirective(prev, created));
       setDraft("");
     } catch {
       setError("That didn't stick — try again.");
