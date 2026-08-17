@@ -111,7 +111,7 @@ def _active_project(env, **body_overrides) -> dict:
         "outputs": [{"title": "The Monday digest email"}],
     }
     payload.update(body_overrides)
-    resp = client.post("/api/registry/projects/", json=payload)
+    resp = client.post("/api/registry/projects", json=payload)
     assert resp.status_code == 200, resp.text
     project = resp.json()
     pid = project["id"]
@@ -422,6 +422,32 @@ def test_a_viewer_reads_runs_but_cannot_start_one(env):
     state["actor"] = STRANGER
     resp = client.get(f"/api/registry/projects/{project['slug']}/runs")
     assert resp.status_code == 404  # reads by non-members stay invisible
+
+
+def test_detail_brief_keeps_an_old_waiting_run(env):
+    """F5: the brief is the last five runs, but a run held at ``waiting``
+    is never truncated out of it — the header's Continue affordance must
+    find it however old it is."""
+    project = _active_project(env)
+    client, _state = env
+    with projects_db.connect_closing() as conn:
+        held = projects_db.open_project_run(
+            conn, project_id=project["id"], trigger="manual",
+            profile="default",
+        )
+        projects_db.update_project_run(conn, held["id"], status="waiting")
+        for _ in range(5):  # five newer runs push it out of the window
+            run = projects_db.open_project_run(
+                conn, project_id=project["id"], trigger="manual",
+                profile="default",
+            )
+            projects_db.update_project_run(
+                conn, run["id"], status="done", outcome="all delivered"
+            )
+    detail = client.get(f"/api/registry/projects/{project['slug']}").json()
+    waiting = [r for r in detail["runs"] if r["status"] == "waiting"]
+    assert [r["run_no"] for r in waiting] == [held["run_no"]]
+    assert held["run_no"] == 1  # the oldest run, still in the brief
 
 
 # ---------------------------------------------------------------------------

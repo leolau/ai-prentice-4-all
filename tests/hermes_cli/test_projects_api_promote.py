@@ -93,7 +93,7 @@ def env(tmp_path, monkeypatch):
 def _create_project(env) -> dict:
     client, _state = env
     resp = client.post(
-        "/api/registry/projects/",
+        "/api/registry/projects",
         json={
             "goal": "Ship the Monday digest — to every subscriber",
             "description": "A weekly digest compiled and emailed each Monday.",
