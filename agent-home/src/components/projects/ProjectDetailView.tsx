@@ -26,6 +26,7 @@ import {
 } from "@/components/projects/ProjectRow";
 import { BusyRegion } from "@/components/ui/BusyRegion";
 import { Pill, type Tone } from "@/components/ui/Pill";
+import { useProjectEvents } from "@/components/projects/useProjectEvents";
 import type {
   ProjectBoardTask,
   ProjectBoardView,
@@ -79,6 +80,11 @@ export function ProjectDetailView({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [addOpen, setAddOpen] = useState(false);
+
+  // §12 live updates: a run promoted in the background becomes visible
+  // without a manual reload — the poller refreshes when the event head
+  // moves (E3).
+  useProjectEvents(project.slug);
 
   const waitingRun = project.runs.find((run) => run.status === "waiting");
   const blockedCards: ProjectBoardTask[] =

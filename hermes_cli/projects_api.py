@@ -381,11 +381,11 @@ def _divergent_self(run: dict) -> Optional[int]:
 def _derived_score(conn, project_id: str) -> Optional[dict]:
     """§8.1: the project's score is **derived** — the mean of the last
     five ``score_user`` values, never an all-time number. Recomputed on
-    every read, so re-scoring an old run moves it."""
-    runs = projects_db.list_project_runs(conn, project_id, limit=25)
-    scored = [
-        int(r["score_user"]) for r in runs if r.get("score_user") is not None
-    ][:5]
+    every read, so re-scoring an old run moves it. The window is the last
+    five *scores*, not scores inside the last N runs (E5) — an unscored
+    streak must not make the score disappear."""
+    runs = projects_db.last_scored_runs(conn, project_id, limit=5)
+    scored = [int(r["score_user"]) for r in runs]
     if not scored:
         return None
     return {"mean": round(sum(scored) / len(scored), 1), "runs": len(scored)}
@@ -1393,13 +1393,12 @@ async def project_events(request: Request) -> dict[str, Any]:
 
     def _events_sync() -> dict:
         with _board_conn(project) as bconn:
-            task_ids = [
-                t.id
-                for t in kanban_db.list_tasks(
-                    bconn, project_id=project.id, principal=principal
-                )
-            ]
-            latest, events = kanban_db.events_tail(bconn, task_ids, since_id=since)
+            # The project-scoped tail (E4): one join against
+            # ``tasks.project_id`` with the C2 visibility clause — never an
+            # id list (bound-variable cap) and never a full card re-list.
+            latest, events = kanban_db.project_events_tail(
+                bconn, project.id, principal=principal, since_id=since
+            )
         return {
             "events": [_event_dict(ev) for ev in events],
             "latest_event_id": latest,
@@ -1479,13 +1478,27 @@ async def create_card(request: Request) -> dict[str, Any]:
     # created, so a bad ref fails with nothing to roll back.
     from_todo = body.get("from_todo")
     todo = None
-    todo_profile = "default"
+    # The to-do store a promotion reads is the *serving* process's store
+    # (``todo_store.default_store``), so a promotion can only name the
+    # profile serving this request — honouring a foreign ``profile`` would
+    # read the wrong store while recording foreign provenance (E2).
+    serving_profile = (
+        request.query_params.get("profile") or "default"
+    ).strip() or "default"
+    todo_profile = serving_profile
     if isinstance(from_todo, dict) and from_todo:
         todo_id = str(from_todo.get("id") or "").strip()
-        todo_profile = str(from_todo.get("profile") or "default").strip()
+        todo_profile = str(from_todo.get("profile") or "").strip() or serving_profile
         if not todo_id:
             raise HTTPException(
                 status_code=422, detail="from_todo needs an id"
+            )
+        if todo_profile != serving_profile:
+            raise HTTPException(
+                status_code=422,
+                detail="a to-do can only be promoted from the profile serving "
+                       "this request — open that profile's Projects to promote "
+                       "it there",
             )
         from hermes_cli.todo_store import default_store
 
@@ -1565,6 +1578,17 @@ async def create_card(request: Request) -> dict[str, Any]:
             def _rollback_sync() -> None:
                 with _board_conn(project) as bconn:
                     kanban_db.delete_task(bconn, str(result["task_id"]))
+                # Roll the provenance link back with the card (E2): the
+                # insert is ``INSERT OR IGNORE``, so a stranded row would
+                # keep its stale label/added_by on a later re-promotion.
+                with projects_db.connect_closing() as pconn:
+                    projects_db.remove_project_link(
+                        pconn,
+                        project_id=project.id,
+                        kind="todo",
+                        profile=todo_profile,
+                        ref=todo.id,
+                    )
 
             await asyncio.to_thread(_rollback_sync)
             raise HTTPException(
@@ -2213,6 +2237,25 @@ async def score_run_route(request: Request, run_no: int) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
+# Toolset/skill names are stored as one CSV column (§1.1 rows 13/14 say
+# lists, the UI splits on commas), so a name containing the separator would
+# silently round-trip as two unknown names. Reject the separator — and
+# anything else outside the safe set — at write time (L1).
+_TOOL_NAME_RE = re.compile(r"^[A-Za-z0-9_.:-]+$")
+
+
+def _reject_bad_names(names: list[str], kind: str) -> None:
+    invalid = [n for n in names if not _TOOL_NAME_RE.match(n)]
+    if invalid:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"{kind} names may only contain letters, digits and "
+                f"'_' '.' ':' '-' — invalid: {', '.join(invalid)}"
+            ),
+        )
+
+
 @router.patch("/{slug}/tools")
 async def patch_tools_route(request: Request) -> dict[str, Any]:
     """Set the project's ``toolsets``/``skills`` (§12).
@@ -2229,6 +2272,7 @@ async def patch_tools_route(request: Request) -> dict[str, Any]:
         updates: dict = {}
         if "toolsets" in body:
             names = [str(t).strip() for t in (body.get("toolsets") or []) if str(t).strip()]
+            _reject_bad_names(names, "toolset")
             unknown = [
                 t for t in names
                 if t.casefold() not in kanban_db.KNOWN_TOOLSET_NAMES
@@ -2247,6 +2291,7 @@ async def patch_tools_route(request: Request) -> dict[str, Any]:
                 host = projects_run.host_profile_name(conn, project.id)
             known = projects_run._available_skill_names(host or "") or None
             names = [str(s).strip() for s in (body.get("skills") or []) if str(s).strip()]
+            _reject_bad_names(names, "skill")
             if known is not None:
                 unknown = [s for s in names if s not in known]
                 if unknown:

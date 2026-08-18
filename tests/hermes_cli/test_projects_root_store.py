@@ -5,6 +5,9 @@ imported into the shared-root DB on first open: row-keyed idempotent, slug
 collisions disambiguated with a ``-2`` suffix, each imported row stamped
 with ``imported_from_profile``, and the per-profile files left in place,
 untouched, so pointing ``HERMES_PROJECTS_DB`` back reverses the migration.
+Imported rows land in ``needs_completion`` quarantine (L2): they violate
+the mandatory-field invariants, so nothing may activate or schedule them
+until a human fills in what is missing.
 """
 
 from __future__ import annotations
@@ -160,10 +163,38 @@ def test_first_open_imports_every_profile_store(root):
             "default"
         ]
 
-    # Additive columns carry their defaults on imported rows.
-    assert b.status == "active"
+    # Additive columns carry their defaults on imported rows — except the
+    # status: an import lands in quarantine, not in a live state (L2).
+    assert b.status == "needs_completion"
     assert b.cadence == "one_off"
     assert b.goal is None
+
+
+def test_imported_project_cannot_leave_quarantine_until_completed(root):
+    """L2: the exit gate names every missing mandatory field, and
+    completing them is what unlocks activation."""
+    with pdb.connect_closing() as conn:
+        project = next(
+            p for p in pdb.list_projects(conn) if p.slug == "acme-rollout-2"
+        )
+        # No goal, no outputs, no host profile — the gate names all three.
+        with pytest.raises(ValueError) as exc:
+            pdb.set_project_status(conn, project.id, "active")
+        msg = str(exc.value)
+        assert "needs completion" in msg
+        for piece in ("a goal", "at least one output", "a host profile"):
+            assert piece in msg
+
+        # Complete it, and the same move lands.
+        pdb.update_project(conn, project.id, goal="Ship the rollout")
+        pdb.add_project_output(
+            conn, project_id=project.id, title="The rollout plan"
+        )
+        pdb.add_project_profile(
+            conn, project_id=project.id, profile="research", role="host"
+        )
+        assert pdb.set_project_status(conn, project.id, "active")
+        assert pdb.get_project(conn, project.id).status == "active"
 
 
 def test_import_is_idempotent(root):

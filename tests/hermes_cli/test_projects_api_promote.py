@@ -4,7 +4,9 @@ Behaviour contracts, not change detectors: a promotion creates a ``triage``
 card inheriting the to-do's title/description, records a
 ``project_links(kind='todo')`` provenance row, moves the to-do to
 ``working`` with a history entry naming the card — and rolls the card back
-when the stage move fails. An invisible to-do is a 404, never a 403.
+*together with the provenance row* when the stage move fails. A foreign
+``from_todo.profile`` is refused at the door (E2): the seam only honours
+the profile serving the request. An invisible to-do is a 404, never a 403.
 """
 
 from __future__ import annotations
@@ -181,10 +183,52 @@ def test_promote_stage_failure_rolls_the_card_back(env):
     resp = _promote(env, project["slug"], {"from_todo": {"id": "td_1"}})
     assert resp.status_code == 409
 
-    # The board is exactly as empty as before the attempt.
+    # The board is exactly as empty as before the attempt…
     with kanban_db.connect_closing() as bconn:
         tasks = kanban_db.list_tasks(bconn, project_id=project["id"])
     assert tasks == []
+    # …and the rollback takes the provenance row with the card (E2): a
+    # retried promotion must not collide with a stranded link.
+    with projects_db.connect_closing() as conn:
+        assert projects_db.get_project_links(conn, project["id"], kind="todo") == []
+
+
+def test_promote_foreign_profile_is_refused_before_touching_the_todo(env):
+    """E2: the seam only honours the profile serving this request."""
+    project = _create_project(env)
+    _client, state = env
+    resp = _promote(
+        env, project["slug"],
+        {"from_todo": {"profile": "work", "id": "td_1"}},
+    )
+    assert resp.status_code == 422
+    assert "profile" in resp.json()["detail"]
+
+    # Refused at the door: the to-do store was never asked anything…
+    store = state["store"]
+    assert store.stage_calls == []
+    assert store.outbound_calls == []
+    # …and nothing landed on the board or in the links.
+    with kanban_db.connect_closing() as bconn:
+        assert kanban_db.list_tasks(bconn, project_id=project["id"]) == []
+    with projects_db.connect_closing() as conn:
+        assert projects_db.get_project_links(conn, project["id"], kind="todo") == []
+
+
+def test_promote_honours_the_serving_profile_when_named(env):
+    """E2: a request served by ``work`` may promote a ``work`` to-do."""
+    project = _create_project(env)
+    client, _state = env
+    resp = client.post(
+        f"/api/registry/projects/{project['slug']}/cards",
+        params={"profile": "work"},
+        json={"from_todo": {"profile": "work", "id": "td_1"}},
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["from_todo"] == {"profile": "work", "id": "td_1"}
+    with projects_db.connect_closing() as conn:
+        links = projects_db.get_project_links(conn, project["id"], kind="todo")
+    assert [(l["profile"], l["ref"]) for l in links] == [("work", "td_1")]
 
 
 def test_plain_card_create_still_requires_title(env):

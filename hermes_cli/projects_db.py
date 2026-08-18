@@ -485,7 +485,13 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
 # cannot bypass them.
 GOAL_MAX_CHARS = 160
 NAME_MAX_CHARS = 60
-VALID_PROJECT_STATUSES = ("planning", "active", "paused", "done", "archived")
+VALID_PROJECT_STATUSES = (
+    "planning", "active", "paused", "done", "archived",
+    # Legacy-imported rows land here (L2): they arrive without a goal, outputs
+    # or a host profile, so they are quarantined from activation/scheduling
+    # until a human completes them.
+    "needs_completion",
+)
 VALID_CADENCES = ("one_off", "repeatable", "standing")
 VALID_AUTONOMY_LEVELS = ("manual", "supervised", "autonomous")
 VALID_MEMBER_ROLES = ("lead", "member", "viewer")
@@ -1057,7 +1063,7 @@ def set_project_status(
         raise ValueError(f"status must be one of {sorted(VALID_PROJECT_STATUSES)}")
     with write_txn(conn):
         row = conn.execute(
-            "SELECT status FROM projects WHERE id = ?", (project_id,)
+            "SELECT status, goal FROM projects WHERE id = ?", (project_id,)
         ).fetchone()
         if row is None:
             return False
@@ -1078,6 +1084,30 @@ def set_project_status(
                 raise ValueError(
                     f"project {project_id} cannot leave 'planning': missing "
                     + ", ".join(missing)
+                )
+        if row["status"] == "needs_completion" and status != "needs_completion":
+            # L2: an imported legacy project must be completed before it can
+            # live — the gate names every missing mandatory field, the same
+            # shape as the planning-exit gate above.
+            missing = []
+            if not str(row["goal"] or "").strip():
+                missing.append("a goal")
+            if not conn.execute(
+                "SELECT COUNT(*) AS n FROM project_outputs WHERE project_id = ?",
+                (project_id,),
+            ).fetchone()["n"]:
+                missing.append("at least one output")
+            if not conn.execute(
+                "SELECT COUNT(*) AS n FROM project_profiles "
+                "WHERE project_id = ? AND role = 'host'",
+                (project_id,),
+            ).fetchone()["n"]:
+                missing.append("a host profile")
+            if missing:
+                raise ValueError(
+                    f"project {project_id} was imported from a legacy store "
+                    "and needs completion before it can leave "
+                    f"'needs_completion': missing " + ", ".join(missing)
                 )
         cur = conn.execute(
             "UPDATE projects SET status = ? WHERE id = ?", (status, project_id)
@@ -2312,6 +2342,25 @@ def list_project_runs(
     ]
 
 
+def last_scored_runs(
+    conn: sqlite3.Connection, project_id: str, *, limit: int = 5
+) -> List[dict]:
+    """§8.1: the last *scored* runs — the window is scores, not runs (E5).
+
+    A standing project with twenty-five unscored recent runs still reports
+    the mean of its last five scores; selecting scored rows first keeps the
+    score from silently disappearing behind an unscored streak.
+    """
+    return [
+        dict(r)
+        for r in conn.execute(
+            "SELECT * FROM project_runs WHERE project_id = ? "
+            "AND score_user IS NOT NULL ORDER BY run_no DESC LIMIT ?",
+            (project_id, int(limit)),
+        ).fetchall()
+    ]
+
+
 def latest_waiting_run(
     conn: sqlite3.Connection, project_id: str
 ) -> Optional[dict]:
@@ -2508,11 +2557,17 @@ def _import_one_profile_store(
                     ).fetchone() is not None:
                         new_id = _new_project_id()
                 slug = _unique_slug(conn, str(row["slug"]).strip() or _slugify(row["name"]))
+                # L2: an imported row arrives without a goal, outputs or a
+                # host profile — the mandatory-field invariant cannot hold
+                # for it, so it lands quarantined in 'needs_completion'
+                # until a human completes it (the status gate names what
+                # is missing; the doctor surfaces it on the list page).
                 conn.execute(
                     "INSERT INTO projects "
                     "(id, slug, name, description, icon, color, board_slug, "
-                    " primary_path, created_at, archived, imported_from_profile) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    " primary_path, status, created_at, archived, "
+                    " imported_from_profile) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         new_id,
                         slug,
@@ -2522,6 +2577,7 @@ def _import_one_profile_store(
                         row["color"] if "color" in src_cols else None,
                         row["board_slug"] if "board_slug" in src_cols else None,
                         row["primary_path"] if "primary_path" in src_cols else None,
+                        "needs_completion",
                         row["created_at"],
                         int(bool(row["archived"])),
                         profile,
