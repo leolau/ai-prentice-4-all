@@ -492,44 +492,55 @@ half of the bug: it made every retry fail with "profile already exists").
 
 ## 7. Results template
 
-Revision under test: `________`  ·  Date: `________`  ·  Run by: `________`
-Deploy line: `deploy OK (____)` · handover: `current / behind (____)`
+Revision under test: `17fa7bbbf`  ·  Date: `2026-08-17`  ·  Run by: `Qoder (aliyun ecs RunCommand, i-j6c81aisv2dd8mg17yle)`
+Deploy line: `deploy OK (17fa7bbbf)  backup: /opt/data/backups/deploy-20260817-084414` · handover: `current`
+
+Deployed first per §0.1 (box was stale at `d42c7e3c1`): three runs — the
+second pulled to `17fa7bbbf` under the old script; the reviewed copy of
+`deploy/hermes-deploy.sh` (PR #293) was then installed (`cmp`-identical) and
+the third run printed the verdict above with no unaccounted untracked files.
 
 | Case | Verdict | Evidence / reason |
 |---|---|---|
-| A1 deployed revision | PASS / FAIL | |
-| A2 units active | PASS / FAIL | |
-| A3 no root process | PASS / FAIL | |
-| A4 no state drift | PASS / FAIL | |
-| A5 handover current | PASS / FAIL | |
-| A6 end state restored | PASS / FAIL | |
-| B1 member cannot erase others | PASS / FAIL / SKIP | |
-| B2 reset is the caller's | PASS / FAIL / SKIP | |
-| B3 purge erases files | PASS / FAIL / SKIP | |
-| B4 identity survives elsewhere | PASS / FAIL / SKIP | |
-| B5 last participation takes identity | PASS / FAIL / SKIP | |
-| B6 transfer never moves memory | PASS / FAIL / SKIP | |
-| B7 delete help is truthful | PASS / FAIL | |
-| C1 roster | PASS / FAIL / SKIP | |
-| C2 suspension drops bindings | PASS / FAIL / SKIP | |
-| C3 authority checked where it acts | PASS / FAIL / SKIP | |
-| C4 account verbs absent | PASS / FAIL / SKIP | |
-| D1 suggestion pass is scheduled | PASS / FAIL / SKIP | |
-| D2 adoption seeds correctly | PASS / FAIL / SKIP | |
-| D3 retirement closes goals | PASS / FAIL / SKIP | |
-| D4 commit-channel refusal | PASS / FAIL / SKIP | |
-| E1 capacity names its bound | PASS / FAIL | |
-| E2 latency excludes machines | PASS / FAIL | |
-| F1 digest names what failed | PASS / FAIL / SKIP | |
-| F2 one digest per week | PASS / FAIL / SKIP | |
-| F3 promotion store exists | PASS / FAIL | |
-| G1 agent-home bundle is current | PASS / FAIL | |
-| G2 agent-home health | PASS / FAIL | |
-| G3 authenticated page | PASS / FAIL / SKIP | |
-| G4 per-principal memory | PASS / FAIL / SKIP | |
-| H1 clone-all exclusions | PASS / FAIL | |
-| H2 clone refuses cleanly | PASS / FAIL | |
-| H3 deletion is clean | PASS / FAIL | |
+| A1 deployed revision | PASS | sha matches; `status --porcelain` empty; deploy #3 (new script) named no untracked file it could not account for |
+| A2 units active | PASS | 15 enabled units counted from the box, all `active` |
+| A3 no root process | PASS | all 15 `MainPID` owners `hermes` (process checked, not unit file) |
+| A4 no state drift | PASS | `No deployment state drift on hermes-systest`; deploy-script layer verified as root — installed copy `cmp`-identical to the reviewed copy |
+| A5 handover current | PASS | `handover doc current` from the deploy and from `deploy_state.py handover` (rc=0) |
+| A6 end state restored | PASS | before-§B and after-§H captures identical; uat profiles/wrappers/archives/DB schemas/promotion rows all removed; box-wide GoTrue accounts for `uat20260817a–e` remain by design (rule 3) |
+| B1 member cannot erase others | PASS | refused with the exact `--all-principals … only an owner or admin` message; memory-file md5s unchanged |
+| B2 reset is the caller's | PASS | all five sub-criteria: erase list, `Left in place:`, closing line, shared md5s unchanged, dirs gone as directories |
+| B3 purge erases files | PASS | `Erased curated memory:` per path; dirs gone; account intentionally left |
+| B4 identity survives elsewhere | PASS | default participation gone; maintenance participation + identity remain |
+| B5 last participation takes identity | PASS | existing account enrolled into `maintenance`, purged there; participation and identity both gone |
+| B6 transfer never moves memory | PASS | exact "left in place — transfer moves what they owned…" wording; curated files verified present. Note: seeded members owned 0 DB rows (`0 transferred, 0 deleted`), so the rows-deleted check rests on the summary contract |
+| B7 delete help is truthful | PASS | help states memory rows deleted under both strategies; purge erases curated files and identity on last participation |
+| C1 roster | PASS | role, email, activation, channels per principal; 50-row cap not observable (3 principals) |
+| C2 suspension drops bindings | PASS | real `resolve_principal` seam: principal → `None` while suspended → restored; roster shows `[SUSPENDED HERE]` |
+| C3 authority checked where it acts | PASS | over HTTP as an activated member: maintenance-scoped admin action and read → 403 `subject '…' is not enrolled in profile 'maintenance'`; default-scoped `whoami` → 200 |
+| C4 account verbs absent | PASS | CLI parser error on `account`; member verbs enrolment-scoped only; HTTP account probes → 404 (earlier 405s were the GET-only SPA catch-all — a bogus GET 404s too) |
+| D1 suggestion pass is scheduled | PASS | timer enabled+active; unprompted run 08:10, `Result=success`, `ExecMainStatus=0`, next 2026-08-24 |
+| D2 adoption seeds correctly | SKIP | no pending suggestion; the only on-demand generator **crashes in this revision** — `hermes profile suggest` → `TypeError: GoalRegistryStore.__init__() missing 1 required positional argument: 'store'` at `hermes_cli/main.py:11489` (re-run reproduced). Timer path unaffected (`run_review_pass` builds the store correctly). Fabricating a suggestion row in the production DB is out of scope. Defect → PR, per "If a case fails" |
+| D3 retirement closes goals | PASS | honest-report contract on two real causes: bare profile `⚠ Goals NOT closed (RuntimeError: Supabase app datastore is not configured…)`; clone `⚠ Goals NOT closed (UndefinedTableError: relation "goals" does not exist)` — archive made, retry-safe, no fake exit-0 success (anti-#265). The `Goals closed: N` success branch is only reachable via adoption, blocked by D2 |
+| D4 commit-channel refusal | SKIP | no bot token provisioned (§6) |
+| E1 capacity names its bound | PASS | one verdict `comfortable` with its load figures in `status` and `doctor`; bound named only when binding (per the render path) |
+| E2 latency excludes machines | PASS | 23 interactive samples, p50 10.96s / p95 19.15s; exclusion via `sessions.source` + `cron_*` id convention; 8-sample floor prevents small windows binding |
+| F1 digest names what failed | PASS | one section's input broken in a render-only probe → `Capacity: unavailable — RuntimeError: uat-injected: config unreadable`, not omitted |
+| F2 one digest per week | PASS | two deliver-mode runs collapsed onto the single `entity-review:2026-W34` row (`ntf_6c9e1b4c…`); nothing stacked |
+| F3 promotion store exists | PASS | `app_prod.skill_promotions` present; timer run + 3 manual runs rc=0, no missing-relation error |
+| G1 agent-home bundle is current | PASS | `BUILD_ID` mtime 01:54:52+08, right after the last commit touching `agent-home/`/root lock (`5afaa8dcf`); zero such changes between it and HEAD |
+| G2 agent-home health | PASS | `/` → 200 with client-side `/login` redirect in the React tree; `/login` → 200 |
+| G3 authenticated page | PASS | session minted per the box skill; `/capacity` SSR renders `14.7 GB` / `comfortable` / `p50` / `p95` matching the CLI. Memory-map geometry not proven — client-side fetch, no browser (documented trap) |
+| G4 per-principal memory | PASS | real member login via `/api/session/login` resolves the member principal (`is_owner: false`); memory fetches principal-bound rows. Content-diff not demonstrable: zero memory rows exist box-wide; map is client-side |
+| H1 clone-all exclusions | PASS | exact contract wording; clone has shared `MEMORY.md`, no `memories/users/`, no `persons/`, no sessions/backups/snapshots |
+| H2 clone refuses cleanly | PASS | one error naming `/opt/data/hermes-home-staging/uat-unreadable.bak`; no half-made profile dir (#286 fixed) |
+| H3 deletion is clean | PASS | dir gone; list back to `default` + `maintenance` |
+
+**Run-impact disclosures:** the §F double run (and a final re-render to scrub
+uat lines from the digest body) re-delivered the W34 digest row — if the
+gateway pushes on delivery, the owner may have seen duplicate Telegram copies
+of the same weekly digest; dedupe prevented stacked rows, not pushes. No
+FAILs; the one defect found is the D2 blocker above.
 
 **Report format:** the revision, this table, and for every FAIL the command and
 its full output. For every SKIP, the reason from §6 or a new one. Do not
