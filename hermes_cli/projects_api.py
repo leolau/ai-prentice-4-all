@@ -217,6 +217,24 @@ async def _require_write(request: Request, *, judgement: bool = False):
     return project, role, profiles, principal
 
 
+async def _require_human(request: Request, act: str) -> str:
+    """§8.1/§8.2: a human act needs a verified interactive subject.
+
+    The one gate every human-only route passes (§16): the role check says
+    *may this member judge*, this says *is a human actually judging*. An
+    agent turn, a service caller or a session-less CLI invocation has no
+    subject and is refused — the returned subject is the provenance to
+    record alongside the write.
+    """
+    subject = await _interactive_subject(request)
+    if not subject:
+        raise HTTPException(
+            status_code=403,
+            detail=f"{act} is a human act — no verified session, no {act}",
+        )
+    return subject
+
+
 # ---------------------------------------------------------------------------
 # Derived values: progress ladder (§9.1), card rollup, health (§9.2)
 # ---------------------------------------------------------------------------
@@ -375,9 +393,19 @@ def _derived_score(conn, project_id: str) -> Optional[dict]:
 
 def _runs_brief(conn, project_id: str, *, limit: int = 5) -> list[dict]:
     """The last N runs as one-line rows (§12 detail). Cost stays fail-open
-    and lives on the run-detail read, not here."""
+    and lives on the run-detail read, not here.
+
+    A ``waiting`` run is never truncated out (F5): the header's Continue
+    affordance must find it however old it is, so the newest one is
+    appended when it fell out of the window.
+    """
+    rows = projects_db.list_project_runs(conn, project_id, limit=limit)
+    if not any(r.get("status") == "waiting" for r in rows):
+        waiting = projects_db.latest_waiting_run(conn, project_id)
+        if waiting is not None:
+            rows = [*rows, waiting]
     out = []
-    for r in projects_db.list_project_runs(conn, project_id, limit=limit):
+    for r in rows:
         duration = None
         if r.get("started_at") and r.get("ended_at"):
             duration = int(r["ended_at"]) - int(r["started_at"])
@@ -460,6 +488,11 @@ def _encode_cursor(created_at: int, pid: str) -> str:
 # GET / — the readable list
 # ---------------------------------------------------------------------------
 
+# ``attention`` is the rung a human must look at — which includes ``stalled``,
+# the worse rung that outranks it (§9.2). The chip sends ``health=attention``;
+# the server expands it here so the filter and the cursor agree (F2).
+_HEALTH_ALIASES = {"attention": frozenset({"attention", "stalled"})}
+
 
 def _list_sync(
     principal,
@@ -478,22 +511,33 @@ def _list_sync(
     # Newest first; the keyset cursor sorts on (created_at, id).
     rows.sort(key=lambda p: (p.created_at, p.id), reverse=True)
 
-    items = []
-    for p in rows:
-        if cursor and (p.created_at, p.id) >= cursor:
-            continue
-        if status and p.status != status:
-            continue
-        if cadence and getattr(p, "cadence", None) != cadence:
-            continue
-        if q and q.lower() not in f"{p.name} {p.goal or ''}".lower():
-            continue
-        items.append(p)
+    health_set = _HEALTH_ALIASES.get(health) if health else None
+    if health and health_set is None:
+        health_set = frozenset({health})
 
-    page = items[:limit]
+    # Every filter runs BEFORE the page slice and the cursor is taken from
+    # the last row *examined*: a post-slice filter both repeats rows and
+    # silently drops the ones between the last kept row and the slice end
+    # (M2).
     out = []
+    last_examined = None
+    exhausted = True
     with projects_db.connect_closing() as conn:
-        for p in page:
+        for p in rows:
+            if cursor and (p.created_at, p.id) >= cursor:
+                continue
+            if len(out) >= limit:
+                # The page is full but rows remain — the next page resumes
+                # strictly after ``last_examined``.
+                exhausted = False
+                break
+            last_examined = (p.created_at, p.id)
+            if status and p.status != status:
+                continue
+            if cadence and getattr(p, "cadence", None) != cadence:
+                continue
+            if q and q.lower() not in f"{p.name} {p.goal or ''}".lower():
+                continue
             role = _member_role_sync(conn, p.id, principal.user_id)
             profiles = projects_db.get_project_profiles(conn, p.id)
             if not _can_read(p, role, principal, enrolled, profiles):
@@ -509,7 +553,7 @@ def _list_sync(
                 [l for l in links if l["kind"] == "goal"],
             )
             item_health = _full_health(conn, p, rollup, profiles)
-            if health and item_health != health:
+            if health_set and item_health not in health_set:
                 continue
             out.append(
                 _project_payload(
@@ -523,13 +567,12 @@ def _list_sync(
             )
 
     next_cursor = None
-    if len(items) > limit and out:
-        last = page[len(out) - 1]
-        next_cursor = _encode_cursor(last.created_at, last.id)
+    if not exhausted and last_examined:
+        next_cursor = _encode_cursor(*last_examined)
     return {"items": out, "next_cursor": next_cursor}
 
 
-@router.get("/")
+@router.get("")
 async def list_projects(request: Request) -> dict[str, Any]:
     principal = await _principal_read(request)
     params = request.query_params
@@ -554,11 +597,11 @@ async def list_projects(request: Request) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# POST / — create under the full §2.2 contract
+# POST — create under the full §2.2 contract
 # ---------------------------------------------------------------------------
 
 
-@router.post("/")
+@router.post("")
 async def create_project_route(request: Request) -> dict[str, Any]:
     principal = await _principal_write(request)
     try:
@@ -799,7 +842,12 @@ def _detail_sync(project, principal, *, include_address: bool) -> dict:
 @router.get("/{slug}")
 async def get_project_detail(request: Request) -> dict[str, Any]:
     project, role, _profiles, principal = await _require_read(request)
-    include_address = role not in (None, "viewer")
+    # Write authority implies address visibility (M3): an owner or instance
+    # admin with no member row has ``role is None`` but must still see
+    # addresses — derive from the same predicate that authorises writes.
+    include_address = _can_write(project, role, principal) or role in (
+        "lead", "editor",
+    )
     return await asyncio.to_thread(
         _detail_sync, project, principal, include_address=include_address
     )
@@ -996,18 +1044,22 @@ async def deliver_output(request: Request, output_id: str) -> dict[str, Any]:
 
 @router.post("/{slug}/outputs/{output_id}/accept")
 async def accept_output(request: Request, output_id: str) -> dict[str, Any]:
-    """Only a human accepts an output (§6.1) — a member judgement act.
+    """Only a human accepts an output (§6.1) — a member judgement act with
+    the identity gate on top (§16).
 
     Accepting the last required output of a ``one_off`` project *offers*
-    closure in the response; it never closes the project by itself."""
-    project, _role, _profiles, principal = await _require_write(
+    closure in the response; it never closes the project by itself. The
+    response carries the updated row so a UI can merge it without a
+    reload."""
+    project, _role, _profiles, _principal = await _require_write(
         request, judgement=True
     )
+    subject = await _require_human(request, "accepting an output")
 
     def _accept_sync() -> dict:
         with projects_db.connect_closing() as conn:
             if not projects_db.accept_project_output(
-                conn, output_id, accepted_by=principal.user_id
+                conn, output_id, accepted_by=subject
             ):
                 raise KeyError(output_id)
             outputs = projects_db.get_project_outputs(conn, project.id)
@@ -1018,9 +1070,11 @@ async def accept_output(request: Request, output_id: str) -> dict[str, Any]:
             offers_closure = (
                 all_accepted and getattr(project, "cadence", "one_off") == "one_off"
             )
+            row = next((o for o in outputs if o.get("id") == output_id), None)
             return {
+                "output": row,
                 "accepted": output_id,
-                "by": principal.user_id,
+                "by": subject,
                 "offers_closure": offers_closure,
             }
 
@@ -1618,9 +1672,11 @@ async def save_playbook_route(request: Request) -> dict[str, Any]:
 
 @router.post("/{slug}/playbook/{rev}/activate")
 async def activate_playbook_route(request: Request, rev: int) -> dict[str, Any]:
-    """Human-only activation (§7.2): lead/admin, records ``activated_at``
-    + ``note``. A mid-flight run is unaffected — it keeps its pinned rev."""
+    """Human-only activation (§7.2): lead/admin AND a verified session,
+    records ``activated_at`` + ``note``. A mid-flight run is unaffected —
+    it keeps its pinned rev."""
     project, _role, _profiles, _principal = await _require_write(request)
+    subject = await _require_human(request, "activating a playbook revision")
     body = await request.json() if request.headers.get("content-length") else {}
 
     def _activate_sync() -> dict:
@@ -1632,7 +1688,7 @@ async def activate_playbook_route(request: Request, rev: int) -> dict[str, Any]:
             raise HTTPException(
                 status_code=404, detail=f"playbook revision {rev} not found"
             )
-        return {"rev": rev, "active": True}
+        return {"rev": rev, "active": True, "by": subject}
 
     return await asyncio.to_thread(_activate_sync)
 
@@ -1688,7 +1744,13 @@ async def add_directive_route(request: Request) -> dict[str, Any]:
             except ValueError as exc:
                 status = 409 if "retire one first" in str(exc) else 422
                 raise HTTPException(status_code=status, detail=str(exc))
-        return {"id": did, "applies_from": "next run"}
+            row = conn.execute(
+                "SELECT * FROM project_directives WHERE id = ?", (did,)
+            ).fetchone()
+        # The full row, so a UI can show the new instruction — body, author,
+        # date — without a reload; ``applies_from`` rides flat beside it.
+        return {**(dict(row) if row else {"id": did}),
+                "applies_from": "next run"}
 
     return await asyncio.to_thread(_add_sync)
 
@@ -1718,13 +1780,14 @@ async def retire_directive_route(
 async def activate_directive_route(
     request: Request, directive_id: str
 ) -> dict[str, Any]:
-    """§8.2: a proposed directive crosses on **any member's** word — the
-    one learning-path crossing a plain member owns. The active-set cap is
-    enforced here, at the crossing, not at proposal time; like every
-    guidance write, it applies from the next run."""
+    """§8.2: a proposed directive crosses on a **human's** word — the one
+    learning-path crossing, so it carries the identity gate (§16). The
+    active-set cap is enforced here, at the crossing, not at proposal time;
+    like every guidance write, it applies from the next run."""
     project, _role, _profiles, _principal = await _require_write(
         request, judgement=True
     )
+    subject = await _require_human(request, "activating a directive")
 
     def _activate_sync() -> dict:
         cfg = projects_run.projects_runtime_config()
@@ -1749,7 +1812,10 @@ async def activate_directive_route(
                 )
             except ValueError as exc:
                 raise HTTPException(status_code=409, detail=str(exc))
-        return {"id": directive_id, "active": True, "applies_from": "next run"}
+        return {
+            "id": directive_id, "active": True, "applies_from": "next run",
+            "by": subject,
+        }
 
     try:
         return await asyncio.to_thread(_activate_sync)
@@ -1780,7 +1846,9 @@ def _run_payload(conn, bconn, run: dict, *, principal) -> dict:
         )
     payload = dict(run)
     payload["cards"] = cards
-    payload["cost"] = projects_run.run_cost(run.get("trace_id"))
+    payload["cost"] = projects_run.run_cost(
+        run.get("trace_id"), principal=principal
+    )
     # Fail-open contract (§6): no ledger → "not recorded", never an error.
     payload["cost_recorded"] = payload["cost"] is not None
     if run.get("started_at"):
@@ -2092,14 +2160,10 @@ async def score_run_route(request: Request, run_no: int) -> dict[str, Any]:
     on top: a caller without a verified interactive session is refused
     (§16). The derived project score (mean of the last five) moves on
     every read, including when an old run is re-scored."""
-    project, _role, _profiles, principal = await _require_write(
+    project, _role, _profiles, _principal = await _require_write(
         request, judgement=True
     )
-    if not await _interactive_subject(request):
-        raise HTTPException(
-            status_code=403,
-            detail="scoring a run is a human act (§8.1) — no session, no score",
-        )
+    subject = await _require_human(request, "scoring a run")
     try:
         body = await request.json()
     except Exception:
@@ -2128,14 +2192,14 @@ async def score_run_route(request: Request, run_no: int) -> dict[str, Any]:
                 run["id"],
                 score_user=score,
                 score_note=note,
-                scored_by=principal.user_id,
+                scored_by=subject,
                 scored_at=int(time.time()),
             )
             return {
                 "scored": run_no,
                 "score_user": score,
                 "score_note": note,
-                "by": principal.user_id,
+                "by": subject,
             }
 
     try:
@@ -2179,7 +2243,9 @@ async def patch_tools_route(request: Request) -> dict[str, Any]:
             # One seam for resolution: the same host-profile loader the
             # run spawn uses (§4.1), so write-time validation and spawn
             # agree about what exists.
-            known = projects_run._available_skill_names() or None
+            with projects_db.connect_closing() as conn:
+                host = projects_run.host_profile_name(conn, project.id)
+            known = projects_run._available_skill_names(host or "") or None
             names = [str(s).strip() for s in (body.get("skills") or []) if str(s).strip()]
             if known is not None:
                 unknown = [s for s in names if s not in known]
@@ -2198,7 +2264,7 @@ async def patch_tools_route(request: Request) -> dict[str, Any]:
             fresh = projects_db.get_project(conn, project.slug)
             host = projects_run.host_profile_name(conn, project.id)
             enabled = projects_run._enabled_toolsets_for_profile(host or "")
-            available = projects_run._available_skill_names()
+            available = projects_run._available_skill_names(host or "")
         cfg = projects_run.projects_runtime_config()
         eff_ts, dropped_ts = projects_run.resolve_toolsets(
             projects_run.parse_csv_field(fresh.toolsets), enabled

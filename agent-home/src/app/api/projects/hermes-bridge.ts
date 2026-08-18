@@ -27,8 +27,17 @@ export async function withPrincipal<T>(
     return NextResponse.json(await handler(client));
   } catch (err) {
     if (err instanceof HermesApiError) {
+      // Forward the upstream's own copy (F6): the design's refusal text —
+      // *retire one first*, the budget refusal — sits in ``err.body.detail``;
+      // ``err.message`` is the internal path + status and never reaches a
+      // user. No detail upstream means generic copy, never the topology.
+      const detail =
+        err.body &&
+        typeof (err.body as { detail?: unknown }).detail === "string"
+          ? (err.body as { detail: string }).detail
+          : "That didn't go through.";
       return NextResponse.json(
-        { error: "api_error", detail: err.message },
+        { error: "api_error", detail },
         { status: err.status },
       );
     }

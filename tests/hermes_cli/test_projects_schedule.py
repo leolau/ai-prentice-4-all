@@ -318,9 +318,35 @@ def test_health_stalled_after_two_silent_periods(stores):
     assert _health(project, runs=runs, cron_job={"id": "real"}) == "ok"
 
 
+def test_health_stalled_when_a_wired_schedule_has_never_fired(stores):
+    """M1: a repeatable project that has never run IS measurable — the
+    silence counts from when the schedule was wired (the cron job's own
+    creation). Two silent periods since then is ``stalled``; silence
+    inside the window is still grace."""
+    _tmp, cron_dir = stores
+    project = _repeatable_project()
+    _activate(project.id)
+    result = _set_schedule(project)  # 'every 60m'
+    # The cron store timestamps are ISO strings; health measures epochs.
+    wired_at = projects_schedule._epoch_from_timestamp(
+        _jobs(cron_dir)[0]["created_at"]
+    )
+    with projects_db.connect_closing() as conn:
+        fresh = projects_db.get_project(conn, project.id)
+    job = {"id": result["cron_job_id"], "created_at": wired_at}
+    assert _health(
+        fresh, cron_job=job, runs=[], now=wired_at + 3 * 3600
+    ) == "stalled"
+    assert _health(
+        fresh, cron_job=job, runs=[], now=wired_at + 3600
+    ) == "ok"
+
+
 def test_health_attention_signals(stores):
     project = _repeatable_project(cron_job_id="real")
-    job = {"id": "real"}
+    # A freshly wired schedule under the fixed clock, so the never-run
+    # anchor (M1) stays out of these attention assertions.
+    job = {"id": "real", "created_at": NOW}
     blocked = dict(_ROLLUP, blocked=1)
     assert _health(project, card_rollup=blocked, cron_job=job) == "attention"
     waiting = [_run_row(started_at=NOW, status="waiting")]

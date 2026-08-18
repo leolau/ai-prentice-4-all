@@ -2312,6 +2312,19 @@ def list_project_runs(
     ]
 
 
+def latest_waiting_run(
+    conn: sqlite3.Connection, project_id: str
+) -> Optional[dict]:
+    """The newest run held at ``waiting``, however old (F5) — the detail
+    brief must never truncate the one a human still has to resume."""
+    row = conn.execute(
+        "SELECT * FROM project_runs WHERE project_id = ? "
+        "AND status = 'waiting' ORDER BY run_no DESC LIMIT 1",
+        (project_id,),
+    ).fetchone()
+    return dict(row) if row is not None else None
+
+
 _RUN_PATCH_FIELDS = {
     "status", "session_id", "trace_id", "outcome", "summary", "retro",
     "retro_at", "score_self", "score_user", "score_note", "scored_by",

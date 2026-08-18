@@ -32,10 +32,16 @@ def env(tmp_path, monkeypatch):
     async def _enrolled(user_id):
         return set()
 
+    async def _subject(request):
+        # The learning surface under test is crossed by a verified human
+        # session; the session-less refusal is tested on the main surface.
+        return OWNER.user_id
+
     monkeypatch.setattr(
         "hermes_cli.web_server._comms_resolve_principal", _resolve, raising=False
     )
     monkeypatch.setattr(projects_api, "_enrolled_profiles", _enrolled)
+    monkeypatch.setattr(projects_api, "_interactive_subject", _subject)
 
     app = FastAPI()
     app.include_router(projects_api.router)
@@ -200,6 +206,7 @@ def test_activate_a_proposed_directive(env):
     assert resp.status_code == 200
     assert resp.json() == {
         "id": did, "active": True, "applies_from": "next run",
+        "by": OWNER.user_id,
     }
 
     listing = env.get(f"{_PREFIX}/{slug}/directives").json()

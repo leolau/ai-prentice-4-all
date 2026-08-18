@@ -107,8 +107,12 @@ What changed, and what to check:
   `agent-home/node_modules` (264 KB of link stubs). Install and build **from the
   repo root**: `npm ci && npm run build --workspace agent-home`. Building from
   inside `agent-home/` creates a second, unhoisted dep tree.
-- Health without credentials: `GET /login` → 200, `GET /` → 307. Its API reads go
-  to the dashboard at `AGENT_HOME_API_URL=http://127.0.0.1:9119`.
+- Health without credentials: `GET /login` → 200 and `GET /` → **200**, with the
+  unauthenticated root carrying a *client-side* redirect to `/login` (grep the
+  body). It is not a 307 — the gate is in the React tree, so a status code alone
+  says nothing about whether the app is guarded (re-checked 2026-08-17,
+  `dfa32fe3c`). Its API reads go to the dashboard at
+  `AGENT_HOME_API_URL=http://127.0.0.1:9119`.
 - `AGENT_HOME_DATASTORE_MODE=prod`, but **the memory tier resolves `app_dev`** on
   this box (`app_prod.memories` is the empty 256-dim pre-re-embed leftover).
   Forwarding that mode to a memory endpoint yields a healthy page reporting zero

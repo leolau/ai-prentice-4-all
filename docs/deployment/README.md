@@ -5,7 +5,7 @@ It states what exists, what is verified, what is *not*, and where the detail
 lives. The per-topic documents are authoritative for procedure; this file is
 authoritative for **what is currently true of the live box**.
 
-Last verified: 2026-08-16, application at `3900ed007` (what the box runs; the
+Last verified: 2026-08-17, application at `fed034fa4` (what the box runs; the
 repo moves ahead of it — the box is deployed by whoever merges, not by this
 document).
 
@@ -41,6 +41,7 @@ prose is worse than an old date.
 | `os-patching.md` | unattended upgrades and the `needrestart` exemption |
 | `mcp-approval-gating.md` | which MCP tools require human approval |
 | `../../.agents/skills/testing-hermes-systest-box/SKILL.md` | how to reach the box at all (no SSH) and ~30 traps |
+| `../testing/uat-hermes-systest.md` | the acceptance suite to run against a deployed revision |
 
 ## The box
 
@@ -230,6 +231,11 @@ lines re-checked at this verification (2026-08-16, `3900ed007`) are marked ✔:
   commits** — the two captures it made on 2026-08-15/16 were finished off-box
   and are now in the state repo.
 - ✔ The installed deploy script is byte-identical to `deploy/hermes-deploy.sh`.
+- ✔ A deploy removes what the new revision deleted or renamed away, and names
+  any file left untracked in the checkout (silent when there are none).
+- ✔ The checkout is clean: `git status --porcelain` is empty (the pre-fix
+  orphan `docs/design/projects-feature-design.md` was cleared 2026-08-17).
+- ✔ A deploy run from a stale installed copy says so.
 - ✔ Interpreter Python 3.11.15, `age` 1.1.1.
 - ✔ `datastore show` reports `app_prod` claimed by `/opt/data/hermes-home-staging`.
 - ✔ An uncaptured unit and an uncaptured drop-in are each reported as drift,
@@ -432,16 +438,30 @@ for r in results:
    must never be silently clobbered).
 2. Fetches `origin/develop` (three attempts, backing off) and fast-forwards; a
    fetch that never succeeds aborts with `nothing deployed, box unchanged`.
-3. `pip install -e .` (reinstalls the package).
-4. Rebuilds the dashboard bundle (`web/`) only when `web/` changed.
-5. Rebuilds the agent-home bundle only when `agent-home/` or `package-lock.json`
+3. Deletes the files the new revision removed (`git diff --diff-filter=D
+   --no-renames`), and lists any file left untracked in the checkout. Until
+   2026-08-17 it did neither: `git checkout -f <ref> -- .` writes what the ref
+   has and removes nothing it lacks, so every upstream delete or rename left its
+   old file on the box forever — found as a `docs/design/projects-feature-design.md`
+   that #283's rename should have taken away.
+4. `pip install -e .` (reinstalls the package).
+5. Rebuilds the dashboard bundle (`web/`) only when `web/` changed.
+6. Rebuilds the agent-home bundle only when `agent-home/` or `package-lock.json`
    changed — this is a `next build` with full TypeScript type checking, which
    is stricter than vitest's esbuild and will catch type errors vitest misses.
-6. Fixes ownership (`hermes:hermes` for source, `root:root` for `.venv`).
-7. Restarts all enabled `hermes-*` services + `agent-home`.
-8. Sleeps 15s, then verifies every unit is `active`.
-9. Prints `deploy OK (<sha>)` or exits 1 on any inactive unit.
-10. Runs `deploy_state.py handover` (reports doc staleness, never blocks).
+7. Fixes ownership (`hermes:hermes` for source, `root:root` for `.venv`).
+8. Restarts all enabled `hermes-*` services + `agent-home`.
+9. Sleeps 15s, then verifies every unit is `active`.
+10. Prints `deploy OK (<sha>)` or exits 1 on any inactive unit.
+11. Runs `deploy_state.py handover` (reports doc staleness, never blocks).
+12. Compares the running `/opt/data/deploy-hermes.sh` with the
+    `deploy/hermes-deploy.sh` it just pulled and prints `DEPLOY TOOL STALE`
+    with the `install` line to fix it. **The deploy tool does not deploy
+    itself** — the copy on the box is installed by hand, so a merged change to
+    this script does nothing until someone installs it, and the deploy reports
+    success meanwhile (it did, for #292). It is reported and not self-applied:
+    a script that overwrites itself while bash is still reading it is its own
+    class of bug. Silent when the two agree.
 
 A successful deploy ends with `deploy OK (<sha>)` and all 15 services `active`
 (14 `hermes-*` plus `agent-home`).

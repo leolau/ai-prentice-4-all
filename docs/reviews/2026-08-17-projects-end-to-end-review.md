@@ -53,23 +53,23 @@ Nothing from #270 has been fixed. Steps 9–11 were new work, not repair work.
 
 | # | finding | status at `7c737474f` | evidence |
 |---|---|---|---|
-| H1 | checkpoint/budget approvals never raised (`from agent import human_comms` — module does not exist; the shipped seam is `hermes_cli.human_comms.NotificationStore.create`) | **OPEN** | `projects_run.py:528-546` |
-| H2 | budget unenforceable — `sum_cost_for_trace` does not exist and `trace_id` is a synthetic string never bound to a trace | **OPEN** | `projects_run.py:548-566`, `592-593`, `641` |
-| H3 | `_enabled_toolsets_for_profile(profile)` ignores its argument and reads the *calling* process's config, so a project can be granted a toolset the host profile disables (invariant 14) | **OPEN** | `projects_run.py:827-841` |
-| H4 | inline run spawns without `profile_home`, so a manual run executes in the server's profile while the run row records the host profile | **OPEN** | `projects_run.py:869-894` |
-| M1 | a repeatable project that has *never* run is never `stalled` (`if last_start and …`) | **OPEN** | `projects_schedule.py:423-428` |
-| M2 | health/read filtering happens **after** the page slice, and `next_cursor` is taken from the last *emitted* row | **OPEN — and worse than reported: it loses rows, not just repeats them.** Rows between the last emitted row and the end of the slice are skipped permanently, and an all-filtered page returns `next_cursor=None`, ending pagination while matches remain | `projects_api.py:493-528` |
-| M3 | an instance owner/admin who is not a project member has `role is None`, so contact addresses are dropped from them too | **OPEN** | `projects_api.py:802` |
+| H1 | checkpoint/budget approvals never raised (`from agent import human_comms` — module does not exist; the shipped seam is `hermes_cli.human_comms.NotificationStore.create`) | **FIXED** — Block 2: approvals raise through `NotificationStore.create` (irreversible, owner-targeted, deduped per run); the fail-open `except` is gone — a broken surface fails the run | `projects_run.py:528-546` |
+| H2 | budget unenforceable — `sum_cost_for_trace` does not exist and `trace_id` is a synthetic string never bound to a trace | **FIXED** — Block 2: `start_run` mints a real C8 trace (`interactions.create_trace`, mode `prod`), binds it around the spawn and flushes it; cost reads through `InteractionLedger.get_trace` (sum of `kind='cost'` events); tracing off → no trace id, gate stays open | `projects_run.py:548-566`, `592-593`, `641` |
+| H3 | `_enabled_toolsets_for_profile(profile)` ignores its argument and reads the *calling* process's config, so a project can be granted a toolset the host profile disables (invariant 14) | **FIXED** — Block 2: toolsets and skills resolve inside `profile_runtime_scope` of the named profile; unknown profile fails closed (no grant) | `projects_run.py:827-841` |
+| H4 | inline run spawns without `profile_home`, so a manual run executes in the server's profile while the run row records the host profile | **FIXED** — Block 2: the default spawn passes `profile_home` (the host profile's dir) and `copy_context()` to `spawn_seeded_session` | `projects_run.py:869-894` |
+| M1 | a repeatable project that has *never* run is never `stalled` (`if last_start and …`) | **FIXED** — Block 3: the never-fired anchor chain is `last_start` → the cron job's own `created_at` (ISO-parsed) → `project.created_at`; older than two periods → `stalled` | `projects_schedule.py` `derive_health` + `_epoch_from_timestamp` |
+| M2 | health/read filtering happens **after** the page slice, and `next_cursor` is taken from the last *emitted* row | **FIXED** — Block 3: `_list_sync` is a single newest-first pass that filters before it appends and stops only once the page is full; the cursor is the last *examined* row, so an all-filtered page still hands back a cursor and no row is ever skipped or repeated | `projects_api.py` `_list_sync` |
+| M3 | an instance owner/admin who is not a project member has `role is None`, so contact addresses are dropped from them too | **FIXED** — Block 3: `include_address` follows write authority (`_can_write` or role lead/editor), not membership alone | `projects_api.py` `get_project_detail` |
 | L1 | `toolsets`/`skills` stored as CSV strings | **OPEN** | `projects_run.py:646-652` |
 | L2 | profile-imported legacy projects land with NULL `goal`, no outputs and no host profile — the mandatory-field invariant does not hold for them | **OPEN** | `projects_db.py:2496-2517` |
-| F1a | accept-output returns an ack envelope; `OutputsPanel` merges it as a row, so the row stays `delivered`, the button stays, and `offers_closure` is never surfaced | **OPEN** | `projects_api.py:1021-1025` vs `OutputsPanel.tsx:38-59` |
-| F1b | continue-run returns `{run, promoted, budget_gate}`; `RunView` reads `data.status`, which never exists at the envelope level, so continuing appears to do nothing and the `budget_gate` holding the run is never shown | **OPEN** | `projects_run.py:786` vs `RunView.tsx:84-86` |
-| F1c | add-directive returns `{id, applies_from}`; `GuidancePanel` prepends it as a `ProjectDirective`, so the new directive renders with no body, author or date until reload | **OPEN** | `projects_api.py:1691` vs `GuidancePanel.tsx` |
-| F2 | the Attention chip filters `health=attention` by equality, so a `stalled` project — the one that outranks attention — is excluded from the very view meant to surface it | **OPEN** | `filters.ts:57,77-78` + `projects_api.py:511-512` vs `projects_schedule.py:405` |
-| F3 | `@router.get("/")` / `@router.post("/")` make every list and create pay a 307 (the todos router uses `""`) | **OPEN** | `projects_api.py:532,561` |
-| F4 | `RunView` never revalidates after a write — no `router.refresh()` on any path | **OPEN** | `RunView.tsx:62-115` |
-| F5 | a `waiting` run is hidden once it falls out of the five-run brief | **OPEN** | `projects_api.py:376-399` |
-| F6/F7 | upstream error detail/path leakage; 404s rendered as raw load errors | **OPEN** | BFF bridge + detail page |
+| F1a | accept-output returns an ack envelope; `OutputsPanel` merges it as a row, so the row stays `delivered`, the button stays, and `offers_closure` is never surfaced | **FIXED** — Block 1: the route returns the updated row + the offer; the panel merges and surfaces a closure notice | `projects_api.py:1021-1025` vs `OutputsPanel.tsx:38-59` |
+| F1b | continue-run returns `{run, promoted, budget_gate}`; `RunView` reads `data.status`, which never exists at the envelope level, so continuing appears to do nothing and the `budget_gate` holding the run is never shown | **FIXED** — Block 1: `RunView` unwraps `data.run` (or the bare row on cancel) and renders `budget_gate` | `projects_run.py:786` vs `RunView.tsx:84-86` |
+| F1c | add-directive returns `{id, applies_from}`; `GuidancePanel` prepends it as a `ProjectDirective`, so the new directive renders with no body, author or date until reload | **FIXED** — Block 1: the route returns the full directive row with `applies_from` flat beside it | `projects_api.py:1691` vs `GuidancePanel.tsx` |
+| F2 | the Attention chip filters `health=attention` by equality, so a `stalled` project — the one that outranks attention — is excluded from the very view meant to surface it | **FIXED** — Block 3: the server expands `health=attention` to `{attention, stalled}` (`_HEALTH_ALIASES`), so the chip's existing query now surfaces both | `projects_api.py` `_list_sync` |
+| F3 | `@router.get("/")` / `@router.post("/")` make every list and create pay a 307 (the todos router uses `""`) | **FIXED** — Block 3: both collection routes use `""` (the todos convention); a test pins that they answer without a redirect | `projects_api.py` router |
+| F4 | `RunView` never revalidates after a write — no `router.refresh()` on any path | **FIXED** — Block 1: `router.refresh()` on every successful write | `RunView.tsx:62-115` |
+| F5 | a `waiting` run is hidden once it falls out of the five-run brief | **FIXED** — Block 3: `_runs_brief` appends the latest waiting run (`projects_db.latest_waiting_run`) when none of the five window rows is waiting — the existing `ProjectDetailView` waiting lookup needs no change | `projects_api.py` `_runs_brief` |
+| F6/F7 | upstream error detail/path leakage; 404s rendered as raw load errors | **FIXED** — Block 3: `HermesApiError.message` now carries the upstream `detail` (fixed once at the source in `client.ts`, so every BFF route that renders `err.message` shows the real reason), the projects bridge forwards `err.body.detail` as defense-in-depth, and the three project pages call `notFound()` on a 404 | `client.ts` + `hermes-bridge.ts` + the three `page.tsx` |
 | F8 | step 8b (`from_todo`) not on `develop` | **FIXED** — landed in `ffb139319` (#279/#280); see E2 below | `projects_api.py:1400-1519` |
 
 ## New findings
@@ -374,43 +374,75 @@ PR per block — each block is independently shippable and independently testabl
 
 **Block 1 — what a human sees and trusts (do first).**
 
-- [ ] E1 · one `_require_human` gate on accept-output, activate-directive and
+- [x] E1 · one `_require_human` gate on accept-output, activate-directive and
       score; CLI claims it only under `--as-human`; `SKILL.md` stops asserting
-      an unenforced rule.
-- [ ] F1a · `OutputsPanel` handles the ack envelope (or the route returns the
+      an unenforced rule. *(landed: the gate covers playbook-rev activation
+      too, and the subject rides the `by`/`scored_by` provenance)*
+- [x] F1a · `OutputsPanel` handles the ack envelope (or the route returns the
       row); the accepted row must lose its Accept button without a reload, and
-      `offers_closure` must surface.
-- [ ] F1b · `RunView` reads `data.run`, and renders `budget_gate` when present —
+      `offers_closure` must surface. *(the route returns the row + the offer;
+      the panel merges and surfaces a closure notice)*
+- [x] F1b · `RunView` reads `data.run`, and renders `budget_gate` when present —
       today the thing holding the run is invisible.
-- [ ] F1c · `GuidancePanel` refreshes instead of casting `{id, applies_from}`
-      into a `ProjectDirective`.
-- [ ] F4 · `router.refresh()` after every `RunView` write.
+- [x] F1c · `GuidancePanel` refreshes instead of casting `{id, applies_from}`
+      into a `ProjectDirective`. *(the route now returns the full directive
+      row with `applies_from` flat beside it)*
+- [x] F4 · `router.refresh()` after every `RunView` write.
 
 **Block 2 — the run lifecycle's four seams (the real risk).**
 
-- [ ] H1 · approvals through `hermes_cli.human_comms.NotificationStore.create`;
+- [x] H1 · approvals through `hermes_cli.human_comms.NotificationStore.create`;
       remove the fail-open `except` — a swallowed approval is worse than a 500.
-- [ ] H2 · bind runs to a real C8 trace (`interactions.create_trace` +
+      *(Block 2: irreversible approvals, owner-targeted, deduped
+      `proj:{slug}:run:{n}:{kind}`; store failure logs ERROR and propagates)*
+- [x] H2 · bind runs to a real C8 trace (`interactions.create_trace` +
       `bind_trace`), store that `trace_id`, read cost through the shipped
       ledger; only then is `budget_usd_per_run` enforceable.
-- [ ] H3 · `_enabled_toolsets_for_profile` must read the **host profile's**
+      *(Block 2: trace minted in `start_run` (mode `prod`, actor = owner),
+      bound around the spawn, flushed before the gate; cost = sum of the
+      trace's `kind='cost'` events via `InteractionLedger.get_trace` — the
+      ledger has no cost column; tracing off → `trace_id` NULL, gate open,
+      `cost_recorded` false)*
+- [x] H3 · `_enabled_toolsets_for_profile` must read the **host profile's**
       config, not the caller's; narrowing may never grant (invariant 14).
-- [ ] H4 · pass `profile_home` to `spawn_seeded_session` so a run executes in
-      the profile its row records.
+      *(Block 2: resolved inside `profile_runtime_scope`; skills use the same
+      scope; unknown profile → empty grant)*
+- [x] H4 · pass `profile_home` to `spawn_seeded_session` so a run executes in
+      the profile its row records. *(Block 2: host profile's dir +
+      `copy_context()` — the trace binding rides the context)*
 
 **Block 3 — health, list and routing.**
 
-- [ ] M1 · a repeatable project that has never run is `stalled`.
-- [ ] M2 · filter **before** the page slice and take `next_cursor` from the last
+- [x] M1 · a repeatable project that has never run is `stalled`.
+      *(Block 3: anchor = `last_start` → cron job `created_at` (ISO-parsed via
+      `_epoch_from_timestamp`) → `project.created_at`; older than two periods →
+      `stalled`)*
+- [x] M2 · filter **before** the page slice and take `next_cursor` from the last
       row of the slice, not the last emitted row (today paging loses rows).
-- [ ] F2 · the Attention chip must include `stalled`, which outranks attention.
-- [ ] F3 · `@router.get("")` / `@router.post("")` — drop the 307 on every list
-      and create.
-- [ ] M3 · an instance owner/admin who is not a member still sees contact
-      addresses.
-- [ ] F5 · a `waiting` run is always in the brief, however old.
-- [ ] F6/F7 · stop leaking upstream detail through the BFF; render a 404 as
+      *(Block 3: single newest-first pass; filters apply per row before it is
+      appended; the cursor is the last **examined** row, so an all-filtered
+      page still returns a cursor and pagination neither loses nor repeats
+      rows)*
+- [x] F2 · the Attention chip must include `stalled`, which outranks attention.
+      *(Block 3: server-side `_HEALTH_ALIASES` expands `health=attention` to
+      `{attention, stalled}`; the chip's query is unchanged)*
+- [x] F3 · `@router.get("")` / `@router.post("")` — drop the 307 on every list
+      and create. *(Block 3: both collection routes use `""`; a test asserts
+      they answer without a redirect)*
+- [x] M3 · an instance owner/admin who is not a member still sees contact
+      addresses. *(Block 3: `include_address` follows write authority —
+      `_can_write` or role lead/editor)*
+- [x] F5 · a `waiting` run is always in the brief, however old.
+      *(Block 3: `_runs_brief` appends `projects_db.latest_waiting_run` when
+      the five-run window holds no waiting row; the detail view's existing
+      waiting lookup is unchanged)*
+- [x] F6/F7 · stop leaking upstream detail through the BFF; render a 404 as
       "no such project", not as a load error.
+      *(Block 3: `HermesApiError.message` carries the upstream `detail`
+      (fixed at the source in `client.ts` so every route rendering
+      `err.message` shows the real reason); the projects bridge forwards
+      `err.body.detail`; the three project pages call `notFound()` on a 404
+      and render generic copy)*
 
 **Block 4 — the later steps.**
 

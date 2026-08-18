@@ -1,5 +1,8 @@
+import { notFound } from "next/navigation";
+
 import { MobileShell } from "@/components/MobileShell";
 import { ProjectDetailView } from "@/components/projects/ProjectDetailView";
+import { HermesApiError } from "@/lib/api/client";
 import { apiClientForRequest, requirePrincipal } from "@/lib/auth/principal";
 import type {
   ProjectBoardView,
@@ -31,11 +34,12 @@ export default async function Page({
   // Fetch under the try, render outside it — JSX built inside a try/catch
   // never reaches the catch (the render happens later).
   let project: ProjectDetail | null = null;
-  let detailError: string | null = null;
   try {
     project = await client.project(slug);
   } catch (err) {
-    detailError = err instanceof Error ? err.message : "Failed to load";
+    // A 404 is the API's deliberate answer for a missing *or unreadable*
+    // project (§11) — render Next's own not-found, not a load error (F7).
+    if (err instanceof HermesApiError && err.status === 404) notFound();
   }
 
   if (!project) {
@@ -45,7 +49,7 @@ export default async function Page({
           data-component="ProjectPageError"
           className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface)] p-4 text-sm text-[var(--color-muted)]"
         >
-          Couldn&apos;t load this project ({detailError}).
+          Couldn&apos;t load this project right now.
         </div>
       </MobileShell>
     );

@@ -49,6 +49,7 @@ export function RunView({
   const [run, setRun] = useState(initial);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [budgetGate, setBudgetGate] = useState<string | null>(null);
   const [retroDraft, setRetroDraft] = useState(initial.retro ?? "");
   const [retroSaved, setRetroSaved] = useState(false);
   const [scoreDraft, setScoreDraft] = useState<number | null>(
@@ -82,9 +83,18 @@ export function RunView({
         return false;
       }
       if (mergeUpdatedRun) {
-        const updated = data as Partial<ProjectRun>;
-        if (updated.status) setRun({ ...run, ...updated });
+        // Continue answers with {run, promoted, budget_gate}; cancel with
+        // the bare run row. Unwrap whichever came back.
+        const envelope = data as {
+          run?: Partial<ProjectRun>;
+          budget_gate?: string | null;
+        };
+        const updated = (envelope.run ?? data) as Partial<ProjectRun>;
+        if (updated.status) setRun((prev) => ({ ...prev, ...updated }));
+        // The thing holding the run must be visible, not silent.
+        setBudgetGate(envelope.budget_gate ?? null);
       }
+      router.refresh(); // revalidate the page's server data after a write
       return true;
     } catch {
       setError("Could not reach the server.");
@@ -217,6 +227,15 @@ export function RunView({
             {error ? (
               <p className="mt-2 text-sm text-red-400" role="alert">
                 {error}
+              </p>
+            ) : null}
+            {budgetGate ? (
+              <p
+                data-component="BudgetGate"
+                role="status"
+                className="mt-2 rounded-lg border border-yellow-500/40 bg-yellow-500/10 px-3 py-2 text-sm text-yellow-300"
+              >
+                {budgetGate}
               </p>
             ) : null}
           </header>

@@ -68,6 +68,33 @@ git checkout -q "$BRANCH" 2>/dev/null || git checkout -q -b "$BRANCH" --track "o
 git checkout -f "origin/$BRANCH" -- .
 git reset -q "origin/$BRANCH"
 git merge --ff-only "origin/$BRANCH" >/dev/null 2>&1 || git update-ref "refs/heads/$BRANCH" "origin/$BRANCH"
+# `checkout -- .` writes what the new revision HAS; it removes nothing the new
+# revision LACKS, and the reset above then leaves the orphan untracked. So a
+# file deleted or renamed upstream lived on here forever — a stale document is
+# the harmless case, an importable deleted module is not. Delete exactly what
+# git says the two revisions deleted: nothing untracked (.env, agent-home.env,
+# .next/) is named by that list, so nothing untracked can be caught by it.
+# --no-renames matters: the case that found this was a rename, and git reports
+# a rename as R rather than D, so the old path would go on surviving.
+while IFS= read -r gone; do
+  [ -z "$gone" ] && continue
+  keep=0
+  for a in "${ALLOWED_LOCAL_MODS[@]}"; do [ "$gone" = "$a" ] && keep=1; done
+  [ "$keep" = 1 ] && continue
+  [ -e "$gone" ] || continue
+  rm -f "$gone"
+  echo "removed upstream-deleted file: $gone"
+  rmdir -p --ignore-fail-on-non-empty "$(dirname "$gone")" 2>/dev/null || true
+done < <(git diff --name-only --no-renames --diff-filter=D "$BEFORE" "origin/$BRANCH")
+# Orphans from deploys made before the loop above existed, and anything a
+# process wrote into the checkout. Ignored paths (.env, agent-home.env, .next/)
+# are excluded by --porcelain, so what remains is genuinely unaccounted for.
+# Reported, never deleted — the deploy does not know what it did not put there.
+untracked=$(git status --porcelain --untracked-files=normal | awk '$1 == "??" {print $2}')
+if [ -n "$untracked" ]; then
+  echo "untracked files in the deployment checkout (not from this revision):"
+  echo "$untracked" | sed 's/^/  /'
+fi
 for a in "${ALLOWED_LOCAL_MODS[@]}"; do
   [ -f "/opt/data/backups/deploy-$TS/$a" ] && cp -a "/opt/data/backups/deploy-$TS/$a" "$a"
 done
@@ -144,3 +171,17 @@ echo "deploy OK ($AFTER)  backup: /opt/data/backups/deploy-$TS"
 # every deploy. Advisory here (a stale document must not block a deploy); the
 # weekly drift timer is what reports it.
 ./.venv/bin/python scripts/deploy_state.py handover || true
+
+# The deploy tool does not deploy itself: /opt/data/deploy-hermes.sh is a copy
+# installed by hand, so a merged fix to this script changes nothing on the box
+# until someone remembers to install it — and the deploy it was supposed to fix
+# reports success meanwhile. Found when the delete-pruning fix above merged,
+# deployed green, and did not run. Reported, not self-applied: a script that
+# rewrites itself while bash is still reading it is its own class of bug.
+SELF=$(readlink -f "$0")
+REVIEWED=$(readlink -f "$REPO/deploy/hermes-deploy.sh" 2>/dev/null || true)
+if [ -n "$REVIEWED" ] && [ "$SELF" != "$REVIEWED" ] && ! cmp -s "$SELF" "$REVIEWED"; then
+  echo "DEPLOY TOOL STALE: the running $SELF differs from the reviewed copy at $AFTER."
+  echo "  Everything above ran the old script. Install the new one and re-run:"
+  echo "    sudo install -m 755 -o root -g root $REVIEWED $SELF"
+fi

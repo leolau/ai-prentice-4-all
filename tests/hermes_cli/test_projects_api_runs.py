@@ -38,20 +38,45 @@ STEPS = [
 ]
 
 
+class _FakeApprovalStore:
+    """Records the ``NotificationStore.create`` kwargs (the H1 seam)."""
+
+    def __init__(self):
+        self.calls: list = []
+
+    async def initialize(self):
+        pass
+
+    async def create(self, **kwargs):
+        self.calls.append(kwargs)
+        return object()
+
+
+APPROVALS = _FakeApprovalStore()
+
+
 @pytest.fixture
 def env(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_PROJECTS_DB", str(tmp_path / "projects.db"))
     monkeypatch.setenv("HERMES_KANBAN_DB", str(tmp_path / "kanban.db"))
+    APPROVALS.calls.clear()
+    monkeypatch.setattr(
+        "hermes_cli.datastore.get_store", lambda *a, **k: object()
+    )
+    monkeypatch.setattr(
+        projects_run, "_approval_store",
+        lambda app_store, *, config: APPROVALS,
+    )
     # Deterministic host seams for the §4.1 intersection.
     monkeypatch.setattr(
         projects_run, "_enabled_toolsets_for_profile",
         lambda profile: ["research", "web"],
     )
     monkeypatch.setattr(
-        projects_run, "_available_skill_names", lambda: ["digest"]
+        projects_run, "_available_skill_names", lambda profile: ["digest"]
     )
 
-    state = {"actor": OWNER, "enrolled": set()}
+    state = {"actor": OWNER, "enrolled": set(), "subject": OWNER.user_id}
 
     async def _resolve(request, *, allow_as=True):
         return state["actor"]
@@ -59,10 +84,16 @@ def env(tmp_path, monkeypatch):
     async def _enrolled(user_id):
         return set(state["enrolled"])
 
+    async def _subject(request):
+        # Playbook activation is a human act (§16); this file's scenarios
+        # run under a verified session, the refusal on the main surface.
+        return state["subject"]
+
     monkeypatch.setattr(
         "hermes_cli.web_server._comms_resolve_principal", _resolve, raising=False
     )
     monkeypatch.setattr(projects_api, "_enrolled_profiles", _enrolled)
+    monkeypatch.setattr(projects_api, "_interactive_subject", _subject)
 
     app = FastAPI()
     app.include_router(projects_api.router)
@@ -80,7 +111,7 @@ def _active_project(env, **body_overrides) -> dict:
         "outputs": [{"title": "The Monday digest email"}],
     }
     payload.update(body_overrides)
-    resp = client.post("/api/registry/projects/", json=payload)
+    resp = client.post("/api/registry/projects", json=payload)
     assert resp.status_code == 200, resp.text
     project = resp.json()
     pid = project["id"]
@@ -391,6 +422,32 @@ def test_a_viewer_reads_runs_but_cannot_start_one(env):
     state["actor"] = STRANGER
     resp = client.get(f"/api/registry/projects/{project['slug']}/runs")
     assert resp.status_code == 404  # reads by non-members stay invisible
+
+
+def test_detail_brief_keeps_an_old_waiting_run(env):
+    """F5: the brief is the last five runs, but a run held at ``waiting``
+    is never truncated out of it — the header's Continue affordance must
+    find it however old it is."""
+    project = _active_project(env)
+    client, _state = env
+    with projects_db.connect_closing() as conn:
+        held = projects_db.open_project_run(
+            conn, project_id=project["id"], trigger="manual",
+            profile="default",
+        )
+        projects_db.update_project_run(conn, held["id"], status="waiting")
+        for _ in range(5):  # five newer runs push it out of the window
+            run = projects_db.open_project_run(
+                conn, project_id=project["id"], trigger="manual",
+                profile="default",
+            )
+            projects_db.update_project_run(
+                conn, run["id"], status="done", outcome="all delivered"
+            )
+    detail = client.get(f"/api/registry/projects/{project['slug']}").json()
+    waiting = [r for r in detail["runs"] if r["status"] == "waiting"]
+    assert [r["run_no"] for r in waiting] == [held["run_no"]]
+    assert held["run_no"] == 1  # the oldest run, still in the brief
 
 
 # ---------------------------------------------------------------------------

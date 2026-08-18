@@ -28,7 +28,7 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_PROJECTS_DB", str(tmp_path / "projects.db"))
     monkeypatch.setenv("HERMES_KANBAN_DB", str(tmp_path / "kanban.db"))
 
-    state = {"actor": OWNER, "enrolled": set()}
+    state = {"actor": OWNER, "enrolled": set(), "subject": ""}
 
     async def _resolve(request, *, allow_as=True):
         return state["actor"]
@@ -36,10 +36,14 @@ def env(tmp_path, monkeypatch):
     async def _enrolled(user_id):
         return set(state["enrolled"])
 
+    async def _subject(request):
+        return state["subject"]
+
     monkeypatch.setattr(
         "hermes_cli.web_server._comms_resolve_principal", _resolve, raising=False
     )
     monkeypatch.setattr(projects_api, "_enrolled_profiles", _enrolled)
+    monkeypatch.setattr(projects_api, "_interactive_subject", _subject)
 
     app = FastAPI()
     app.include_router(projects_api.router)
@@ -62,7 +66,7 @@ def _create(env, *, body=None, actor=None) -> dict:
         }
         if body:
             payload.update(body)
-        resp = client.post("/api/registry/projects/", json=payload)
+        resp = client.post("/api/registry/projects", json=payload)
         assert resp.status_code == 200, resp.text
         return resp.json()
     finally:
@@ -93,7 +97,7 @@ def _member(project_id: str, user_id: str, role: str) -> None:
 
 def test_create_refused_without_mandatory_fields_and_each_is_named(env):
     client, _state = env
-    resp = client.post("/api/registry/projects/", json={})
+    resp = client.post("/api/registry/projects", json={})
     assert resp.status_code == 422
     missing = resp.json()["detail"]["missing"]
     assert set(missing) == {"goal", "description", "outputs", "host_profile"}
@@ -102,7 +106,7 @@ def test_create_refused_without_mandatory_fields_and_each_is_named(env):
 def test_create_partial_mandatory_names_only_what_is_missing(env):
     client, _state = env
     resp = client.post(
-        "/api/registry/projects/",
+        "/api/registry/projects",
         json={"goal": "Ship it", "description": "The brief."},
     )
     assert resp.status_code == 422
@@ -128,7 +132,7 @@ def test_create_defaults_name_from_goal_and_writes_membership(env):
 def test_create_refuses_goal_over_160_chars(env):
     client, _state = env
     resp = client.post(
-        "/api/registry/projects/",
+        "/api/registry/projects",
         json={
             "goal": "x" * 161,
             "description": "d",
@@ -137,6 +141,69 @@ def test_create_refuses_goal_over_160_chars(env):
         },
     )
     assert resp.status_code == 422
+
+
+def test_collection_routes_answer_without_a_redirect(env):
+    """F3: the client calls ``/api/registry/projects`` with no trailing
+    slash; a 307 costs a round trip and replays the session to wherever
+    the ``Location`` header points. The todos router's ``""`` convention
+    is the shipped one."""
+    client, _state = env
+    resp = client.get("/api/registry/projects", follow_redirects=False)
+    assert resp.status_code == 200
+    resp = client.post(
+        "/api/registry/projects",
+        json={
+            "goal": "Ship the Monday digest — to every subscriber",
+            "description": "A weekly digest compiled and emailed each Monday.",
+            "host_profile": "default",
+            "outputs": [{"title": "The Monday digest email"}],
+        },
+        follow_redirects=False,
+    )
+    assert resp.status_code == 200, resp.text
+
+
+def test_list_pagination_loses_no_rows_under_a_filter(env):
+    """M2: filters run before the page slice and the cursor is taken from
+    the last row examined. Five projects, two needing attention (the
+    newest and the oldest); paging one at a time must surface exactly
+    those two — the old code ended pagination on the all-filtered middle
+    page and dropped the oldest match."""
+
+    def _waiting_run(project_id: str) -> None:
+        with projects_db.connect_closing() as conn:
+            run = projects_db.open_project_run(
+                conn, project_id=project_id, trigger="manual",
+                profile="default",
+            )
+            projects_db.update_project_run(conn, run["id"], status="waiting")
+
+    slugs = []
+    ids = {}
+    for i in range(5):
+        project = _create(
+            env, body={"goal": f"Pagination fixture project number {i}"}
+        )
+        slugs.append(project["slug"])
+        ids[project["slug"]] = project["id"]
+    newest, oldest = slugs[-1], slugs[0]
+    _waiting_run(ids[newest])
+    _waiting_run(ids[oldest])
+
+    client, _state = env
+    seen = []
+    cursor = None
+    for _ in range(10):  # generous bound; the contract ends pagination
+        url = "/api/registry/projects?health=attention&limit=1"
+        if cursor:
+            url += f"&cursor={cursor}"
+        body = client.get(url).json()
+        seen.extend(item["slug"] for item in body["items"])
+        cursor = body["next_cursor"]
+        if cursor is None:
+            break
+    assert seen == [newest, oldest]  # both matches, once each, newest first
 
 
 # ---------------------------------------------------------------------------
@@ -283,6 +350,26 @@ def test_viewer_responses_omit_contact_address_members_do_not(env):
     assert detail["contacts"][0]["name"] == "The client"
 
 
+def test_owner_without_a_member_row_still_sees_contact_addresses(env):
+    """M3: address visibility derives from write authority, not from the
+    membership table — an owner with no ``project_members`` row (role
+    None) kept losing addresses to the ``role not in (None, 'viewer')``
+    gate."""
+    project = _create(env)
+    client, _state = env
+    assert client.post(
+        f"/api/registry/projects/{project['slug']}/contacts",
+        json={"name": "The client", "address": "client@example.com"},
+    ).status_code == 200
+    with projects_db.connect_closing() as conn:
+        conn.execute(
+            "DELETE FROM project_members WHERE project_id = ?",
+            (project["id"],),
+        )
+    detail = client.get(f"/api/registry/projects/{project['slug']}").json()
+    assert detail["contacts"][0]["address"] == "client@example.com"
+
+
 # ---------------------------------------------------------------------------
 # Outputs lifecycle — deliver, human-only accept, closure offer (§6.1)
 # ---------------------------------------------------------------------------
@@ -291,7 +378,7 @@ def test_viewer_responses_omit_contact_address_members_do_not(env):
 def test_accept_flow_and_closure_offer(env):
     project = _create(env)
     _activate(env, project)
-    client, _state = env
+    client, state = env
     slug = project["slug"]
     with projects_db.connect_closing() as conn:
         oid = projects_db.get_project_outputs(conn, project["id"])[0]["id"]
@@ -304,15 +391,60 @@ def test_accept_flow_and_closure_offer(env):
     assert row["status"] == "delivered"
     assert row["delivered_at"]
 
+    state["subject"] = "leo"  # accepting is a human act (§16)
     resp = client.post(f"/api/registry/projects/{slug}/outputs/{oid}/accept")
     assert resp.status_code == 200
     body = resp.json()
     assert body["by"] == "leo"
+    # The updated row rides the response so a UI merges it without reload.
+    assert body["output"]["id"] == oid
+    assert body["output"]["status"] == "accepted"
     # one_off with every required output accepted → closure is offered,
     # never forced.
     assert body["offers_closure"] is True
     with projects_db.connect_closing() as conn:
         assert projects_db.get_project(conn, project["id"]).status == "active"
+
+
+def test_human_acts_refuse_a_session_less_caller(env):
+    """§16: accepting an output, activating a directive, activating a
+    playbook revision and scoring a run all need a verified interactive
+    subject — the role gate alone never suffices."""
+    project = _create(env)
+    _activate(env, project)
+    client, _state = env  # subject stays "" — an agent turn
+    slug = project["slug"]
+    with projects_db.connect_closing() as conn:
+        oid = projects_db.get_project_outputs(conn, project["id"])[0]["id"]
+        did = projects_db.add_project_directive(
+            conn, project_id=project["id"], kind="directive",
+            body="Never email before 9am", author_user_id="leo", active=False,
+        )
+        projects_db.save_playbook_rev(
+            conn, project_id=project["id"], body="The method", steps=[],
+            created_by="leo",
+        )
+        projects_db.open_project_run(
+            conn, project_id=project["id"], trigger="manual", profile="default",
+        )
+
+    resp = client.post(f"/api/registry/projects/{slug}/outputs/{oid}/accept")
+    assert resp.status_code == 403
+    assert "human act" in resp.json()["detail"]
+
+    resp = client.post(f"/api/registry/projects/{slug}/directives/{did}/activate")
+    assert resp.status_code == 403
+    assert "human act" in resp.json()["detail"]
+
+    resp = client.post(f"/api/registry/projects/{slug}/playbook/1/activate")
+    assert resp.status_code == 403
+    assert "human act" in resp.json()["detail"]
+
+    resp = client.post(
+        f"/api/registry/projects/{slug}/runs/1/score", json={"score": 4}
+    )
+    assert resp.status_code == 403
+    assert "human act" in resp.json()["detail"]
 
 
 def test_agent_cannot_accept_directly_through_status_patch(env):

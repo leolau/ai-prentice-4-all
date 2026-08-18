@@ -55,10 +55,10 @@ def env(tmp_path, monkeypatch):
         lambda profile: ["research", "web"],
     )
     monkeypatch.setattr(
-        projects_run, "_available_skill_names", lambda: ["digest"]
+        projects_run, "_available_skill_names", lambda profile: ["digest"]
     )
 
-    state = {"actor": OWNER, "enrolled": set()}
+    state = {"actor": OWNER, "enrolled": set(), "subject": OWNER.user_id}
 
     async def _resolve(request, *, allow_as=True):
         return state["actor"]
@@ -66,10 +66,16 @@ def env(tmp_path, monkeypatch):
     async def _enrolled(user_id):
         return set(state["enrolled"])
 
+    async def _subject(request):
+        # Playbook activation is a human act (§16); this file's scenarios
+        # run under a verified session, the refusal on the main surface.
+        return state["subject"]
+
     monkeypatch.setattr(
         "hermes_cli.web_server._comms_resolve_principal", _resolve, raising=False
     )
     monkeypatch.setattr(projects_api, "_enrolled_profiles", _enrolled)
+    monkeypatch.setattr(projects_api, "_interactive_subject", _subject)
 
     app = FastAPI()
     app.include_router(projects_api.router)
@@ -87,7 +93,7 @@ def _active_project(env, **body_overrides) -> dict:
         "outputs": [{"title": "The Monday digest email"}],
     }
     payload.update(body_overrides)
-    resp = client.post("/api/registry/projects/", json=payload)
+    resp = client.post("/api/registry/projects", json=payload)
     assert resp.status_code == 200, resp.text
     project = resp.json()
     pid = project["id"]
@@ -373,10 +379,16 @@ def test_list_supports_the_health_filter(env):
     assert resp.status_code == 200
     _break_the_cron_link(broken)
 
-    resp = client.get("/api/registry/projects/?health=stalled")
+    resp = client.get("/api/registry/projects?health=stalled")
     slugs = [item["slug"] for item in resp.json()["items"]]
     assert slugs == ["broken-digest"]
 
-    resp = client.get("/api/registry/projects/?health=ok")
+    resp = client.get("/api/registry/projects?health=ok")
     slugs = [item["slug"] for item in resp.json()["items"]]
     assert "healthy-digest" in slugs and "broken-digest" not in slugs
+
+    # F2: ``stalled`` outranks ``attention`` (§9.2), so the chip named for
+    # needing a human must surface it too — the server expands the filter.
+    resp = client.get("/api/registry/projects?health=attention")
+    slugs = [item["slug"] for item in resp.json()["items"]]
+    assert slugs == ["broken-digest"]
