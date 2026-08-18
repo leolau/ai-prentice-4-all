@@ -134,11 +134,11 @@ export function AddToProjectSheet({
         {
           method: "POST",
           headers: { "content-type": "application/json" },
+          // A promotion always reads the to-do from the profile serving this
+          // request — the sheet knows no foreign profile, so it names none
+          // (the backend refuses any other one; see E2).
           body: JSON.stringify({
-            from_todo: {
-              id: promote.todoId,
-              profile: profile.trim() || undefined,
-            },
+            from_todo: { id: promote.todoId },
           }),
         },
       );

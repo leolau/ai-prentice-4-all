@@ -392,3 +392,84 @@ def test_list_supports_the_health_filter(env):
     resp = client.get("/api/registry/projects?health=attention")
     slugs = [item["slug"] for item in resp.json()["items"]]
     assert slugs == ["broken-digest"]
+
+# ---------------------------------------------------------------------------
+# needs_completion quarantine (L2)
+# ---------------------------------------------------------------------------
+
+
+def _quarantine(project):
+    """Force the shape a legacy import lands in: ``needs_completion`` with
+    no goal, no outputs and no host profile. Raw SQL on purpose — the
+    import path is the only legitimate writer of this status."""
+    with projects_db.connect_closing() as conn:
+        with projects_db.write_txn(conn):
+            conn.execute(
+                "UPDATE projects SET status = 'needs_completion', goal = NULL "
+                "WHERE id = ?",
+                (project["id"],),
+            )
+            conn.execute(
+                "DELETE FROM project_outputs WHERE project_id = ?",
+                (project["id"],),
+            )
+            conn.execute(
+                "DELETE FROM project_profiles WHERE project_id = ?",
+                (project["id"],),
+            )
+
+
+def test_schedule_refuses_a_quarantined_project_naming_the_missing_fields(env):
+    project = _active_project(env, cadence="repeatable")
+    _save_and_activate_playbook(env, project)
+    _quarantine(project)
+    client, _state, _cron = env
+    resp = client.put(
+        f"/api/registry/projects/{project['slug']}/schedule",
+        json={"schedule": "every 60m"},
+    )
+    assert resp.status_code == 409
+    detail = resp.json()["detail"]
+    assert "needs completion" in detail
+    for piece in ("a goal", "at least one output", "a host profile"):
+        assert piece in detail
+
+
+def test_status_change_refuses_a_quarantined_project_until_completed(env):
+    project = _active_project(env)
+    _quarantine(project)
+    client, _state, _cron = env
+    resp = client.patch(
+        f"/api/registry/projects/{project['slug']}", json={"status": "active"}
+    )
+    assert resp.status_code == 422
+    assert "needs completion" in resp.json()["detail"]
+
+    # Outputs + a host profile back, then the goal rides in the same
+    # request as the activation — one PATCH completes and unlocks.
+    with projects_db.connect_closing() as conn:
+        projects_db.add_project_output(
+            conn, project_id=project["id"], title="The Monday digest email"
+        )
+        projects_db.add_project_profile(
+            conn, project_id=project["id"], profile="default", role="host"
+        )
+    resp = client.patch(
+        f"/api/registry/projects/{project['slug']}",
+        json={"goal": "Ship the Monday digest to every subscriber",
+              "status": "active"},
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["status"] == "active"
+
+
+def test_doctor_flags_a_quarantined_project(env):
+    project = _active_project(env)
+    _quarantine(project)
+    client, _state, _cron = env
+    resp = client.get(f"/api/registry/projects/{project['slug']}/doctor")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["clean"] is False
+    finding = next(f for f in body["findings"] if f["code"] == "needs_completion")
+    assert "a goal" in finding["detail"]

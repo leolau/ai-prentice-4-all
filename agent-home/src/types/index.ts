@@ -1199,7 +1199,15 @@ export interface EntityGoalResponse {
 
 // ── Projects (design ed.3.2 §2–§9, §12) ─────────────────────────────────────
 
-export type ProjectStatus = "planning" | "active" | "paused" | "done" | "archived";
+/** ``needs_completion`` is the L2 quarantine for legacy-imported rows —
+ * never a state a human picks, only one they work a project out of. */
+export type ProjectStatus =
+  | "planning"
+  | "active"
+  | "paused"
+  | "done"
+  | "archived"
+  | "needs_completion";
 export type ProjectCadence = "one_off" | "repeatable" | "standing";
 export type ProjectAutonomy = "manual" | "supervised" | "autonomous";
 export type ProjectVisibility = "shared" | "private";

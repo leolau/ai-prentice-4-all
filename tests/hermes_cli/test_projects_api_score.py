@@ -197,6 +197,33 @@ def test_project_score_is_the_mean_of_the_last_five(env):
     assert detail["score"] == {"mean": 4.5, "runs": 2}
 
 
+def test_project_score_windows_scores_not_runs(env):
+    """E5: the window is the last five *scores* — twenty-five unscored
+    runs after them must not make the score disappear, and a re-score of
+    an early run still moves it."""
+    client, state = env
+    project = _project_with_runs(env, runs=40)
+    state["subject"] = "leo"
+    for run_no, score in ((1, 2), (2, 4), (3, 4), (4, 4), (5, 5)):
+        assert client.post(
+            f"{_PREFIX}/{project['slug']}/runs/{run_no}/score",
+            json={"score": score},
+        ).status_code == 200
+
+    detail = client.get(f"{_PREFIX}/{project['slug']}").json()
+    # Runs 6–40 are unscored: under the old "scores within the last 25
+    # runs" window this read was None.
+    assert detail["score"] == {"mean": 3.8, "runs": 5}
+
+    # Re-scoring run 1 still moves the window.
+    assert client.post(
+        f"{_PREFIX}/{project['slug']}/runs/1/score", json={"score": 5}
+    ).status_code == 200
+    detail = client.get(f"{_PREFIX}/{project['slug']}").json()
+    assert detail["score"]["runs"] == 5
+    assert abs(detail["score"]["mean"] - 4.4) < 1e-9
+
+
 def test_project_score_absent_until_somebody_scores(env):
     client, _state = env
     project = _project_with_runs(env)

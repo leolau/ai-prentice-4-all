@@ -3,19 +3,22 @@
 Behaviour contracts: ``GET /{slug}/events?since=`` returns only the
 ``task_events`` rows belonging to the caller-visible cards of *this*
 project, oldest first, with a ``latest_event_id`` that always names the
-current head — even when the window is empty or overflowed.
-``POST /{slug}/summarise`` is the one write entry point for the rolling
-"where this stands" (§2.2): it stamps ``summary_at`` and shows up on the
-detail read.
+current head — even when the window is empty or overflowed. The tail is a
+project-scoped join (E4), so a project with more than ~999 visible cards
+still serves it. ``POST /{slug}/summarise`` is the one write entry point
+for the rolling "where this stands" (§2.2): it stamps ``summary_at`` and
+shows up on the detail read.
 """
 
 from __future__ import annotations
+
+import time
 
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from hermes_cli import projects_api
+from hermes_cli import kanban_db, projects_api
 from hermes_cli.access import Principal
 
 OWNER = Principal(user_id="leo", display="Leo", role="owner")  # type: ignore[arg-type]
@@ -135,6 +138,36 @@ def test_events_since_validation(env):
     slug = project["slug"]
     assert env.get(f"{_PREFIX}/{slug}/events", params={"since": "abc"}).status_code == 400
     assert env.get(f"{_PREFIX}/{slug}/events", params={"since": "-1"}).status_code == 400
+
+
+def test_events_tail_survives_more_than_999_cards(env):
+    """E4: the old seam bounded the read with an id list — past SQLite's
+    ~999 bound-variable cap that was a 500. The project-scoped join does
+    not care how many cards the project has."""
+    project = _create(env, goal="Ship the Monday digest to every subscriber")
+    now = int(time.time())
+    with kanban_db.connect_closing() as bconn:
+        with kanban_db.write_txn(bconn):
+            bconn.executemany(
+                "INSERT INTO tasks (id, title, status, created_at, project_id) "
+                "VALUES (?, ?, 'triage', ?, ?)",
+                [
+                    (f"t_{i:04d}", f"Card {i}", now, project["id"])
+                    for i in range(1_200)
+                ],
+            )
+            bconn.executemany(
+                "INSERT INTO task_events (task_id, kind, created_at) "
+                "VALUES (?, 'created', ?)",
+                [(f"t_{i:04d}", now) for i in range(1_200)],
+            )
+
+    resp = env.get(f"{_PREFIX}/{project['slug']}/events")
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    assert len(data["events"]) == 200  # the tail stays bounded
+    assert data["latest_event_id"] == 1_200  # …but the head is the true head
+    assert all(ev["task_id"].startswith("t_") for ev in data["events"])
 
 
 def test_events_unknown_project_404(env):

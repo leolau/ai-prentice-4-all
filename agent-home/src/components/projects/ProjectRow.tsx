@@ -79,7 +79,12 @@ export function ProjectRow({ project }: { project: ProjectListItem }) {
         </Pill>
       </div>
 
-      {project.goal ? (
+      {project.status === "needs_completion" ? (
+        <p className="mt-1 truncate text-sm italic text-[var(--color-muted)]">
+          Imported from a legacy store — needs completion (goal, outputs,
+          host profile)
+        </p>
+      ) : project.goal ? (
         <p className="mt-1 truncate text-sm text-[var(--color-muted)]">
           {project.goal}
         </p>

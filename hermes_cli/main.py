@@ -11486,9 +11486,9 @@ def cmd_profile(args):
         from hermes_cli.access import PrincipalStore
 
         async def _run_suggest():
-            registry = GoalRegistryStore()
-            tree = GoalTreeStore(registry)
             app_store = get_store("supabase-app", "prod")
+            registry = GoalRegistryStore(app_store)
+            tree = GoalTreeStore(registry)
             promotions = SkillPromotionStore(app_store)
             principal = await PrincipalStore(app_store).get_owner()
             if principal is None:
