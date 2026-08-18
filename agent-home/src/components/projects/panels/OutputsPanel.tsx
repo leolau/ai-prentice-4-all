@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useState } from "react";
 
+import { applyAcceptEnvelope } from "@/components/projects/envelopes";
 import { dateTimeLabel } from "@/components/projects/format";
 import { BusyRegion } from "@/components/ui/BusyRegion";
 import { Pill } from "@/components/ui/Pill";
@@ -50,16 +51,11 @@ export function OutputsPanel({
       // merge the row (the joined deliveries survive the spread) so the
       // Accept button disappears without a reload.
       const payload = (await res.json()) as {
-        output?: Record<string, unknown>;
+        output?: Partial<ProjectOutputWithDeliveries>;
         offers_closure?: boolean;
       };
-      const updated = payload.output ?? {};
-      setOutputs((prev) =>
-        prev.map((row) =>
-          row.id === outputId ? { ...row, ...updated } : row,
-        ),
-      );
-      if (payload.offers_closure) setOffersClosure(true);
+      setOutputs((prev) => applyAcceptEnvelope(prev, outputId, payload).outputs);
+      if (payload.offers_closure === true) setOffersClosure(true);
     } catch {
       setError("That didn't stick — try again.");
     } finally {
