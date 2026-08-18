@@ -393,9 +393,19 @@ def _derived_score(conn, project_id: str) -> Optional[dict]:
 
 def _runs_brief(conn, project_id: str, *, limit: int = 5) -> list[dict]:
     """The last N runs as one-line rows (§12 detail). Cost stays fail-open
-    and lives on the run-detail read, not here."""
+    and lives on the run-detail read, not here.
+
+    A ``waiting`` run is never truncated out (F5): the header's Continue
+    affordance must find it however old it is, so the newest one is
+    appended when it fell out of the window.
+    """
+    rows = projects_db.list_project_runs(conn, project_id, limit=limit)
+    if not any(r.get("status") == "waiting" for r in rows):
+        waiting = projects_db.latest_waiting_run(conn, project_id)
+        if waiting is not None:
+            rows = [*rows, waiting]
     out = []
-    for r in projects_db.list_project_runs(conn, project_id, limit=limit):
+    for r in rows:
         duration = None
         if r.get("started_at") and r.get("ended_at"):
             duration = int(r["ended_at"]) - int(r["started_at"])
@@ -478,6 +488,11 @@ def _encode_cursor(created_at: int, pid: str) -> str:
 # GET / — the readable list
 # ---------------------------------------------------------------------------
 
+# ``attention`` is the rung a human must look at — which includes ``stalled``,
+# the worse rung that outranks it (§9.2). The chip sends ``health=attention``;
+# the server expands it here so the filter and the cursor agree (F2).
+_HEALTH_ALIASES = {"attention": frozenset({"attention", "stalled"})}
+
 
 def _list_sync(
     principal,
@@ -496,22 +511,33 @@ def _list_sync(
     # Newest first; the keyset cursor sorts on (created_at, id).
     rows.sort(key=lambda p: (p.created_at, p.id), reverse=True)
 
-    items = []
-    for p in rows:
-        if cursor and (p.created_at, p.id) >= cursor:
-            continue
-        if status and p.status != status:
-            continue
-        if cadence and getattr(p, "cadence", None) != cadence:
-            continue
-        if q and q.lower() not in f"{p.name} {p.goal or ''}".lower():
-            continue
-        items.append(p)
+    health_set = _HEALTH_ALIASES.get(health) if health else None
+    if health and health_set is None:
+        health_set = frozenset({health})
 
-    page = items[:limit]
+    # Every filter runs BEFORE the page slice and the cursor is taken from
+    # the last row *examined*: a post-slice filter both repeats rows and
+    # silently drops the ones between the last kept row and the slice end
+    # (M2).
     out = []
+    last_examined = None
+    exhausted = True
     with projects_db.connect_closing() as conn:
-        for p in page:
+        for p in rows:
+            if cursor and (p.created_at, p.id) >= cursor:
+                continue
+            if len(out) >= limit:
+                # The page is full but rows remain — the next page resumes
+                # strictly after ``last_examined``.
+                exhausted = False
+                break
+            last_examined = (p.created_at, p.id)
+            if status and p.status != status:
+                continue
+            if cadence and getattr(p, "cadence", None) != cadence:
+                continue
+            if q and q.lower() not in f"{p.name} {p.goal or ''}".lower():
+                continue
             role = _member_role_sync(conn, p.id, principal.user_id)
             profiles = projects_db.get_project_profiles(conn, p.id)
             if not _can_read(p, role, principal, enrolled, profiles):
@@ -527,7 +553,7 @@ def _list_sync(
                 [l for l in links if l["kind"] == "goal"],
             )
             item_health = _full_health(conn, p, rollup, profiles)
-            if health and item_health != health:
+            if health_set and item_health not in health_set:
                 continue
             out.append(
                 _project_payload(
@@ -541,13 +567,12 @@ def _list_sync(
             )
 
     next_cursor = None
-    if len(items) > limit and out:
-        last = page[len(out) - 1]
-        next_cursor = _encode_cursor(last.created_at, last.id)
+    if not exhausted and last_examined:
+        next_cursor = _encode_cursor(*last_examined)
     return {"items": out, "next_cursor": next_cursor}
 
 
-@router.get("/")
+@router.get("")
 async def list_projects(request: Request) -> dict[str, Any]:
     principal = await _principal_read(request)
     params = request.query_params
@@ -572,11 +597,11 @@ async def list_projects(request: Request) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# POST / — create under the full §2.2 contract
+# POST — create under the full §2.2 contract
 # ---------------------------------------------------------------------------
 
 
-@router.post("/")
+@router.post("")
 async def create_project_route(request: Request) -> dict[str, Any]:
     principal = await _principal_write(request)
     try:
@@ -817,7 +842,12 @@ def _detail_sync(project, principal, *, include_address: bool) -> dict:
 @router.get("/{slug}")
 async def get_project_detail(request: Request) -> dict[str, Any]:
     project, role, _profiles, principal = await _require_read(request)
-    include_address = role not in (None, "viewer")
+    # Write authority implies address visibility (M3): an owner or instance
+    # admin with no member row has ``role is None`` but must still see
+    # addresses — derive from the same predicate that authorises writes.
+    include_address = _can_write(project, role, principal) or role in (
+        "lead", "editor",
+    )
     return await asyncio.to_thread(
         _detail_sync, project, principal, include_address=include_address
     )

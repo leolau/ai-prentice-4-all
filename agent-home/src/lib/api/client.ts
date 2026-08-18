@@ -107,6 +107,24 @@ export class HermesApiError extends Error {
   }
 }
 
+/**
+ * The upstream's own wording when it sent one (F6). Every BFF route and
+ * page that renders ``err.message`` must reach a user with the API's
+ * copy — *retire one first*, the budget refusal — never with the
+ * internal path and status, which is topology nobody can act on.
+ */
+function upstreamDetail(parsed: unknown, fallback: string): string {
+  if (
+    parsed &&
+    typeof parsed === "object" &&
+    typeof (parsed as { detail?: unknown }).detail === "string" &&
+    (parsed as { detail: string }).detail
+  ) {
+    return (parsed as { detail: string }).detail;
+  }
+  return fallback;
+}
+
 export interface HermesApiClientOptions {
   /** The bridged upstream Hermes access token to replay (from the session). */
   hermesToken?: string;
@@ -193,7 +211,7 @@ export class HermesApiClient {
     if (!res.ok) {
       throw new HermesApiError(
         res.status,
-        `Hermes API ${path} → ${res.status}`,
+        upstreamDetail(parsed, "That didn't go through."),
         parsed ?? text,
       );
     }
@@ -552,7 +570,7 @@ export class HermesApiClient {
       const text = res.body ? await res.text().catch(() => "") : "";
       throw new HermesApiError(
         res.status,
-        `Hermes API chat/stream → ${res.status}`,
+        upstreamDetail(text ? safeJson(text) : undefined, "That didn't go through."),
         text,
       );
     }

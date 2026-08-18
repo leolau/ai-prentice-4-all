@@ -57,19 +57,19 @@ Nothing from #270 has been fixed. Steps 9–11 were new work, not repair work.
 | H2 | budget unenforceable — `sum_cost_for_trace` does not exist and `trace_id` is a synthetic string never bound to a trace | **FIXED** — Block 2: `start_run` mints a real C8 trace (`interactions.create_trace`, mode `prod`), binds it around the spawn and flushes it; cost reads through `InteractionLedger.get_trace` (sum of `kind='cost'` events); tracing off → no trace id, gate stays open | `projects_run.py:548-566`, `592-593`, `641` |
 | H3 | `_enabled_toolsets_for_profile(profile)` ignores its argument and reads the *calling* process's config, so a project can be granted a toolset the host profile disables (invariant 14) | **FIXED** — Block 2: toolsets and skills resolve inside `profile_runtime_scope` of the named profile; unknown profile fails closed (no grant) | `projects_run.py:827-841` |
 | H4 | inline run spawns without `profile_home`, so a manual run executes in the server's profile while the run row records the host profile | **FIXED** — Block 2: the default spawn passes `profile_home` (the host profile's dir) and `copy_context()` to `spawn_seeded_session` | `projects_run.py:869-894` |
-| M1 | a repeatable project that has *never* run is never `stalled` (`if last_start and …`) | **OPEN** | `projects_schedule.py:423-428` |
-| M2 | health/read filtering happens **after** the page slice, and `next_cursor` is taken from the last *emitted* row | **OPEN — and worse than reported: it loses rows, not just repeats them.** Rows between the last emitted row and the end of the slice are skipped permanently, and an all-filtered page returns `next_cursor=None`, ending pagination while matches remain | `projects_api.py:493-528` |
-| M3 | an instance owner/admin who is not a project member has `role is None`, so contact addresses are dropped from them too | **OPEN** | `projects_api.py:802` |
+| M1 | a repeatable project that has *never* run is never `stalled` (`if last_start and …`) | **FIXED** — Block 3: the never-fired anchor chain is `last_start` → the cron job's own `created_at` (ISO-parsed) → `project.created_at`; older than two periods → `stalled` | `projects_schedule.py` `derive_health` + `_epoch_from_timestamp` |
+| M2 | health/read filtering happens **after** the page slice, and `next_cursor` is taken from the last *emitted* row | **FIXED** — Block 3: `_list_sync` is a single newest-first pass that filters before it appends and stops only once the page is full; the cursor is the last *examined* row, so an all-filtered page still hands back a cursor and no row is ever skipped or repeated | `projects_api.py` `_list_sync` |
+| M3 | an instance owner/admin who is not a project member has `role is None`, so contact addresses are dropped from them too | **FIXED** — Block 3: `include_address` follows write authority (`_can_write` or role lead/editor), not membership alone | `projects_api.py` `get_project_detail` |
 | L1 | `toolsets`/`skills` stored as CSV strings | **FIXED** — Block 4: CSV kept (the UI's `ToolsPanel` already splits CSV); names are validated against `^[A-Za-z0-9_.:-]+$` at write time in `patch_tools_route`, before the unknown-name check — a separator can no longer round-trip as two unknown names | `projects_run.py:646-652` |
 | L2 | profile-imported legacy projects land with NULL `goal`, no outputs and no host profile — the mandatory-field invariant does not hold for them | **FIXED** — Block 4: quarantined — imports land with `status='needs_completion'`; leaving the status or scheduling is refused until a goal, an output and a host profile exist, each refusal naming what is missing; doctor emits a `needs_completion` finding and the list row renders it instead of an empty goal | `projects_db.py:2496-2517` |
 | F1a | accept-output returns an ack envelope; `OutputsPanel` merges it as a row, so the row stays `delivered`, the button stays, and `offers_closure` is never surfaced | **FIXED** — Block 1: the route returns the updated row + the offer; the panel merges and surfaces a closure notice | `projects_api.py:1021-1025` vs `OutputsPanel.tsx:38-59` |
 | F1b | continue-run returns `{run, promoted, budget_gate}`; `RunView` reads `data.status`, which never exists at the envelope level, so continuing appears to do nothing and the `budget_gate` holding the run is never shown | **FIXED** — Block 1: `RunView` unwraps `data.run` (or the bare row on cancel) and renders `budget_gate` | `projects_run.py:786` vs `RunView.tsx:84-86` |
 | F1c | add-directive returns `{id, applies_from}`; `GuidancePanel` prepends it as a `ProjectDirective`, so the new directive renders with no body, author or date until reload | **FIXED** — Block 1: the route returns the full directive row with `applies_from` flat beside it | `projects_api.py:1691` vs `GuidancePanel.tsx` |
-| F2 | the Attention chip filters `health=attention` by equality, so a `stalled` project — the one that outranks attention — is excluded from the very view meant to surface it | **OPEN** | `filters.ts:57,77-78` + `projects_api.py:511-512` vs `projects_schedule.py:405` |
-| F3 | `@router.get("/")` / `@router.post("/")` make every list and create pay a 307 (the todos router uses `""`) | **OPEN** | `projects_api.py:532,561` |
+| F2 | the Attention chip filters `health=attention` by equality, so a `stalled` project — the one that outranks attention — is excluded from the very view meant to surface it | **FIXED** — Block 3: the server expands `health=attention` to `{attention, stalled}` (`_HEALTH_ALIASES`), so the chip's existing query now surfaces both | `projects_api.py` `_list_sync` |
+| F3 | `@router.get("/")` / `@router.post("/")` make every list and create pay a 307 (the todos router uses `""`) | **FIXED** — Block 3: both collection routes use `""` (the todos convention); a test pins that they answer without a redirect | `projects_api.py` router |
 | F4 | `RunView` never revalidates after a write — no `router.refresh()` on any path | **FIXED** — Block 1: `router.refresh()` on every successful write | `RunView.tsx:62-115` |
-| F5 | a `waiting` run is hidden once it falls out of the five-run brief | **OPEN** | `projects_api.py:376-399` |
-| F6/F7 | upstream error detail/path leakage; 404s rendered as raw load errors | **OPEN** | BFF bridge + detail page |
+| F5 | a `waiting` run is hidden once it falls out of the five-run brief | **FIXED** — Block 3: `_runs_brief` appends the latest waiting run (`projects_db.latest_waiting_run`) when none of the five window rows is waiting — the existing `ProjectDetailView` waiting lookup needs no change | `projects_api.py` `_runs_brief` |
+| F6/F7 | upstream error detail/path leakage; 404s rendered as raw load errors | **FIXED** — Block 3: `HermesApiError.message` now carries the upstream `detail` (fixed once at the source in `client.ts`, so every BFF route that renders `err.message` shows the real reason), the projects bridge forwards `err.body.detail` as defense-in-depth, and the three project pages call `notFound()` on a 404 | `client.ts` + `hermes-bridge.ts` + the three `page.tsx` |
 | F8 | step 8b (`from_todo`) not on `develop` | **FIXED** — landed in `ffb139319` (#279/#280); see E2 below | `projects_api.py:1400-1519` |
 
 ## New findings
@@ -413,17 +413,36 @@ PR per block — each block is independently shippable and independently testabl
 
 **Block 3 — health, list and routing.**
 
-- [ ] M1 · a repeatable project that has never run is `stalled`.
-- [ ] M2 · filter **before** the page slice and take `next_cursor` from the last
+- [x] M1 · a repeatable project that has never run is `stalled`.
+      *(Block 3: anchor = `last_start` → cron job `created_at` (ISO-parsed via
+      `_epoch_from_timestamp`) → `project.created_at`; older than two periods →
+      `stalled`)*
+- [x] M2 · filter **before** the page slice and take `next_cursor` from the last
       row of the slice, not the last emitted row (today paging loses rows).
-- [ ] F2 · the Attention chip must include `stalled`, which outranks attention.
-- [ ] F3 · `@router.get("")` / `@router.post("")` — drop the 307 on every list
-      and create.
-- [ ] M3 · an instance owner/admin who is not a member still sees contact
-      addresses.
-- [ ] F5 · a `waiting` run is always in the brief, however old.
-- [ ] F6/F7 · stop leaking upstream detail through the BFF; render a 404 as
+      *(Block 3: single newest-first pass; filters apply per row before it is
+      appended; the cursor is the last **examined** row, so an all-filtered
+      page still returns a cursor and pagination neither loses nor repeats
+      rows)*
+- [x] F2 · the Attention chip must include `stalled`, which outranks attention.
+      *(Block 3: server-side `_HEALTH_ALIASES` expands `health=attention` to
+      `{attention, stalled}`; the chip's query is unchanged)*
+- [x] F3 · `@router.get("")` / `@router.post("")` — drop the 307 on every list
+      and create. *(Block 3: both collection routes use `""`; a test asserts
+      they answer without a redirect)*
+- [x] M3 · an instance owner/admin who is not a member still sees contact
+      addresses. *(Block 3: `include_address` follows write authority —
+      `_can_write` or role lead/editor)*
+- [x] F5 · a `waiting` run is always in the brief, however old.
+      *(Block 3: `_runs_brief` appends `projects_db.latest_waiting_run` when
+      the five-run window holds no waiting row; the detail view's existing
+      waiting lookup is unchanged)*
+- [x] F6/F7 · stop leaking upstream detail through the BFF; render a 404 as
       "no such project", not as a load error.
+      *(Block 3: `HermesApiError.message` carries the upstream `detail`
+      (fixed at the source in `client.ts` so every route rendering
+      `err.message` shows the real reason); the projects bridge forwards
+      `err.body.detail`; the three project pages call `notFound()` on a 404
+      and render generic copy)*
 
 **Block 4 — the later steps.**
 
