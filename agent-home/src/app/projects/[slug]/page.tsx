@@ -27,7 +27,7 @@ export default async function Page({
 }: {
   params: Promise<{ slug: string }>;
 }) {
-  await requirePrincipal();
+  const principal = await requirePrincipal();
   const { slug } = await params;
   const client = await apiClientForRequest();
 
@@ -72,6 +72,8 @@ export default async function Page({
         board={board}
         playbook={playbook}
         directives={directives}
+        callerUserId={principal.user_id}
+        isInstanceAdmin={principal.role === "owner" || principal.role === "admin"}
       />
     </MobileShell>
   );

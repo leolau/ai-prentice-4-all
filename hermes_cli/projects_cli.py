@@ -447,6 +447,54 @@ def _cmd_doctor(api: _Api, args) -> int:
     return 1
 
 
+def _cmd_archive(api: _Api, args) -> int:
+    """Shelve a project (§13, decision 17): reversible, keeps the record,
+    stops it running."""
+    body = {"reason": args.reason} if getattr(args, "reason", None) else None
+    resp = api.request("POST", f"/{args.slug}/archive", json_body=body)
+    if resp.status_code != 200:
+        return _fail(resp)
+    data = resp.json()
+    if args.json:
+        _print_json(data)
+        return 0
+    print(f"Archived {data.get('slug')} — restore it with "
+          f"`hermes projects restore {data.get('slug')}`.")
+    return 0
+
+
+def _cmd_restore(api: _Api, args) -> int:
+    """Bring an archived project back — lands in ``paused``, never straight
+    to ``active``; the schedule is not re-created (§12)."""
+    resp = api.request("POST", f"/{args.slug}/restore")
+    if resp.status_code != 200:
+        return _fail(resp)
+    data = resp.json()
+    if args.json:
+        _print_json(data)
+        return 0
+    print(f"Restored {data.get('slug')} — status '{data.get('status')}'. "
+          "Re-schedule it with PUT /schedule when it should run again.")
+    return 0
+
+
+def _cmd_delete(api: _Api, args) -> int:
+    """Hard delete — the narrow exception (decision 17). Human-only: needs
+    ``--as-human`` on the command line and ``--confirm <slug>`` here."""
+    resp = api.request(
+        "DELETE", f"/{args.slug}", params={"confirm": args.confirm}
+    )
+    if resp.status_code != 200:
+        return _fail(resp)
+    data = resp.json()
+    if args.json:
+        _print_json(data)
+        return 0
+    print(f"Deleted {data.get('deleted')} — the record is gone, "
+          "not archived.")
+    return 0
+
+
 # ---------------------------------------------------------------------------
 # Write verbs
 # ---------------------------------------------------------------------------
@@ -1089,6 +1137,12 @@ async def _dispatch(args: argparse.Namespace) -> int:
             return _cmd_summarise(api, args)
         if verb == "doctor":
             return _cmd_doctor(api, args)
+        if verb == "archive":
+            return _cmd_archive(api, args)
+        if verb == "restore":
+            return _cmd_restore(api, args)
+        if verb == "delete":
+            return _cmd_delete(api, args)
         print(f"projects: unknown command: {verb}", file=sys.stderr)
         return 2
     finally:
@@ -1324,6 +1378,34 @@ def register_projects_subparser(
     )
     doctor.add_argument("--slug", default=None)
     doctor.add_argument("--json", **json_flag)
+
+    archive = sub.add_parser(
+        "archive",
+        help="Shelve a project — reversible, keeps the record, stops it "
+             "running (§13)",
+    )
+    archive.add_argument("slug")
+    archive.add_argument(
+        "--reason", default=None, help="Why it is being shelved (recorded)"
+    )
+    archive.add_argument("--json", **json_flag)
+
+    restore = sub.add_parser(
+        "restore", help="Bring an archived project back (lands in 'paused')"
+    )
+    restore.add_argument("slug")
+    restore.add_argument("--json", **json_flag)
+
+    delete = sub.add_parser(
+        "delete",
+        help="Hard delete — only for the genuinely empty mistake "
+             "(needs --as-human and --confirm <slug>)",
+    )
+    delete.add_argument("slug")
+    delete.add_argument(
+        "--confirm", required=True, help="Must equal the project slug"
+    )
+    delete.add_argument("--json", **json_flag)
 
     parser.set_defaults(func=projects_cli_command)
 

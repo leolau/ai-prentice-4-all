@@ -914,6 +914,179 @@ async def patch_project(request: Request) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Lifecycle: archive / restore / hard delete (§13, decision 17)
+# ---------------------------------------------------------------------------
+
+
+@router.post("/{slug}/archive")
+async def archive_project_route(request: Request) -> dict[str, Any]:
+    """Shelve a project (§13): the archived flag and the ``archived`` status
+    land in one transaction, and the schedule detaches by the same call —
+    the invariant is that no archived project keeps firing. An optional
+    ``reason`` is recorded with who did it. Lead / instance admin. Returns
+    the **updated row**, never an ack.
+    """
+    project, _role, _profiles, principal = await _require_write(request)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        body = {}
+    reason = str(body.get("reason") or "").strip()
+
+    def _archive_sync() -> dict:
+        with projects_db.connect_closing() as conn:
+            fresh = projects_db.get_project(conn, project.id)
+            if fresh is None:
+                raise ValueError("project not found")
+            if fresh.archived:
+                raise ValueError(
+                    f"project {fresh.slug} is already archived"
+                )
+            # One transaction: archived=1 AND status='archived'. Refuses a
+            # needs_completion record (L2), naming the missing fields.
+            projects_db.archive_project(conn, fresh.id)
+            if getattr(fresh, "cron_job_id", None):
+                projects_schedule.detach_project_schedule(
+                    conn,
+                    project=fresh,
+                    reason=(
+                        f"project archived{f': {reason}' if reason else ''}"
+                    ),
+                    changed_by=principal.user_id,
+                )
+            note = f"Project archived{f': {reason}' if reason else ''}."
+            try:
+                projects_db.add_project_directive(
+                    conn,
+                    project_id=fresh.id,
+                    kind="directive",
+                    body=note,
+                    author_user_id=principal.user_id,
+                )
+            except ValueError:  # pragma: no cover - directive cap: never block
+                logger.debug("projects: directive cap — archive note dropped")
+            updated = projects_db.get_project(conn, fresh.id)
+            return _project_payload(updated)
+
+    try:
+        return await asyncio.to_thread(_archive_sync)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+
+
+@router.post("/{slug}/restore")
+async def restore_project_route(request: Request) -> dict[str, Any]:
+    """Bring a shelved project back (§13): ``archived=0`` and
+    ``status='paused'`` — re-entry is a decision, so never straight to
+    ``active``. The schedule is **not** re-created; ``PUT /schedule`` does
+    that. Returns the updated row.
+    """
+    project, _role, _profiles, _principal = await _require_write(request)
+
+    def _restore_sync() -> dict:
+        with projects_db.connect_closing() as conn:
+            fresh = projects_db.get_project(conn, project.id)
+            if fresh is None:
+                raise ValueError("project not found")
+            if not fresh.archived:
+                raise ValueError(f"project {fresh.slug} is not archived")
+            projects_db.restore_project(conn, fresh.id)
+            updated = projects_db.get_project(conn, fresh.id)
+            return _project_payload(updated)
+
+    try:
+        return await asyncio.to_thread(_restore_sync)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+
+
+@router.delete("/{slug}")
+async def delete_project_route(request: Request) -> dict[str, Any]:
+    """Hard delete — the narrow exception (decision 17), never the default.
+
+    Human-only (§8.1/§8.2), owner or lead, and ``?confirm=<slug>`` must
+    name the slug. Refused ``409`` unless the project is already archived
+    and carries no run, no delivered or accepted output and no card —
+    anything else has history, and ``tasks.project_id`` has no foreign key
+    back to ``projects``, so a permissive delete would orphan somebody's
+    board. Clears the active pointer and detaches the schedule before the
+    row goes.
+    """
+    project, _role, _profiles, principal = await _require_write(request)
+    await _require_human(request, "hard delete")
+    confirm = (request.query_params.get("confirm") or "").strip()
+    if confirm != project.slug:
+        raise HTTPException(
+            status_code=422,
+            detail="confirm must equal the project slug",
+        )
+
+    def _delete_sync() -> dict:
+        with projects_db.connect_closing() as conn:
+            fresh = projects_db.get_project(conn, project.id)
+            if fresh is None:
+                raise HTTPException(status_code=404, detail="project not found")
+            blockers: list[str] = []
+            if not fresh.archived:
+                blockers.append("it is not archived")
+            runs = conn.execute(
+                "SELECT COUNT(*) AS n FROM project_runs WHERE project_id = ?",
+                (fresh.id,),
+            ).fetchone()["n"]
+            if runs:
+                blockers.append(f"{runs} run" + ("" if runs == 1 else "s"))
+            done_outputs = conn.execute(
+                "SELECT COUNT(*) AS n FROM project_outputs "
+                "WHERE project_id = ? AND status IN ('delivered', 'accepted')",
+                (fresh.id,),
+            ).fetchone()["n"]
+            if done_outputs:
+                blockers.append(
+                    f"{done_outputs} delivered or accepted output"
+                    + ("" if done_outputs == 1 else "s")
+                )
+            # The board lives in the per-profile kanban store — count every
+            # card pointing at this project, archived cards included: an
+            # orphan is an orphan whatever its column.
+            with _board_conn(fresh) as bconn:
+                cards = kanban_db.list_tasks(
+                    bconn, project_id=fresh.id, include_archived=True
+                )
+            if cards:
+                blockers.append(
+                    f"{len(cards)} card" + ("" if len(cards) == 1 else "s")
+                )
+            if blockers:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        f"refused: {fresh.slug} still has history — "
+                        + ", ".join(blockers)
+                        + ". Archive keeps it; hard delete is only for the "
+                        "genuinely empty mistake."
+                    ),
+                )
+            # Cleanup before the row goes (§12): the active pointer and the
+            # schedule first, then the delete cascades the project_* tables
+            # on the FK — and stops there, by design.
+            if projects_db.get_active_id(conn) == fresh.id:
+                projects_db.set_active(conn, None)
+            if getattr(fresh, "cron_job_id", None):
+                projects_schedule.detach_project_schedule(
+                    conn,
+                    project=fresh,
+                    reason="project deleted",
+                    changed_by=principal.user_id,
+                )
+            projects_db.delete_project(conn, fresh.id)
+            return {"deleted": fresh.slug}
+
+    return await asyncio.to_thread(_delete_sync)
+
+
+# ---------------------------------------------------------------------------
 # Outputs + deliveries + accept (§6.1)
 # ---------------------------------------------------------------------------
 

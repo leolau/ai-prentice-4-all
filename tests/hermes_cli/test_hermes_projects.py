@@ -334,3 +334,47 @@ def test_doctor_healthy_box(env, capsys):
     run, _capsys = env
     assert run("doctor") == 0
     assert "healthy" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
+# archive / restore / delete — the lifecycle verbs (§13, decision 17)
+# ---------------------------------------------------------------------------
+
+
+def test_archive_and_restore_round_trip(env, tmp_path, capsys):
+    run, _capsys = env
+    slug = _create(run, capsys, tmp_path)
+
+    assert run("archive", slug, "--reason", "done for term", "--json") == 0
+    archived = json.loads(capsys.readouterr().out)
+    assert archived["archived"] is True
+    assert archived["status"] == "archived"
+
+    assert run("restore", slug, "--json") == 0
+    restored = json.loads(capsys.readouterr().out)
+    assert restored["archived"] is False
+    # Re-entry is a decision: paused, never straight back to active.
+    assert restored["status"] == "paused"
+
+
+def test_delete_is_a_human_act_with_a_typed_slug(env, tmp_path, capsys):
+    run, _capsys = env
+    slug = _create(run, capsys, tmp_path)
+    assert run("archive", slug) == 0
+    capsys.readouterr()
+
+    # Without --as-human the router refuses the agent-side caller, and the
+    # hint names the operator's escape hatch.
+    assert run("delete", slug, "--confirm", slug) == 1
+    err = capsys.readouterr().err
+    assert "human act" in err
+    assert "--as-human" in err
+
+    # confirm must equal the slug.
+    assert run("--as-human", "delete", slug, "--confirm", "wrong") == 1
+    assert "confirm" in capsys.readouterr().err
+
+    assert run("--as-human", "delete", slug, "--confirm", slug, "--json") == 0
+    assert json.loads(capsys.readouterr().out) == {"deleted": slug}
+    # The record is gone, not shelved.
+    assert run("show", slug) == 1
