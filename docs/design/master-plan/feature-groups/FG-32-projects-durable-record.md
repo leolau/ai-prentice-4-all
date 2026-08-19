@@ -1038,6 +1038,9 @@ auth and is not reachable from `agent-home`).
 | `GET /` | readable projects: filters `status`, `cadence`, `health`, `q`, `archived`; keyset `cursor` → `{items, next_cursor}`. Each item: goal progress, card rollup, member count, `cadence`, `next_run_at`, `health`, `due_at` |
 | `POST /` | create: **goal [1], description [2], at least one output [3], host profile + creator as lead [4]** — refused without them (§2.2) — plus `name` (defaults from `goal`, §2.2), slug?, icon/colour, `cadence`, `target_audience`, `definition_of_done`, `board_slug` (bind or create), folders, first goal link |
 | `GET /{slug}` | the whole record in one read: fields 1–15 — outputs + their deliveries, members + profiles, contacts (members only), active playbook, active directives, tools/skills (with the host-profile intersection applied so the UI shows what would *actually* run), derived progress + score + health, board rollup, links grouped by kind, last N `task_events`, last 5 runs |
+| `POST /{slug}/archive` | shelve it (§13): `archived=1` **and** `status='archived'` in one transaction, plus `detach_project_schedule()` so a shelved project cannot keep firing. Optional `reason`, recorded with who did it. Lead / instance admin. Returns the **updated project row**, never an ack |
+| `POST /{slug}/restore` | bring it back: `archived=0`, `status='paused'`. Deliberately not straight to `active` — re-entry is a decision, and `paused` keeps the §2.2 exit gate meaningful. The schedule is **not** re-created; `PUT /schedule` does that |
+| `DELETE /{slug}?confirm=<slug>` | hard delete, the narrow case (§13): **human-only** (`_require_human`), owner or lead, and refused `409` unless the project is already archived **and** carries no run, no delivered or accepted output, and no card. Anything else has history: archive it. Clears the `project_meta` active pointer, detaches the schedule, then deletes — the `project_*` tables cascade on the FK |
 | `PATCH /{slug}` | `goal`, `name` (independently — re-wording the goal never silently renames the project, and renaming never rewrites the goal), description, status, cadence, `due_at`, `review_every`, `target_audience`, `score_rubric`, icon/colour, visibility, `board_slug`, `definition_of_done`, `max_in_progress`, `budget_usd_per_run` |
 | `PATCH /{slug}/tools` | `toolsets` [13] + `skills` [14]; validates names and returns the resolved intersection, so an impossible request is refused loudly (§4.1) |
 | `GET /{slug}/outputs`, `POST /{slug}/outputs`, `PATCH /{slug}/outputs/{id}`, `DELETE /{slug}/outputs/{id}` | the deliverables [3]; delete refuses on the last required output |
@@ -1180,6 +1183,56 @@ current profile); step 2 is "how should this run" — cadence, autonomy, host
 profile — and is skippable into a `manual` `one_off`. Ten optional fields on a
 create form would guarantee nobody fills in the four that matter.
 
+**The create form needs a door.** The list header carries a primary **New project**
+action, and the empty state's CTA is the same one — a Projects page with no way to
+create a project is not a missing nicety, it is the feature being unreachable for
+everyone except a CLI operator. `/projects/new` is a server-rendered route (not a
+modal): the two mandatory Markdown-ish fields need room, a refused submit must be
+linkable and reloadable without losing what was typed, and the BFF's 422 `missing`
+list maps onto the field that is blank. On success it redirects to
+`/projects/[slug]`, where the new project is already readable.
+
+### Removing a project — archive is the verb, delete is the exception
+
+A project is a durable record, so "remove" cannot mean "forget". Two verbs, and
+the UI must not present them as siblings:
+
+- **Archive** is the ordinary one: reversible, keeps every run, output, retro and
+  score, drops the project out of the list, and stops it running. It is the
+  answer for "I'm done with this" and for "this was a mistake, three runs ago".
+- **Delete** exists for the genuinely empty mistake — the project created with a
+  typo in its goal that never ran. It is refused the moment there is anything to
+  learn from: any run, any delivered or accepted output, any card.
+
+Why delete is narrow rather than a big red button with a cascade: the record's
+child tables cascade on the foreign key, but **cards do not** — `tasks.project_id`
+lives in the per-profile kanban store, a different database with no FK back to
+`projects`. A hard delete of a project with cards would leave the board pointing
+at a project id that no longer resolves, and the board is somebody's actual work.
+Refusing is honest; a cascade across two stores is a data-loss feature.
+
+The affordances, and where they are *not*:
+
+```
+/projects/[slug]  ⋯ overflow menu, never a bare button in the header
+                  ├─ Archive project…        → reason field, one confirm
+                  ├─ Restore project         (only when archived)
+                  └─ Delete permanently…     (only when the §12 preconditions
+                                              hold; typed-slug confirmation,
+                                              and the dialog says what would be
+                                              lost and what archive keeps)
+/projects         Archived chip beside All — restore is only discoverable if a
+                  shelved project can be found again
+```
+
+Every one of these is a `BusyRegion` write that merges the **returned project
+row** (the ed.3.1 lesson: a write that returns an ack the UI renders as a row is
+indistinguishable from a write that did nothing), and delete redirects to
+`/projects` with the row gone rather than leaving a detail page for something
+that no longer exists. A `viewer` sees none of the three; a member who is not a
+lead sees Archive disabled with the reason, not hidden — "why can't I" is a
+better question than "where did it go".
+
 **Adding to a project is a link, from both ends.** The detail page has an "Add"
 sheet (search across files, arrivals, to-dos, goals, conversations), and
 `/todos/[id]`, `/inbox/[id]` and the files detail each gain "Add to project" —
@@ -1193,6 +1246,9 @@ the to-do to `working`.
 ```
 src/app/projects/page.tsx                      list, server-rendered
 src/app/projects/loading.tsx
+src/app/projects/new/page.tsx                  the two-step create form (§13)
+src/components/projects/NewProjectForm.tsx     client form, 422 → field errors
+src/components/projects/ProjectLifecycleMenu.tsx  archive / restore / delete…
 src/app/projects/[slug]/page.tsx               detail
 src/app/projects/[slug]/loading.tsx
 src/app/projects/[slug]/runs/[no]/page.tsx     one run
@@ -1221,6 +1277,7 @@ Client methods on `HermesApiClient`: `projects()`, `project()`, `createProject()
 `deliverProjectOutput()`, `acceptProjectOutput()`, `scoreProjectRun()`,
 `projectContacts()`, `addProjectContact()`, `setProjectTools()`,
 `projectMembers()`, `addProjectMember()`, `addProjectProfile()`,
+`archiveProject()`, `restoreProject()`, `deleteProject()`,
 `linkToProject()`, `unlinkFromProject()`, `projectActivity()`,
 `projectConversations()`, `projectEvents()`; types in `src/types/index.ts`.
 
@@ -1452,6 +1509,31 @@ Behaviour contracts, not change detectors (`AGENTS.md`).
   (and References/Memories hide) rather than rendering empty;
   the two-step create form blocks on [1]–[3] and defaults [4]; `filters.ts` passes the server/client
   boundary test; nav tests updated for the secondary slot and the Home card.
+- **The create action exists on the page**, not only in the API: the list header
+  and the empty state both route to `/projects/new`, and the form's submit posts
+  the §2.2 four. A test that asserts `createProject()` exists on the client while
+  no rendered surface calls it is exactly the hole that shipped.
+- A 422 from create names the blank field in the form rather than a toast, and a
+  refused submit preserves what was typed.
+
+**Lifecycle (§13)**
+- Archive sets `archived=1` **and** `status='archived'`, and a project with a
+  schedule has its cron job detached by the same call — the invariant is that no
+  archived project has a live `cron_job_id`.
+- An archived project is absent from the default list, present under Archived,
+  and its detail page still renders the whole record read-only-ish (restore is
+  the only write offered).
+- Restore lands in `paused`, never `active`, and does **not** resurrect the
+  schedule.
+- Delete refuses (409, naming what it found) when the project has a run, a
+  delivered or accepted output, a card, or is not archived; it refuses (403)
+  for a session-less or agent caller, and for a member who is not a lead; and
+  the `confirm` parameter must equal the slug.
+- A permitted delete leaves nothing behind: the `project_*` rows are gone, the
+  active-project pointer no longer names it, no cron job survives, and
+  `GET /{slug}` is a 404 for everyone.
+- Archive and delete both return the row shape the UI merges, and the UI reflects
+  the new state without a reload.
 
 **Live (systest box), after deploy**
 - Create a repeatable project with a 4-step playbook including a checkpoint, set
@@ -1480,6 +1562,8 @@ Behaviour contracts, not change detectors (`AGENTS.md`).
 | 9b | **Score**: `POST /runs/{n}/score`, `score_self` with the retro, the derived project score, the ≥2 divergence column, `score_rubric` | Needs runs to exist; cheap and independently useful. |
 | 10 | **Retro + learning**: retro write-back, proposed playbook revisions and directives, skill-candidate provenance into `background_review` | Last, because it needs real runs to be worth anything. |
 | 11 | **Events + summary**: `GET /{slug}/events?since=`, `POST /{slug}/summarise` | |
+| 12 | **Lifecycle API**: `POST /{slug}/archive`, `POST /{slug}/restore`, `DELETE /{slug}` with the §13 preconditions + the human gate, and the CLI verbs `projects archive/restore/delete` (delete behind `--as-human --confirm <slug>`) | Backend first, so step 12b's menu cannot ship faster than the rules it depends on. The store functions (`archive_project`, `restore_project`, `delete_project`) already exist from the folder-workspace era — this is the router, the preconditions and the cleanup, not new SQL. |
+| 12b | **Management UI**: `/projects/new` + `NewProjectForm`, the list header and empty-state action, `ProjectLifecycleMenu` (archive / restore / delete…) and the Archived chip | The step that closes the gap the owner hit: create and remove existed at every layer *except* the one a user touches. |
 
 Steps 1–5 are backend-only and land first, so that by the time step 8 renders a
 panel there is a real project with real runs behind it — the sequencing that
@@ -1557,6 +1641,13 @@ worked for Incomings and To-dos.
     automation reacts to a score in v1; the divergence is the signal.
 16. **Contacts are project-scoped rows, not an address book**, and their
     addresses are member-only PII.
+17. **Removal is archive by default; hard delete is the narrow exception**
+    (owner decision, 2026-08-18). Archive is reversible, keeps the record and
+    detaches the schedule; delete is human-only, requires the project to be
+    already archived and to carry no run, accepted/delivered output or card, and
+    refuses rather than cascading across the kanban store — `tasks.project_id`
+    has no foreign key back to `projects`, so "delete everything" would mean
+    silently orphaning somebody's board.
 
 ---
 
@@ -1658,6 +1749,20 @@ The design-relevant ones, in the order the second review recommends fixing them:
    page slice so paging *loses* matching rows.
 5. **E3 — the §12 event tail has no consumer**, so §13's live board updates do
    not happen; the page refreshes only after its own writes.
+6. **U1 — the Projects page has no way to create or remove a project** (owner
+   report, 2026-08-18). `POST /api/projects` validates the §2.2 four and
+   `createProject()` is on the client, but nothing rendered calls either:
+   `ProjectsList` has one button and it is "load more", and there is no
+   `/projects/new` route. Removal is worse than missing — it exists at no layer
+   above the store: `projects_db` has `archive_project`, `restore_project` and
+   `delete_project`, the Python router exposes neither (only `PATCH` with a
+   `status`, which sets the string without detaching the schedule), and
+   `api/projects/[slug]/route.ts` has `GET` and `PATCH` only. So the feature is
+   reachable only from a CLI, which is not the primary UI (`AGENTS.md`).
+   §13 now specifies the surfaces and §12 the endpoints; steps 12 and 12b
+   build them. Note the trap recorded in decision 17: a naive cascade would
+   orphan `tasks.project_id` rows in the per-profile kanban store, which has no
+   foreign key back to `projects`.
 
 ### 20.3 Testing gaps that let the above through
 
