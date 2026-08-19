@@ -476,6 +476,37 @@ PR per block — each block is independently shippable and independently testabl
       refuse with the missing fields named, doctor flags it, the list row
       shows "needs completion" instead of an empty goal)*
 
+**Block 4b — U1: give the Projects page its create and remove doors**
+(owner report, 2026-08-18; FG-32 §12, §13, §20.2 item 6 and decision 17 now
+specify this — read them before starting, the delete rules are deliberate).
+
+- [ ] `POST /{slug}/archive` — `archived=1` **and** `status='archived'` in one
+      transaction, plus `detach_project_schedule()`; lead/admin; returns the
+      updated project row, not an ack (Block 1's lesson).
+- [ ] `POST /{slug}/restore` — `archived=0`, `status='paused'`; does not
+      re-create the cron job.
+- [ ] `DELETE /{slug}?confirm=<slug>` — `_require_human`, owner/lead, and `409`
+      unless the project is already archived and has no run, no
+      delivered/accepted output and no card. **Do not cascade past the FK:**
+      `tasks.project_id` lives in the per-profile kanban store with no foreign
+      key back to `projects`, so a permissive delete orphans board rows. Clear
+      the `project_meta` active pointer and detach the schedule first.
+- [ ] BFF: `POST /api/projects/[slug]/archive`, `.../restore`, `DELETE
+      /api/projects/[slug]`; `archiveProject()`, `restoreProject()`,
+      `deleteProject()` on the client; preserve upstream status codes so the
+      dialog can say *why* a delete was refused.
+- [ ] agent-home: `/projects/new` + `NewProjectForm` (the §13 two-step form,
+      422 → the field that is blank, typed input preserved on refusal), a
+      primary **New project** action in the list header *and* as the empty
+      state's CTA, `ProjectLifecycleMenu` in the detail header's `[⋯]`
+      (Archive… / Restore / Delete permanently…, typed-slug confirm), and an
+      Archived chip beside All.
+- [ ] CLI: `hermes projects archive|restore|delete <slug>`, delete behind
+      `--as-human --confirm <slug>`.
+- [ ] Tests: the FG-32 §16 "Lifecycle" contracts, plus one asserting a rendered
+      surface routes to `/projects/new` — a client method with no caller is the
+      exact shape of this defect.
+
 **Block 5 — close the two holes that hid all of the above.**
 
 - [x] One contract per run seam asserting the *default* implementation resolves
