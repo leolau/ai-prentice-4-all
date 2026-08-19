@@ -9,10 +9,12 @@
  */
 
 /**
- * The seven chips from the design (§13): one narrows by status, cadence or
- * health, and "All" lifts every restriction including the archive. They are
- * the list's only narrowing controls, so each maps to exactly one query
- * parameter — a shared `/projects?cadence=standing` link is a shared filter.
+ * The eight chips from the design (§13): one narrows by status, cadence or
+ * health, "All" lifts every restriction including the archive, and
+ * "Archived" names the shelf — restore is only discoverable if a shelved
+ * project can be found again. They are the list's only narrowing controls,
+ * so each maps to exactly one query parameter — a shared
+ * `/projects?cadence=standing` link is a shared filter.
  */
 export type ProjectListView =
   | "active"
@@ -21,7 +23,8 @@ export type ProjectListView =
   | "attention"
   | "paused"
   | "done"
-  | "all";
+  | "all"
+  | "archived";
 
 export const FILTER_CHIPS: { view: ProjectListView; label: string }[] = [
   { view: "active", label: "Active" },
@@ -31,6 +34,7 @@ export const FILTER_CHIPS: { view: ProjectListView; label: string }[] = [
   { view: "paused", label: "Paused" },
   { view: "done", label: "Done" },
   { view: "all", label: "All" },
+  { view: "archived", label: "Archived" },
 ];
 
 /** The list defaults to the live work (acceptance §16 Frontend). */
@@ -51,7 +55,9 @@ export function filtersFromParams(
   params: URLSearchParams,
 ): ProjectsFilterState {
   let view: ProjectListView = DEFAULT_VIEW;
-  if (params.get("archived") === "true") view = "all";
+  if (params.get("archived") === "true" && params.get("status") === "archived")
+    view = "archived";
+  else if (params.get("archived") === "true") view = "all";
   else if (params.get("cadence") === "repeatable") view = "repeatable";
   else if (params.get("cadence") === "standing") view = "standing";
   else if (params.get("health") === "attention") view = "attention";
@@ -85,6 +91,10 @@ export function filtersToParams(
       break;
     case "all":
       params.set("archived", "true");
+      break;
+    case "archived":
+      params.set("archived", "true");
+      params.set("status", "archived");
       break;
     default:
       params.set("status", "active");

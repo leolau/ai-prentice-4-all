@@ -480,32 +480,61 @@ PR per block — each block is independently shippable and independently testabl
 (owner report, 2026-08-18; FG-32 §12, §13, §20.2 item 6 and decision 17 now
 specify this — read them before starting, the delete rules are deliberate).
 
-- [ ] `POST /{slug}/archive` — `archived=1` **and** `status='archived'` in one
+- [x] `POST /{slug}/archive` — `archived=1` **and** `status='archived'` in one
       transaction, plus `detach_project_schedule()`; lead/admin; returns the
-      updated project row, not an ack (Block 1's lesson).
-- [ ] `POST /{slug}/restore` — `archived=0`, `status='paused'`; does not
-      re-create the cron job.
-- [ ] `DELETE /{slug}?confirm=<slug>` — `_require_human`, owner/lead, and `409`
+      updated project row, not an ack (Block 1's lesson). *(Block 4b:
+      `projects_db.archive_project` sets both flags in one `write_txn` and
+      reuses the `_needs_completion_missing` gate — a `needs_completion`
+      project is refused with 409; the route detaches the schedule and
+      records an optional `reason` as a directive, ValueError → 409 like the
+      members/outputs siblings; `restore_project` sets `paused` and never
+      resurrects the cron job. §16 contracts in
+      `tests/hermes_cli/test_projects_api_lifecycle.py`)*
+- [x] `POST /{slug}/restore` — `archived=0`, `status='paused'`; does not
+      re-create the cron job. *(Block 4b: refuses a not-archived project with
+      409; the restored row comes back `paused` — a lead decides when it runs
+      again)*
+- [x] `DELETE /{slug}?confirm=<slug>` — `_require_human`, owner/lead, and `409`
       unless the project is already archived and has no run, no
       delivered/accepted output and no card. **Do not cascade past the FK:**
       `tasks.project_id` lives in the per-profile kanban store with no foreign
       key back to `projects`, so a permissive delete orphans board rows. Clear
       the `project_meta` active pointer and detach the schedule first.
-- [ ] BFF: `POST /api/projects/[slug]/archive`, `.../restore`, `DELETE
+      *(Block 4b: `confirm` must equal the slug (422 otherwise); cards are
+      counted through `kanban_db.list_tasks(..., include_archived=True)` so
+      archived cards still block; the 409 names every blocker — "Archive
+      keeps it; hard delete is only for the genuinely empty mistake")*
+- [x] BFF: `POST /api/projects/[slug]/archive`, `.../restore`, `DELETE
       /api/projects/[slug]`; `archiveProject()`, `restoreProject()`,
       `deleteProject()` on the client; preserve upstream status codes so the
-      dialog can say *why* a delete was refused.
-- [ ] agent-home: `/projects/new` + `NewProjectForm` (the §13 two-step form,
+      dialog can say *why* a delete was refused. *(Block 4b: the three routes
+      go through `withPrincipal`, which forwards the upstream status and the
+      string `detail` verbatim; DELETE reads `confirm` from the query string)*
+- [x] agent-home: `/projects/new` + `NewProjectForm` (the §13 two-step form,
       422 → the field that is blank, typed input preserved on refusal), a
       primary **New project** action in the list header *and* as the empty
       state's CTA, `ProjectLifecycleMenu` in the detail header's `[⋯]`
       (Archive… / Restore / Delete permanently…, typed-slug confirm), and an
-      Archived chip beside All.
-- [ ] CLI: `hermes projects archive|restore|delete <slug>`, delete behind
-      `--as-human --confirm <slug>`.
-- [ ] Tests: the FG-32 §16 "Lifecycle" contracts, plus one asserting a rendered
+      Archived chip beside All. *(Block 4b: the form pins the host profile to
+      the serving profile; step 1 is the mandatory what-fields, step 2 the
+      how-it-runs defaults; a viewer sees no `[⋯]` at all and a non-lead
+      member sees Archive disabled with the reason; Delete only appears when
+      the rendered record is archived and genuinely empty — the server
+      re-checks everything. Archived chip decodes
+      `archived=true&status=archived`)*
+- [x] CLI: `hermes projects archive|restore|delete <slug>`, delete behind
+      `--as-human --confirm <slug>`. *(Block 4b: archive/restore are role-gated
+      only; delete additionally passes `--as-human` through the
+      `_interactive_subject` seam and `--confirm` as the query param; a 403
+      "human act" prints the `--as-human` hint)*
+- [x] Tests: the FG-32 §16 "Lifecycle" contracts, plus one asserting a rendered
       surface routes to `/projects/new` — a client method with no caller is the
-      exact shape of this defect.
+      exact shape of this defect. *(Block 4b: 15 lifecycle contracts in
+      `test_projects_api_lifecycle.py` + 2 CLI verb tests in
+      `test_hermes_projects.py`; on the UI side `ProjectsList.test.tsx`
+      asserts the create door in the header and the empty state, and
+      `ProjectLifecycleMenu.test.tsx` + `NewProjectForm.test.tsx` cover the
+      role matrix and the step-1 surface)*
 
 **Block 5 — close the two holes that hid all of the above.**
 

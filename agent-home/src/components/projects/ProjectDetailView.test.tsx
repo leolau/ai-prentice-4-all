@@ -371,7 +371,14 @@ describe("LinkRow", () => {
 describe("ProjectDetailView", () => {
   it("renders the header, actions and the §13 panel order", () => {
     const html = renderToStaticMarkup(
-      <ProjectDetailView project={PROJECT} board={BOARD} playbook={null} directives={null} />,
+      <ProjectDetailView
+        project={PROJECT}
+        board={BOARD}
+        playbook={null}
+        directives={null}
+        callerUserId="leo"
+        isInstanceAdmin={false}
+      />,
     );
     expect(html).toContain('data-component="ProjectDetailView"');
     expect(html).toContain("Send the Monday digest");
