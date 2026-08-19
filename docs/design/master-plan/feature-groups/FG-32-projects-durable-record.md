@@ -1708,6 +1708,19 @@ Verified at `7c737474f`: 185 Projects Python tests pass, 46 agent-home Projects
 tests pass, `tsc --noEmit` clean. The feature has **not** been deployed or
 system-tested on a live box.
 
+**The review fix pass** — the 2026-08-17 review's ordered checklist, one PR per
+block; each block's landed detail is annotated on the checklist in
+[`docs/reviews/2026-08-17-projects-end-to-end-review.md`](../../../reviews/2026-08-17-projects-end-to-end-review.md):
+
+| Block | Scope | PR |
+|---|---|---|
+| 1 | One human gate on all §8.1/§8.2 acts + honest UI writes (E1, F1a–F1c, F4) | #289 |
+| 2 | The run lifecycle's four seams wired to shipped infra (H1–H4) | #294 |
+| 3 | Health anchor, lossless list paging, routing & error surfaces (M1–M3, F2, F3, F5–F7) | #295 |
+| 4 | Promotion guard, event-tail poller, scored window, import quarantine (E2–E5, L1–L2) | #296 |
+| 5 | Default-seam contracts and write-envelope coverage (the §20.3 holes) | #297, #301 |
+| 4b | U1 — the create and remove doors (§12, §13, decision 17) | #305 (in review) |
+
 ### 20.2 Open defects
 
 Two reviews, both merged as documents, carry the findings and the fix recipes.
@@ -1724,7 +1737,8 @@ Two reviews, both merged as documents, carry the findings and the fix recipes.
   grouped into five independently shippable blocks — that is the list to work
   from.
 
-The design-relevant ones, in the order the second review recommends fixing them:
+The design-relevant ones, in the order the second review recommends fixing them
+(all are now fixed — the block that landed each is noted per item):
 
 1. **E1 — the human-only acts are enforceable in one place out of three.**
    §6.1 (accept), §8.1 (score) and §8.2 ("a human approves every crossing")
@@ -1732,25 +1746,27 @@ The design-relevant ones, in the order the second review recommends fixing them:
    `projects_cli` patches that gate out for the agent's own route (§14), so the
    learning loop can close with no human in it. This is the one finding that
    weakens a *design guarantee* rather than an implementation: the record's
-   trustworthiness rests on those three acts.
+   trustworthiness rests on those three acts. **Fixed — Block 1 (#289).**
 2. **F1a/F1b/F1c/F4 — three of the four detail-page writes look like failures.**
    Accept-output, continue-run and add-directive return ack envelopes that the
    panels merge as rows, and `RunView` never revalidates. §13's promise that the
-   page shows what actually happened is not kept.
+   page shows what actually happened is not kept. **Fixed — Block 1 (#289).**
 3. **H1–H4 — the run lifecycle's four seams are not in force at spawn time.**
    Approvals (§4.3) are never raised, `budget_usd_per_run` (§4.2) is
    unenforceable because runs carry a synthetic `trace_id` bound to no C8 trace,
    toolset narrowing (§4.1, invariant 14) reads the calling process's config
    instead of the host profile's, and an inline run spawns without
    `profile_home` so it executes outside the profile the run row records (§11).
+   **Fixed — Block 2 (#294).**
 4. **M1/M2/F2 — health and the list contradict §9.2.** A never-run repeatable
    project is never `stalled`, `stalled` projects are excluded from the
    Attention chip that exists to surface them, and the list filters after the
-   page slice so paging *loses* matching rows.
+   page slice so paging *loses* matching rows. **Fixed — Block 3 (#295).**
 5. **E3 — the §12 event tail has no consumer**, so §13's live board updates do
-   not happen; the page refreshes only after its own writes.
-6. **U1 — the Projects page has no way to create or remove a project** (owner
-   report, 2026-08-18). `POST /api/projects` validates the §2.2 four and
+   not happen; the page refreshes only after its own writes. **Fixed — Block 4
+   (#296).**
+6. **FIXED — Block 4b (#305, in review): U1 — the Projects page had no way to
+   create or remove a project** (owner report, 2026-08-18). `POST /api/projects` validates the §2.2 four and
    `createProject()` is on the client, but nothing rendered calls either:
    `ProjectsList` has one button and it is "load more", and there is no
    `/projects/new` route. Removal is worse than missing — it exists at no layer
@@ -1759,16 +1775,19 @@ The design-relevant ones, in the order the second review recommends fixing them:
    `status`, which sets the string without detaching the schedule), and
    `api/projects/[slug]/route.ts` has `GET` and `PATCH` only. So the feature is
    reachable only from a CLI, which is not the primary UI (`AGENTS.md`).
-   §13 now specifies the surfaces and §12 the endpoints; steps 12 and 12b
-   build them. Note the trap recorded in decision 17: a naive cascade would
-   orphan `tasks.project_id` rows in the per-profile kanban store, which has no
-   foreign key back to `projects`.
+   §13 specified the surfaces and §12 the endpoints; Block 4b built them —
+   `/projects/new` + the two-step create form, the `[⋯]` lifecycle menu and
+   the Archived chip in agent-home, and archive/restore/delete at every layer
+   (API, CLI, BFF). The decision-17 trap is honoured: the cascade stops at the
+   projects DB, and delete refuses while runs, delivered/accepted outputs or
+   cards exist in the per-profile kanban store (which has no foreign key back
+   to `projects`).
 
 ### 20.3 Testing gaps that let the above through
 
 §16's contracts are behaviour-shaped and the store/router honour them. Two
 holes account for nearly every open finding, and both should be closed before
-the next step lands:
+the next step lands **(both closed by Block 5 — #297, #301)**:
 
 - **The run seams are only ever tested through injected fakes**, so defects in
   the *default* implementations of `spawn_inline`, `cost_reader` and the
