@@ -241,7 +241,13 @@ def _refuse_if_archived(project, act: str) -> None:
 
     ``POST /{slug}/archive`` and ``DELETE /{slug}`` never reach this
     gate: archive has its own already-archived refusal, and hard delete
-    *requires* ``archived`` to be true."""
+    *requires* ``archived`` to be true.
+
+    The gate also holds one layer below the router (U9):
+    ``kanban_db.create_task`` refuses an archived project itself, so the
+    card writers that never pass through this file — the to-do promote
+    route and ``hermes kanban create --project`` — inherit the same
+    refusal."""
     if project.archived:
         raise HTTPException(
             status_code=409,
@@ -1009,11 +1015,7 @@ async def archive_project_route(request: Request) -> dict[str, Any]:
             # The resumable run would outlive the shelf; cancel (or letting
             # it finish) is the sanctioned way out. `blocked` is a card-level
             # wait with no resume affordance; terminal statuses are fine.
-            open_runs = [
-                r
-                for r in projects_db.list_project_runs(conn, fresh.id, limit=50)
-                if r["status"] in ("running", "waiting")
-            ]
+            open_runs = projects_db.list_open_project_runs(conn, fresh.id)
             if open_runs:
                 held = ", ".join(
                     f"run {r['run_no']} ({r['status']})" for r in open_runs

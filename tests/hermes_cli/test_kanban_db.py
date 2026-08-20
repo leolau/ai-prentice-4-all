@@ -4793,3 +4793,45 @@ def test_bare_connect_does_not_close_on_context_exit(tmp_path):
     # Still usable after with-block exit (the leak).
     conn.execute("SELECT 1").fetchone()
     conn.close()  # explicit close to avoid leaking THIS test
+
+
+# ---------------------------------------------------------------------------
+# U9 — the writer-level archived gate
+# ---------------------------------------------------------------------------
+
+def test_create_task_refuses_an_archived_project(kanban_home, tmp_path, monkeypatch):
+    """A shelved project does not grow — the gate lives at the writer so
+    EVERY door below the Projects router (to-do promote, ``kanban create
+    --project``) inherits it. The refusal is a ValueError the callers map
+    to their own 409."""
+    from hermes_cli import projects_db
+
+    monkeypatch.setenv("HERMES_PROJECTS_DB", str(tmp_path / "projects.db"))
+    with projects_db.connect_closing() as pconn:
+        pid = projects_db.create_project(pconn, name="Acme", slug="acme")
+        assert projects_db.archive_project(pconn, pid) is True
+
+    with kb.connect_closing() as conn:
+        with pytest.raises(ValueError) as excinfo:
+            kb.create_task(conn, title="Sneaky card", project_id="acme")
+    assert "archived" in str(excinfo.value)
+    assert "restore" in str(excinfo.value)
+    # No card landed — the refusal is atomic, not a silent null.
+    with kb.connect_closing() as conn:
+        assert kb.list_tasks(conn) == []
+
+
+def test_create_task_keeps_an_active_project_link(kanban_home, tmp_path, monkeypatch):
+    """Regression guard for the 'silently null' branch: a resolvable ACTIVE
+    project still lands on the card with its id intact."""
+    from hermes_cli import projects_db
+
+    monkeypatch.setenv("HERMES_PROJECTS_DB", str(tmp_path / "projects.db"))
+    with projects_db.connect_closing() as pconn:
+        pid = projects_db.create_project(pconn, name="Acme", slug="acme")
+
+    with kb.connect_closing() as conn:
+        tid = kb.create_task(conn, title="Real card", project_id="acme")
+        task = kb.get_task(conn, tid)
+    assert task is not None
+    assert task.project_id == pid

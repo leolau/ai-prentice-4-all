@@ -282,3 +282,50 @@ def _mock_request(body: dict) -> MagicMock:
     request = MagicMock()
     request.json = AsyncMock(return_value=body)
     return request
+
+
+class TestPromoteRefusesArchivedProject:
+    """U9: the writer's gate — promoting into a shelved project answers 409
+    like the Projects router, and the provenance link is never written."""
+
+    @pytest.mark.asyncio
+    async def test_promote_into_archived_project_is_409_and_no_link(self) -> None:
+        from hermes_cli import todos_api
+
+        store = MagicMock()
+        store._store = MagicMock()
+        store.initialize = AsyncMock()
+        store.get = AsyncMock(return_value=_todo())
+        store.set_stage = AsyncMock(
+            return_value=_todo(stage="working", status="in_progress")
+        )
+
+        refusal = ValueError(
+            "project acme is archived — restore it before adding a card"
+        )
+        request = _mock_request({"project": "acme"})
+        with (
+            patch.object(todos_api, "_store", return_value=store),
+            patch.object(todos_api, "_table_ready", return_value=True),
+            patch.object(todos_api, "_resolve_principal", return_value=PRINCIPAL),
+            patch("hermes_cli.projects_db.get_project", return_value=_MockProject()),
+            patch("hermes_cli.projects_db.connect_closing") as mock_conn_ctx,
+            patch("hermes_cli.kanban_db.create_task", side_effect=refusal),
+            patch("hermes_cli.kanban_db.connect_closing") as mock_kconn_ctx,
+            patch("hermes_cli.projects_db.add_project_link") as mock_link,
+        ):
+            mock_conn_ctx.return_value.__enter__ = MagicMock(return_value=MagicMock())
+            mock_conn_ctx.return_value.__exit__ = MagicMock(return_value=False)
+            mock_kconn_ctx.return_value.__enter__ = MagicMock(return_value=MagicMock())
+            mock_kconn_ctx.return_value.__exit__ = MagicMock(return_value=False)
+            with pytest.raises(HTTPException) as excinfo:
+                await todos_api.promote_todo(request, "tsk_1")
+
+        # The router's archived refusal: 409 naming the archive and restore.
+        assert excinfo.value.status_code == 409
+        assert "archived" in excinfo.value.detail
+        assert "restore" in excinfo.value.detail
+        # The card's refusal takes everything with it: no link row, and the
+        # to-do did not move.
+        mock_link.assert_not_called()
+        store.set_stage.assert_not_called()

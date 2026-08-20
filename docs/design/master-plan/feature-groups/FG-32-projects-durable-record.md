@@ -1236,18 +1236,25 @@ that no longer exists. A `viewer` sees none of the three; a member who is not a
 lead sees Archive disabled with the reason, not hidden — "why can't I" is a
 better question than "where did it go".
 
-**A shelved project does not run and does not learn.** While archived, every
-mutating act that would grow the record — start, continue, retro or score a
-run, add a card, save or activate a playbook, declare, change or deliver an
-output, accept an output, add or activate guidance, set a schedule, change
-the tools or the autonomy, re-summarise — is refused `409` naming the archive
+**A shelved project does not run and does not learn.** Archive stops
+*execution and learning* — while archived, every act that would grow what
+the project does or knows — start, continue, retro or score a run, add a
+card, save or activate a playbook, declare, change or deliver an output,
+accept an output, add or activate guidance, set a schedule, change the
+tools or the autonomy, re-summarise — is refused `409` naming the archive
 and pointing at restore; the panels and the run page hide the same
-affordances with the same hint. The writes that stay open are deliberately
-not growth: correcting a typo (`PATCH /{slug}`), member/profile/contact/link
-bookkeeping, every DELETE verb and directive retirement, and cancel — archive
-itself refuses to shelve a project holding a `running`/`waiting` run, so
-cancel is the sanctioned way out of an open run. Restore is the one act that
-unblocks everything else.
+affordances with the same hint. The gate also holds one layer below the
+router: the card writer itself (`kanban_db.create_task`) refuses an
+archived project, so the to-do promote route and
+`hermes kanban create --project` cannot grow the board either. Record
+bookkeeping deliberately stays open — it writes the *record*, not what
+the project does: correcting a typo (`PATCH /{slug}`), links (how samples,
+references, files, memories and conversation histories attach to a
+project), member/profile/contact bookkeeping, every DELETE verb and
+directive retirement, and cancel. Archive itself refuses to shelve a
+project holding a `running`/`waiting` run — it asks the store for *every*
+open run, not a page of the newest — so cancel is the sanctioned way out
+of an open run. Restore is the one act that unblocks everything else.
 
 **Adding to a project is a link, from both ends.** The detail page has an "Add"
 sheet (search across files, arrivals, to-dos, goals, conversations), and
@@ -1544,11 +1551,14 @@ Behaviour contracts, not change detectors (`AGENTS.md`).
 - While archived, every growing act — start/continue/retro/score a run, add
   a card, save or activate a playbook, declare/change/deliver/accept an
   output, add or activate guidance, set a schedule, change the tools or the
-  autonomy, re-summarise — is refused `409` until restore. What stays
-  allowed never grows the record: `PATCH /{slug}` (record fields),
-  member/profile/contact/link bookkeeping, the DELETE verbs, directive
-  retirement, and cancel. Archive refuses to shelve a project holding a
-  `running`/`waiting` run — cancel (or finishing it) is the way out.
+  autonomy, re-summarise — is refused `409` until restore, and the refusal
+  also holds at the card writer (`kanban_db.create_task`), so the to-do
+  promote route and `hermes kanban create --project` inherit it. What stays
+  allowed is record bookkeeping, not growth: `PATCH /{slug}` (record
+  fields), links, member/profile/contact bookkeeping, the DELETE verbs,
+  directive retirement, and cancel. Archive refuses to shelve a project
+  holding a `running`/`waiting` run — it scans every run, not a page — and
+  cancel (or finishing it) is the way out.
 - Delete refuses (409, naming what it found) when the project has a run, a
   delivered or accepted output, a card, or is not archived; it refuses (403)
   for a session-less or agent caller, and for a member who is not a lead; and
@@ -1731,6 +1741,7 @@ sequencing did not name (8b, 9b) and a live-integration merge:
 | 12b | Management UI: `/projects/new` + `NewProjectForm`, the `[⋯]` menu, the Archived chip | #305 |
 | 12c | Lifecycle hardening (review U2–U6): the archived-inert gate, structured 422 forwarding to the form, the archived-inclusive card count, the flag-aware Archived chip, and the interaction + route tests | #307 |
 | 12d | Lifecycle completion (review U7–U8): the gate on every growing route, the archive-time open-run precondition, the run page's archived wiring, and the principal-blind delete count | #310 |
+| 12e | Below-router completion (review U9–U12): the writer-level archived gate in `create_task` (promote → 409, no orphan link), the unpaged open-run scan, the U8 consumer and run-page loader tests, and §13's narrowed wording | #312 |
 
 Verified at `7c737474f`: 185 Projects Python tests pass, 46 agent-home Projects
 tests pass, `tsc --noEmit` clean. The feature has **not** been deployed or
@@ -1863,6 +1874,14 @@ The design-relevant ones, in the order the second review recommends fixing them:
   memories and conversation histories attach — so either gate it or narrow §13
   to "stops execution and learning; record bookkeeping stays open" with the
   permitted list named. **Block 4e** of the end-to-end review is the worklist.
+  **FIXED in Block 4e (#312)**: `create_task` raises on an archived
+  project — promote maps the refusal to 409 and the link row never lands,
+  `hermes kanban create` prints it instead of a traceback; `_archive_sync`
+  asks SQL for *every* open run (no page window); the U8 consumer
+  (`ProjectLifecycleMenu` reading `total_all_principals`) and the run
+  page's loader (archived / live / fetch-failed / 404) have tests; and §13
+  now says what archive truly stops — execution and learning — with the
+  open record-bookkeeping list named.
 
 ### 20.3 Testing gaps that let the above through
 

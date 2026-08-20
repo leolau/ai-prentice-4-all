@@ -2535,6 +2535,16 @@ def create_task(
             # creation or persist a dangling reference — drop the link and
             # create the task as an ordinary (scratch) task.
             project_id = None
+        elif getattr(project_obj, "archived", 0):
+            # §13 (U9): a shelved project does not grow — and this writer
+            # sits BELOW the Projects router, so the gate lives here, once,
+            # where the project is already resolved. Raise (never null the
+            # id and keep the card): callers map this to their refusal —
+            # the to-do promote route answers 409 like the router does.
+            raise ValueError(
+                f"project {project_obj.slug} is archived — restore it "
+                "before adding a card"
+            )
         else:
             # Canonicalise (a slug may have been passed) and anchor the
             # worktree under the project's primary repo.

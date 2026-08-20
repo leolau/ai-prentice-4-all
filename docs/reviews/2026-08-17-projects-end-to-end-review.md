@@ -1337,18 +1337,39 @@ what disagrees.
 
 **Block 4e — close U9, and the three lows with it.**
 
-- [ ] **U9** Refuse an archived project in `kanban_db.create_task`'s project
+**All four landed in Block 4e (#312, `3b50c6224`)** — the gate moved to the writer
+(`kanban_db.create_task`), promote maps the refusal to the router's own 409,
+archive's open-run scan is unpaged, the two untested Block 4d surfaces have
+tests, and §13 says what archive truly stops.
+
+- [x] **U9** Refuse an archived project in `kanban_db.create_task`'s project
       branch (`kanban_db.py:2530`) so `todos_api.promote_todo` and
       `hermes kanban create --project` cannot grow a shelved project's board;
       map the `ValueError` to 409 in the promote route. Tests: promote →
       409 + no card + no link; `create_task` raises on archived, still works on
-      active.
-- [ ] **U10** Replace the `limit=50` scan in `_archive_sync` with a
+      active. *(Block 4e: the gate sits in `create_task`'s project branch;
+      promote answers 409 and the link row never lands
+      (`test_todos_promote.py::TestPromoteRefusesArchivedProject`), the CLI
+      prints the refusal instead of a traceback, and
+      `test_kanban_db.py::test_create_task_refuses_an_archived_project` +
+      `test_create_task_keeps_an_active_project_link` pin the writer both
+      ways.)*
+- [x] **U10** Replace the `limit=50` scan in `_archive_sync` with a
       `list_open_project_runs` SQL query. Test: 51 `done` runs and a `waiting`
-      run 1 → archive refuses.
-- [ ] **U11** Test the U8 consumer (`ProjectLifecycleMenu` reading
+      run 1 → archive refuses. *(Block 4e:
+      `projects_db.list_open_project_runs` — SQL, unpaged, ordered by
+      `run_no`; `test_archive_refuses_an_old_open_run_beyond_the_page_window`
+      seeds run 1 `waiting` under 51 `done` runs and fails against the old
+      scan.)*
+- [x] **U11** Test the U8 consumer (`ProjectLifecycleMenu` reading
       `total_all_principals`) and the run page's project fetch, including the
-      fetch-failed path.
-- [ ] **U12** Decide links: gate `POST /{slug}/links`, or narrow FG-32 §13 to
+      fetch-failed path. *(Block 4e: two `ProjectLifecycleMenu` cases pin the
+      consumer on `total_all_principals` (hidden cards block Delete, zero
+      across all principals offers it); the run page's own `page.test.tsx`
+      pins archived / live / fetch-failed-renders-unflagged / 404.)*
+- [x] **U12** Decide links: gate `POST /{slug}/links`, or narrow FG-32 §13 to
       "stops execution and learning; record bookkeeping stays open" with the
-      permitted list named.
+      permitted list named. *(Block 4e decided the narrowing: links stay open
+      as record bookkeeping — §13 now says archive stops execution and
+      learning, names links as how samples, references, files, memories and
+      conversation histories attach, and lists the open bookkeeping class.)*

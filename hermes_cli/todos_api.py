@@ -599,6 +599,11 @@ async def promote_todo(
                 # card rather than leaving a dangling triage card on the
                 # board with no project and no project_links row.
                 delete_task(kconn, card_id)
+    except ValueError as exc:
+        # The writer's refusal — an archived project (U9). Surface it the
+        # way the Projects router answers the same act: 409 naming the
+        # archive and restore, not a generic failure.
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except Exception as exc:
         logger.warning("todos: promote card creation failed (%s)", exc)
         raise HTTPException(
