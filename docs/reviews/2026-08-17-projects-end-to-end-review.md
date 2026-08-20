@@ -1206,3 +1206,149 @@ a defect under any policy, and the run page must match), step 2 shrinks to
 `continue` alone, and §13/§16 must be narrowed to enumerate exactly what a
 shelved project still accepts. Do not leave the wording general with a partial
 gate.
+
+---
+
+## Review of Block 4d — findings U9–U12
+
+Read at `develop` `5a2c3a58f` (#310, implementation commit `59d39ff50`).
+Verified here, not taken on trust: `tests/hermes_cli/test_projects_api_lifecycle.py`
+22 passed, `-k project` across `tests/hermes_cli` 313 passed / 1 skipped, and
+`RunView.test.tsx` + `ProjectLifecycleMenu.test.tsx` 13 passed.
+
+**What Block 4d actually closed.** All four plan steps landed as written:
+`_archive_sync` refuses a `running`/`waiting` run and names it;
+`_refuse_if_archived` is now called from all twelve growing routes with the
+deliberately-open list written into its docstring; the run page fetches the
+project alongside the run and `RunView` hides Continue / Repeat / Save retro /
+the score control while Cancel stays; `_card_rollup_sync` publishes
+`total_all_principals` and `ProjectLifecycleMenu.deleteEligible` reads it. U7
+and U8 are closed **at the Projects router**. U9 is the same invariant leaking
+through a door that is not the Projects router.
+
+### U9 — cards still reach a shelved project through two non-Projects doors (medium)
+
+`POST /{slug}/cards` is gated, but `tasks.project_id` is writable from outside
+`projects_api.py`, and neither writer looks at `archived`:
+
+1. **`POST /api/registry/todos/{todo_id}/promote`** —
+   `hermes_cli/todos_api.py:526`, resolving the project at 558–572 and calling
+   `kanban_db.create_task(..., project_id=project.id)` at 588 plus
+   `projects_db.add_project_link(..., kind="todo")` at 613–622. It resolves the
+   project by slug and never asks whether it is archived, so a human promoting
+   a to-do into a shelved project gets a `triage` card on the board *and* a new
+   `project_links` row — the archived record grows twice over.
+2. **`hermes kanban create --project <slug>`** — `hermes_cli/kanban.py:1338`
+   passes `project_id` straight into the same `create_task`.
+
+Both land in `kanban_db.create_task` (`kanban_db.py:2442`), whose project
+resolution (2523–2542) is explicitly written to *silently null an unresolvable
+project id* — and to accept every project it can resolve. An archived project
+resolves fine.
+
+**Why it matters, not just wording.** This is the exact orphan class hard
+delete's card blocker exists to prevent: a project that has been archived with
+zero cards (and is therefore delete-eligible) can silently gain cards, and the
+kanban store has no FK back to `projects`, so nothing else notices. It also
+re-opens the U7 promise one route below the one Block 4d fixed: FG-32 §13's
+"a shelved project does not run and does not learn" is now true of the router
+and false of the system.
+
+**The fix — one gate, at the writer, not two at the callers.** Put the refusal
+where the project is already resolved, in `create_task`'s project branch
+(`kanban_db.py:2530`): if the resolved project is archived, raise
+`ValueError(f"project {project_obj.slug} is archived — restore it before adding
+a card")` rather than nulling the id. `create_task` already raises `ValueError`
+for bad input, so both callers surface it (`todos_api.promote_todo` should map
+it to **409**, matching the router's archived refusal, instead of the current
+generic 500 at 604–607). Do **not** null the `project_id` and keep the card:
+that produces exactly the dangling triage card the promote route already deletes
+at 597–601.
+
+Also gate the link half of promote: `POST /{slug}/links` is on the
+deliberately-open list as *bookkeeping*, but promote's link write accompanies a
+card creation, so if the card is refused the link must not be written (it is
+written after the card today, so raising in `create_task` is enough).
+
+**The tests.**
+- `tests/hermes_cli/test_todos_promote.py` (where the promote contracts already
+  live): promote a to-do into an archived project → 409, the project's
+  `total_all_principals` is unchanged, and no `project_links` row appears.
+- `tests/hermes_cli/test_kanban_db.py`: `create_task(project_id=<archived>)`
+  raises, and `create_task(project_id=<active>)` still returns a card carrying
+  the id (the regression guard for the "silently null" behaviour above).
+
+### U10 — the archive open-run scan can miss an old open run (low)
+
+`projects_api.py:1012–1015`:
+
+```python
+open_runs = [
+    r
+    for r in projects_db.list_project_runs(conn, fresh.id, limit=50)
+    if r["status"] in ("running", "waiting")
+]
+```
+
+`list_project_runs` (`projects_db.py:2373`) is `ORDER BY run_no DESC LIMIT ?`,
+so the precondition only inspects the newest 50 runs. A standing project — the
+cadence this feature exists for — passes 50 runs in a year of weekly cadence
+plus retries, and a run stuck at a checkpoint months ago is then invisible to
+the gate: archive succeeds and leaves precisely the resumable-run state U7's
+step 1 was added to prevent (`continue` is gated now, so the harm is a lie in
+the record rather than work restarting — which is why this is low, not medium).
+
+**The fix.** Ask the question in SQL instead of paging: add
+`projects_db.list_open_project_runs(conn, project_id)` —
+`SELECT run_no, status FROM project_runs WHERE project_id = ? AND status IN
+('running','waiting') ORDER BY run_no` — and have `_archive_sync` use it. No
+limit, no ordering assumption, and the 409 message keeps naming every held run.
+
+**The test.** Seed 51 `done` runs plus one `waiting` run at `run_no` 1, archive
+→ 409 naming run 1 (this fails against the current code).
+
+### U11 — the two Block 4d surfaces with no test (low)
+
+`test_delete_gate_counts_cards_it_cannot_see` pins the *payload*, but nothing
+pins the *consumer*: `ProjectLifecycleMenu.test.tsx` never sets
+`total_all_principals`, so the U8 fix's UI half rides on the `??` fallback
+chain and a future rename of the field silently restores the old behaviour.
+Likewise nothing covers the run page's own change — that it fetches the project
+alongside the run, and that a *failed* project fetch renders the run unflagged
+rather than erroring the page (the deliberate choice in #310's step 3).
+
+**The fix.** Two cases in `ProjectLifecycleMenu.test.tsx`: an archived project
+with `total_all_principals: 2` and `total_with_archived: 0` offers no Delete;
+the same with both `0` offers it. And a `page.test.tsx` (or a `RunView` case
+driven by the page's loader) for the archived / fetch-failed pair.
+
+### U12 — "archived does not grow" is still not literally true (low, or a doc fix)
+
+`POST /{slug}/links` (`projects_api.py:1546`) is deliberately open as
+bookkeeping, but links are how §1.1's samples, references, files, memories and
+conversation histories attach to a project. So a shelved project can still gain
+references and conversation history — a *record* write, not a run.
+
+Pick one and stop the drift: either gate `POST /{slug}/links` too (leaving the
+`DELETE` open), or say in FG-32 §13 that archive stops *execution and learning*
+and explicitly permits record bookkeeping — naming links, members, profiles,
+contacts and `PATCH /{slug}`. The helper docstring already lists them; §13 is
+what disagrees.
+
+**Block 4e — close U9, and the three lows with it.**
+
+- [ ] **U9** Refuse an archived project in `kanban_db.create_task`'s project
+      branch (`kanban_db.py:2530`) so `todos_api.promote_todo` and
+      `hermes kanban create --project` cannot grow a shelved project's board;
+      map the `ValueError` to 409 in the promote route. Tests: promote →
+      409 + no card + no link; `create_task` raises on archived, still works on
+      active.
+- [ ] **U10** Replace the `limit=50` scan in `_archive_sync` with a
+      `list_open_project_runs` SQL query. Test: 51 `done` runs and a `waiting`
+      run 1 → archive refuses.
+- [ ] **U11** Test the U8 consumer (`ProjectLifecycleMenu` reading
+      `total_all_principals`) and the run page's project fetch, including the
+      fetch-failed path.
+- [ ] **U12** Decide links: gate `POST /{slug}/links`, or narrow FG-32 §13 to
+      "stops execution and learning; record bookkeeping stays open" with the
+      permitted list named.
