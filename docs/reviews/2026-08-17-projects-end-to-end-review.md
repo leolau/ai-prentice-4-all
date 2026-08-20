@@ -327,6 +327,150 @@ def last_scored_runs(conn, project_id: str, *, limit: int = 5) -> List[dict]:
 reports the mean of runs 1–5. Re-scoring run 1 still moves it (the existing
 contract must keep passing).
 
+## Block 4b follow-up review (2026-08-20) — findings U2–U6
+
+Reviewed at `570be680f` (`2d187f122`, "Block 4b — create/remove doors"), against
+FG-32 §12, §13, §16 "Frontend"/"Lifecycle" and decision 17. The lifecycle
+backend matches the design: archive writes both halves in one `write_txn` and
+detaches the schedule in the same call, restore lands `paused` and never
+resurrects cron, hard delete is human-gated with a typed slug and names every
+blocker, archived cards block through
+`kanban_db.list_tasks(..., include_archived=True)`, the active pointer is
+cleared and the cascade stops at the projects DB. Verified green locally:
+31 tests in `test_projects_api_lifecycle.py` + `test_hermes_projects.py`,
+154 agent-home tests, `tsc --noEmit` clean.
+
+Five things the block did not land.
+
+### U2 — archive stops the cron job, not the project (medium, contract)
+
+§13 says archive "drops the project out of the list, **and stops it running**",
+and §16 "Lifecycle" says the archived detail page renders the record with
+**restore as the only write offered**. Neither is enforced:
+
+- No route in `hermes_cli/projects_api.py` reads `archived` except the three
+  lifecycle routes and the list filter (`grep -n archived` → lines 503, 510,
+  591, 729, 923-1055 only). So `POST /{slug}/runs`, `POST /{slug}/outputs/{id}/accept`,
+  `POST /{slug}/directives`, `PUT /{slug}/schedule` and `PATCH /{slug}/tools`
+  all still succeed on an archived project. A shelved project can be run by
+  hand from the CLI or the API — only the *timer* was removed.
+- On the page, `ProjectDetailView.tsx:181-217` hides the three header buttons
+  (Run now / Continue / Add) when `project.archived`, but the panels below it
+  never look at the flag: `panels/OutputsPanel.tsx:45` and
+  `panels/GuidancePanel.tsx:42,69,87,107` still render and fire their writes.
+
+**The fix.** Refuse the mutating routes on an archived record at the router —
+a small helper beside `_require_write`:
+
+```python
+def _refuse_if_archived(project, act: str) -> None:
+    """§13: a shelved project does not run and does not learn. Restore first."""
+    if project.archived:
+        raise HTTPException(
+            status_code=409,
+            detail=f"project {project.slug} is archived — restore it before {act}",
+        )
+```
+
+Call it from the run, accept, directive, schedule and tools routes (not from
+`PATCH /{slug}`, so a typo in an archived project's goal can still be fixed,
+and not from restore). Then pass `archived` down from `ProjectDetailView` and
+have `OutputsPanel`/`GuidancePanel` render their write affordances as disabled
+with "Restore this project to …" rather than firing a call the server now
+refuses.
+
+**The test.** Archive a project, then assert each mutating route answers 409
+and that the record is unchanged; and one UI contract that the archived detail
+markup contains no accept/add-instruction control.
+
+### U3 — the 422 → blank-field contract is dead code (medium)
+
+§13: "the BFF's 422 `missing` list maps onto the field that is blank", and §16
+Frontend: "a 422 from create names the blank field in the form rather than a
+toast". `NewProjectForm.tsx:82-110` implements exactly that — and it can never
+run:
+
+- `withPrincipal` (`agent-home/src/app/api/projects/hermes-bridge.ts:31-44`)
+  forwards `err.body.detail` **only when it is a string**, otherwise it
+  substitutes `"That didn't go through."`. The Python create route raises
+  `detail={"missing": [...], "message": ...}`
+  (`projects_api.py`, `create_project_route`) — a dict — so the `missing` list
+  is dropped at the bridge.
+- The BFF's own pre-check answers `{error: "invalid_request", detail: "<string>"}`
+  (`app/api/projects/route.ts:69-79`), also without a `missing` list.
+
+Net effect: every server refusal shows generic copy with no field highlighted;
+the field-mapping branch is unreachable. Typed input *is* preserved (client
+state), so only the targeting is lost.
+
+**The fix.** Let the bridge forward a structured detail rather than flattening
+it — `detail` stays a string for the existing callers, and the object is
+carried alongside:
+
+```ts
+const raw = (err.body as { detail?: unknown } | undefined)?.detail;
+const detail = typeof raw === "string" && raw ? raw : "That didn't go through.";
+return NextResponse.json(
+  raw && typeof raw === "object" ? { error: "api_error", detail, ...raw } : { error: "api_error", detail },
+  { status: err.status },
+);
+```
+
+…or, simpler and local: have `app/api/projects/route.ts`'s pre-check answer
+`{error: "invalid_request", detail: {missing: [...], message: "…"}}` and read
+that shape in the form. Either way one of the two ends has to speak `missing`.
+
+**The test.** A route test where upstream raises a dict-detail 422 and the BFF
+answer still carries `missing: ["outputs"]`, plus a form test asserting the
+output field is marked invalid and the typed goal survives.
+
+### U4 — the new create/remove surface has no interaction tests (medium)
+
+This is the same hole U1 came out of. `archiveProject`/`restoreProject`/
+`deleteProject` have no test at all (`grep -rn archiveProject src --include=*.test.*`
+→ nothing), the three new BFF routes have none (route tests are an established
+pattern in this tree — `app/api/chat/send/route.test.ts`,
+`app/api/profiles/suggestions/route.test.ts`, …), and the three new component
+tests are `renderToStaticMarkup` string assertions only. Nothing exercises:
+submit → `/projects/<slug>` redirect; a 422 mapping onto a field (U3 above,
+which a single test would have caught); typed input surviving a refusal;
+archive/restore/delete actually calling the route and refreshing; the delete
+button staying disabled until the slug matches.
+
+**The fix.** Three route tests (archive/restore/delete: principal missing →
+401, upstream 409 → 409 with the refusal text, DELETE forwards `confirm`) and
+form/menu tests that drive the handlers with a stubbed `fetch`.
+
+### U5 — `deleteEligible` and the server disagree about archived cards (low)
+
+`ProjectLifecycleMenu.tsx:53-57` gates Delete on
+`project.card_rollup.total === 0`, but the rollup is built from
+`kanban_db.list_tasks(bconn, project_id=…, principal=…)`
+(`projects_api.py:253-254`) — `include_archived` defaults to `False`, while the
+delete route counts archived cards too. A project whose only cards are archived
+therefore *offers* Delete and then takes a 409. The refusal text is shown, so
+this is cosmetic; fix it by adding an archived-inclusive count to the detail
+payload (or by having the menu treat "no cards" as unknown and let the server
+answer).
+
+### U6 — the Archived chip cannot find a legacy archived row (low)
+
+The chip encodes `archived=true&status=archived`
+(`components/projects/filters.ts:95-98`) and the list filters `p.status != status`
+(`projects_api.py:535`). Any row with `archived = 1` and a status other than
+`'archived'` — anything shelved before Block 4b, or by a direct
+`PATCH`/store call — appears under **All** but never under **Archived**, which
+is the one place §13 says a shelved project must be findable. Either treat
+`status=archived` as "archived flag or archived status" in `_list_sync`, or
+backfill `status='archived' WHERE archived = 1` in the migration that follows.
+
+**Not a defect:** `/projects/new` passes `servingProfile="default"`. Throughout
+agent-home `"default"` *means* the box's own home (`lib/api/client.ts:139,158`;
+`profiles.get_profile_dir` resolves it to `_get_default_hermes_home()`), and the
+projects BFF talks to that home, so the pinned value is the serving profile. The
+consequence worth writing into §13 is that the UI cannot create a project hosted
+on a *named* profile — that stays a CLI act.
+
 ## Test coverage — what the 185 green tests still do not cover
 
 The suites are behaviour-shaped and genuinely good on the store and the router.
@@ -567,3 +711,29 @@ specify this — read them before starting, the delete rules are deliberate).
       `test_promote_foreign_profile_is_refused_before_touching_the_todo`; the
       >999-card event tail by Block 4's
       `test_events_tail_survives_more_than_999_cards`)*
+
+**Block 4c — finish the lifecycle Block 4b started** (findings U2–U6 above,
+in this order).
+
+- [ ] **U2** Refuse the mutating routes on an archived project (`_refuse_if_archived`
+      in `projects_api.py`, called from run / accept / directives / schedule /
+      tools — not from `PATCH /{slug}` or restore), and pass `archived` into
+      `OutputsPanel` / `GuidancePanel` so the archived detail page offers
+      restore and nothing else (§13, §16 "Lifecycle").
+- [ ] **U3** Make one end speak `missing`: either stop `withPrincipal` flattening
+      a dict `detail` (`app/api/projects/hermes-bridge.ts:31-44`) or have the
+      create route's pre-check answer a structured detail — so
+      `NewProjectForm`'s field mapping can actually fire (§13, §16 Frontend).
+- [ ] **U4** Tests for the surface Block 4b added: route tests for
+      archive/restore/delete (401 without a principal, upstream 409 forwarded
+      with its refusal text, `confirm` forwarded on DELETE) and handler-level
+      form/menu tests (submit → redirect, 422 → field marked, typed input
+      preserved, Delete disabled until the slug matches).
+- [ ] **U5** Give the detail payload an archived-inclusive card count so
+      `ProjectLifecycleMenu`'s `deleteEligible` agrees with the delete route.
+- [ ] **U6** Make Archived find every shelved row — `status=archived` should
+      match the archived *flag*, or backfill `status` for rows archived before
+      Block 4b.
+- [ ] Note in FG-32 §13 that the create form pins the host profile to the
+      serving home, so hosting a project on a *named* profile stays a CLI act
+      (the design's intent, not a gap — recorded so it is not re-reported).
