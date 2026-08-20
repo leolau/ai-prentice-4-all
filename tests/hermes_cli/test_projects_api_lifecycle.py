@@ -22,12 +22,38 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from hermes_cli import kanban_db, projects_api, projects_db, projects_schedule
-from hermes_cli.access import Principal
+from hermes_cli import (
+    kanban_db,
+    projects_api,
+    projects_db,
+    projects_run,
+    projects_schedule,
+)
+from hermes_cli.access import Principal, private
 
 OWNER = Principal(user_id="leo", display="Leo", role="owner")  # type: ignore[arg-type]
 MEMBER_P = Principal(user_id="ada", display="Ada", role="member")  # type: ignore[arg-type]
 VIEWER_P = Principal(user_id="vic", display="Vic", role="member")  # type: ignore[arg-type]
+# Instance-"member" with a project-level lead membership (added in the
+# U8 test) — the delete gate's "owner or lead" means the PROJECT role.
+LEAD_P = Principal(user_id="lea", display="Lea", role="member")  # type: ignore[arg-type]
+
+
+class _FakeApprovalStore:
+    """Records the ``NotificationStore.create`` kwargs (the H1 seam)."""
+
+    def __init__(self):
+        self.calls: list = []
+
+    async def initialize(self):
+        pass
+
+    async def create(self, **kwargs):
+        self.calls.append(kwargs)
+        return object()
+
+
+APPROVALS = _FakeApprovalStore()
 
 PREFIX = "/api/registry/projects"
 
@@ -40,6 +66,22 @@ def env(tmp_path, monkeypatch):
     cron_dir = tmp_path / "host-cron"
     monkeypatch.setattr(
         projects_schedule, "_host_profile_cron_dir", lambda profile: cron_dir
+    )
+    APPROVALS.calls.clear()
+    monkeypatch.setattr(
+        "hermes_cli.datastore.get_store", lambda *a, **k: object()
+    )
+    monkeypatch.setattr(
+        projects_run, "_approval_store",
+        lambda app_store, *, config: APPROVALS,
+    )
+    # Deterministic host seams for the §4.1 intersection.
+    monkeypatch.setattr(
+        projects_run, "_enabled_toolsets_for_profile",
+        lambda profile: ["research", "web"],
+    )
+    monkeypatch.setattr(
+        projects_run, "_available_skill_names", lambda profile: ["digest"]
     )
 
     state = {"actor": OWNER, "enrolled": set(), "subject": OWNER.user_id}
@@ -96,6 +138,30 @@ def _archive(env, project) -> dict:
     resp = client.post(f"{PREFIX}/{project['slug']}/archive", json={})
     assert resp.status_code == 200, resp.text
     return resp.json()
+
+
+STEPS = [
+    {"key": "gather", "title": "Collect arrivals"},
+    {"key": "approve", "title": "Owner reviews", "depends_on": ["gather"],
+     "checkpoint": True},
+    {"key": "send", "title": "Send to the list", "depends_on": ["approve"]},
+]
+
+
+def _save_and_activate_playbook(env, project) -> int:
+    client, _state = env
+    resp = client.post(
+        f"{PREFIX}/{project['slug']}/playbook",
+        json={"body": "The weekly method", "steps": STEPS},
+    )
+    assert resp.status_code == 200, resp.text
+    rev = resp.json()["rev"]
+    resp = client.post(
+        f"{PREFIX}/{project['slug']}/playbook/{rev}/activate",
+        json={"note": "first method"},
+    )
+    assert resp.status_code == 200, resp.text
+    return rev
 
 
 # ---------------------------------------------------------------------------
@@ -377,16 +443,43 @@ def test_delete_leaves_nothing_behind(env):
 
 def test_archived_project_refuses_every_mutating_route(env):
     project = _create_active_project(env)
-    _archive(env, project)
     client, _state = env
     slug = project["slug"]
 
+    # Seed a FINISHED run so the run-level writes have a real target:
+    # archive may shelve a done run (step 1 only blocks open ones).
+    _save_and_activate_playbook(env, project)
+    resp = client.post(f"{PREFIX}/{slug}/runs", json={})
+    assert resp.status_code == 200, resp.text
+    run = resp.json()["run"]
+    with projects_db.connect_closing() as conn:
+        projects_db.update_project_run(conn, run["id"], status="done")
+    _archive(env, project)
+    baseline_cards = client.get(f"{PREFIX}/{slug}").json()["card_rollup"][
+        "total_all_principals"
+    ]
+
+    # Every act that grows the record — the full enumeration, so route
+    # 13 arriving ungated is what the table catches.
     attempts = [
         ("POST", f"{PREFIX}/{slug}/runs", {}),
         ("POST", f"{PREFIX}/{slug}/outputs/output-1/accept", {}),
         ("POST", f"{PREFIX}/{slug}/directives", {"body": "Keep emails short."}),
         ("PUT", f"{PREFIX}/{slug}/schedule", {"schedule": "0 9 * * 1"}),
         ("PATCH", f"{PREFIX}/{slug}/tools", {"toolsets": []}),
+        ("POST", f"{PREFIX}/{slug}/runs/{run['run_no']}/continue", {}),
+        ("POST", f"{PREFIX}/{slug}/runs/{run['run_no']}/retro",
+         {"retro": "Late learning"}),
+        ("POST", f"{PREFIX}/{slug}/runs/{run['run_no']}/score", {"score": 4}),
+        ("POST", f"{PREFIX}/{slug}/cards", {"title": "One more thing"}),
+        ("POST", f"{PREFIX}/{slug}/playbook", {"steps": STEPS}),
+        ("POST", f"{PREFIX}/{slug}/playbook/1/activate", {}),
+        ("POST", f"{PREFIX}/{slug}/outputs", {"title": "Late artefact"}),
+        ("POST", f"{PREFIX}/{slug}/outputs/output-1/deliver", {}),
+        ("PATCH", f"{PREFIX}/{slug}/outputs/output-1", {"status": "delivered"}),
+        ("PATCH", f"{PREFIX}/{slug}/autonomy", {"autonomy": "supervised"}),
+        ("POST", f"{PREFIX}/{slug}/summarise", {"summary": "Late summary"}),
+        ("POST", f"{PREFIX}/{slug}/directives/d-1/activate", {}),
     ]
     for method, url, body in attempts:
         resp = client.request(method, url, json=body)
@@ -394,10 +487,15 @@ def test_archived_project_refuses_every_mutating_route(env):
         detail = resp.json()["detail"]
         assert "archived" in detail and "restore" in detail
 
-    # Nothing slipped through: no run, no guidance, no schedule.
+    # Nothing slipped through: no NEW run, no guidance, no schedule, no
+    # card — and the seeded run's retro/score stayed untouched.
     detail = client.get(f"{PREFIX}/{slug}").json()
-    assert detail["runs"] == []
+    assert len(detail["runs"]) == 1
     assert not detail.get("cron_job_id")
+    assert detail["card_rollup"]["total_all_principals"] == baseline_cards
+    seeded = client.get(f"{PREFIX}/{slug}/runs/{run['run_no']}").json()
+    assert seeded["retro"] is None
+    assert seeded["score_user"] is None
     directives = client.get(f"{PREFIX}/{slug}/directives").json()
     # The archive act's own record is the only guidance present.
     bodies = [d["body"] for d in directives["directives"]]
@@ -459,3 +557,93 @@ def test_detail_rollup_counts_archived_cards_for_the_delete_gate(env):
     assert detail["card_rollup"]["total"] == 0
     # …but the delete gate must still see the archived card.
     assert detail["card_rollup"]["total_with_archived"] == 1
+
+
+def test_archive_refuses_while_a_run_is_open(env):
+    """U7 step 1: the shelf may not trap a resumable run — archive names
+    the open run and refuses; cancel is the sanctioned way out."""
+    project = _create_active_project(env)
+    client, _state = env
+    slug = project["slug"]
+    _save_and_activate_playbook(env, project)
+    resp = client.post(f"{PREFIX}/{slug}/runs", json={})
+    assert resp.status_code == 200, resp.text
+    run = resp.json()["run"]
+
+    # The fresh run is held at its checkpoint — the shelf must refuse.
+    resp = client.post(f"{PREFIX}/{slug}/archive", json={})
+    assert resp.status_code == 409, resp.text
+    detail = resp.json()["detail"]
+    assert "open run" in detail and f"run {run['run_no']}" in detail
+
+    # Cancel is the sanctioned way out…
+    resp = client.post(f"{PREFIX}/{slug}/runs/{run['run_no']}/cancel", json={})
+    assert resp.status_code == 200, resp.text
+    # …and the shelf lands afterwards.
+    archived = _archive(env, project)
+    assert archived["archived"] is True
+
+
+def test_cancel_still_works_on_an_archived_project(env):
+    """Cancel *reduces* the record — the deliberately-open list keeps it
+    working even on a shelved project."""
+    project = _create_active_project(env)
+    client, _state = env
+    slug = project["slug"]
+    _save_and_activate_playbook(env, project)
+    resp = client.post(f"{PREFIX}/{slug}/runs", json={})
+    assert resp.status_code == 200, resp.text
+    run = resp.json()["run"]
+    # `blocked` is a card-level stall with no resume affordance — archive
+    # tolerates it…
+    with projects_db.connect_closing() as conn:
+        projects_db.update_project_run(conn, run["id"], status="blocked")
+    _archive(env, project)
+    # …and cancel still lands on top of the shelf.
+    resp = client.post(f"{PREFIX}/{slug}/runs/{run['run_no']}/cancel", json={})
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["status"] == "cancelled"
+
+
+def test_delete_gate_counts_cards_it_cannot_see(env):
+    """U8: the delete gate must agree with what the delete ROUTE counts —
+    a principal-blind total, not the caller-visible one."""
+    project = _create_active_project(env)
+    client, _state = env
+    slug = project["slug"]
+    for title in ("Shared card", "Ada's private card"):
+        resp = client.post(f"{PREFIX}/{slug}/cards", json={"title": title})
+        assert resp.status_code == 200, resp.text
+    # One card becomes private to ada — invisible to leo.
+    with kanban_db.connect_closing() as bconn:
+        tasks = kanban_db.list_tasks(bconn, project_id=project["id"])
+        private_id = next(
+            t.id for t in tasks if t.title == "Ada's private card"
+        )
+        with kanban_db.write_txn(bconn):
+            bconn.execute(
+                "UPDATE tasks SET visibility = ? WHERE id = ?",
+                (private("ada"), private_id),
+            )
+
+    # A non-owner lead joins the project — the owner sees every card,
+    # so the visibility gap only shows for a lesser principal.
+    client, state = env
+    with projects_db.connect_closing() as conn:
+        projects_db.add_project_member(
+            conn, project_id=project["id"], user_id="lea", role="lead"
+        )
+    state["actor"] = LEAD_P
+
+    detail = client.get(f"{PREFIX}/{slug}").json()
+    # The caller-visible total sees one…
+    assert detail["card_rollup"]["total_with_archived"] == 1
+    # …but the delete gate shows what the route counts: both.
+    assert detail["card_rollup"]["total_all_principals"] == 2
+
+    state["actor"] = OWNER
+    _archive(env, project)
+    state["actor"] = LEAD_P
+    resp = client.request("DELETE", f"{PREFIX}/{slug}", params={"confirm": slug})
+    assert resp.status_code == 409
+    assert "2 cards" in resp.json()["detail"]
