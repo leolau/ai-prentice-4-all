@@ -16,9 +16,12 @@ import type { ProjectDirective, ProjectDirectivesResponse } from "@/types";
 export function GuidancePanel({
   slug,
   initial,
+  archived = false,
 }: {
   slug: string;
   initial: ProjectDirectivesResponse | null;
+  /** §13: a shelved project offers restore as the only write. */
+  archived?: boolean;
 }) {
   const [directives, setDirectives] = useState<ProjectDirective[]>(
     initial?.directives ?? [],
@@ -148,15 +151,17 @@ export function GuidancePanel({
                     {agoLabel(directive.created_at)}
                     {directive.kind === "feedback" ? " · feedback" : ""}
                   </span>
-                  <BusyRegion busy={busyId === directive.id} label="Retiring…">
-                    <button
-                      type="button"
-                      onClick={() => void retire(directive.id)}
-                      className="text-[var(--color-muted)] underline"
-                    >
-                      Retire
-                    </button>
-                  </BusyRegion>
+                  {archived ? null : (
+                    <BusyRegion busy={busyId === directive.id} label="Retiring…">
+                      <button
+                        type="button"
+                        onClick={() => void retire(directive.id)}
+                        className="text-[var(--color-muted)] underline"
+                      >
+                        Retire
+                      </button>
+                    </BusyRegion>
+                  )}
                 </p>
               </li>
             ))}
@@ -184,18 +189,20 @@ export function GuidancePanel({
                         {directive.author_user_id} ·{" "}
                         {agoLabel(directive.created_at)}
                       </span>
-                      <BusyRegion
-                        busy={busyId === directive.id}
-                        label="Activating…"
-                      >
-                        <button
-                          type="button"
-                          onClick={() => void activate(directive.id)}
-                          className="text-[var(--color-accent)] underline"
+                      {archived ? null : (
+                        <BusyRegion
+                          busy={busyId === directive.id}
+                          label="Activating…"
                         >
-                          Activate
-                        </button>
-                      </BusyRegion>
+                          <button
+                            type="button"
+                            onClick={() => void activate(directive.id)}
+                            className="text-[var(--color-accent)] underline"
+                          >
+                            Activate
+                          </button>
+                        </BusyRegion>
+                      )}
                     </p>
                   </li>
                 ))}
@@ -207,30 +214,36 @@ export function GuidancePanel({
             <p className="mt-2 text-sm text-red-300">{error}</p>
           ) : null}
 
-          <BusyRegion busy={busy} label="Adding instruction…" className="mt-3">
-            <div className="flex flex-col gap-1.5">
-              <textarea
-                value={draft}
-                onChange={(e) => setDraft(e.target.value)}
-                placeholder="Add an instruction…"
-                rows={2}
-                className="w-full rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm outline-none focus:border-[var(--color-accent)]"
-              />
-              <div className="flex items-center justify-between">
-                <span className="text-xs text-[var(--color-muted)]">
-                  {initial.applies_from}
-                </span>
-                <button
-                  type="button"
-                  onClick={() => void add()}
-                  disabled={!draft.trim()}
-                  className="rounded-lg border border-[var(--color-accent)] px-3 py-1.5 text-xs font-medium text-[var(--color-accent)] disabled:opacity-40"
-                >
-                  Add
-                </button>
+          {archived ? (
+            <p className="mt-3 text-xs text-[var(--color-muted)]">
+              This project is archived — restore it (⋯) to add guidance.
+            </p>
+          ) : (
+            <BusyRegion busy={busy} label="Adding instruction…" className="mt-3">
+              <div className="flex flex-col gap-1.5">
+                <textarea
+                  value={draft}
+                  onChange={(e) => setDraft(e.target.value)}
+                  placeholder="Add an instruction…"
+                  rows={2}
+                  className="w-full rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm outline-none focus:border-[var(--color-accent)]"
+                />
+                <div className="flex items-center justify-between">
+                  <span className="text-xs text-[var(--color-muted)]">
+                    {initial.applies_from}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => void add()}
+                    disabled={!draft.trim()}
+                    className="rounded-lg border border-[var(--color-accent)] px-3 py-1.5 text-xs font-medium text-[var(--color-accent)] disabled:opacity-40"
+                  >
+                    Add
+                  </button>
+                </div>
               </div>
-            </div>
-          </BusyRegion>
+            </BusyRegion>
+          )}
 
           {retired == null ? (
             <button

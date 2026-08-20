@@ -10,7 +10,7 @@ import { NextResponse } from "next/server";
 
 import type { CreateProjectPayload } from "@/types";
 
-import { invalidRequest, readBody, withPrincipal } from "./hermes-bridge";
+import { readBody, withPrincipal } from "./hermes-bridge";
 
 export async function GET(req: Request): Promise<NextResponse> {
   const params = new URL(req.url).searchParams;
@@ -30,18 +30,30 @@ export async function GET(req: Request): Promise<NextResponse> {
 export async function POST(req: Request): Promise<NextResponse> {
   const body = await readBody(req);
   // The §2.2 mandatory four — the Python layer re-checks all of them, but a
-  // BFF-level refusal keeps the 422's `missing` list from being the first
-  // feedback the form gets.
+  // BFF-level refusal speaks the same `missing` shape the upstream 422 does
+  // (U3), so the form maps the refusal onto the blank field either way.
   const goal = String(body.goal ?? "").trim();
   const description = String(body.description ?? "").trim();
   const hostProfile = String(body.host_profile ?? "").trim();
-  const outputs = body.outputs;
-  if (!goal) return invalidRequest("A project needs a goal sentence.");
-  if (!description) return invalidRequest("A project needs a description.");
-  if (!Array.isArray(outputs) || outputs.length === 0) {
-    return invalidRequest("A project declares at least one output.");
+  const outputs = Array.isArray(body.outputs) ? body.outputs : [];
+  const hasOutput = outputs.some((output) =>
+    String((output as { title?: unknown } | null)?.title ?? "").trim(),
+  );
+  const missing: string[] = [];
+  if (!goal) missing.push("goal");
+  if (!description) missing.push("description");
+  if (outputs.length === 0 || !hasOutput) missing.push("outputs");
+  if (!hostProfile) missing.push("host_profile");
+  if (missing.length > 0) {
+    return NextResponse.json(
+      {
+        error: "invalid_request",
+        detail: "A project needs its mandatory fields before it can start.",
+        missing,
+      },
+      { status: 422 },
+    );
   }
-  if (!hostProfile) return invalidRequest("A project needs a host profile.");
   return withPrincipal((client) =>
     client.createProject(body as unknown as CreateProjectPayload),
   );

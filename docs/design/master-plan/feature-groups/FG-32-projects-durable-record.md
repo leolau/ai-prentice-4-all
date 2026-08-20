@@ -1181,7 +1181,10 @@ prefilled from it and editable inline, so the split costs the user nothing), [2]
 output (everything mandatory except participants, which default to you + the
 current profile); step 2 is "how should this run" — cadence, autonomy, host
 profile — and is skippable into a `manual` `one_off`. Ten optional fields on a
-create form would guarantee nobody fills in the four that matter.
+create form would guarantee nobody fills in the four that matter. The form pins
+the host profile to the profile serving the page (a read-only field) — the
+record lives where you can see it, so hosting a project on a *named* profile
+stays a CLI act, not a form choice.
 
 **The create form needs a door.** The list header carries a primary **New project**
 action, and the empty state's CTA is the same one — a Projects page with no way to
@@ -1232,6 +1235,13 @@ indistinguishable from a write that did nothing), and delete redirects to
 that no longer exists. A `viewer` sees none of the three; a member who is not a
 lead sees Archive disabled with the reason, not hidden — "why can't I" is a
 better question than "where did it go".
+
+**A shelved project does not run and does not learn.** While archived, every
+mutating act that would grow the record — start a run, accept an output, add
+guidance, set a schedule, change the tools — is refused `409` naming the
+archive and pointing at restore; the panels hide the same affordances with the
+same hint. Correcting a typo (`PATCH /{slug}`) is not learning and stays
+allowed; restore is the one act that unblocks everything else.
 
 **Adding to a project is a link, from both ends.** The detail page has an "Add"
 sheet (search across files, arrivals, to-dos, goals, conversations), and
@@ -1525,6 +1535,9 @@ Behaviour contracts, not change detectors (`AGENTS.md`).
   the only write offered).
 - Restore lands in `paused`, never `active`, and does **not** resurrect the
   schedule.
+- While archived, the growing acts — start a run, accept an output, add
+  guidance, set a schedule, change the tools — are refused `409` until
+  restore; `PATCH /{slug}` (record fields) stays allowed.
 - Delete refuses (409, naming what it found) when the project has a run, a
   delivered or accepted output, a card, or is not archived; it refuses (403)
   for a session-less or agent caller, and for a member who is not a lead; and
@@ -1703,6 +1716,9 @@ sequencing did not name (8b, 9b) and a live-integration merge:
 | 10 | Retro → learning (playbook rev / directive / skill candidate, all inactive) | #275, #276 |
 | 11 | Event tail, rolling `summarise`, phase closeout | #276, #278 |
 | — | Live integration into `develop` | #279, #280 |
+| 12 | Lifecycle API: archive / restore / delete router, §13 preconditions, human gate, CLI verbs | #305 |
+| 12b | Management UI: `/projects/new` + `NewProjectForm`, the `[⋯]` menu, the Archived chip | #305 |
+| 12c | Lifecycle hardening (review U2–U6): the archived-inert gate, structured 422 forwarding to the form, the archived-inclusive card count, the flag-aware Archived chip, and the interaction + route tests | this PR |
 
 Verified at `7c737474f`: 185 Projects Python tests pass, 46 agent-home Projects
 tests pass, `tsc --noEmit` clean. The feature has **not** been deployed or
@@ -1778,7 +1794,13 @@ The design-relevant ones, in the order the second review recommends fixing them:
    component tests are markup-only; `deleteEligible` counts cards without
    archived ones while the server counts them; and the Archived chip matches
    on `status` so a row shelved before Block 4b is unreachable from it.
-   **Block 4c** of the end-to-end review is the worklist.
+   **Block 4c** of the end-to-end review is the worklist. **FIXED in Block 4c
+   (this PR)**: every mutating route refuses an archived project `409` and the
+   panels hide the same affordances; the bridge forwards a structured `detail`
+   so the 422's `missing` list maps onto the blank field; the three new BFF
+   routes and both new components have handler-level tests; the detail payload
+   carries an archived-inclusive card count the delete gate reads; and the
+   Archived chip matches the `archived` flag as well as the status.
 
 ### 20.3 Testing gaps that let the above through
 
