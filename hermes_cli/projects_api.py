@@ -217,6 +217,21 @@ async def _require_write(request: Request, *, judgement: bool = False):
     return project, role, profiles, principal
 
 
+def _refuse_if_archived(project, act: str) -> None:
+    """§13: a shelved project does not run and does not learn.
+
+    Archive drops the project out of the list *and stops it running*;
+    its detail page offers restore as the only write. The mutating
+    routes enforce that here — `PATCH /{slug}` keeps working (a typo in
+    an archived goal is still fixable) and restore never reaches this
+    gate."""
+    if project.archived:
+        raise HTTPException(
+            status_code=409,
+            detail=f"project {project.slug} is archived — restore it before {act}",
+        )
+
+
 async def _require_human(request: Request, act: str) -> str:
     """§8.1/§8.2: a human act needs a verified interactive subject.
 
@@ -251,10 +266,25 @@ def goal_progress_hook(project, goal_link: dict) -> Optional[dict]:
 
 
 def _card_rollup_sync(bconn, project_id: str, principal) -> dict:
-    tasks = kanban_db.list_tasks(bconn, project_id=project_id, principal=principal)
-    rollup = {"total": len(tasks), "done": 0, "running": 0, "blocked": 0}
+    # One archived-inclusive query, two counts: `total` keeps the board's
+    # live picture, `total_with_archived` is what the delete gate counts
+    # (§12 decision 17) — so the detail header's Delete offer and the
+    # route's refusal agree (U5).
+    tasks = kanban_db.list_tasks(
+        bconn, project_id=project_id, principal=principal, include_archived=True
+    )
+    rollup = {
+        "total": 0,
+        "done": 0,
+        "running": 0,
+        "blocked": 0,
+        "total_with_archived": len(tasks),
+    }
     for t in tasks:
         status = getattr(t, "status", "")
+        if status == "archived":
+            continue
+        rollup["total"] += 1
         if status in rollup:
             rollup[status] += 1
     return rollup
@@ -532,7 +562,13 @@ def _list_sync(
                 exhausted = False
                 break
             last_examined = (p.created_at, p.id)
-            if status and p.status != status:
+            if status == "archived":
+                # The Archived chip must find every shelved row (U6) —
+                # including rows archived before Block 4b, when shelving
+                # set the flag without the status.
+                if not (getattr(p, "archived", 0) or p.status == "archived"):
+                    continue
+            elif status and p.status != status:
                 continue
             if cadence and getattr(p, "cadence", None) != cadence:
                 continue
@@ -1227,6 +1263,7 @@ async def accept_output(request: Request, output_id: str) -> dict[str, Any]:
     project, _role, _profiles, _principal = await _require_write(
         request, judgement=True
     )
+    _refuse_if_archived(project, "accepting an output")
     subject = await _require_human(request, "accepting an output")
 
     def _accept_sync() -> dict:
@@ -1921,6 +1958,7 @@ async def add_directive_route(request: Request) -> dict[str, Any]:
     project, _role, _profiles, principal = await _require_write(
         request, judgement=True
     )
+    _refuse_if_archived(project, "adding guidance")
     body = await request.json()
 
     def _add_sync() -> dict:
@@ -2113,6 +2151,7 @@ async def start_run_route(request: Request) -> dict[str, Any]:
     project, _role, _profiles, principal = await _require_write(
         request, judgement=True
     )
+    _refuse_if_archived(project, "running it")
     body = await request.json() if request.headers.get("content-length") else {}
     trigger = str(body.get("trigger") or "manual").strip()
     if trigger not in projects_db.VALID_RUN_TRIGGERS:
@@ -2439,6 +2478,7 @@ async def patch_tools_route(request: Request) -> dict[str, Any]:
     and the response shows that intersection.
     """
     project, _role, profiles, _principal = await _require_write(request)
+    _refuse_if_archived(project, "changing its tools")
     body = await request.json()
 
     def _patch_sync() -> dict:
@@ -2544,6 +2584,7 @@ async def put_schedule_route(request: Request) -> dict[str, Any]:
     §3.1 preconditions map to 409 naming what is missing; an invalid
     schedule string maps to 422."""
     project, _role, profiles, principal = await _require_write(request)
+    _refuse_if_archived(project, "scheduling it")
     try:
         body = await request.json()
     except Exception:

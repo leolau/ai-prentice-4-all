@@ -1299,6 +1299,8 @@ export interface ProjectCardRollup {
   done: number;
   running: number;
   blocked: number;
+  /** Archived cards included — the count the delete gate uses (U5). */
+  total_with_archived?: number;
 }
 
 /**
