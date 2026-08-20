@@ -997,7 +997,13 @@ them, and that `deleteEligible` is therefore false.
 
 **Block 4d — finish U7, and U8 with it.**
 
-- [ ] **U7** Make the code and FG-32 §13/§16 agree: either call
+**All three landed in Block 4d (#310, `59d39ff50`)** — the gate now covers every
+growing route with the deliberately-open list written into the helper,
+archive refuses an open run, the run page knows the project is archived,
+and the delete gate counts principal-blind; each item below carries the
+annotation of what pinned it.
+
+- [x] **U7** Make the code and FG-32 §13/§16 agree: either call
       `_refuse_if_archived` from `continue`, `retro`, `score`, `cards`,
       `playbook` (+ activate), `outputs` (+ deliver), `autonomy` and
       `summarise` — leaving `cancel` and `PATCH /{slug}` open — or narrow the
@@ -1005,14 +1011,32 @@ them, and that `deleteEligible` is therefore false.
       `continue` must not resume a shelved project silently, and archive
       should refuse (or the design should permit) shelving a project whose run
       is still `running`/`waiting`.
-- [ ] **U7 (UI)** `app/projects/[slug]/runs/[runNo]/page.tsx` fetches the run
+      *(Block 4d: the first branch — `_refuse_if_archived` now runs from all
+      twelve growing routes, the deliberately-open list (PATCH, restore,
+      cancel, the DELETE verbs, directive retirement, bookkeeping POSTs) is
+      written into the helper's docstring, and `_archive_sync` refuses a
+      `running`/`waiting` run naming it, with cancel as the sanctioned way
+      out. The refusal table in `test_projects_api_lifecycle.py` enumerates
+      all seventeen mutating attempts; `test_archive_refuses_while_a_run_is_open`
+      and `test_cancel_still_works_on_an_archived_project` pin both halves.)*
+- [x] **U7 (UI)** `app/projects/[slug]/runs/[runNo]/page.tsx` fetches the run
       only, so `RunView` cannot know the project is archived and still offers
       Continue / Cancel / Save retro / the score control. Pass `archived`
       down and hide the writes behind the panels' hint.
-- [ ] **U8** Give the delete gate a principal-blind card count
+      *(Block 4d: the run page fetches the project alongside the run —
+      a failed project fetch renders unflagged rather than erroring — and
+      `RunView` hides Continue / Repeat this run / Save retro / the score
+      control behind the panels' hint while Cancel stays; `RunView.test.tsx`
+      pins the archived and the live renderings.)*
+- [x] **U8** Give the delete gate a principal-blind card count
       (`total_all_principals`, or a plain `COUNT(*)` in `_card_rollup_sync`)
       so a lead who cannot see a colleague's private card is not offered a
       Delete the route will refuse.
+      *(Block 4d: `_card_rollup_sync` adds `total_all_principals`, a
+      principal-blind `COUNT(*)` over `tasks.project_id` (a count leaks no
+      card); `ProjectLifecycleMenu.deleteEligible` reads it, and
+      `test_delete_gate_counts_cards_it_cannot_see` pins the
+      sees-one / counts-two split with the consistent 409.)*
 
 ### Block 4d — the implementation plan
 

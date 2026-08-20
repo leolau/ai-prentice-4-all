@@ -36,10 +36,20 @@ export default async function Page({
   }
 
   const client = await apiClientForRequest();
-  // Fetch under the try, render outside it.
+  // Fetch under the try, render outside it. The run is the page; the
+  // project read only carries the `archived` flag for RunView — if it
+  // fails the page renders unflagged, and the router refuses the writes
+  // anyway.
   let run: ProjectRun | null = null;
+  let archived = false;
   try {
-    run = await client.projectRun(slug, runNoInt);
+    [run, archived] = await Promise.all([
+      client.projectRun(slug, runNoInt),
+      client
+        .project(slug)
+        .then((p) => Boolean(p.archived))
+        .catch(() => false),
+    ]);
   } catch (err) {
     // 404 = no such run (or no such project for this caller) — Next's
     // not-found, not a load error that prints upstream detail (F7).
@@ -61,7 +71,7 @@ export default async function Page({
 
   return (
     <MobileShell title={`Run ${runNoInt}`}>
-      <RunView slug={slug} run={run} />
+      <RunView slug={slug} run={run} archived={archived} />
     </MobileShell>
   );
 }

@@ -1237,11 +1237,17 @@ lead sees Archive disabled with the reason, not hidden — "why can't I" is a
 better question than "where did it go".
 
 **A shelved project does not run and does not learn.** While archived, every
-mutating act that would grow the record — start a run, accept an output, add
-guidance, set a schedule, change the tools — is refused `409` naming the
-archive and pointing at restore; the panels hide the same affordances with the
-same hint. Correcting a typo (`PATCH /{slug}`) is not learning and stays
-allowed; restore is the one act that unblocks everything else.
+mutating act that would grow the record — start, continue, retro or score a
+run, add a card, save or activate a playbook, declare, change or deliver an
+output, accept an output, add or activate guidance, set a schedule, change
+the tools or the autonomy, re-summarise — is refused `409` naming the archive
+and pointing at restore; the panels and the run page hide the same
+affordances with the same hint. The writes that stay open are deliberately
+not growth: correcting a typo (`PATCH /{slug}`), member/profile/contact/link
+bookkeeping, every DELETE verb and directive retirement, and cancel — archive
+itself refuses to shelve a project holding a `running`/`waiting` run, so
+cancel is the sanctioned way out of an open run. Restore is the one act that
+unblocks everything else.
 
 **Adding to a project is a link, from both ends.** The detail page has an "Add"
 sheet (search across files, arrivals, to-dos, goals, conversations), and
@@ -1535,9 +1541,14 @@ Behaviour contracts, not change detectors (`AGENTS.md`).
   the only write offered).
 - Restore lands in `paused`, never `active`, and does **not** resurrect the
   schedule.
-- While archived, the growing acts — start a run, accept an output, add
-  guidance, set a schedule, change the tools — are refused `409` until
-  restore; `PATCH /{slug}` (record fields) stays allowed.
+- While archived, every growing act — start/continue/retro/score a run, add
+  a card, save or activate a playbook, declare/change/deliver/accept an
+  output, add or activate guidance, set a schedule, change the tools or the
+  autonomy, re-summarise — is refused `409` until restore. What stays
+  allowed never grows the record: `PATCH /{slug}` (record fields),
+  member/profile/contact/link bookkeeping, the DELETE verbs, directive
+  retirement, and cancel. Archive refuses to shelve a project holding a
+  `running`/`waiting` run — cancel (or finishing it) is the way out.
 - Delete refuses (409, naming what it found) when the project has a run, a
   delivered or accepted output, a card, or is not archived; it refuses (403)
   for a session-less or agent caller, and for a member who is not a lead; and
@@ -1719,6 +1730,7 @@ sequencing did not name (8b, 9b) and a live-integration merge:
 | 12 | Lifecycle API: archive / restore / delete router, §13 preconditions, human gate, CLI verbs | #305 |
 | 12b | Management UI: `/projects/new` + `NewProjectForm`, the `[⋯]` menu, the Archived chip | #305 |
 | 12c | Lifecycle hardening (review U2–U6): the archived-inert gate, structured 422 forwarding to the form, the archived-inclusive card count, the flag-aware Archived chip, and the interaction + route tests | #307 |
+| 12d | Lifecycle completion (review U7–U8): the gate on every growing route, the archive-time open-run precondition, the run page's archived wiring, and the principal-blind delete count | #310 |
 
 Verified at `7c737474f`: 185 Projects Python tests pass, 46 agent-home Projects
 tests pass, `tsc --noEmit` clean. The feature has **not** been deployed or
@@ -1822,7 +1834,15 @@ The design-relevant ones, in the order the second review recommends fixing them:
    "Block 4d — the implementation plan" section after it is the step-by-step:
    the archive-time precondition on an open run, the twelve routes to gate
    (with the deliberately-open list), the run page wiring, U8's
-   principal-blind count, and the tests for each.
+   principal-blind count, and the tests for each. **FIXED in Block 4d
+   (#310)**: archive refuses a project holding a `running`/`waiting` run
+   (cancel is the sanctioned way out, and stays open on a shelved project);
+   the gate now covers every growing route, with the deliberately-open list
+   written into `_refuse_if_archived`'s docstring; the run page fetches the
+   project alongside the run and `RunView` hides Continue / Repeat / Save
+   retro / the score control behind the panels' hint while Cancel stays; and
+   the delete gate reads `card_rollup.total_all_principals`, the
+   principal-blind `COUNT(*)` the delete route agrees with.
 
 ### 20.3 Testing gaps that let the above through
 

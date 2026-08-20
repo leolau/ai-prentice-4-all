@@ -50,9 +50,13 @@ export function ProjectLifecycleMenu({
   // The §12 preconditions, derived from the same record the page renders:
   // archived, and no run, no delivered/accepted output, no card. The server
   // re-checks all of them — this gate only decides what the menu offers.
-  // The card count is the archived-inclusive one the delete route uses (U5).
+  // The card count is the principal-blind one the delete route counts
+  // (U5 + U8): a lead who cannot see a colleague's private card is not
+  // offered a Delete the route will refuse.
   const cardCount =
-    project.card_rollup.total_with_archived ?? project.card_rollup.total;
+    project.card_rollup.total_all_principals ??
+    project.card_rollup.total_with_archived ??
+    project.card_rollup.total;
   const deleteEligible =
     project.archived &&
     project.runs.length === 0 &&
