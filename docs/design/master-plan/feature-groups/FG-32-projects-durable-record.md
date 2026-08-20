@@ -1763,6 +1763,22 @@ The design-relevant ones, in the order the second review recommends fixing them:
    build them. Note the trap recorded in decision 17: a naive cascade would
    orphan `tasks.project_id` rows in the per-profile kanban store, which has no
    foreign key back to `projects`.
+7. **U2–U6 — Block 4b built the doors; two contracts are still unmet**
+   (review of `570be680f`, 2026-08-20). The lifecycle store/router/CLI match
+   §12 and decision 17, and `/projects/new` + the `[⋯]` menu exist. What does
+   not hold yet: **archive stops the cron job but not the project** — no
+   mutating route checks `archived`, so a shelved project still accepts a
+   manual run, an accepted output and a new directive, and the detail page
+   hides only its three header buttons while the Outputs and Guidance panels
+   keep their writes (§13 "stops it running", §16 "restore is the only write
+   offered"); and **the 422 → blank-field mapping cannot fire**, because the
+   BFF bridge flattens a structured `detail` to a string, so the `missing`
+   list §13 promises never reaches `NewProjectForm`. Three smaller ones: the
+   new BFF routes and client lifecycle methods have no tests and the new
+   component tests are markup-only; `deleteEligible` counts cards without
+   archived ones while the server counts them; and the Archived chip matches
+   on `status` so a row shelved before Block 4b is unreachable from it.
+   **Block 4c** of the end-to-end review is the worklist.
 
 ### 20.3 Testing gaps that let the above through
 
