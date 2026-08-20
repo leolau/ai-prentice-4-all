@@ -1718,7 +1718,7 @@ sequencing did not name (8b, 9b) and a live-integration merge:
 | — | Live integration into `develop` | #279, #280 |
 | 12 | Lifecycle API: archive / restore / delete router, §13 preconditions, human gate, CLI verbs | #305 |
 | 12b | Management UI: `/projects/new` + `NewProjectForm`, the `[⋯]` menu, the Archived chip | #305 |
-| 12c | Lifecycle hardening (review U2–U6): the archived-inert gate, structured 422 forwarding to the form, the archived-inclusive card count, the flag-aware Archived chip, and the interaction + route tests | this PR |
+| 12c | Lifecycle hardening (review U2–U6): the archived-inert gate, structured 422 forwarding to the form, the archived-inclusive card count, the flag-aware Archived chip, and the interaction + route tests | #307 |
 
 Verified at `7c737474f`: 185 Projects Python tests pass, 46 agent-home Projects
 tests pass, `tsc --noEmit` clean. The feature has **not** been deployed or
@@ -1795,7 +1795,7 @@ The design-relevant ones, in the order the second review recommends fixing them:
    archived ones while the server counts them; and the Archived chip matches
    on `status` so a row shelved before Block 4b is unreachable from it.
    **Block 4c** of the end-to-end review is the worklist. **FIXED in Block 4c
-   (this PR)**: every mutating route refuses an archived project `409` and the
+   (#307)**: every mutating route refuses an archived project `409` and the
    panels hide the same affordances; the bridge forwards a structured `detail`
    so the 422's `missing` list maps onto the blank field; the three new BFF
    routes and both new components have handler-level tests; the detail payload
