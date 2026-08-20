@@ -1337,7 +1337,7 @@ what disagrees.
 
 **Block 4e — close U9, and the three lows with it.**
 
-**All four landed in Block 4e (this PR)** — the gate moved to the writer
+**All four landed in Block 4e (#312, `3b50c6224`)** — the gate moved to the writer
 (`kanban_db.create_task`), promote maps the refusal to the router's own 409,
 archive's open-run scan is unpaged, the two untested Block 4d surfaces have
 tests, and §13 says what archive truly stops.

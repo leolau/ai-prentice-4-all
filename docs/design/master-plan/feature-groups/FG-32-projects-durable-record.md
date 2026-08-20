@@ -1741,7 +1741,7 @@ sequencing did not name (8b, 9b) and a live-integration merge:
 | 12b | Management UI: `/projects/new` + `NewProjectForm`, the `[⋯]` menu, the Archived chip | #305 |
 | 12c | Lifecycle hardening (review U2–U6): the archived-inert gate, structured 422 forwarding to the form, the archived-inclusive card count, the flag-aware Archived chip, and the interaction + route tests | #307 |
 | 12d | Lifecycle completion (review U7–U8): the gate on every growing route, the archive-time open-run precondition, the run page's archived wiring, and the principal-blind delete count | #310 |
-| 12e | Below-router completion (review U9–U12): the writer-level archived gate in `create_task` (promote → 409, no orphan link), the unpaged open-run scan, the U8 consumer and run-page loader tests, and §13's narrowed wording | this PR |
+| 12e | Below-router completion (review U9–U12): the writer-level archived gate in `create_task` (promote → 409, no orphan link), the unpaged open-run scan, the U8 consumer and run-page loader tests, and §13's narrowed wording | #312 |
 
 Verified at `7c737474f`: 185 Projects Python tests pass, 46 agent-home Projects
 tests pass, `tsc --noEmit` clean. The feature has **not** been deployed or
@@ -1874,7 +1874,7 @@ The design-relevant ones, in the order the second review recommends fixing them:
   memories and conversation histories attach — so either gate it or narrow §13
   to "stops execution and learning; record bookkeeping stays open" with the
   permitted list named. **Block 4e** of the end-to-end review is the worklist.
-  **FIXED in Block 4e (this PR)**: `create_task` raises on an archived
+  **FIXED in Block 4e (#312)**: `create_task` raises on an archived
   project — promote maps the refusal to 409 and the link row never lands,
   `hermes kanban create` prints it instead of a traceback; `_archive_sync`
   asks SQL for *every* open run (no page window); the U8 consumer
