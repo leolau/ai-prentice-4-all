@@ -647,3 +647,45 @@ def test_delete_gate_counts_cards_it_cannot_see(env):
     resp = client.request("DELETE", f"{PREFIX}/{slug}", params={"confirm": slug})
     assert resp.status_code == 409
     assert "2 cards" in resp.json()["detail"]
+
+
+def test_archive_refuses_an_old_open_run_beyond_the_page_window(env):
+    """U10: the gate must not page — a waiting run 1 buried under 51 newer
+    finished runs still blocks the shelf (fails against the limit=50 scan)."""
+    project = _create_active_project(env)
+    client, _state = env
+    slug = project["slug"]
+    with projects_db.connect_closing() as conn:
+        with projects_db.write_txn(conn):
+            # Run 1 is stuck at a checkpoint…
+            conn.execute(
+                "INSERT INTO project_runs "
+                "(id, project_id, run_no, trigger, triggered_by, profile, "
+                " playbook_rev, status, started_at, trace_id) "
+                "VALUES (?, ?, 1, 'manual', 'leo', 'default', 1, 'waiting', "
+                " datetime('now'), NULL)",
+                ("run_old", project["id"]),
+            )
+            # …under 51 finished runs — more than one page of the
+            # newest-first listing.
+            for n in range(2, 53):
+                conn.execute(
+                    "INSERT INTO project_runs "
+                    "(id, project_id, run_no, trigger, triggered_by, profile, "
+                    " playbook_rev, status, started_at, trace_id) "
+                    "VALUES (?, ?, ?, 'manual', 'leo', 'default', 1, 'done', "
+                    " datetime('now'), NULL)",
+                    (f"run_{n}", project["id"], n),
+                )
+
+    resp = client.post(f"{PREFIX}/{slug}/archive", json={})
+    assert resp.status_code == 409, resp.text
+    detail = resp.json()["detail"]
+    assert "open run" in detail and "run 1 (waiting)" in detail
+
+    # Still not shelved.
+    with projects_db.connect_closing() as conn:
+        row = conn.execute(
+            "SELECT archived FROM projects WHERE id = ?", (project["id"],)
+        ).fetchone()
+    assert row["archived"] == 0

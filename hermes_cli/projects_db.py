@@ -2383,6 +2383,25 @@ def list_project_runs(
     ]
 
 
+def list_open_project_runs(
+    conn: sqlite3.Connection, project_id: str
+) -> List[dict]:
+    """Every resumable run — no limit, no ordering assumption (U10).
+
+    The archive precondition cannot page: ``list_project_runs`` reads the
+    NEWEST 50, so a long-standing project would hide an old run stuck at
+    a checkpoint from the gate. Ask in SQL instead."""
+    return [
+        dict(r)
+        for r in conn.execute(
+            "SELECT run_no, status FROM project_runs "
+            "WHERE project_id = ? AND status IN ('running', 'waiting') "
+            "ORDER BY run_no",
+            (project_id,),
+        ).fetchall()
+    ]
+
+
 def last_scored_runs(
     conn: sqlite3.Connection, project_id: str, *, limit: int = 5
 ) -> List[dict]:

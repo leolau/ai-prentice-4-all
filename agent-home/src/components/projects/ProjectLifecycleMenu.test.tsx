@@ -183,6 +183,47 @@ describe("ProjectLifecycleMenu", () => {
     expect(html).not.toContain("Delete permanently");
   });
 
+  it("U8: Delete reads the principal-blind total, not the caller-visible one", () => {
+    // The caller sees zero cards (the other principal's card is invisible
+    // to them) — the principal-blind total still says two, so no Delete.
+    const html = MENU(
+      PROJECT({
+        archived: true,
+        status: "archived",
+        card_rollup: {
+          total: 0,
+          done: 0,
+          running: 0,
+          blocked: 0,
+          total_with_archived: 0,
+          total_all_principals: 2,
+        },
+      }),
+      "leo_owner",
+    );
+    expect(html).toContain("Restore project");
+    expect(html).not.toContain("Delete permanently");
+  });
+
+  it("U8: Delete returns once every principal's cards are gone", () => {
+    const html = MENU(
+      PROJECT({
+        archived: true,
+        status: "archived",
+        card_rollup: {
+          total: 0,
+          done: 0,
+          running: 0,
+          blocked: 0,
+          total_with_archived: 0,
+          total_all_principals: 0,
+        },
+      }),
+      "leo_owner",
+    );
+    expect(html).toContain("Delete permanently");
+  });
+
   it("withholds Delete while the board still has cards", () => {
     const html = MENU(
       PROJECT({
