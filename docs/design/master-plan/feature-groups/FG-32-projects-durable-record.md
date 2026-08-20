@@ -1780,6 +1780,24 @@ The design-relevant ones, in the order the second review recommends fixing them:
    on `status` so a row shelved before Block 4b is unreachable from it.
    **Block 4c** of the end-to-end review is the worklist.
 
+8. **U7–U8 — the archived-inert rule is asserted generally and enforced on five
+   routes** (review of Block 4c, `b743715d1`/PR #307, 2026-08-21). U3–U6 are
+   closed. But `_refuse_if_archived` guards only run / accept / directives /
+   tools / schedule, while the §13 paragraph that lands with #307 promises it of
+   *every* growing act, so
+   `continue` a held run, `retro`, `score`, add a card, save or activate a
+   playbook revision, add or deliver an output, raise `autonomy` and
+   `summarise` all still land on a shelved project — and archive has no
+   precondition on an in-flight run, so a project holding a `waiting` run can
+   be shelved and then resumed, which §13's "stops it running" forbids. The run
+   page compounds it: it fetches the run only, so `RunView` cannot know the
+   project is archived and still offers Continue / Cancel / retro / score.
+   Either gate the rest or narrow this section's wording — they must not
+   disagree. U8 (low): the delete gate counts cards *with* the caller's
+   principal while the delete route counts without one, so a lead who cannot
+   see a colleague's private card is offered a Delete the route refuses.
+   **Block 4d** of the end-to-end review is the worklist.
+
 ### 20.3 Testing gaps that let the above through
 
 §16's contracts are behaviour-shaped and the store/router honour them. Two
