@@ -1013,3 +1013,172 @@ them, and that `deleteEligible` is therefore false.
       (`total_all_principals`, or a plain `COUNT(*)` in `_card_rollup_sync`)
       so a lead who cannot see a colleague's private card is not offered a
       Delete the route will refuse.
+
+### Block 4d — the implementation plan
+
+Written against `develop` at `6620a22e6`; every line number below is that sha.
+Five steps, in order — steps 1–2 are one PR (they are one decision), step 3 is
+the surface that step 2 makes truthful, step 4 is independent and can go first
+if you want a warm-up. Do not start step 3 before step 2: the UI must hide only
+what the router already refuses, or the next reviewer finds the same split
+again.
+
+#### Step 1 — archive refuses a project whose run is still open
+
+**Why first.** It removes the hard case from step 2. If no archived project can
+own a `running`/`waiting` run, then "may I continue / retro / score a run on a
+shelved project?" only ever concerns *finished* runs, and the answer is a
+policy choice rather than a correctness hole.
+
+`_archive_sync` (`hermes_cli/projects_api.py:974`) already refuses one thing —
+an already-archived record — and raises `ValueError`, which the wrapper at 1010
+turns into a `409`. Add a second blocker in the same style, right after the
+`fresh.archived` check and *before* `projects_db.archive_project`:
+
+```python
+open_runs = [
+    r for r in projects_db.list_project_runs(conn, fresh.id, limit=50)
+    if r["status"] in ("running", "waiting")
+]
+if open_runs:
+    held = ", ".join(f"run {r['run_no']} ({r['status']})" for r in open_runs)
+    raise ValueError(
+        f"project {fresh.slug} still has an open run — {held}. "
+        "Cancel it (or let it finish) before archiving."
+    )
+```
+
+`VALID_RUN_STATUSES` is `running, waiting, blocked, done, failed, cancelled`
+(`projects_db.py:2315`). Block only `running` and `waiting`: `blocked` is a
+card-level wait that carries no resume affordance, and `done`/`failed`/
+`cancelled` are terminal. Cancel is the escape hatch, and it already works on
+an archived project — which is the second reason step 2 must leave `cancel`
+open.
+
+#### Step 2 — call `_refuse_if_archived` from every act that grows the record
+
+The helper (`projects_api.py:220`) needs no change; it takes the act name and
+raises the `409` whose text names restore. Add these calls, each immediately
+after the route's `_require_write(...)`/`_require_human(...)` line so the gate
+runs before any body parsing or DB work:
+
+| Route | Line | `act` string |
+| --- | --- | --- |
+| `POST /{slug}/runs/{run_no}/continue` | 2183 | `"continuing a run"` |
+| `POST /{slug}/runs/{run_no}/retro` | 2282 | `"writing a retro"` |
+| `POST /{slug}/runs/{run_no}/score` | 2390 | `"scoring a run"` |
+| `POST /{slug}/cards` | 1663 | `"adding a card"` |
+| `POST /{slug}/playbook` | 1860 | `"revising its plan"` |
+| `POST /{slug}/playbook/{rev}/activate` | 1907 | `"activating a plan"` |
+| `POST /{slug}/outputs` | 1130 | `"declaring an output"` |
+| `POST /{slug}/outputs/{output_id}/deliver` | 1219 | `"delivering an output"` |
+| `PATCH /{slug}/outputs/{output_id}` | 1158 | `"changing an output"` |
+| `PATCH /{slug}/autonomy` | 2548 | `"changing its autonomy"` |
+| `POST /{slug}/summarise` | 1629 | `"re-summarising it"` |
+| `POST /{slug}/directives/{id}/activate` | 2014 | `"activating guidance"` |
+
+**Deliberately left open — write this list into the helper's docstring so the
+next reader does not "finish the job" again:**
+
+- `PATCH /{slug}` — already documented: a typo in an archived goal is still
+  fixable, and `test_archived_project_still_accepts_a_patch_and_restore_unblocks`
+  pins it.
+- `POST /{slug}/restore` — the one write the detail page offers.
+- `POST /{slug}/runs/{run_no}/cancel` — cancelling *reduces* the record, and
+  step 1 makes it the sanctioned way out of an open run.
+- `POST /{slug}/directives/{id}/retire`, `DELETE /{slug}/outputs/{id}`,
+  `DELETE /{slug}/members/{id}`, `DELETE /{slug}/profiles/{name}`,
+  `DELETE /{slug}/contacts/{id}`, `DELETE /{slug}/links`,
+  `DELETE /{slug}/schedule` — every one of them removes or detaches. Archive is
+  not a write-lock on the record, it is a stop on *growth*.
+- `POST /{slug}/members`, `/profiles`, `/contacts`, `/links` — bookkeeping on a
+  shelved record (fixing a wrong contact, attaching the file someone forgot).
+  Same class as `PATCH /{slug}`. If you disagree, gate them too — but then say
+  so in §13, because that is a policy change, not a bug fix.
+
+`POST /{slug}/archive` and `DELETE /{slug}` must not call the helper: archive
+has its own already-archived refusal (step 1), and hard delete *requires*
+`archived` to be true.
+
+The CLI needs no change: every verb reaches these same routes
+(`hermes_cli/projects_cli.py`), so it inherits the gate.
+
+#### Step 3 — the run page learns the project is archived
+
+`app/projects/[slug]/runs/[runNo]/page.tsx` fetches only the run (line 40,
+`client.projectRun(slug, runNoInt)`), so `RunView` cannot know. It already holds
+an `apiClientForRequest()` — fetch the project alongside the run and pass the
+flag down:
+
+```ts
+const [run, project] = await Promise.all([
+  client.projectRun(slug, runNoInt),
+  client.project(slug),   // ProjectDetail extends Project — it carries `archived`
+]);
+...
+<RunView slug={slug} run={run} archived={project.archived} />
+```
+
+Keep the existing 404 → `notFound()` behaviour, and treat a failed *project*
+fetch as non-fatal (default `archived = false`) — a run page that renders
+without the flag is better than one that errors, and the router refuses the
+write anyway.
+
+In `RunView` (`components/projects/RunView.tsx:42`) add `archived = false` to
+the props and hide, when archived: **Continue** (191), **Save retro** (328),
+the score control (341–380) and **Repeat this run** (the `${slugPath}/runs`
+button at ~206). Leave **Cancel** visible — step 1/2 keep it working. Render
+the same one-liner the panels use, so the copy matches
+`GuidancePanel.tsx:219`:
+
+> This project is archived — restore it (⋯) to continue or score this run.
+
+#### Step 4 — the delete gate counts what the delete route counts (U8)
+
+`_card_rollup_sync` (`projects_api.py:268`) passes `principal=principal`, so a
+non-owner's count is visibility-filtered; the delete route (1090) counts with
+no principal, on purpose. Add a third number from the same query path — an
+unfiltered `COUNT(*)`, not a listing:
+
+```python
+rollup["total_all_principals"] = bconn.execute(
+    "SELECT COUNT(*) AS n FROM tasks WHERE project_id = ?", (project_id,)
+).fetchone()["n"]
+```
+
+Then have `ProjectLifecycleMenu`'s `deleteEligible` read
+`card_rollup.total_all_principals` instead of `total_with_archived`. A count
+leaks no title, assignee or column. Keep `total_with_archived` — the payload is
+public API to the menu and the tests pin it.
+
+#### Step 5 — tests and the doc, in the same PR
+
+- **Extend, don't add**:
+  `tests/hermes_cli/test_projects_api_lifecycle.py::test_archived_project_refuses_every_mutating_route`
+  is already a table of `(method, url, body)` — grow it to all 12 routes from
+  step 2. The table *being* the enumeration is what stops route 13 arriving
+  ungated. Keep its tail assertions (no run, no schedule, no stray directive)
+  and add: the run's `retro` and `score_user` are still `None`, and no card was
+  created.
+- **New, in the same file**:
+  `test_archive_refuses_while_a_run_is_open` — start a run, drive it to
+  `waiting`, archive → 409 naming the run; cancel it, archive → 200.
+  `test_cancel_still_works_on_an_archived_project` — the escape hatch, pinned.
+- **New**: `test_delete_gate_counts_cards_it_cannot_see` — two cards, one
+  private to another user; the detail payload's `total_all_principals` is 2 for
+  a lead who sees one, and `DELETE` refuses consistently.
+- **agent-home**: in `RunView`'s test file (create it — there is none today),
+  assert that an archived project's run renders no Continue / Save retro /
+  score control and still renders Cancel, and that a live one renders them all.
+- **Docs**: FG-32 §13 and §16 "Lifecycle" already assert the general rule, so
+  step 2 makes them true rather than needing a rewrite — but add the
+  deliberately-open list to §13 in one sentence, and tick U7/U8 in the Block 4d
+  checklist above with a note on how each landed (the house style in Blocks
+  1–4c).
+
+**If you choose the other branch of U7** — gate only the five and keep the rest
+open — then steps 1 and 3 still apply (`continue` resuming a shelved project is
+a defect under any policy, and the run page must match), step 2 shrinks to
+`continue` alone, and §13/§16 must be narrowed to enumerate exactly what a
+shelved project still accepts. Do not leave the wording general with a partial
+gate.

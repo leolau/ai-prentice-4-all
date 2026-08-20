@@ -1818,7 +1818,11 @@ The design-relevant ones, in the order the second review recommends fixing them:
    disagree. U8 (low): the delete gate counts cards *with* the caller's
    principal while the delete route counts without one, so a lead who cannot
    see a colleague's private card is offered a Delete the route refuses.
-   **Block 4d** of the end-to-end review is the worklist.
+   **Block 4d** of the end-to-end review is the worklist, and the
+   "Block 4d — the implementation plan" section after it is the step-by-step:
+   the archive-time precondition on an open run, the twelve routes to gate
+   (with the deliberately-open list), the run page wiring, U8's
+   principal-blind count, and the tests for each.
 
 ### 20.3 Testing gaps that let the above through
 
