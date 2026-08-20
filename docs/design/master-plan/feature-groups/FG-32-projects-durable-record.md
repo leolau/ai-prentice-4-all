@@ -1843,6 +1843,26 @@ The design-relevant ones, in the order the second review recommends fixing them:
    retro / the score control behind the panels' hint while Cancel stays; and
    the delete gate reads `card_rollup.total_all_principals`, the
    principal-blind `COUNT(*)` the delete route agrees with.
+- **U9 (medium) — the archived gate holds at the Projects router and leaks one
+  layer below it.** `tasks.project_id` is also written by
+  `POST /api/registry/todos/{id}/promote` and
+  `hermes kanban create --project <slug>`, both of which reach
+  `kanban_db.create_task`, which resolves the project and never reads
+  `archived`. So a shelved project can still gain board cards (and, through
+  promote, a `project_links` row) — the orphan class hard delete's card blocker
+  exists to prevent, and §13's "a shelved project does not run and does not
+  learn" is true of the router and false of the system. The fix belongs in
+  `create_task`'s project branch, one gate for both callers, with promote
+  mapping the refusal to 409. Three lows land with it: **U10** archive's
+  open-run precondition scans only the newest 50 runs
+  (`list_project_runs(..., limit=50)`), so a standing project's old held run is
+  invisible to it — ask in SQL instead; **U11** nothing tests the U8 fix's
+  consumer (`ProjectLifecycleMenu` reading `total_all_principals`) or the run
+  page's project fetch and its fetch-failed path; **U12** `POST /{slug}/links`
+  stays open as bookkeeping, yet links are how samples, references, files,
+  memories and conversation histories attach — so either gate it or narrow §13
+  to "stops execution and learning; record bookkeeping stays open" with the
+  permitted list named. **Block 4e** of the end-to-end review is the worklist.
 
 ### 20.3 Testing gaps that let the above through
 
