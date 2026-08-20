@@ -839,6 +839,99 @@ fix: every verb goes through this router (`_cmd_run` → `POST /{slug}/runs`), s
 it inherits whatever the router enforces — which is exactly why the router is
 the right place to finish the job.
 
+#### U7 illustrated
+
+**(1) Where the gate sits today.** One helper, thirteen doors, five of them
+wired to it:
+
+```
+                        POST /{slug}/runs ─────────────┐
+                        POST /outputs/{id}/accept ─────┤
+                        POST /directives ──────────────┼──▶ _refuse_if_archived
+                        PATCH /tools ──────────────────┤        (409 if archived)
+                        PUT  /schedule ────────────────┘
+
+    POST /runs/{n}/continue ──┐
+    POST /runs/{n}/retro ─────┤
+    POST /runs/{n}/score ─────┤
+    POST /cards ──────────────┤
+    POST /playbook (+activate)┼──▶ (no check) ──▶ 200, record grows
+    POST /outputs (+deliver) ─┤
+    PATCH /autonomy ──────────┤
+    POST /summarise ──────────┘
+```
+
+The five above the line are the ones the Block 4c worklist happened to name
+(they were the ones the U2 write-up had found). The eight below are the same
+kind of act and were never gated — while FG-32 §13/§16 now promise the general
+rule ("every mutating act that would grow the record is refused 409").
+
+**(2) The live path — archiving does not stop a run that is already in flight.**
+Time runs downward; the left column is what a human does, the right is what the
+system holds:
+
+```
+   human / agent                       project state
+   ─────────────────────────────────────────────────────────────────────
+   POST /{slug}/runs            ──▶    run 7: running
+                                       cards: [a done][b done][c todo]
+   run hits a checkpoint        ──▶    run 7: waiting          ← held
+                                       card c: blocked (awaiting approval)
+                                       cron job: attached
+
+   POST /{slug}/archive         ──▶    archived = 1
+     (no precondition on an            status   = archived
+      in-flight run)                   cron job: DETACHED  ← the only stop
+                                       run 7:   waiting     ← untouched
+                                       card c:  blocked     ← untouched
+
+   ── the project is now "shelved": UI hides Run / Add directive / Accept ──
+   ── but the run page still renders Continue, and the route still answers ──
+
+   POST /runs/7/continue        ──▶    run 7: running        ← RUNNING AGAIN
+     (ungated)                         card c: todo          ← promoted
+                                       workers pick c up, the agent works,
+                                       outputs get produced, cost is spent
+```
+
+So archive removed the **timer** (the cron job), not the **resumable run**. A
+shelved project can still be doing work minutes later, with no restore, and the
+record it was supposed to freeze keeps growing. `POST /cards` is the second
+substantive one: it lets a shelved project acquire new board rows — the exact
+orphan class hard delete's card blocker exists to prevent.
+
+**(3) The fix, as a picture.** Two edges to add, and one deliberate
+non-edge (`cancel` stays open — it *reduces* the record):
+
+```
+   POST /{slug}/archive
+        │
+        ├─ run in running/waiting? ──▶ 409 "run 7 is still open —
+        │                               cancel or continue it first"   ← NEW
+        └─ else ──▶ archived = 1, schedule detached
+
+   any growing route on an archived project
+        │
+        └─▶ _refuse_if_archived ──▶ 409                                ← NEW
+                                    (continue, retro, score, cards,
+                                     playbook/activate, outputs/deliver,
+                                     autonomy, summarise)
+
+   POST /runs/{n}/cancel ──▶ still allowed                        ← UNCHANGED
+
+   runs/[runNo]/page.tsx
+        │  fetches: run                     fetches: run + project   ← NEW
+        └─▶ <RunView run />        ──▶      <RunView run archived /> ← NEW
+                                            hides Continue / retro / score
+                                            behind "restore it (⋯) to …"
+```
+
+With the archive-time precondition in place, "can I score a run on a shelved
+project?" cannot arise for a run that was in flight — the only runs on an
+archived project are finished ones, so scoring them afterwards can stay allowed
+as a deliberate exception (a human closing the book on work already done) if
+you prefer that to a blanket refusal. Write down whichever you pick.
+
 **The fix — pick one of the two, do not leave them disagreeing.**
 
 *(a) Enforce the general rule (preferred; it is what §13 now promises).* Call
