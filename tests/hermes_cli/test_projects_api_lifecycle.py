@@ -367,3 +367,95 @@ def test_delete_leaves_nothing_behind(env):
             "SELECT 1 FROM project_outputs WHERE project_id = ?",
             (project["id"],),
         ).fetchone()
+
+
+# ---------------------------------------------------------------------------
+# An archived project stays inert (§13: a shelved project does not run
+# and does not learn)
+# ---------------------------------------------------------------------------
+
+
+def test_archived_project_refuses_every_mutating_route(env):
+    project = _create_active_project(env)
+    _archive(env, project)
+    client, _state = env
+    slug = project["slug"]
+
+    attempts = [
+        ("POST", f"{PREFIX}/{slug}/runs", {}),
+        ("POST", f"{PREFIX}/{slug}/outputs/output-1/accept", {}),
+        ("POST", f"{PREFIX}/{slug}/directives", {"body": "Keep emails short."}),
+        ("PUT", f"{PREFIX}/{slug}/schedule", {"schedule": "0 9 * * 1"}),
+        ("PATCH", f"{PREFIX}/{slug}/tools", {"toolsets": []}),
+    ]
+    for method, url, body in attempts:
+        resp = client.request(method, url, json=body)
+        assert resp.status_code == 409, (method, url, resp.text)
+        detail = resp.json()["detail"]
+        assert "archived" in detail and "restore" in detail
+
+    # Nothing slipped through: no run, no guidance, no schedule.
+    detail = client.get(f"{PREFIX}/{slug}").json()
+    assert detail["runs"] == []
+    assert not detail.get("cron_job_id")
+    directives = client.get(f"{PREFIX}/{slug}/directives").json()
+    # The archive act's own record is the only guidance present.
+    bodies = [d["body"] for d in directives["directives"]]
+    assert "Keep emails short." not in bodies
+
+
+def test_archived_project_still_accepts_a_patch_and_restore_unblocks(env):
+    project = _create_active_project(env)
+    _archive(env, project)
+    client, _state = env
+    slug = project["slug"]
+
+    # Correcting a typo is not learning — it stays allowed while archived.
+    resp = client.patch(f"{PREFIX}/{slug}", json={"goal": "Ship the digest, fixed."})
+    assert resp.status_code == 200, resp.text
+
+    # Restore is the unblocking act: the same write now lands.
+    resp = client.post(f"{PREFIX}/{slug}/restore", json={})
+    assert resp.status_code == 200, resp.text
+    resp = client.post(
+        f"{PREFIX}/{slug}/directives", json={"body": "Keep emails short."}
+    )
+    assert resp.status_code == 200, resp.text
+
+
+def test_archived_chip_finds_legacy_rows_shelved_by_flag_alone(env):
+    project = _create_active_project(env)
+    # A legacy writer shelved the row by flag alone — no status change.
+    with projects_db.connect_closing() as conn:
+        with projects_db.write_txn(conn):
+            conn.execute(
+                "UPDATE projects SET archived = 1 WHERE id = ?", (project["id"],)
+            )
+    client, _state = env
+
+    default = client.get(f"{PREFIX}?status=active").json()
+    assert all(p["slug"] != project["slug"] for p in default["items"])
+    shelved = client.get(
+        f"{PREFIX}?archived=true&status=archived"
+    ).json()
+    assert any(p["slug"] == project["slug"] for p in shelved["items"])
+
+
+def test_detail_rollup_counts_archived_cards_for_the_delete_gate(env):
+    project = _create_active_project(env)
+    client, _state = env
+    resp = client.post(
+        f"{PREFIX}/{project['slug']}/cards", json={"title": "Draft the summary"}
+    )
+    assert resp.status_code == 200, resp.text
+    with kanban_db.connect_closing() as bconn:
+        tasks = kanban_db.list_tasks(bconn, project_id=project["id"])
+    assert len(tasks) == 1
+    with kanban_db.connect_closing() as bconn:
+        assert kanban_db.archive_task(bconn, tasks[0].id)
+
+    detail = client.get(f"{PREFIX}/{project['slug']}").json()
+    # The live count is zero…
+    assert detail["card_rollup"]["total"] == 0
+    # …but the delete gate must still see the archived card.
+    assert detail["card_rollup"]["total_with_archived"] == 1

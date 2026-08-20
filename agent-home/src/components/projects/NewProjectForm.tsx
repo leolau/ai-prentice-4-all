@@ -82,28 +82,26 @@ export function NewProjectForm({ servingProfile }: { servingProfile: string }) {
         slug?: string;
         detail?: unknown;
         error?: string;
+        missing?: unknown;
       };
       if (res.ok && data.slug) {
         router.push(`/projects/${data.slug}`);
         return;
       }
-      // The upstream 422 names the blank field(s) — map them onto the form.
-      const detail = data.detail;
-      if (
-        detail &&
-        typeof detail === "object" &&
-        Array.isArray((detail as { missing?: unknown }).missing)
-      ) {
-        const missing = (detail as { missing: MandatoryField[] }).missing;
+      // The 422 names the blank field(s) — the BFF pre-check and the
+      // widened bridge both carry the `missing` list at the top level
+      // beside the string `detail` (U3) — map it onto the form.
+      const missing = Array.isArray(data.missing)
+        ? (data.missing as MandatoryField[])
+        : null;
+      if (missing && missing.length > 0) {
         const next: Partial<Record<MandatoryField, string>> = {};
         for (const field of missing) {
           next[field] = "This field is mandatory.";
         }
         setFieldErrors(next);
         setError(
-          typeof (detail as { message?: unknown }).message === "string"
-            ? (detail as { message: string }).message
-            : null,
+          typeof data.detail === "string" && data.detail ? data.detail : null,
         );
         if (missing.includes("goal") || missing.includes("description") || missing.includes("outputs")) {
           setStep(1);
@@ -111,8 +109,8 @@ export function NewProjectForm({ servingProfile }: { servingProfile: string }) {
         return;
       }
       setError(
-        typeof detail === "string" && detail
-          ? detail
+        typeof data.detail === "string" && data.detail
+          ? data.detail
           : "That didn't go through — check the fields and try again.",
       );
     } catch {

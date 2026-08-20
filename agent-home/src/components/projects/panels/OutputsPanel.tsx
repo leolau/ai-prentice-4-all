@@ -29,9 +29,12 @@ const STATUS_TONE: Record<
 export function OutputsPanel({
   slug,
   outputs: initial,
+  archived = false,
 }: {
   slug: string;
   outputs: ProjectOutputWithDeliveries[];
+  /** §13: a shelved project offers restore as the only write. */
+  archived?: boolean;
 }) {
   const [outputs, setOutputs] = useState(initial);
   const [busyId, setBusyId] = useState<string | null>(null);
@@ -86,6 +89,12 @@ export function OutputsPanel({
 
       {error ? (
         <p className="mt-2 text-sm text-red-300">{error}</p>
+      ) : null}
+
+      {archived ? (
+        <p className="mt-2 text-xs text-[var(--color-muted)]">
+          This project is archived — restore it (⋯) to accept outputs.
+        </p>
       ) : null}
 
       {offersClosure ? (
@@ -143,7 +152,7 @@ export function OutputsPanel({
                   ))}
                 </ul>
               ) : null}
-              {output.status === "delivered" ? (
+              {output.status === "delivered" && !archived ? (
                 <BusyRegion busy={busyId === output.id} label="Accepting…">
                   <button
                     type="button"

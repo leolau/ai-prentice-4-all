@@ -340,7 +340,12 @@ cleared and the cascade stops at the projects DB. Verified green locally:
 31 tests in `test_projects_api_lifecycle.py` + `test_hermes_projects.py`,
 154 agent-home tests, `tsc --noEmit` clean.
 
-Five things the block did not land.
+Five things the block did not land. **All five are fixed in Block 4c
+(#307, `9fcdf03c4`)** — the archived-inert gate, the structured `missing`
+forwarding, the interaction + route tests, the archived-inclusive card count
+and the flag-aware Archived chip; each item below carries the annotation of
+what pinned it, and the Block 4c checklist at the end of this document is
+fully ticked.
 
 ### U2 — archive stops the cron job, not the project (medium, contract)
 
@@ -715,25 +720,48 @@ specify this — read them before starting, the delete rules are deliberate).
 **Block 4c — finish the lifecycle Block 4b started** (findings U2–U6 above,
 in this order).
 
-- [ ] **U2** Refuse the mutating routes on an archived project (`_refuse_if_archived`
+- [x] **U2** Refuse the mutating routes on an archived project (`_refuse_if_archived`
       in `projects_api.py`, called from run / accept / directives / schedule /
       tools — not from `PATCH /{slug}` or restore), and pass `archived` into
       `OutputsPanel` / `GuidancePanel` so the archived detail page offers
-      restore and nothing else (§13, §16 "Lifecycle").
-- [ ] **U3** Make one end speak `missing`: either stop `withPrincipal` flattening
+      restore and nothing else (§13, §16 "Lifecycle"). *(Block 4c: the helper
+      guards all five routes with a 409 naming the archive and pointing at
+      restore; both panels hide their writes behind the same hint;
+      `test_archived_project_refuses_every_mutating_route` and
+      `test_archived_project_still_accepts_a_patch_and_restore_unblocks` pin
+      the contract)*
+- [x] **U3** Make one end speak `missing`: either stop `withPrincipal` flattening
       a dict `detail` (`app/api/projects/hermes-bridge.ts:31-44`) or have the
       create route's pre-check answer a structured detail — so
       `NewProjectForm`'s field mapping can actually fire (§13, §16 Frontend).
-- [ ] **U4** Tests for the surface Block 4b added: route tests for
+      *(Block 4c, both ends: `withPrincipal` now forwards a dict detail's
+      `message` as the string `detail` with the remaining keys — `missing` —
+      riding top-level, and the create route's pre-check answers its own
+      `missing` list; `NewProjectForm.interaction.test.tsx` drives a 422 onto
+      the blank field and keeps what was typed)*
+- [x] **U4** Tests for the surface Block 4b added: route tests for
       archive/restore/delete (401 without a principal, upstream 409 forwarded
       with its refusal text, `confirm` forwarded on DELETE) and handler-level
       form/menu tests (submit → redirect, 422 → field marked, typed input
-      preserved, Delete disabled until the slug matches).
-- [ ] **U5** Give the detail payload an archived-inclusive card count so
+      preserved, Delete disabled until the slug matches). *(Block 4c: three
+      `route.test.ts` files under `api/projects/[slug]/` — 401, forwarded 409
+      wording, `reason`/`confirm` forwarding — plus
+      `NewProjectForm.interaction.test.tsx` and
+      `ProjectLifecycleMenu.interaction.test.tsx`, jsdom handler tests in the
+      `apps/desktop` per-file-environment pattern; the matching devDeps ride
+      with the tests)*
+- [x] **U5** Give the detail payload an archived-inclusive card count so
       `ProjectLifecycleMenu`'s `deleteEligible` agrees with the delete route.
-- [ ] **U6** Make Archived find every shelved row — `status=archived` should
+      *(Block 4c: `card_rollup.total_with_archived` from one
+      `include_archived=True` query; the menu's gate reads it;
+      `test_detail_rollup_counts_archived_cards_for_the_delete_gate` pins it)*
+- [x] **U6** Make Archived find every shelved row — `status=archived` should
       match the archived *flag*, or backfill `status` for rows archived before
-      Block 4b.
-- [ ] Note in FG-32 §13 that the create form pins the host profile to the
+      Block 4b. *(Block 4c, filter-on-the-flag: a `status=archived` list also
+      matches `archived=1` rows; `test_archived_chip_finds_legacy_rows_shelved_by_flag_alone`
+      pins it against a flag-only legacy row)*
+- [x] Note in FG-32 §13 that the create form pins the host profile to the
       serving home, so hosting a project on a *named* profile stays a CLI act
       (the design's intent, not a gap — recorded so it is not re-reported).
+      *(Block 4c: recorded in FG-32 §13's create-form paragraph; the same
+      edit records the archived-inert rule in §13 and §16)*

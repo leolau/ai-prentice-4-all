@@ -246,7 +246,11 @@ export function ProjectDetailView({
           {/* ── Panels — stacked on a phone, two columns from md: ── */}
           <div className="flex flex-col gap-4 md:grid md:grid-cols-2 md:items-start">
             <BriefPanel project={project} />
-            <OutputsPanel slug={project.slug} outputs={project.outputs} />
+            <OutputsPanel
+              slug={project.slug}
+              outputs={project.outputs}
+              archived={project.archived}
+            />
             <ProgressPanel
               slug={project.slug}
               project={project}
@@ -255,7 +259,11 @@ export function ProjectDetailView({
             <BoardPanel slug={project.slug} board={board} />
             <RunsPanel slug={project.slug} runs={project.runs} />
             <PlanPanel playbook={playbook} />
-            <GuidancePanel slug={project.slug} initial={directives} />
+            <GuidancePanel
+              slug={project.slug}
+              initial={directives}
+              archived={project.archived}
+            />
             <PeoplePanel project={project} />
             <FilesPanel project={project} />
             <ReferencesPanel project={project} />
