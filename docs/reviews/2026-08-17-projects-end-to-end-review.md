@@ -340,7 +340,12 @@ cleared and the cascade stops at the projects DB. Verified green locally:
 31 tests in `test_projects_api_lifecycle.py` + `test_hermes_projects.py`,
 154 agent-home tests, `tsc --noEmit` clean.
 
-Five things the block did not land.
+Five things the block did not land. **All five are fixed in Block 4c
+(#307, `9fcdf03c4`)** — the archived-inert gate, the structured `missing`
+forwarding, the interaction + route tests, the archived-inclusive card count
+and the flag-aware Archived chip; each item below carries the annotation of
+what pinned it, and the Block 4c checklist at the end of this document is
+fully ticked.
 
 ### U2 — archive stops the cron job, not the project (medium, contract)
 
