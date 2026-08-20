@@ -997,7 +997,7 @@ them, and that `deleteEligible` is therefore false.
 
 **Block 4d — finish U7, and U8 with it.**
 
-**All three landed in Block 4d (this PR)** — the gate now covers every
+**All three landed in Block 4d (#310, `59d39ff50`)** — the gate now covers every
 growing route with the deliberately-open list written into the helper,
 archive refuses an open run, the run page knows the project is archived,
 and the delete gate counts principal-blind; each item below carries the

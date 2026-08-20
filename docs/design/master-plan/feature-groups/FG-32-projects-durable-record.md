@@ -1730,7 +1730,7 @@ sequencing did not name (8b, 9b) and a live-integration merge:
 | 12 | Lifecycle API: archive / restore / delete router, §13 preconditions, human gate, CLI verbs | #305 |
 | 12b | Management UI: `/projects/new` + `NewProjectForm`, the `[⋯]` menu, the Archived chip | #305 |
 | 12c | Lifecycle hardening (review U2–U6): the archived-inert gate, structured 422 forwarding to the form, the archived-inclusive card count, the flag-aware Archived chip, and the interaction + route tests | #307 |
-| 12d | Lifecycle completion (review U7–U8): the gate on every growing route, the archive-time open-run precondition, the run page's archived wiring, and the principal-blind delete count | this PR |
+| 12d | Lifecycle completion (review U7–U8): the gate on every growing route, the archive-time open-run precondition, the run page's archived wiring, and the principal-blind delete count | #310 |
 
 Verified at `7c737474f`: 185 Projects Python tests pass, 46 agent-home Projects
 tests pass, `tsc --noEmit` clean. The feature has **not** been deployed or
@@ -1835,7 +1835,7 @@ The design-relevant ones, in the order the second review recommends fixing them:
    the archive-time precondition on an open run, the twelve routes to gate
    (with the deliberately-open list), the run page wiring, U8's
    principal-blind count, and the tests for each. **FIXED in Block 4d
-   (this PR)**: archive refuses a project holding a `running`/`waiting` run
+   (#310)**: archive refuses a project holding a `running`/`waiting` run
    (cancel is the sanctioned way out, and stays open on a shelved project);
    the gate now covers every growing route, with the deliberately-open list
    written into `_refuse_if_archived`'s docstring; the run page fetches the
