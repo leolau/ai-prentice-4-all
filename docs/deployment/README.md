@@ -1,5 +1,14 @@
 # The `hermes-systest` deployment — handover
 
+> **⚠️ SUPERSEDED 2026-08-20 — production no longer lives here.**
+> The live production environment is now the Hetzner box `hermes` (CX43, nbg1,
+> `188.245.219.105`). The authoritative ops document for it is
+> [`PRODUCTION.md`](./PRODUCTION.md); the migration history is
+> [`hetzner-migration-runbook.md`](./hetzner-migration-runbook.md).
+> The `hermes-systest` (Alibaba cn-hongkong) box described below was stopped at
+> cutover and its subscription lapses 2026-08-26. Treat everything below as
+> historical unless it is restated in `PRODUCTION.md`.
+
 Written for an agent or engineer picking this up cold, with no session history.
 It states what exists, what is verified, what is *not*, and where the detail
 lives. The per-topic documents are authoritative for procedure; this file is
