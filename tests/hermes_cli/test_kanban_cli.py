@@ -566,3 +566,38 @@ def test_run_slash_board_override_does_not_change_boards_show_current(kanban_hom
     out = kc.run_slash("--board beta boards show")
 
     assert "Current board: alpha" in out
+
+
+# ---------------------------------------------------------------------------
+# U13/U15 — the archived refusal through the real CLI path
+# ---------------------------------------------------------------------------
+
+def test_run_slash_create_refuses_an_archived_project(kanban_home, tmp_path, monkeypatch):
+    """U15 real path: ``hermes kanban create --project <archived>`` refuses
+    in the writer's voice, and no task row lands."""
+    from hermes_cli import projects_db
+
+    monkeypatch.setenv("HERMES_PROJECTS_DB", str(tmp_path / "projects.db"))
+    with projects_db.connect_closing() as pconn:
+        pid = projects_db.create_project(pconn, name="Acme", slug="acme")
+        assert projects_db.archive_project(pconn, pid) is True
+
+    out = kc.run_slash("create 'sneaky card' --project acme")
+    assert "archived" in out
+    assert "restore" in out
+    with kb.connect_closing() as conn:
+        assert kb.list_tasks(conn) == []
+
+
+def test_run_slash_create_reports_input_errors_in_their_own_voice(kanban_home):
+    """U13: an argument error keeps its own report — not the archived
+    refusal's identity. (``--initial-status`` is validated by argparse, so
+    the plain ``ValueError`` voice is exercised through the writer-level
+    pair in ``test_kanban_db.py``; here we pin that the CLI surfaces a
+    usage error as a usage error.)"""
+    out = kc.run_slash("create 'card' --initial-status bogus")
+    assert "usage error" in out
+    assert "invalid choice" in out
+    assert "archived" not in out
+    with kb.connect_closing() as conn:
+        assert kb.list_tasks(conn) == []

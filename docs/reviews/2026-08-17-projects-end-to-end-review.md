@@ -1481,15 +1481,32 @@ boundaries specifically), the archived gate wants one real-path test. And
 
 **Block 4f — finish the writer-level gate.**
 
-- [ ] **U13** Introduce `ArchivedProjectError(ValueError)` at the writer and
+**All three landed in Block 4f (this PR)** — the refusal has its own
+identity (`ArchivedProjectError`), the two handlers are narrowed to it,
+the gate reads the declared `archived` field, and the boundary has
+real-path tests on both doors.
+
+- [x] **U13** Introduce `ArchivedProjectError(ValueError)` at the writer and
       narrow the `todos_api` (409) and `kanban.py` (rc 2) handlers to it, so
       ordinary `create_task` input errors keep their old status and their log
       line. Tests: a `create_task` input error through promote is not a 409;
-      the CLI reports an argument error in its own voice.
-- [ ] **U14** Replace `getattr(project_obj, "archived", 0)` with
+      the CLI reports an argument error in its own voice. *(Block 4f:
+      `kanban_db.ArchivedProjectError(ValueError)` — the subclass keeps
+      `kanban_tools`' existing catch; promote answers 409 for the refusal
+      alone and the input-error path gets its log line and the generic 500
+      back (`TestPromoteWriterGateWidth`); the CLI splits the archived voice
+      from an `invalid arguments:` voice, and the usage-error case pins the
+      argparse report.)*
+- [x] **U14** Replace `getattr(project_obj, "archived", 0)` with
       `project_obj.archived` (`kanban_db.py:2537`) — `Project.archived` is a
-      declared, coerced field.
-- [ ] **U15** Add the two real-path tests the boundary is missing: promote into
+      declared, coerced field. *(Block 4f: done — the existing
+      archived/active writer pair pins both sides.)*
+- [x] **U15** Add the two real-path tests the boundary is missing: promote into
       a genuinely archived project (asserting the board and `project_links`
       are untouched and the to-do did not move), and
       `hermes kanban create --project <archived>` → rc 2 with no task row.
+      *(Block 4f: `TestPromoteRealPathArchivedGate` runs the real route
+      against a genuinely archived project — real writer, real board, real
+      `project_links`, only the Supabase-only to-do store mocked;
+      `test_run_slash_create_refuses_an_archived_project` drives the real
+      CLI end to end and finds no task row.)*
