@@ -1373,3 +1373,123 @@ tests, and §13 says what archive truly stops.
       as record bookkeeping — §13 now says archive stops execution and
       learning, names links as how samples, references, files, memories and
       conversation histories attach, and lists the open bookkeeping class.)*
+
+---
+
+## Review of Block 4e — findings U13–U15
+
+Read at `develop` `31351551a` (#312, implementation commit `3b50c6224`).
+Verified here, not taken on trust: the three touched Python test files pass
+(259), the run-page + `components/projects` vitest files pass (77),
+`tsc --noEmit` and `ruff` are clean. The 22 failures in a wide
+`-k "project or kanban or todo"` sweep are **pre-existing** — the identical set
+fails at `4c40a5e45` (pre-#312), so they are cross-file pollution in the kanban
+suites, not a regression from this block.
+
+**What Block 4e actually closed.** U9's gate went in at the writer, where it
+covers every caller and not just the two the finding named: besides
+`todos_api.promote_todo` and `hermes kanban create --project`, the same
+`create_task` refusal now protects `kanban_swarm` (4 call sites),
+`tools/kanban_tools.py:938` (which already catches `ValueError` and answers a
+tool error) and `projects_run.py:369`. U10 is SQL and unpaged. U11's two
+surfaces have behaviour tests — the menu cases drive `total_all_principals`
+2 → no Delete / 0 → Delete, and `page.test.tsx` runs the page's real loader for
+archived / live / fetch-failed / run-404. U12 chose the narrowing and wrote it
+into **both** FG-32 §13 and §16, naming links as record bookkeeping.
+
+Three residuals, all low. None of them reopens an invariant; U13 is the only
+one with a runtime-visible effect.
+
+### U13 — the `ValueError` catch is wider than the refusal it maps (low)
+
+`hermes_cli/todos_api.py:599–604` catches `ValueError` around the *whole*
+card-creation block and answers **409**:
+
+```python
+except ValueError as exc:
+    raise HTTPException(status_code=409, detail=str(exc)) from exc
+```
+
+`create_task` raises `ValueError` for a family of plain input errors that have
+nothing to do with archiving — `initial_status must be one of …`,
+`workspace_kind must be one of …`, `branch_name is only valid for worktree
+workspaces`, and the skills-name validation below them. Those now return a
+`409` whose detail claims a conflict, and — because the new clause sits *above*
+the general `except Exception` — they also lose the
+`logger.warning("todos: promote card creation failed …")` line they used to
+emit. `hermes_cli/kanban.py:1350` has the same width: any `create_task`
+`ValueError` prints `kanban create: …` and exits 2, so a genuine argument
+error is now reported in the same voice as the archive refusal.
+
+**The fix.** Give the refusal its own identity instead of overloading the
+built-in. Define one exception beside the writer — e.g.
+`class ArchivedProjectError(ValueError)` in `kanban_db.py` (subclassing
+`ValueError` keeps every existing caller's behaviour, including
+`kanban_tools`' catch) — raise it in the project branch, and narrow both
+handlers to it. `todos_api` then keeps its `except Exception` path (log +
+500-family) for real input errors, and `kanban.py`'s message stays truthful.
+
+**The tests.** In `tests/hermes_cli/test_todos_promote.py`, alongside the
+archived case: promote with a `create_task` input error → **not** 409 (and the
+warning is logged). In `tests/hermes_cli/test_kanban_cli.py`, an archived
+project prints the refusal on stderr with rc 2, and a bad `--initial-status`
+still reports its own error.
+
+### U14 — `getattr` on a declared field (low, code quality)
+
+`hermes_cli/kanban_db.py:2537`:
+
+```python
+elif getattr(project_obj, "archived", 0):
+```
+
+`projects_db.Project` declares `archived: bool = False`
+(`projects_db.py:631`), and `from_row` coerces it with
+`bool(_row_get(row, "archived", 0))` (714), so the attribute always exists on
+anything `get_project` returns. `AGENTS.md` names `getattr` as a lazy typing
+escape not to reach for; the default `0` also silently reads falsy if the field
+is ever renamed, which is exactly the failure mode a plain attribute access
+would surface loudly.
+
+**The fix.** `elif project_obj.archived:`. Nothing else changes — the existing
+`test_create_task_refuses_an_archived_project` /
+`test_create_task_keeps_an_active_project_link` pair already pins both sides.
+
+### U15 — the security boundary is pinned by a mock at the route (low)
+
+`tests/hermes_cli/test_kanban_db.py` tests the writer for real (real project,
+real archive, real store, and it asserts no card landed) — that is the right
+shape. The route test does not: it patches `kanban_db.create_task` with a
+`side_effect` `ValueError`, so it pins the *mapping* to 409 and that
+`add_project_link` / `set_stage` were not called, but nothing exercises
+`POST /api/registry/todos/{id}/promote` against an actually-archived project.
+Per `AGENTS.md` ("E2E validation, not just green unit mocks" — security
+boundaries specifically), the archived gate wants one real-path test. And
+`hermes kanban create --project <archived>` has **no** test at all:
+`test_kanban_cli.py` contains zero occurrences of `archived`.
+
+**The fix.** Add one real-path case per door, keeping the mocked mapping test
+(it is cheap and pins the status code):
+
+- `test_todos_promote.py`: create a project, archive it through
+  `projects_db.archive_project`, promote a real to-do into it → 409; then
+  assert against the stores, not the mocks — no card on the board, no
+  `project_links` row of `kind="todo"`, and the to-do still at its original
+  stage.
+- `test_kanban_cli.py`: `hermes kanban create --project <archived-slug>` → rc 2,
+  the refusal on stderr, and no task row created.
+
+**Block 4f — finish the writer-level gate.**
+
+- [ ] **U13** Introduce `ArchivedProjectError(ValueError)` at the writer and
+      narrow the `todos_api` (409) and `kanban.py` (rc 2) handlers to it, so
+      ordinary `create_task` input errors keep their old status and their log
+      line. Tests: a `create_task` input error through promote is not a 409;
+      the CLI reports an argument error in its own voice.
+- [ ] **U14** Replace `getattr(project_obj, "archived", 0)` with
+      `project_obj.archived` (`kanban_db.py:2537`) — `Project.archived` is a
+      declared, coerced field.
+- [ ] **U15** Add the two real-path tests the boundary is missing: promote into
+      a genuinely archived project (asserting the board and `project_links`
+      are untouched and the to-do did not move), and
+      `hermes kanban create --project <archived>` → rc 2 with no task row.
