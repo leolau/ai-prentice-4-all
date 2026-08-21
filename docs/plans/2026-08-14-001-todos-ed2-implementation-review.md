@@ -62,6 +62,12 @@ properly isolated.
 
 ---
 
+**Picking this up in a new session?** `docs/plans/2026-08-14-002-todos-projects-session-handoff.md`
+carries the part this doc does not: how the defects were found, the re-verification commands,
+the probe/signature traps, and the two gaps still open by design.
+
+---
+
 ## Third pass — S1–S6 verified, and the regression tests they were missing
 
 Verified against `develop` @ `31e5133c2`. All six hold. Two of them were verified against a
