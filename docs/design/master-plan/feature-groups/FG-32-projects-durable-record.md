@@ -1882,6 +1882,18 @@ The design-relevant ones, in the order the second review recommends fixing them:
   page's loader (archived / live / fetch-failed / 404) have tests; and §13
   now says what archive truly stops — execution and learning — with the
   open record-bookkeeping list named.
+- **U13–U15 — three lows left behind by the writer-level gate** (review of
+  Block 4e, at `31351551a`). The gate itself is right and reaches every card
+  writer, but: **U13** both handlers catch bare `ValueError`, so ordinary
+  `create_task` input errors (`initial_status must be one of …`, bad
+  `branch_name`) now answer promote's archive-flavoured `409` and lose their
+  log line — the refusal should carry its own
+  `ArchivedProjectError(ValueError)`; **U14** the gate reads
+  `getattr(project_obj, "archived", 0)` on a declared, coerced field, which
+  `AGENTS.md` rules out; **U15** the boundary's route test mocks
+  `create_task`, so nothing exercises promote against a genuinely archived
+  project and `hermes kanban create --project <archived>` has no test at all.
+  **Block 4f** of the end-to-end review is the worklist.
 
 ### 20.3 Testing gaps that let the above through
 
