@@ -1742,7 +1742,7 @@ sequencing did not name (8b, 9b) and a live-integration merge:
 | 12c | Lifecycle hardening (review U2–U6): the archived-inert gate, structured 422 forwarding to the form, the archived-inclusive card count, the flag-aware Archived chip, and the interaction + route tests | #307 |
 | 12d | Lifecycle completion (review U7–U8): the gate on every growing route, the archive-time open-run precondition, the run page's archived wiring, and the principal-blind delete count | #310 |
 | 12e | Below-router completion (review U9–U12): the writer-level archived gate in `create_task` (promote → 409, no orphan link), the unpaged open-run scan, the U8 consumer and run-page loader tests, and §13's narrowed wording | #312 |
-| 12f | Writer-gate residuals (review U13–U15): `ArchivedProjectError` identity with narrowed promote/CLI handlers, plain-field `archived` access, and real-path boundary tests on both doors | this PR |
+| 12f | Writer-gate residuals (review U13–U15): `ArchivedProjectError` identity with narrowed promote/CLI handlers, plain-field `archived` access, and real-path boundary tests on both doors | #314 |
 
 Verified at `7c737474f`: 185 Projects Python tests pass, 46 agent-home Projects
 tests pass, `tsc --noEmit` clean. The feature has **not** been deployed or
@@ -1882,7 +1882,7 @@ The design-relevant ones, in the order the second review recommends fixing them:
   (`ProjectLifecycleMenu` reading `total_all_principals`) and the run
   page's loader (archived / live / fetch-failed / 404) have tests; and §13
   now says what archive truly stops — execution and learning — with the
-  open record-bookkeeping list named. **Refined in Block 4f (this PR)**:
+  open record-bookkeeping list named. **Refined in Block 4f (#314)**:
   the refusal has its own identity (`kanban_db.ArchivedProjectError`,
   a `ValueError` subclass) so promote maps ONLY it to 409 and ordinary
   `create_task` input errors keep their log line and generic failure; the

@@ -1481,7 +1481,7 @@ boundaries specifically), the archived gate wants one real-path test. And
 
 **Block 4f — finish the writer-level gate.**
 
-**All three landed in Block 4f (this PR)** — the refusal has its own
+**All three landed in Block 4f (#314, `9250314d8`)** — the refusal has its own
 identity (`ArchivedProjectError`), the two handlers are narrowed to it,
 the gate reads the declared `archived` field, and the boundary has
 real-path tests on both doors.
