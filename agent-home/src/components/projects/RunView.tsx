@@ -42,9 +42,11 @@ function deliveryLabel(delivery: ProjectDelivery): string {
 export function RunView({
   slug,
   run: initial,
+  archived = false,
 }: {
   slug: string;
   run: ProjectRun;
+  archived?: boolean;
 }) {
   const router = useRouter();
   const [run, setRun] = useState(initial);
@@ -183,7 +185,7 @@ export function RunView({
             ) : null}
 
             <div className="mt-3 flex flex-wrap gap-2">
-              {run.status === "waiting" ? (
+              {run.status === "waiting" && !archived ? (
                 <button
                   type="button"
                   onClick={() => void post(`${runPath}/continue`, undefined, true)}
@@ -202,7 +204,7 @@ export function RunView({
                 >
                   Cancel
                 </button>
-              ) : (
+              ) : !archived ? (
                 <button
                   type="button"
                   onClick={() =>
@@ -220,8 +222,15 @@ export function RunView({
                 >
                   Repeat this run
                 </button>
-              )}
+              ) : null}
             </div>
+
+            {archived ? (
+              <p className="mt-3 text-xs text-[var(--color-muted)]">
+                This project is archived — restore it (⋯) to continue or
+                score this run.
+              </p>
+            ) : null}
 
             {error ? (
               <p className="mt-2 text-sm text-red-400" role="alert">
@@ -312,25 +321,28 @@ export function RunView({
             <textarea
               className="mt-2 min-h-24 w-full rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-2)] px-3 py-2 text-sm"
               placeholder="What worked, what didn't, what to change next time…"
+              readOnly={archived}
               value={retroDraft}
               onChange={(e) => {
                 setRetroDraft(e.target.value);
                 setRetroSaved(false);
               }}
             />
-            <div className="mt-2 flex items-center gap-2">
-              <button
-                type="button"
-                onClick={() => void saveRetro()}
-                disabled={busy || !retroDraft.trim()}
-                className="rounded-xl bg-[var(--color-accent)] px-4 py-2 text-sm font-medium text-[var(--color-accent-fg)] disabled:opacity-50"
-              >
-                Save retro
-              </button>
-              {retroSaved ? (
-                <span className="text-xs text-[var(--color-muted)]">saved</span>
-              ) : null}
-            </div>
+            {!archived ? (
+              <div className="mt-2 flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => void saveRetro()}
+                  disabled={busy || !retroDraft.trim()}
+                  className="rounded-xl bg-[var(--color-accent)] px-4 py-2 text-sm font-medium text-[var(--color-accent-fg)] disabled:opacity-50"
+                >
+                  Save retro
+                </button>
+                {retroSaved ? (
+                  <span className="text-xs text-[var(--color-muted)]">saved</span>
+                ) : null}
+              </div>
+            ) : null}
           </section>
           {/* ── Score ────────────────────────────────────────────── */}
           <section
@@ -340,51 +352,59 @@ export function RunView({
             <h2 className="text-xs uppercase tracking-wide text-[var(--color-muted)]">
               Your score
             </h2>
-            <div className="mt-2 flex gap-1.5" role="group" aria-label="Score this run from 1 to 5">
-              {[1, 2, 3, 4, 5].map((n) => (
-                <button
-                  key={n}
-                  type="button"
-                  onClick={() => {
-                    setScoreDraft(n);
+            {!archived ? (
+              <>
+                <div
+                  className="mt-2 flex gap-1.5"
+                  role="group"
+                  aria-label="Score this run from 1 to 5"
+                >
+                  {[1, 2, 3, 4, 5].map((n) => (
+                    <button
+                      key={n}
+                      type="button"
+                      onClick={() => {
+                        setScoreDraft(n);
+                        setScoreSaved(false);
+                      }}
+                      disabled={busy}
+                      aria-pressed={scoreDraft === n}
+                      className={`h-9 w-9 rounded-xl border text-sm disabled:opacity-50 ${
+                        scoreDraft === n
+                          ? "border-[var(--color-accent)] bg-[var(--color-accent)] font-medium text-[var(--color-accent-fg)]"
+                          : "border-[var(--color-border)] bg-[var(--color-surface-2)]"
+                      }`}
+                    >
+                      {n}
+                    </button>
+                  ))}
+                </div>
+                <input
+                  className="mt-2 w-full rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-2)] px-3 py-2 text-sm"
+                  placeholder="One line on why — optional"
+                  value={scoreNote}
+                  onChange={(e) => {
+                    setScoreNote(e.target.value);
                     setScoreSaved(false);
                   }}
-                  disabled={busy}
-                  aria-pressed={scoreDraft === n}
-                  className={`h-9 w-9 rounded-xl border text-sm disabled:opacity-50 ${
-                    scoreDraft === n
-                      ? "border-[var(--color-accent)] bg-[var(--color-accent)] font-medium text-[var(--color-accent-fg)]"
-                      : "border-[var(--color-border)] bg-[var(--color-surface-2)]"
-                  }`}
-                >
-                  {n}
-                </button>
-              ))}
-            </div>
-            <input
-              className="mt-2 w-full rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-2)] px-3 py-2 text-sm"
-              placeholder="One line on why — optional"
-              value={scoreNote}
-              onChange={(e) => {
-                setScoreNote(e.target.value);
-                setScoreSaved(false);
-              }}
-            />
-            <div className="mt-2 flex items-center gap-2">
-              <button
-                type="button"
-                onClick={() => void saveScore()}
-                disabled={busy || scoreDraft == null}
-                className="rounded-xl bg-[var(--color-accent)] px-4 py-2 text-sm font-medium text-[var(--color-accent-fg)] disabled:opacity-50"
-              >
-                Save score
-              </button>
-              {scoreSaved ? (
-                <span className="text-xs text-[var(--color-muted)]">
-                  saved
-                </span>
-              ) : null}
-            </div>
+                />
+                <div className="mt-2 flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => void saveScore()}
+                    disabled={busy || scoreDraft == null}
+                    className="rounded-xl bg-[var(--color-accent)] px-4 py-2 text-sm font-medium text-[var(--color-accent-fg)] disabled:opacity-50"
+                  >
+                    Save score
+                  </button>
+                  {scoreSaved ? (
+                    <span className="text-xs text-[var(--color-muted)]">
+                      saved
+                    </span>
+                  ) : null}
+                </div>
+              </>
+            ) : null}
           </section>
         </div>
       </BusyRegion>

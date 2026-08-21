@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { ProjectRow } from "@/components/projects/ProjectRow";
@@ -106,6 +107,18 @@ export function ProjectsList({ initial }: { initial: ProjectsResponse }) {
 
   return (
     <div data-component="ProjectsList" className="flex flex-col gap-3">
+      {/* The create door (§13): the feature is unreachable if its only
+          entrance is a CLI verb. */}
+      <div className="flex items-center justify-end">
+        <Link
+          href="/projects/new"
+          data-component="NewProjectAction"
+          className="rounded-xl bg-[var(--color-accent)] px-4 py-2 text-sm font-medium text-[var(--color-accent-fg)]"
+        >
+          New project
+        </Link>
+      </div>
+
       <ProjectsFilters value={filters} onChange={setFilters} />
 
       {error ? (
@@ -118,14 +131,25 @@ export function ProjectsList({ initial }: { initial: ProjectsResponse }) {
       ) : null}
 
       {items.length === 0 && !loading ? (
-        <p
+        <div
           data-component="ProjectsEmpty"
-          className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface)] p-4 text-sm text-[var(--color-muted)]"
+          className="flex flex-col gap-3 rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface)] p-4 text-sm text-[var(--color-muted)]"
         >
-          {narrowed || filters.q
-            ? "Nothing matches that view."
-            : "No active projects. Anything the agent works on over time — a deliverable, a recurring job, a standing duty — lives here."}
-        </p>
+          <p>
+            {narrowed || filters.q
+              ? "Nothing matches that view."
+              : "No active projects. Anything the agent works on over time — a deliverable, a recurring job, a standing duty — lives here."}
+          </p>
+          {!narrowed && !filters.q ? (
+            <Link
+              href="/projects/new"
+              data-component="NewProjectAction"
+              className="self-start rounded-xl bg-[var(--color-accent)] px-4 py-2 text-sm font-medium text-[var(--color-accent-fg)]"
+            >
+              New project
+            </Link>
+          ) : null}
+        </div>
       ) : (
         <ul className="flex flex-col gap-2">
           {items.map((project) => (

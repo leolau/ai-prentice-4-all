@@ -1299,6 +1299,10 @@ export interface ProjectCardRollup {
   done: number;
   running: number;
   blocked: number;
+  /** Archived cards included — the caller-visible total (U5). */
+  total_with_archived?: number;
+  /** Principal-blind COUNT(*) — what the delete route counts (U8). */
+  total_all_principals?: number;
 }
 
 /**

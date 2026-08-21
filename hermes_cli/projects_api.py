@@ -217,6 +217,44 @@ async def _require_write(request: Request, *, judgement: bool = False):
     return project, role, profiles, principal
 
 
+def _refuse_if_archived(project, act: str) -> None:
+    """§13: a shelved project does not run and does not learn.
+
+    Archive drops the project out of the list *and stops it running*;
+    its detail page offers restore as the only *growing* write. Every
+    route that grows the record calls this gate; the routes that stay
+    open are deliberate, not omissions:
+
+    - ``PATCH /{slug}`` — a typo in an archived goal is still fixable
+      (pinned by ``test_archived_project_still_accepts_a_patch_and_
+      restore_unblocks``).
+    - ``POST /{slug}/restore`` — the one write the detail page offers.
+    - ``POST /{slug}/runs/{run_no}/cancel`` — cancelling *reduces* the
+      record; archive refuses to shelve a project while a run is still
+      ``running``/``waiting``, so cancel is the sanctioned way out.
+    - The DELETE routes (outputs, members, profiles, contacts, links,
+      schedule) and ``POST /{slug}/directives/{id}/retire`` — every one
+      removes or detaches. Archive is not a write-lock on the record,
+      it is a stop on *growth*.
+    - ``POST /{slug}/members``, ``/profiles``, ``/contacts``, ``/links``
+      — bookkeeping on a shelved record, same class as ``PATCH /{slug}``.
+
+    ``POST /{slug}/archive`` and ``DELETE /{slug}`` never reach this
+    gate: archive has its own already-archived refusal, and hard delete
+    *requires* ``archived`` to be true.
+
+    The gate also holds one layer below the router (U9):
+    ``kanban_db.create_task`` refuses an archived project itself, so the
+    card writers that never pass through this file — the to-do promote
+    route and ``hermes kanban create --project`` — inherit the same
+    refusal."""
+    if project.archived:
+        raise HTTPException(
+            status_code=409,
+            detail=f"project {project.slug} is archived — restore it before {act}",
+        )
+
+
 async def _require_human(request: Request, act: str) -> str:
     """§8.1/§8.2: a human act needs a verified interactive subject.
 
@@ -251,12 +289,34 @@ def goal_progress_hook(project, goal_link: dict) -> Optional[dict]:
 
 
 def _card_rollup_sync(bconn, project_id: str, principal) -> dict:
-    tasks = kanban_db.list_tasks(bconn, project_id=project_id, principal=principal)
-    rollup = {"total": len(tasks), "done": 0, "running": 0, "blocked": 0}
+    # One archived-inclusive query, two counts: `total` keeps the board's
+    # live picture, `total_with_archived` is the caller-visible total
+    # (§12 decision 17, U5). `total_all_principals` is a plain COUNT(*)
+    # with no principal filter — what the delete ROUTE counts (U8): a
+    # lead who cannot see a colleague's private card must still see the
+    # same number the refusal is based on. A count leaks no title,
+    # assignee or column.
+    tasks = kanban_db.list_tasks(
+        bconn, project_id=project_id, principal=principal, include_archived=True
+    )
+    rollup = {
+        "total": 0,
+        "done": 0,
+        "running": 0,
+        "blocked": 0,
+        "total_with_archived": len(tasks),
+    }
     for t in tasks:
         status = getattr(t, "status", "")
+        if status == "archived":
+            continue
+        rollup["total"] += 1
         if status in rollup:
             rollup[status] += 1
+    rollup["total_all_principals"] = bconn.execute(
+        "SELECT COUNT(*) AS n FROM tasks WHERE project_id = ?",
+        (project_id,),
+    ).fetchone()["n"]
     return rollup
 
 
@@ -532,7 +592,13 @@ def _list_sync(
                 exhausted = False
                 break
             last_examined = (p.created_at, p.id)
-            if status and p.status != status:
+            if status == "archived":
+                # The Archived chip must find every shelved row (U6) —
+                # including rows archived before Block 4b, when shelving
+                # set the flag without the status.
+                if not (getattr(p, "archived", 0) or p.status == "archived"):
+                    continue
+            elif status and p.status != status:
                 continue
             if cadence and getattr(p, "cadence", None) != cadence:
                 continue
@@ -914,6 +980,193 @@ async def patch_project(request: Request) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Lifecycle: archive / restore / hard delete (§13, decision 17)
+# ---------------------------------------------------------------------------
+
+
+@router.post("/{slug}/archive")
+async def archive_project_route(request: Request) -> dict[str, Any]:
+    """Shelve a project (§13): the archived flag and the ``archived`` status
+    land in one transaction, and the schedule detaches by the same call —
+    the invariant is that no archived project keeps firing. An optional
+    ``reason`` is recorded with who did it. Lead / instance admin. Returns
+    the **updated row**, never an ack.
+    """
+    project, _role, _profiles, principal = await _require_write(request)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        body = {}
+    reason = str(body.get("reason") or "").strip()
+
+    def _archive_sync() -> dict:
+        with projects_db.connect_closing() as conn:
+            fresh = projects_db.get_project(conn, project.id)
+            if fresh is None:
+                raise ValueError("project not found")
+            if fresh.archived:
+                raise ValueError(
+                    f"project {fresh.slug} is already archived"
+                )
+            # §13 (U7): archive stops the project running — so it cannot
+            # shelve a run that is still running or waiting at a checkpoint.
+            # The resumable run would outlive the shelf; cancel (or letting
+            # it finish) is the sanctioned way out. `blocked` is a card-level
+            # wait with no resume affordance; terminal statuses are fine.
+            open_runs = projects_db.list_open_project_runs(conn, fresh.id)
+            if open_runs:
+                held = ", ".join(
+                    f"run {r['run_no']} ({r['status']})" for r in open_runs
+                )
+                raise ValueError(
+                    f"project {fresh.slug} still has an open run — {held}. "
+                    "Cancel it (or let it finish) before archiving."
+                )
+            # One transaction: archived=1 AND status='archived'. Refuses a
+            # needs_completion record (L2), naming the missing fields.
+            projects_db.archive_project(conn, fresh.id)
+            if getattr(fresh, "cron_job_id", None):
+                projects_schedule.detach_project_schedule(
+                    conn,
+                    project=fresh,
+                    reason=(
+                        f"project archived{f': {reason}' if reason else ''}"
+                    ),
+                    changed_by=principal.user_id,
+                )
+            note = f"Project archived{f': {reason}' if reason else ''}."
+            try:
+                projects_db.add_project_directive(
+                    conn,
+                    project_id=fresh.id,
+                    kind="directive",
+                    body=note,
+                    author_user_id=principal.user_id,
+                )
+            except ValueError:  # pragma: no cover - directive cap: never block
+                logger.debug("projects: directive cap — archive note dropped")
+            updated = projects_db.get_project(conn, fresh.id)
+            return _project_payload(updated)
+
+    try:
+        return await asyncio.to_thread(_archive_sync)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+
+
+@router.post("/{slug}/restore")
+async def restore_project_route(request: Request) -> dict[str, Any]:
+    """Bring a shelved project back (§13): ``archived=0`` and
+    ``status='paused'`` — re-entry is a decision, so never straight to
+    ``active``. The schedule is **not** re-created; ``PUT /schedule`` does
+    that. Returns the updated row.
+    """
+    project, _role, _profiles, _principal = await _require_write(request)
+
+    def _restore_sync() -> dict:
+        with projects_db.connect_closing() as conn:
+            fresh = projects_db.get_project(conn, project.id)
+            if fresh is None:
+                raise ValueError("project not found")
+            if not fresh.archived:
+                raise ValueError(f"project {fresh.slug} is not archived")
+            projects_db.restore_project(conn, fresh.id)
+            updated = projects_db.get_project(conn, fresh.id)
+            return _project_payload(updated)
+
+    try:
+        return await asyncio.to_thread(_restore_sync)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+
+
+@router.delete("/{slug}")
+async def delete_project_route(request: Request) -> dict[str, Any]:
+    """Hard delete — the narrow exception (decision 17), never the default.
+
+    Human-only (§8.1/§8.2), owner or lead, and ``?confirm=<slug>`` must
+    name the slug. Refused ``409`` unless the project is already archived
+    and carries no run, no delivered or accepted output and no card —
+    anything else has history, and ``tasks.project_id`` has no foreign key
+    back to ``projects``, so a permissive delete would orphan somebody's
+    board. Clears the active pointer and detaches the schedule before the
+    row goes.
+    """
+    project, _role, _profiles, principal = await _require_write(request)
+    await _require_human(request, "hard delete")
+    confirm = (request.query_params.get("confirm") or "").strip()
+    if confirm != project.slug:
+        raise HTTPException(
+            status_code=422,
+            detail="confirm must equal the project slug",
+        )
+
+    def _delete_sync() -> dict:
+        with projects_db.connect_closing() as conn:
+            fresh = projects_db.get_project(conn, project.id)
+            if fresh is None:
+                raise HTTPException(status_code=404, detail="project not found")
+            blockers: list[str] = []
+            if not fresh.archived:
+                blockers.append("it is not archived")
+            runs = conn.execute(
+                "SELECT COUNT(*) AS n FROM project_runs WHERE project_id = ?",
+                (fresh.id,),
+            ).fetchone()["n"]
+            if runs:
+                blockers.append(f"{runs} run" + ("" if runs == 1 else "s"))
+            done_outputs = conn.execute(
+                "SELECT COUNT(*) AS n FROM project_outputs "
+                "WHERE project_id = ? AND status IN ('delivered', 'accepted')",
+                (fresh.id,),
+            ).fetchone()["n"]
+            if done_outputs:
+                blockers.append(
+                    f"{done_outputs} delivered or accepted output"
+                    + ("" if done_outputs == 1 else "s")
+                )
+            # The board lives in the per-profile kanban store — count every
+            # card pointing at this project, archived cards included: an
+            # orphan is an orphan whatever its column.
+            with _board_conn(fresh) as bconn:
+                cards = kanban_db.list_tasks(
+                    bconn, project_id=fresh.id, include_archived=True
+                )
+            if cards:
+                blockers.append(
+                    f"{len(cards)} card" + ("" if len(cards) == 1 else "s")
+                )
+            if blockers:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        f"refused: {fresh.slug} still has history — "
+                        + ", ".join(blockers)
+                        + ". Archive keeps it; hard delete is only for the "
+                        "genuinely empty mistake."
+                    ),
+                )
+            # Cleanup before the row goes (§12): the active pointer and the
+            # schedule first, then the delete cascades the project_* tables
+            # on the FK — and stops there, by design.
+            if projects_db.get_active_id(conn) == fresh.id:
+                projects_db.set_active(conn, None)
+            if getattr(fresh, "cron_job_id", None):
+                projects_schedule.detach_project_schedule(
+                    conn,
+                    project=fresh,
+                    reason="project deleted",
+                    changed_by=principal.user_id,
+                )
+            projects_db.delete_project(conn, fresh.id)
+            return {"deleted": fresh.slug}
+
+    return await asyncio.to_thread(_delete_sync)
+
+
+# ---------------------------------------------------------------------------
 # Outputs + deliveries + accept (§6.1)
 # ---------------------------------------------------------------------------
 
@@ -923,6 +1176,7 @@ async def add_output(request: Request) -> dict[str, Any]:
     project, _role, _profiles, principal = await _require_write(
         request, judgement=True
     )
+    _refuse_if_archived(project, "declaring an output")
     body = await request.json()
     try:
         def _add_sync() -> dict:
@@ -951,6 +1205,7 @@ async def patch_output(request: Request, output_id: str) -> dict[str, Any]:
     project, role, _profiles, principal = await _require_write(
         request, judgement=True
     )
+    _refuse_if_archived(project, "changing an output")
     body = await request.json()
     # Changing what counts as required is structural — lead and above only.
     if "required" in body and not _can_write(project, role, principal):
@@ -1012,6 +1267,7 @@ async def deliver_output(request: Request, output_id: str) -> dict[str, Any]:
     project, _role, _profiles, principal = await _require_write(
         request, judgement=True
     )
+    _refuse_if_archived(project, "delivering an output")
     try:
         body = await request.json()
     except Exception:
@@ -1054,6 +1310,7 @@ async def accept_output(request: Request, output_id: str) -> dict[str, Any]:
     project, _role, _profiles, _principal = await _require_write(
         request, judgement=True
     )
+    _refuse_if_archived(project, "accepting an output")
     subject = await _require_human(request, "accepting an output")
 
     def _accept_sync() -> dict:
@@ -1425,6 +1682,7 @@ async def summarise_project(request: Request) -> dict[str, Any]:
     correcting the record. Not a judgement act.
     """
     project, _role, _profiles, _principal = await _require_write(request)
+    _refuse_if_archived(project, "re-summarising it")
     try:
         body = await request.json()
     except Exception:
@@ -1470,6 +1728,7 @@ async def create_card(request: Request) -> dict[str, Any]:
     project, _role, _profiles, principal = await _require_write(
         request, judgement=True
     )
+    _refuse_if_archived(project, "adding a card")
     body = await request.json()
     title = str(body.get("title") or "").strip()
     card_body = body.get("body")
@@ -1659,6 +1918,7 @@ async def save_playbook_route(request: Request) -> dict[str, Any]:
     project, _role, profiles, principal = await _require_write(
         request, judgement=True
     )
+    _refuse_if_archived(project, "revising its plan")
     body = await request.json()
     steps = body.get("steps") or []
 
@@ -1700,6 +1960,7 @@ async def activate_playbook_route(request: Request, rev: int) -> dict[str, Any]:
     records ``activated_at`` + ``note``. A mid-flight run is unaffected —
     it keeps its pinned rev."""
     project, _role, _profiles, _principal = await _require_write(request)
+    _refuse_if_archived(project, "activating a plan")
     subject = await _require_human(request, "activating a playbook revision")
     body = await request.json() if request.headers.get("content-length") else {}
 
@@ -1748,6 +2009,7 @@ async def add_directive_route(request: Request) -> dict[str, Any]:
     project, _role, _profiles, principal = await _require_write(
         request, judgement=True
     )
+    _refuse_if_archived(project, "adding guidance")
     body = await request.json()
 
     def _add_sync() -> dict:
@@ -1811,6 +2073,7 @@ async def activate_directive_route(
     project, _role, _profiles, _principal = await _require_write(
         request, judgement=True
     )
+    _refuse_if_archived(project, "activating guidance")
     subject = await _require_human(request, "activating a directive")
 
     def _activate_sync() -> dict:
@@ -1940,6 +2203,7 @@ async def start_run_route(request: Request) -> dict[str, Any]:
     project, _role, _profiles, principal = await _require_write(
         request, judgement=True
     )
+    _refuse_if_archived(project, "running it")
     body = await request.json() if request.headers.get("content-length") else {}
     trigger = str(body.get("trigger") or "manual").strip()
     if trigger not in projects_db.VALID_RUN_TRIGGERS:
@@ -1975,6 +2239,7 @@ async def continue_run_route(request: Request, run_no: int) -> dict[str, Any]:
     project, _role, _profiles, _principal = await _require_write(
         request, judgement=True
     )
+    _refuse_if_archived(project, "continuing a run")
 
     def _continue_sync() -> dict:
         with projects_db.connect_closing() as conn:
@@ -2082,6 +2347,7 @@ async def run_retro_route(request: Request, run_no: int) -> dict[str, Any]:
     project, _role, profiles, principal = await _require_write(
         request, judgement=True
     )
+    _refuse_if_archived(project, "writing a retro")
     body = await request.json()
     retro = str(body.get("retro") or "").strip()
     if not retro:
@@ -2187,6 +2453,7 @@ async def score_run_route(request: Request, run_no: int) -> dict[str, Any]:
     project, _role, _profiles, _principal = await _require_write(
         request, judgement=True
     )
+    _refuse_if_archived(project, "scoring a run")
     subject = await _require_human(request, "scoring a run")
     try:
         body = await request.json()
@@ -2266,6 +2533,7 @@ async def patch_tools_route(request: Request) -> dict[str, Any]:
     and the response shows that intersection.
     """
     project, _role, profiles, _principal = await _require_write(request)
+    _refuse_if_archived(project, "changing its tools")
     body = await request.json()
 
     def _patch_sync() -> dict:
@@ -2337,6 +2605,7 @@ async def patch_autonomy_route(request: Request) -> dict[str, Any]:
     """A separate route so the audit line and the permission check are
     unmistakable (§12). Lead/admin only — ``_can_write``."""
     project, _role, _profiles, _principal = await _require_write(request)
+    _refuse_if_archived(project, "changing its autonomy")
     body = await request.json()
     autonomy = body.get("autonomy")
     if autonomy not in projects_db.VALID_AUTONOMY_LEVELS:
@@ -2371,6 +2640,7 @@ async def put_schedule_route(request: Request) -> dict[str, Any]:
     §3.1 preconditions map to 409 naming what is missing; an invalid
     schedule string maps to 422."""
     project, _role, profiles, principal = await _require_write(request)
+    _refuse_if_archived(project, "scheduling it")
     try:
         body = await request.json()
     except Exception:

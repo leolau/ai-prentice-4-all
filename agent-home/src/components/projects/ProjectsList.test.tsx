@@ -85,6 +85,7 @@ describe("projects filter URL round-trip", () => {
       ["status=paused", "paused"],
       ["status=done", "done"],
       ["archived=true", "all"],
+      ["archived=true&status=archived", "archived"],
     ];
     for (const [qs, view] of cases) {
       expect(filtersFromParams(new URLSearchParams(qs)).view).toBe(view);
@@ -161,7 +162,7 @@ describe("ProjectsList", () => {
     expect(html).toContain('data-component="ProjectsFilters"');
     expect(html).toContain("Send the Monday digest");
     // All seven chips are present — they are the lifecycle, not facets.
-    for (const label of ["Active", "Repeatable", "Standing", "Attention", "Paused", "Done", "All"]) {
+    for (const label of ["Active", "Repeatable", "Standing", "Attention", "Paused", "Done", "All", "Archived"]) {
       expect(html).toContain(label);
     }
     expect(html).toContain("Load more");
@@ -173,6 +174,22 @@ describe("ProjectsList", () => {
     );
     expect(html).toContain('data-component="ProjectsEmpty"');
     expect(html).toContain("a recurring job, a standing duty");
+  });
+
+  it("carries the create door in the header and in the empty state", () => {
+    // A client method with no caller is the exact shape of the U1 defect:
+    // the door must exist on the *rendered* page, in both states.
+    const withItems = renderToStaticMarkup(
+      <ProjectsList initial={{ items: [ITEM], next_cursor: null }} />,
+    );
+    expect(withItems).toContain('href="/projects/new"');
+    expect(withItems).toContain("New project");
+
+    const empty = renderToStaticMarkup(
+      <ProjectsList initial={{ items: [], next_cursor: null }} />,
+    );
+    expect(empty).toContain('href="/projects/new"');
+    expect(empty).toContain("New project");
   });
 });
 

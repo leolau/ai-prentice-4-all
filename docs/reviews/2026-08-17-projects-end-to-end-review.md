@@ -327,6 +327,155 @@ def last_scored_runs(conn, project_id: str, *, limit: int = 5) -> List[dict]:
 reports the mean of runs 1–5. Re-scoring run 1 still moves it (the existing
 contract must keep passing).
 
+## Block 4b follow-up review (2026-08-20) — findings U2–U6
+
+Reviewed at `570be680f` (`2d187f122`, "Block 4b — create/remove doors"), against
+FG-32 §12, §13, §16 "Frontend"/"Lifecycle" and decision 17. The lifecycle
+backend matches the design: archive writes both halves in one `write_txn` and
+detaches the schedule in the same call, restore lands `paused` and never
+resurrects cron, hard delete is human-gated with a typed slug and names every
+blocker, archived cards block through
+`kanban_db.list_tasks(..., include_archived=True)`, the active pointer is
+cleared and the cascade stops at the projects DB. Verified green locally:
+31 tests in `test_projects_api_lifecycle.py` + `test_hermes_projects.py`,
+154 agent-home tests, `tsc --noEmit` clean.
+
+Five things the block did not land. **All five are fixed in Block 4c
+(#307, `9fcdf03c4`)** — the archived-inert gate, the structured `missing`
+forwarding, the interaction + route tests, the archived-inclusive card count
+and the flag-aware Archived chip; each item below carries the annotation of
+what pinned it, and the Block 4c checklist at the end of this document is
+fully ticked.
+
+### U2 — archive stops the cron job, not the project (medium, contract)
+
+§13 says archive "drops the project out of the list, **and stops it running**",
+and §16 "Lifecycle" says the archived detail page renders the record with
+**restore as the only write offered**. Neither is enforced:
+
+- No route in `hermes_cli/projects_api.py` reads `archived` except the three
+  lifecycle routes and the list filter (`grep -n archived` → lines 503, 510,
+  591, 729, 923-1055 only). So `POST /{slug}/runs`, `POST /{slug}/outputs/{id}/accept`,
+  `POST /{slug}/directives`, `PUT /{slug}/schedule` and `PATCH /{slug}/tools`
+  all still succeed on an archived project. A shelved project can be run by
+  hand from the CLI or the API — only the *timer* was removed.
+- On the page, `ProjectDetailView.tsx:181-217` hides the three header buttons
+  (Run now / Continue / Add) when `project.archived`, but the panels below it
+  never look at the flag: `panels/OutputsPanel.tsx:45` and
+  `panels/GuidancePanel.tsx:42,69,87,107` still render and fire their writes.
+
+**The fix.** Refuse the mutating routes on an archived record at the router —
+a small helper beside `_require_write`:
+
+```python
+def _refuse_if_archived(project, act: str) -> None:
+    """§13: a shelved project does not run and does not learn. Restore first."""
+    if project.archived:
+        raise HTTPException(
+            status_code=409,
+            detail=f"project {project.slug} is archived — restore it before {act}",
+        )
+```
+
+Call it from the run, accept, directive, schedule and tools routes (not from
+`PATCH /{slug}`, so a typo in an archived project's goal can still be fixed,
+and not from restore). Then pass `archived` down from `ProjectDetailView` and
+have `OutputsPanel`/`GuidancePanel` render their write affordances as disabled
+with "Restore this project to …" rather than firing a call the server now
+refuses.
+
+**The test.** Archive a project, then assert each mutating route answers 409
+and that the record is unchanged; and one UI contract that the archived detail
+markup contains no accept/add-instruction control.
+
+### U3 — the 422 → blank-field contract is dead code (medium)
+
+§13: "the BFF's 422 `missing` list maps onto the field that is blank", and §16
+Frontend: "a 422 from create names the blank field in the form rather than a
+toast". `NewProjectForm.tsx:82-110` implements exactly that — and it can never
+run:
+
+- `withPrincipal` (`agent-home/src/app/api/projects/hermes-bridge.ts:31-44`)
+  forwards `err.body.detail` **only when it is a string**, otherwise it
+  substitutes `"That didn't go through."`. The Python create route raises
+  `detail={"missing": [...], "message": ...}`
+  (`projects_api.py`, `create_project_route`) — a dict — so the `missing` list
+  is dropped at the bridge.
+- The BFF's own pre-check answers `{error: "invalid_request", detail: "<string>"}`
+  (`app/api/projects/route.ts:69-79`), also without a `missing` list.
+
+Net effect: every server refusal shows generic copy with no field highlighted;
+the field-mapping branch is unreachable. Typed input *is* preserved (client
+state), so only the targeting is lost.
+
+**The fix.** Let the bridge forward a structured detail rather than flattening
+it — `detail` stays a string for the existing callers, and the object is
+carried alongside:
+
+```ts
+const raw = (err.body as { detail?: unknown } | undefined)?.detail;
+const detail = typeof raw === "string" && raw ? raw : "That didn't go through.";
+return NextResponse.json(
+  raw && typeof raw === "object" ? { error: "api_error", detail, ...raw } : { error: "api_error", detail },
+  { status: err.status },
+);
+```
+
+…or, simpler and local: have `app/api/projects/route.ts`'s pre-check answer
+`{error: "invalid_request", detail: {missing: [...], message: "…"}}` and read
+that shape in the form. Either way one of the two ends has to speak `missing`.
+
+**The test.** A route test where upstream raises a dict-detail 422 and the BFF
+answer still carries `missing: ["outputs"]`, plus a form test asserting the
+output field is marked invalid and the typed goal survives.
+
+### U4 — the new create/remove surface has no interaction tests (medium)
+
+This is the same hole U1 came out of. `archiveProject`/`restoreProject`/
+`deleteProject` have no test at all (`grep -rn archiveProject src --include=*.test.*`
+→ nothing), the three new BFF routes have none (route tests are an established
+pattern in this tree — `app/api/chat/send/route.test.ts`,
+`app/api/profiles/suggestions/route.test.ts`, …), and the three new component
+tests are `renderToStaticMarkup` string assertions only. Nothing exercises:
+submit → `/projects/<slug>` redirect; a 422 mapping onto a field (U3 above,
+which a single test would have caught); typed input surviving a refusal;
+archive/restore/delete actually calling the route and refreshing; the delete
+button staying disabled until the slug matches.
+
+**The fix.** Three route tests (archive/restore/delete: principal missing →
+401, upstream 409 → 409 with the refusal text, DELETE forwards `confirm`) and
+form/menu tests that drive the handlers with a stubbed `fetch`.
+
+### U5 — `deleteEligible` and the server disagree about archived cards (low)
+
+`ProjectLifecycleMenu.tsx:53-57` gates Delete on
+`project.card_rollup.total === 0`, but the rollup is built from
+`kanban_db.list_tasks(bconn, project_id=…, principal=…)`
+(`projects_api.py:253-254`) — `include_archived` defaults to `False`, while the
+delete route counts archived cards too. A project whose only cards are archived
+therefore *offers* Delete and then takes a 409. The refusal text is shown, so
+this is cosmetic; fix it by adding an archived-inclusive count to the detail
+payload (or by having the menu treat "no cards" as unknown and let the server
+answer).
+
+### U6 — the Archived chip cannot find a legacy archived row (low)
+
+The chip encodes `archived=true&status=archived`
+(`components/projects/filters.ts:95-98`) and the list filters `p.status != status`
+(`projects_api.py:535`). Any row with `archived = 1` and a status other than
+`'archived'` — anything shelved before Block 4b, or by a direct
+`PATCH`/store call — appears under **All** but never under **Archived**, which
+is the one place §13 says a shelved project must be findable. Either treat
+`status=archived` as "archived flag or archived status" in `_list_sync`, or
+backfill `status='archived' WHERE archived = 1` in the migration that follows.
+
+**Not a defect:** `/projects/new` passes `servingProfile="default"`. Throughout
+agent-home `"default"` *means* the box's own home (`lib/api/client.ts:139,158`;
+`profiles.get_profile_dir` resolves it to `_get_default_hermes_home()`), and the
+projects BFF talks to that home, so the pinned value is the serving profile. The
+consequence worth writing into §13 is that the UI cannot create a project hosted
+on a *named* profile — that stays a CLI act.
+
 ## Test coverage — what the 185 green tests still do not cover
 
 The suites are behaviour-shaped and genuinely good on the store and the router.
@@ -476,6 +625,66 @@ PR per block — each block is independently shippable and independently testabl
       refuse with the missing fields named, doctor flags it, the list row
       shows "needs completion" instead of an empty goal)*
 
+**Block 4b — U1: give the Projects page its create and remove doors**
+(owner report, 2026-08-18; FG-32 §12, §13, §20.2 item 6 and decision 17 now
+specify this — read them before starting, the delete rules are deliberate).
+
+- [x] `POST /{slug}/archive` — `archived=1` **and** `status='archived'` in one
+      transaction, plus `detach_project_schedule()`; lead/admin; returns the
+      updated project row, not an ack (Block 1's lesson). *(Block 4b:
+      `projects_db.archive_project` sets both flags in one `write_txn` and
+      reuses the `_needs_completion_missing` gate — a `needs_completion`
+      project is refused with 409; the route detaches the schedule and
+      records an optional `reason` as a directive, ValueError → 409 like the
+      members/outputs siblings; `restore_project` sets `paused` and never
+      resurrects the cron job. §16 contracts in
+      `tests/hermes_cli/test_projects_api_lifecycle.py`)*
+- [x] `POST /{slug}/restore` — `archived=0`, `status='paused'`; does not
+      re-create the cron job. *(Block 4b: refuses a not-archived project with
+      409; the restored row comes back `paused` — a lead decides when it runs
+      again)*
+- [x] `DELETE /{slug}?confirm=<slug>` — `_require_human`, owner/lead, and `409`
+      unless the project is already archived and has no run, no
+      delivered/accepted output and no card. **Do not cascade past the FK:**
+      `tasks.project_id` lives in the per-profile kanban store with no foreign
+      key back to `projects`, so a permissive delete orphans board rows. Clear
+      the `project_meta` active pointer and detach the schedule first.
+      *(Block 4b: `confirm` must equal the slug (422 otherwise); cards are
+      counted through `kanban_db.list_tasks(..., include_archived=True)` so
+      archived cards still block; the 409 names every blocker — "Archive
+      keeps it; hard delete is only for the genuinely empty mistake")*
+- [x] BFF: `POST /api/projects/[slug]/archive`, `.../restore`, `DELETE
+      /api/projects/[slug]`; `archiveProject()`, `restoreProject()`,
+      `deleteProject()` on the client; preserve upstream status codes so the
+      dialog can say *why* a delete was refused. *(Block 4b: the three routes
+      go through `withPrincipal`, which forwards the upstream status and the
+      string `detail` verbatim; DELETE reads `confirm` from the query string)*
+- [x] agent-home: `/projects/new` + `NewProjectForm` (the §13 two-step form,
+      422 → the field that is blank, typed input preserved on refusal), a
+      primary **New project** action in the list header *and* as the empty
+      state's CTA, `ProjectLifecycleMenu` in the detail header's `[⋯]`
+      (Archive… / Restore / Delete permanently…, typed-slug confirm), and an
+      Archived chip beside All. *(Block 4b: the form pins the host profile to
+      the serving profile; step 1 is the mandatory what-fields, step 2 the
+      how-it-runs defaults; a viewer sees no `[⋯]` at all and a non-lead
+      member sees Archive disabled with the reason; Delete only appears when
+      the rendered record is archived and genuinely empty — the server
+      re-checks everything. Archived chip decodes
+      `archived=true&status=archived`)*
+- [x] CLI: `hermes projects archive|restore|delete <slug>`, delete behind
+      `--as-human --confirm <slug>`. *(Block 4b: archive/restore are role-gated
+      only; delete additionally passes `--as-human` through the
+      `_interactive_subject` seam and `--confirm` as the query param; a 403
+      "human act" prints the `--as-human` hint)*
+- [x] Tests: the FG-32 §16 "Lifecycle" contracts, plus one asserting a rendered
+      surface routes to `/projects/new` — a client method with no caller is the
+      exact shape of this defect. *(Block 4b: 15 lifecycle contracts in
+      `test_projects_api_lifecycle.py` + 2 CLI verb tests in
+      `test_hermes_projects.py`; on the UI side `ProjectsList.test.tsx`
+      asserts the create door in the header and the empty state, and
+      `ProjectLifecycleMenu.test.tsx` + `NewProjectForm.test.tsx` cover the
+      role matrix and the step-1 surface)*
+
 **Block 5 — close the two holes that hid all of the above.**
 
 - [x] One contract per run seam asserting the *default* implementation resolves
@@ -507,3 +716,797 @@ PR per block — each block is independently shippable and independently testabl
       `test_promote_foreign_profile_is_refused_before_touching_the_todo`; the
       >999-card event tail by Block 4's
       `test_events_tail_survives_more_than_999_cards`)*
+
+**Block 4c — finish the lifecycle Block 4b started** (findings U2–U6 above,
+in this order).
+
+- [x] **U2** Refuse the mutating routes on an archived project (`_refuse_if_archived`
+      in `projects_api.py`, called from run / accept / directives / schedule /
+      tools — not from `PATCH /{slug}` or restore), and pass `archived` into
+      `OutputsPanel` / `GuidancePanel` so the archived detail page offers
+      restore and nothing else (§13, §16 "Lifecycle"). *(Block 4c: the helper
+      guards all five routes with a 409 naming the archive and pointing at
+      restore; both panels hide their writes behind the same hint;
+      `test_archived_project_refuses_every_mutating_route` and
+      `test_archived_project_still_accepts_a_patch_and_restore_unblocks` pin
+      the contract)*
+- [x] **U3** Make one end speak `missing`: either stop `withPrincipal` flattening
+      a dict `detail` (`app/api/projects/hermes-bridge.ts:31-44`) or have the
+      create route's pre-check answer a structured detail — so
+      `NewProjectForm`'s field mapping can actually fire (§13, §16 Frontend).
+      *(Block 4c, both ends: `withPrincipal` now forwards a dict detail's
+      `message` as the string `detail` with the remaining keys — `missing` —
+      riding top-level, and the create route's pre-check answers its own
+      `missing` list; `NewProjectForm.interaction.test.tsx` drives a 422 onto
+      the blank field and keeps what was typed)*
+- [x] **U4** Tests for the surface Block 4b added: route tests for
+      archive/restore/delete (401 without a principal, upstream 409 forwarded
+      with its refusal text, `confirm` forwarded on DELETE) and handler-level
+      form/menu tests (submit → redirect, 422 → field marked, typed input
+      preserved, Delete disabled until the slug matches). *(Block 4c: three
+      `route.test.ts` files under `api/projects/[slug]/` — 401, forwarded 409
+      wording, `reason`/`confirm` forwarding — plus
+      `NewProjectForm.interaction.test.tsx` and
+      `ProjectLifecycleMenu.interaction.test.tsx`, jsdom handler tests in the
+      `apps/desktop` per-file-environment pattern; the matching devDeps ride
+      with the tests)*
+- [x] **U5** Give the detail payload an archived-inclusive card count so
+      `ProjectLifecycleMenu`'s `deleteEligible` agrees with the delete route.
+      *(Block 4c: `card_rollup.total_with_archived` from one
+      `include_archived=True` query; the menu's gate reads it;
+      `test_detail_rollup_counts_archived_cards_for_the_delete_gate` pins it)*
+- [x] **U6** Make Archived find every shelved row — `status=archived` should
+      match the archived *flag*, or backfill `status` for rows archived before
+      Block 4b. *(Block 4c, filter-on-the-flag: a `status=archived` list also
+      matches `archived=1` rows; `test_archived_chip_finds_legacy_rows_shelved_by_flag_alone`
+      pins it against a flag-only legacy row)*
+- [x] Note in FG-32 §13 that the create form pins the host profile to the
+      serving home, so hosting a project on a *named* profile stays a CLI act
+      (the design's intent, not a gap — recorded so it is not re-reported).
+      *(Block 4c: recorded in FG-32 §13's create-form paragraph; the same
+      edit records the archived-inert rule in §13 and §16)*
+
+## Block 4c follow-up review (2026-08-21) — findings U7–U8
+
+Reviewed at `b743715d1` (`9fcdf03c4`, "Block 4c — archived projects stay inert",
+PR #307, open against `develop` at the time of review) against FG-32 §12, §13,
+§16 "Lifecycle" and decision 17. Every line number below is on that branch, not
+on `develop`.
+
+**U3, U4, U5 and U6 are genuinely closed.** The bridge forwards a structured
+`detail` (`message` becomes the string, the remaining keys ride top-level) and
+the create route's own pre-check answers the same `missing` shape, so
+`NewProjectForm`'s field mapping fires from either end; the three lifecycle BFF
+routes and both new components have handler-level tests; `card_rollup` carries
+`total_with_archived` from one `include_archived=True` query and the menu's
+`deleteEligible` reads it; and a `status=archived` list matches the archived
+*flag* as well as the status, so a flag-only legacy row is reachable from the
+chip. `total` is unchanged by U5's rewrite because `archived` is a kanban
+*status*, so the new loop's `continue` drops exactly the rows the old
+`include_archived=False` query never returned. Verified locally at that sha:
+310 Projects Python tests + 1 skipped, 517 agent-home tests across 80 files,
+`tsc --noEmit` clean, `ruff check` clean on the touched files (the 8 eslint
+errors in the tree are pre-existing, in `chat/` and `settings/` files Block 4c
+does not touch). The de-flake of
+`test_list_pagination_loses_no_rows_under_a_filter` (staggering `created_at` so
+"newest first" is not a coin flip on random ids) is a real determinism fix with
+no product change.
+
+Two things remain.
+
+### U7 — "a shelved project does not run and does not learn" is asserted in the design but enforced on five routes only (medium, contract)
+
+`_refuse_if_archived` (`hermes_cli/projects_api.py:220`) is the right helper in
+the right place, and it is called from exactly the five routes Block 4c's
+worklist named: `POST /{slug}/runs` (2154), `POST
+/{slug}/outputs/{id}/accept` (1266), `POST /{slug}/directives` (1961), `PATCH
+/{slug}/tools` (2481), `PUT /{slug}/schedule` (2587). That list came from the
+U2 write-up, which named the routes it had found — it was never the complete
+set of acts that grow the record.
+
+The same block then widened the *contract* to the general rule. FG-32 §13 now
+says "every mutating act that would grow the record … is refused `409`", and
+§16 "Lifecycle" repeats it. Against that wording these routes are holes — all
+of them still answer 200 on an archived project:
+
+| Route | Line | What it does on a shelved project |
+| --- | --- | --- |
+| `POST /{slug}/runs/{run_no}/continue` | 2183 | Resumes a `waiting` run: promotes the held successors to `todo`, so workers pick them up. The project runs again with no restore. |
+| `POST /{slug}/runs/{run_no}/retro` | 2282 | Writes the retro — and the retro is the entry point of the learning loop (§10). |
+| `POST /{slug}/runs/{run_no}/score` | 2390 | Records the human 1–5, which moves the project's score rollup. |
+| `POST /{slug}/cards` | 1663 | Adds a board card to an archived project — re-creating the very orphan class hard delete's card blocker exists to prevent (§12). |
+| `POST /{slug}/playbook`, `POST /{slug}/playbook/{rev}/activate` | 1860, 1907 | Saves and activates a plan revision, the second of the three learning destinations. |
+| `POST /{slug}/outputs`, `POST /{slug}/outputs/{id}/deliver` | 1130, 1219 | Declares a new commitment / marks one delivered, so the project can acquire delivered work while shelved. |
+| `PATCH /{slug}/autonomy` | 2548 | Raises how much the project may do unattended. |
+| `POST /{slug}/summarise` | 1629 | Rewrites "where this stands" on a record that is meant to be frozen. |
+
+`continue` is the one that breaks the invariant outright rather than
+cosmetically, and it has a live path: **archive has no precondition on an
+in-flight run.** `archive_project_route` (957) refuses only an
+already-archived record, so a project with a `waiting` run can be shelved while
+that run is held at a checkpoint or a budget stop; the run row survives
+untouched, and the run page still offers Continue. Detaching the cron job (the
+one thing archive does do) removes the *timer*, not the resumable run.
+
+The UI mirrors the same partial fix. `ProjectDetailView.tsx:181` hides the
+header's three actions and passes `archived` into `OutputsPanel` and
+`GuidancePanel`, but the run page does not:
+`app/projects/[slug]/runs/[runNo]/page.tsx:64` renders
+`<RunView slug={slug} run={run} />` — it fetches the run and never the project,
+so `RunView` has no way to know the project is archived and keeps rendering
+Continue, Cancel, Save retro and the score control. The CLI needs no separate
+fix: every verb goes through this router (`_cmd_run` → `POST /{slug}/runs`), so
+it inherits whatever the router enforces — which is exactly why the router is
+the right place to finish the job.
+
+#### U7 illustrated
+
+**(1) Where the gate sits today.** One helper, thirteen doors, five of them
+wired to it:
+
+```
+                        POST /{slug}/runs ─────────────┐
+                        POST /outputs/{id}/accept ─────┤
+                        POST /directives ──────────────┼──▶ _refuse_if_archived
+                        PATCH /tools ──────────────────┤        (409 if archived)
+                        PUT  /schedule ────────────────┘
+
+    POST /runs/{n}/continue ──┐
+    POST /runs/{n}/retro ─────┤
+    POST /runs/{n}/score ─────┤
+    POST /cards ──────────────┤
+    POST /playbook (+activate)┼──▶ (no check) ──▶ 200, record grows
+    POST /outputs (+deliver) ─┤
+    PATCH /autonomy ──────────┤
+    POST /summarise ──────────┘
+```
+
+The five above the line are the ones the Block 4c worklist happened to name
+(they were the ones the U2 write-up had found). The eight below are the same
+kind of act and were never gated — while FG-32 §13/§16 now promise the general
+rule ("every mutating act that would grow the record is refused 409").
+
+**(2) The live path — archiving does not stop a run that is already in flight.**
+Time runs downward; the left column is what a human does, the right is what the
+system holds:
+
+```
+   human / agent                       project state
+   ─────────────────────────────────────────────────────────────────────
+   POST /{slug}/runs            ──▶    run 7: running
+                                       cards: [a done][b done][c todo]
+   run hits a checkpoint        ──▶    run 7: waiting          ← held
+                                       card c: blocked (awaiting approval)
+                                       cron job: attached
+
+   POST /{slug}/archive         ──▶    archived = 1
+     (no precondition on an            status   = archived
+      in-flight run)                   cron job: DETACHED  ← the only stop
+                                       run 7:   waiting     ← untouched
+                                       card c:  blocked     ← untouched
+
+   ── the project is now "shelved": UI hides Run / Add directive / Accept ──
+   ── but the run page still renders Continue, and the route still answers ──
+
+   POST /runs/7/continue        ──▶    run 7: running        ← RUNNING AGAIN
+     (ungated)                         card c: todo          ← promoted
+                                       workers pick c up, the agent works,
+                                       outputs get produced, cost is spent
+```
+
+So archive removed the **timer** (the cron job), not the **resumable run**. A
+shelved project can still be doing work minutes later, with no restore, and the
+record it was supposed to freeze keeps growing. `POST /cards` is the second
+substantive one: it lets a shelved project acquire new board rows — the exact
+orphan class hard delete's card blocker exists to prevent.
+
+**(3) The fix, as a picture.** Two edges to add, and one deliberate
+non-edge (`cancel` stays open — it *reduces* the record):
+
+```
+   POST /{slug}/archive
+        │
+        ├─ run in running/waiting? ──▶ 409 "run 7 is still open —
+        │                               cancel or continue it first"   ← NEW
+        └─ else ──▶ archived = 1, schedule detached
+
+   any growing route on an archived project
+        │
+        └─▶ _refuse_if_archived ──▶ 409                                ← NEW
+                                    (continue, retro, score, cards,
+                                     playbook/activate, outputs/deliver,
+                                     autonomy, summarise)
+
+   POST /runs/{n}/cancel ──▶ still allowed                        ← UNCHANGED
+
+   runs/[runNo]/page.tsx
+        │  fetches: run                     fetches: run + project   ← NEW
+        └─▶ <RunView run />        ──▶      <RunView run archived /> ← NEW
+                                            hides Continue / retro / score
+                                            behind "restore it (⋯) to …"
+```
+
+With the archive-time precondition in place, "can I score a run on a shelved
+project?" cannot arise for a run that was in flight — the only runs on an
+archived project are finished ones, so scoring them afterwards can stay allowed
+as a deliberate exception (a human closing the book on work already done) if
+you prefer that to a blanket refusal. Write down whichever you pick.
+
+**The fix — pick one of the two, do not leave them disagreeing.**
+
+*(a) Enforce the general rule (preferred; it is what §13 now promises).* Call
+`_refuse_if_archived` from the eight routes above, with the act named as the
+existing calls do. Two of them want a thought, not a reflex:
+
+- `cancel` must stay allowed — it *reduces* the record, and cancelling a run
+  left waiting on a project someone shelved is the natural cleanup. So gate
+  `continue`, not `cancel`.
+- `retro`/`score` are the reason to prefer the stronger variant: refuse
+  archiving while a run is not terminal. Add to `_archive_sync`, beside the
+  already-archived check, a blocker for any run in `running`/`waiting` —
+  "refused: run N is still open — cancel or continue it first" — so the
+  question "can I score a run on a shelved project?" cannot arise for a run
+  that was in flight, and scoring a *finished* run afterwards can then stay
+  allowed as a deliberate exception (a human closing the book on work that is
+  already done). Record whichever way you choose in §13; the current wording
+  forbids it.
+
+Then pass `archived` into the run surface: have
+`app/projects/[slug]/runs/[runNo]/page.tsx` also fetch the project (it already
+holds an `apiClientForRequest()`), pass `archived` to `RunView`, and have
+`RunView` render the write affordances behind the same "restore it (⋯) to …"
+hint the panels use.
+
+*(b) Or narrow the contract.* If the intent really is only the five, change
+FG-32 §13 and §16 to enumerate them and say plainly which acts stay open on a
+shelved project and why. Then U7 is a documentation fix — but `continue`
+resuming a shelved project still needs to be either gated or written down as
+intended, because "archive … stops it running" (§13, unchanged since #304)
+cannot coexist with it.
+
+**The test.** Extend
+`test_archived_project_refuses_every_mutating_route` to the full set rather
+than adding a second test — it is already a table, and the table *being* the
+enumeration is what stops the next route from arriving ungated. Plus: archive a
+project holding a `waiting` run and assert whichever rule you chose (refused at
+archive, or 409 at `continue`), and one UI contract that the archived project's
+run page markup carries no Continue/Save-retro control.
+
+### U8 — the delete gate and the delete route still count cards through different eyes (low)
+
+U5 closed the archived half of this. The other half is the principal.
+`_card_rollup_sync` (`projects_api.py:268`) counts through
+`kanban_db.list_tasks(..., principal=principal)`, which for a non-owner adds
+`AND (visibility = 'shared' OR visibility = ?)`; the delete route's own count
+(1067) passes **no** principal, deliberately — "an orphan is an orphan whatever
+its column", and the same is true whoever created it. So a lead whose colleague
+holds a private card on the project sees `total_with_archived == 0`, is offered
+Delete, and takes the 409 the count was supposed to pre-empt.
+
+Same cosmetic class as U5 (the refusal text is shown, nothing is destroyed),
+and the fix should not leak the card: add an unfiltered count to the payload —
+`card_rollup.total_all_principals`, or simply have `_card_rollup_sync` compute
+the archived-and-visibility-inclusive number with
+`SELECT COUNT(*) FROM tasks WHERE project_id = ?` — and have `deleteEligible`
+read that. It is a count, not a card: no title, no assignee, no visibility
+leaks with it.
+
+**The test.** Two cards on a project, one private to another user; assert the
+detail payload's delete-gate count is 2 for a lead who can see only one of
+them, and that `deleteEligible` is therefore false.
+
+**Block 4d — finish U7, and U8 with it.**
+
+**All three landed in Block 4d (#310, `59d39ff50`)** — the gate now covers every
+growing route with the deliberately-open list written into the helper,
+archive refuses an open run, the run page knows the project is archived,
+and the delete gate counts principal-blind; each item below carries the
+annotation of what pinned it.
+
+- [x] **U7** Make the code and FG-32 §13/§16 agree: either call
+      `_refuse_if_archived` from `continue`, `retro`, `score`, `cards`,
+      `playbook` (+ activate), `outputs` (+ deliver), `autonomy` and
+      `summarise` — leaving `cancel` and `PATCH /{slug}` open — or narrow the
+      design's wording to the five routes Block 4c gated. Either way,
+      `continue` must not resume a shelved project silently, and archive
+      should refuse (or the design should permit) shelving a project whose run
+      is still `running`/`waiting`.
+      *(Block 4d: the first branch — `_refuse_if_archived` now runs from all
+      twelve growing routes, the deliberately-open list (PATCH, restore,
+      cancel, the DELETE verbs, directive retirement, bookkeeping POSTs) is
+      written into the helper's docstring, and `_archive_sync` refuses a
+      `running`/`waiting` run naming it, with cancel as the sanctioned way
+      out. The refusal table in `test_projects_api_lifecycle.py` enumerates
+      all seventeen mutating attempts; `test_archive_refuses_while_a_run_is_open`
+      and `test_cancel_still_works_on_an_archived_project` pin both halves.)*
+- [x] **U7 (UI)** `app/projects/[slug]/runs/[runNo]/page.tsx` fetches the run
+      only, so `RunView` cannot know the project is archived and still offers
+      Continue / Cancel / Save retro / the score control. Pass `archived`
+      down and hide the writes behind the panels' hint.
+      *(Block 4d: the run page fetches the project alongside the run —
+      a failed project fetch renders unflagged rather than erroring — and
+      `RunView` hides Continue / Repeat this run / Save retro / the score
+      control behind the panels' hint while Cancel stays; `RunView.test.tsx`
+      pins the archived and the live renderings.)*
+- [x] **U8** Give the delete gate a principal-blind card count
+      (`total_all_principals`, or a plain `COUNT(*)` in `_card_rollup_sync`)
+      so a lead who cannot see a colleague's private card is not offered a
+      Delete the route will refuse.
+      *(Block 4d: `_card_rollup_sync` adds `total_all_principals`, a
+      principal-blind `COUNT(*)` over `tasks.project_id` (a count leaks no
+      card); `ProjectLifecycleMenu.deleteEligible` reads it, and
+      `test_delete_gate_counts_cards_it_cannot_see` pins the
+      sees-one / counts-two split with the consistent 409.)*
+
+### Block 4d — the implementation plan
+
+Written against `develop` at `6620a22e6`; every line number below is that sha.
+Five steps, in order — steps 1–2 are one PR (they are one decision), step 3 is
+the surface that step 2 makes truthful, step 4 is independent and can go first
+if you want a warm-up. Do not start step 3 before step 2: the UI must hide only
+what the router already refuses, or the next reviewer finds the same split
+again.
+
+#### Step 1 — archive refuses a project whose run is still open
+
+**Why first.** It removes the hard case from step 2. If no archived project can
+own a `running`/`waiting` run, then "may I continue / retro / score a run on a
+shelved project?" only ever concerns *finished* runs, and the answer is a
+policy choice rather than a correctness hole.
+
+`_archive_sync` (`hermes_cli/projects_api.py:974`) already refuses one thing —
+an already-archived record — and raises `ValueError`, which the wrapper at 1010
+turns into a `409`. Add a second blocker in the same style, right after the
+`fresh.archived` check and *before* `projects_db.archive_project`:
+
+```python
+open_runs = [
+    r for r in projects_db.list_project_runs(conn, fresh.id, limit=50)
+    if r["status"] in ("running", "waiting")
+]
+if open_runs:
+    held = ", ".join(f"run {r['run_no']} ({r['status']})" for r in open_runs)
+    raise ValueError(
+        f"project {fresh.slug} still has an open run — {held}. "
+        "Cancel it (or let it finish) before archiving."
+    )
+```
+
+`VALID_RUN_STATUSES` is `running, waiting, blocked, done, failed, cancelled`
+(`projects_db.py:2315`). Block only `running` and `waiting`: `blocked` is a
+card-level wait that carries no resume affordance, and `done`/`failed`/
+`cancelled` are terminal. Cancel is the escape hatch, and it already works on
+an archived project — which is the second reason step 2 must leave `cancel`
+open.
+
+#### Step 2 — call `_refuse_if_archived` from every act that grows the record
+
+The helper (`projects_api.py:220`) needs no change; it takes the act name and
+raises the `409` whose text names restore. Add these calls, each immediately
+after the route's `_require_write(...)`/`_require_human(...)` line so the gate
+runs before any body parsing or DB work:
+
+| Route | Line | `act` string |
+| --- | --- | --- |
+| `POST /{slug}/runs/{run_no}/continue` | 2183 | `"continuing a run"` |
+| `POST /{slug}/runs/{run_no}/retro` | 2282 | `"writing a retro"` |
+| `POST /{slug}/runs/{run_no}/score` | 2390 | `"scoring a run"` |
+| `POST /{slug}/cards` | 1663 | `"adding a card"` |
+| `POST /{slug}/playbook` | 1860 | `"revising its plan"` |
+| `POST /{slug}/playbook/{rev}/activate` | 1907 | `"activating a plan"` |
+| `POST /{slug}/outputs` | 1130 | `"declaring an output"` |
+| `POST /{slug}/outputs/{output_id}/deliver` | 1219 | `"delivering an output"` |
+| `PATCH /{slug}/outputs/{output_id}` | 1158 | `"changing an output"` |
+| `PATCH /{slug}/autonomy` | 2548 | `"changing its autonomy"` |
+| `POST /{slug}/summarise` | 1629 | `"re-summarising it"` |
+| `POST /{slug}/directives/{id}/activate` | 2014 | `"activating guidance"` |
+
+**Deliberately left open — write this list into the helper's docstring so the
+next reader does not "finish the job" again:**
+
+- `PATCH /{slug}` — already documented: a typo in an archived goal is still
+  fixable, and `test_archived_project_still_accepts_a_patch_and_restore_unblocks`
+  pins it.
+- `POST /{slug}/restore` — the one write the detail page offers.
+- `POST /{slug}/runs/{run_no}/cancel` — cancelling *reduces* the record, and
+  step 1 makes it the sanctioned way out of an open run.
+- `POST /{slug}/directives/{id}/retire`, `DELETE /{slug}/outputs/{id}`,
+  `DELETE /{slug}/members/{id}`, `DELETE /{slug}/profiles/{name}`,
+  `DELETE /{slug}/contacts/{id}`, `DELETE /{slug}/links`,
+  `DELETE /{slug}/schedule` — every one of them removes or detaches. Archive is
+  not a write-lock on the record, it is a stop on *growth*.
+- `POST /{slug}/members`, `/profiles`, `/contacts`, `/links` — bookkeeping on a
+  shelved record (fixing a wrong contact, attaching the file someone forgot).
+  Same class as `PATCH /{slug}`. If you disagree, gate them too — but then say
+  so in §13, because that is a policy change, not a bug fix.
+
+`POST /{slug}/archive` and `DELETE /{slug}` must not call the helper: archive
+has its own already-archived refusal (step 1), and hard delete *requires*
+`archived` to be true.
+
+The CLI needs no change: every verb reaches these same routes
+(`hermes_cli/projects_cli.py`), so it inherits the gate.
+
+#### Step 3 — the run page learns the project is archived
+
+`app/projects/[slug]/runs/[runNo]/page.tsx` fetches only the run (line 40,
+`client.projectRun(slug, runNoInt)`), so `RunView` cannot know. It already holds
+an `apiClientForRequest()` — fetch the project alongside the run and pass the
+flag down:
+
+```ts
+const [run, project] = await Promise.all([
+  client.projectRun(slug, runNoInt),
+  client.project(slug),   // ProjectDetail extends Project — it carries `archived`
+]);
+...
+<RunView slug={slug} run={run} archived={project.archived} />
+```
+
+Keep the existing 404 → `notFound()` behaviour, and treat a failed *project*
+fetch as non-fatal (default `archived = false`) — a run page that renders
+without the flag is better than one that errors, and the router refuses the
+write anyway.
+
+In `RunView` (`components/projects/RunView.tsx:42`) add `archived = false` to
+the props and hide, when archived: **Continue** (191), **Save retro** (328),
+the score control (341–380) and **Repeat this run** (the `${slugPath}/runs`
+button at ~206). Leave **Cancel** visible — step 1/2 keep it working. Render
+the same one-liner the panels use, so the copy matches
+`GuidancePanel.tsx:219`:
+
+> This project is archived — restore it (⋯) to continue or score this run.
+
+#### Step 4 — the delete gate counts what the delete route counts (U8)
+
+`_card_rollup_sync` (`projects_api.py:268`) passes `principal=principal`, so a
+non-owner's count is visibility-filtered; the delete route (1090) counts with
+no principal, on purpose. Add a third number from the same query path — an
+unfiltered `COUNT(*)`, not a listing:
+
+```python
+rollup["total_all_principals"] = bconn.execute(
+    "SELECT COUNT(*) AS n FROM tasks WHERE project_id = ?", (project_id,)
+).fetchone()["n"]
+```
+
+Then have `ProjectLifecycleMenu`'s `deleteEligible` read
+`card_rollup.total_all_principals` instead of `total_with_archived`. A count
+leaks no title, assignee or column. Keep `total_with_archived` — the payload is
+public API to the menu and the tests pin it.
+
+#### Step 5 — tests and the doc, in the same PR
+
+- **Extend, don't add**:
+  `tests/hermes_cli/test_projects_api_lifecycle.py::test_archived_project_refuses_every_mutating_route`
+  is already a table of `(method, url, body)` — grow it to all 12 routes from
+  step 2. The table *being* the enumeration is what stops route 13 arriving
+  ungated. Keep its tail assertions (no run, no schedule, no stray directive)
+  and add: the run's `retro` and `score_user` are still `None`, and no card was
+  created.
+- **New, in the same file**:
+  `test_archive_refuses_while_a_run_is_open` — start a run, drive it to
+  `waiting`, archive → 409 naming the run; cancel it, archive → 200.
+  `test_cancel_still_works_on_an_archived_project` — the escape hatch, pinned.
+- **New**: `test_delete_gate_counts_cards_it_cannot_see` — two cards, one
+  private to another user; the detail payload's `total_all_principals` is 2 for
+  a lead who sees one, and `DELETE` refuses consistently.
+- **agent-home**: in `RunView`'s test file (create it — there is none today),
+  assert that an archived project's run renders no Continue / Save retro /
+  score control and still renders Cancel, and that a live one renders them all.
+- **Docs**: FG-32 §13 and §16 "Lifecycle" already assert the general rule, so
+  step 2 makes them true rather than needing a rewrite — but add the
+  deliberately-open list to §13 in one sentence, and tick U7/U8 in the Block 4d
+  checklist above with a note on how each landed (the house style in Blocks
+  1–4c).
+
+**If you choose the other branch of U7** — gate only the five and keep the rest
+open — then steps 1 and 3 still apply (`continue` resuming a shelved project is
+a defect under any policy, and the run page must match), step 2 shrinks to
+`continue` alone, and §13/§16 must be narrowed to enumerate exactly what a
+shelved project still accepts. Do not leave the wording general with a partial
+gate.
+
+---
+
+## Review of Block 4d — findings U9–U12
+
+Read at `develop` `5a2c3a58f` (#310, implementation commit `59d39ff50`).
+Verified here, not taken on trust: `tests/hermes_cli/test_projects_api_lifecycle.py`
+22 passed, `-k project` across `tests/hermes_cli` 313 passed / 1 skipped, and
+`RunView.test.tsx` + `ProjectLifecycleMenu.test.tsx` 13 passed.
+
+**What Block 4d actually closed.** All four plan steps landed as written:
+`_archive_sync` refuses a `running`/`waiting` run and names it;
+`_refuse_if_archived` is now called from all twelve growing routes with the
+deliberately-open list written into its docstring; the run page fetches the
+project alongside the run and `RunView` hides Continue / Repeat / Save retro /
+the score control while Cancel stays; `_card_rollup_sync` publishes
+`total_all_principals` and `ProjectLifecycleMenu.deleteEligible` reads it. U7
+and U8 are closed **at the Projects router**. U9 is the same invariant leaking
+through a door that is not the Projects router.
+
+### U9 — cards still reach a shelved project through two non-Projects doors (medium)
+
+`POST /{slug}/cards` is gated, but `tasks.project_id` is writable from outside
+`projects_api.py`, and neither writer looks at `archived`:
+
+1. **`POST /api/registry/todos/{todo_id}/promote`** —
+   `hermes_cli/todos_api.py:526`, resolving the project at 558–572 and calling
+   `kanban_db.create_task(..., project_id=project.id)` at 588 plus
+   `projects_db.add_project_link(..., kind="todo")` at 613–622. It resolves the
+   project by slug and never asks whether it is archived, so a human promoting
+   a to-do into a shelved project gets a `triage` card on the board *and* a new
+   `project_links` row — the archived record grows twice over.
+2. **`hermes kanban create --project <slug>`** — `hermes_cli/kanban.py:1338`
+   passes `project_id` straight into the same `create_task`.
+
+Both land in `kanban_db.create_task` (`kanban_db.py:2442`), whose project
+resolution (2523–2542) is explicitly written to *silently null an unresolvable
+project id* — and to accept every project it can resolve. An archived project
+resolves fine.
+
+**Why it matters, not just wording.** This is the exact orphan class hard
+delete's card blocker exists to prevent: a project that has been archived with
+zero cards (and is therefore delete-eligible) can silently gain cards, and the
+kanban store has no FK back to `projects`, so nothing else notices. It also
+re-opens the U7 promise one route below the one Block 4d fixed: FG-32 §13's
+"a shelved project does not run and does not learn" is now true of the router
+and false of the system.
+
+**The fix — one gate, at the writer, not two at the callers.** Put the refusal
+where the project is already resolved, in `create_task`'s project branch
+(`kanban_db.py:2530`): if the resolved project is archived, raise
+`ValueError(f"project {project_obj.slug} is archived — restore it before adding
+a card")` rather than nulling the id. `create_task` already raises `ValueError`
+for bad input, so both callers surface it (`todos_api.promote_todo` should map
+it to **409**, matching the router's archived refusal, instead of the current
+generic 500 at 604–607). Do **not** null the `project_id` and keep the card:
+that produces exactly the dangling triage card the promote route already deletes
+at 597–601.
+
+Also gate the link half of promote: `POST /{slug}/links` is on the
+deliberately-open list as *bookkeeping*, but promote's link write accompanies a
+card creation, so if the card is refused the link must not be written (it is
+written after the card today, so raising in `create_task` is enough).
+
+**The tests.**
+- `tests/hermes_cli/test_todos_promote.py` (where the promote contracts already
+  live): promote a to-do into an archived project → 409, the project's
+  `total_all_principals` is unchanged, and no `project_links` row appears.
+- `tests/hermes_cli/test_kanban_db.py`: `create_task(project_id=<archived>)`
+  raises, and `create_task(project_id=<active>)` still returns a card carrying
+  the id (the regression guard for the "silently null" behaviour above).
+
+### U10 — the archive open-run scan can miss an old open run (low)
+
+`projects_api.py:1012–1015`:
+
+```python
+open_runs = [
+    r
+    for r in projects_db.list_project_runs(conn, fresh.id, limit=50)
+    if r["status"] in ("running", "waiting")
+]
+```
+
+`list_project_runs` (`projects_db.py:2373`) is `ORDER BY run_no DESC LIMIT ?`,
+so the precondition only inspects the newest 50 runs. A standing project — the
+cadence this feature exists for — passes 50 runs in a year of weekly cadence
+plus retries, and a run stuck at a checkpoint months ago is then invisible to
+the gate: archive succeeds and leaves precisely the resumable-run state U7's
+step 1 was added to prevent (`continue` is gated now, so the harm is a lie in
+the record rather than work restarting — which is why this is low, not medium).
+
+**The fix.** Ask the question in SQL instead of paging: add
+`projects_db.list_open_project_runs(conn, project_id)` —
+`SELECT run_no, status FROM project_runs WHERE project_id = ? AND status IN
+('running','waiting') ORDER BY run_no` — and have `_archive_sync` use it. No
+limit, no ordering assumption, and the 409 message keeps naming every held run.
+
+**The test.** Seed 51 `done` runs plus one `waiting` run at `run_no` 1, archive
+→ 409 naming run 1 (this fails against the current code).
+
+### U11 — the two Block 4d surfaces with no test (low)
+
+`test_delete_gate_counts_cards_it_cannot_see` pins the *payload*, but nothing
+pins the *consumer*: `ProjectLifecycleMenu.test.tsx` never sets
+`total_all_principals`, so the U8 fix's UI half rides on the `??` fallback
+chain and a future rename of the field silently restores the old behaviour.
+Likewise nothing covers the run page's own change — that it fetches the project
+alongside the run, and that a *failed* project fetch renders the run unflagged
+rather than erroring the page (the deliberate choice in #310's step 3).
+
+**The fix.** Two cases in `ProjectLifecycleMenu.test.tsx`: an archived project
+with `total_all_principals: 2` and `total_with_archived: 0` offers no Delete;
+the same with both `0` offers it. And a `page.test.tsx` (or a `RunView` case
+driven by the page's loader) for the archived / fetch-failed pair.
+
+### U12 — "archived does not grow" is still not literally true (low, or a doc fix)
+
+`POST /{slug}/links` (`projects_api.py:1546`) is deliberately open as
+bookkeeping, but links are how §1.1's samples, references, files, memories and
+conversation histories attach to a project. So a shelved project can still gain
+references and conversation history — a *record* write, not a run.
+
+Pick one and stop the drift: either gate `POST /{slug}/links` too (leaving the
+`DELETE` open), or say in FG-32 §13 that archive stops *execution and learning*
+and explicitly permits record bookkeeping — naming links, members, profiles,
+contacts and `PATCH /{slug}`. The helper docstring already lists them; §13 is
+what disagrees.
+
+**Block 4e — close U9, and the three lows with it.**
+
+**All four landed in Block 4e (#312, `3b50c6224`)** — the gate moved to the writer
+(`kanban_db.create_task`), promote maps the refusal to the router's own 409,
+archive's open-run scan is unpaged, the two untested Block 4d surfaces have
+tests, and §13 says what archive truly stops.
+
+- [x] **U9** Refuse an archived project in `kanban_db.create_task`'s project
+      branch (`kanban_db.py:2530`) so `todos_api.promote_todo` and
+      `hermes kanban create --project` cannot grow a shelved project's board;
+      map the `ValueError` to 409 in the promote route. Tests: promote →
+      409 + no card + no link; `create_task` raises on archived, still works on
+      active. *(Block 4e: the gate sits in `create_task`'s project branch;
+      promote answers 409 and the link row never lands
+      (`test_todos_promote.py::TestPromoteRefusesArchivedProject`), the CLI
+      prints the refusal instead of a traceback, and
+      `test_kanban_db.py::test_create_task_refuses_an_archived_project` +
+      `test_create_task_keeps_an_active_project_link` pin the writer both
+      ways.)*
+- [x] **U10** Replace the `limit=50` scan in `_archive_sync` with a
+      `list_open_project_runs` SQL query. Test: 51 `done` runs and a `waiting`
+      run 1 → archive refuses. *(Block 4e:
+      `projects_db.list_open_project_runs` — SQL, unpaged, ordered by
+      `run_no`; `test_archive_refuses_an_old_open_run_beyond_the_page_window`
+      seeds run 1 `waiting` under 51 `done` runs and fails against the old
+      scan.)*
+- [x] **U11** Test the U8 consumer (`ProjectLifecycleMenu` reading
+      `total_all_principals`) and the run page's project fetch, including the
+      fetch-failed path. *(Block 4e: two `ProjectLifecycleMenu` cases pin the
+      consumer on `total_all_principals` (hidden cards block Delete, zero
+      across all principals offers it); the run page's own `page.test.tsx`
+      pins archived / live / fetch-failed-renders-unflagged / 404.)*
+- [x] **U12** Decide links: gate `POST /{slug}/links`, or narrow FG-32 §13 to
+      "stops execution and learning; record bookkeeping stays open" with the
+      permitted list named. *(Block 4e decided the narrowing: links stay open
+      as record bookkeeping — §13 now says archive stops execution and
+      learning, names links as how samples, references, files, memories and
+      conversation histories attach, and lists the open bookkeeping class.)*
+
+---
+
+## Review of Block 4e — findings U13–U15
+
+Read at `develop` `31351551a` (#312, implementation commit `3b50c6224`).
+Verified here, not taken on trust: the three touched Python test files pass
+(259), the run-page + `components/projects` vitest files pass (77),
+`tsc --noEmit` and `ruff` are clean. The 22 failures in a wide
+`-k "project or kanban or todo"` sweep are **pre-existing** — the identical set
+fails at `4c40a5e45` (pre-#312), so they are cross-file pollution in the kanban
+suites, not a regression from this block.
+
+**What Block 4e actually closed.** U9's gate went in at the writer, where it
+covers every caller and not just the two the finding named: besides
+`todos_api.promote_todo` and `hermes kanban create --project`, the same
+`create_task` refusal now protects `kanban_swarm` (4 call sites),
+`tools/kanban_tools.py:938` (which already catches `ValueError` and answers a
+tool error) and `projects_run.py:369`. U10 is SQL and unpaged. U11's two
+surfaces have behaviour tests — the menu cases drive `total_all_principals`
+2 → no Delete / 0 → Delete, and `page.test.tsx` runs the page's real loader for
+archived / live / fetch-failed / run-404. U12 chose the narrowing and wrote it
+into **both** FG-32 §13 and §16, naming links as record bookkeeping.
+
+Three residuals, all low. None of them reopens an invariant; U13 is the only
+one with a runtime-visible effect.
+
+### U13 — the `ValueError` catch is wider than the refusal it maps (low)
+
+`hermes_cli/todos_api.py:599–604` catches `ValueError` around the *whole*
+card-creation block and answers **409**:
+
+```python
+except ValueError as exc:
+    raise HTTPException(status_code=409, detail=str(exc)) from exc
+```
+
+`create_task` raises `ValueError` for a family of plain input errors that have
+nothing to do with archiving — `initial_status must be one of …`,
+`workspace_kind must be one of …`, `branch_name is only valid for worktree
+workspaces`, and the skills-name validation below them. Those now return a
+`409` whose detail claims a conflict, and — because the new clause sits *above*
+the general `except Exception` — they also lose the
+`logger.warning("todos: promote card creation failed …")` line they used to
+emit. `hermes_cli/kanban.py:1350` has the same width: any `create_task`
+`ValueError` prints `kanban create: …` and exits 2, so a genuine argument
+error is now reported in the same voice as the archive refusal.
+
+**The fix.** Give the refusal its own identity instead of overloading the
+built-in. Define one exception beside the writer — e.g.
+`class ArchivedProjectError(ValueError)` in `kanban_db.py` (subclassing
+`ValueError` keeps every existing caller's behaviour, including
+`kanban_tools`' catch) — raise it in the project branch, and narrow both
+handlers to it. `todos_api` then keeps its `except Exception` path (log +
+500-family) for real input errors, and `kanban.py`'s message stays truthful.
+
+**The tests.** In `tests/hermes_cli/test_todos_promote.py`, alongside the
+archived case: promote with a `create_task` input error → **not** 409 (and the
+warning is logged). In `tests/hermes_cli/test_kanban_cli.py`, an archived
+project prints the refusal on stderr with rc 2, and a bad `--initial-status`
+still reports its own error.
+
+### U14 — `getattr` on a declared field (low, code quality)
+
+`hermes_cli/kanban_db.py:2537`:
+
+```python
+elif getattr(project_obj, "archived", 0):
+```
+
+`projects_db.Project` declares `archived: bool = False`
+(`projects_db.py:631`), and `from_row` coerces it with
+`bool(_row_get(row, "archived", 0))` (714), so the attribute always exists on
+anything `get_project` returns. `AGENTS.md` names `getattr` as a lazy typing
+escape not to reach for; the default `0` also silently reads falsy if the field
+is ever renamed, which is exactly the failure mode a plain attribute access
+would surface loudly.
+
+**The fix.** `elif project_obj.archived:`. Nothing else changes — the existing
+`test_create_task_refuses_an_archived_project` /
+`test_create_task_keeps_an_active_project_link` pair already pins both sides.
+
+### U15 — the security boundary is pinned by a mock at the route (low)
+
+`tests/hermes_cli/test_kanban_db.py` tests the writer for real (real project,
+real archive, real store, and it asserts no card landed) — that is the right
+shape. The route test does not: it patches `kanban_db.create_task` with a
+`side_effect` `ValueError`, so it pins the *mapping* to 409 and that
+`add_project_link` / `set_stage` were not called, but nothing exercises
+`POST /api/registry/todos/{id}/promote` against an actually-archived project.
+Per `AGENTS.md` ("E2E validation, not just green unit mocks" — security
+boundaries specifically), the archived gate wants one real-path test. And
+`hermes kanban create --project <archived>` has **no** test at all:
+`test_kanban_cli.py` contains zero occurrences of `archived`.
+
+**The fix.** Add one real-path case per door, keeping the mocked mapping test
+(it is cheap and pins the status code):
+
+- `test_todos_promote.py`: create a project, archive it through
+  `projects_db.archive_project`, promote a real to-do into it → 409; then
+  assert against the stores, not the mocks — no card on the board, no
+  `project_links` row of `kind="todo"`, and the to-do still at its original
+  stage.
+- `test_kanban_cli.py`: `hermes kanban create --project <archived-slug>` → rc 2,
+  the refusal on stderr, and no task row created.
+
+**Block 4f — finish the writer-level gate.**
+
+**All three landed in Block 4f (#314, `9250314d8`)** — the refusal has its own
+identity (`ArchivedProjectError`), the two handlers are narrowed to it,
+the gate reads the declared `archived` field, and the boundary has
+real-path tests on both doors.
+
+- [x] **U13** Introduce `ArchivedProjectError(ValueError)` at the writer and
+      narrow the `todos_api` (409) and `kanban.py` (rc 2) handlers to it, so
+      ordinary `create_task` input errors keep their old status and their log
+      line. Tests: a `create_task` input error through promote is not a 409;
+      the CLI reports an argument error in its own voice. *(Block 4f:
+      `kanban_db.ArchivedProjectError(ValueError)` — the subclass keeps
+      `kanban_tools`' existing catch; promote answers 409 for the refusal
+      alone and the input-error path gets its log line and the generic 500
+      back (`TestPromoteWriterGateWidth`); the CLI splits the archived voice
+      from an `invalid arguments:` voice, and the usage-error case pins the
+      argparse report.)*
+- [x] **U14** Replace `getattr(project_obj, "archived", 0)` with
+      `project_obj.archived` (`kanban_db.py:2537`) — `Project.archived` is a
+      declared, coerced field. *(Block 4f: done — the existing
+      archived/active writer pair pins both sides.)*
+- [x] **U15** Add the two real-path tests the boundary is missing: promote into
+      a genuinely archived project (asserting the board and `project_links`
+      are untouched and the to-do did not move), and
+      `hermes kanban create --project <archived>` → rc 2 with no task row.
+      *(Block 4f: `TestPromoteRealPathArchivedGate` runs the real route
+      against a genuinely archived project — real writer, real board, real
+      `project_links`, only the Supabase-only to-do store mocked;
+      `test_run_slash_create_refuses_an_archived_project` drives the real
+      CLI end to end and finds no task row.)*

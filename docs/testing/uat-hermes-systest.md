@@ -75,6 +75,18 @@ handover doc current (docs/deployment/README.md)
 7. **Report what you could not run, with the reason.** A skipped case that reads
    as a pass is the defect this project keeps finding in itself (#279). Use
    `SKIP (reason)` in the results table — never leave a row blank.
+8. **A case whose subject was empty did not pass — write `PASS (vacuous)`.**
+   If the departing member owned no rows, if no memory exists to be withheld, if
+   the verdict came out unbound, then the assertion could not have failed and the
+   row is evidence of nothing. This is rule 7's twin and the harder one to obey:
+   the command exited 0 and the wording was right, so the row *looks* earned.
+   Say which half you observed and which half had no subject; the 2026-08-17 run
+   recorded three such rows as plain PASS (B6, E1, G4).
+9. **Count the subject before you assert its absence.** "Nothing was returned"
+   and "nothing exists to return" are different verdicts with identical output.
+   Query the table first, put the count in the evidence, and only then read the
+   filter's answer — G4's PASS in the 2026-08-17 run rested on "zero memory rows
+   exist box-wide" while `app_prod.memories` held 139.
 
 ### 0.3 What a run produces
 
@@ -112,16 +124,33 @@ what the two revisions deleted, and lists whatever is left untracked.
 So A1 has a second half: the deploy output must not name an untracked file it
 cannot account for. Report the path, its owner and its mtime; do not delete it.
 
-### A2 — every enabled unit is active
+### A2 — every unit that should run is enabled *and* active
+
+Enumerate the unit **files on disk**, not the enabled set — a unit that has been
+disabled drops out of the enabled set and a loop over that set then cannot see
+it. That is not hypothetical: on 2026-08-20 twelve units (gateway, digest,
+escalation, the three email workers, all four WhatsApp units, both calendar
+units) were stopped **and disabled** for 21 hours, while `agent-home`, the
+dashboard and the public URL all answered 200 and `deploy_state.py check`
+reported no drift — the captured state holds unit *file content*, not
+enable/active state.
 
 ```bash
-for u in $(systemctl list-unit-files 'hermes-*.service' 'agent-home*.service' \
-           --state=enabled --no-legend | awk '{print $1}'); do
-  printf '%-42s %s\n' "$u" "$(systemctl is-active "$u")"
+for u in $(ls /etc/systemd/system | grep -E '^(hermes-|agent-home).*\.service$'); do
+  printf '%-42s %s/%s\n' "$u" "$(systemctl is-enabled "$u" 2>&1)" "$(systemctl is-active "$u" 2>&1)"
 done; true
 ```
 
-**Pass:** every unit `active`. At `dfa32fe3c` that is **15**: 14 `hermes-*`
+**Pass:** every long-running unit `enabled/active`; the four timer-driven
+`.service` units (`drift-check`, `memory-projection`, `review-pass`,
+`secret-backup`) are `static/inactive`, which is correct — check their `.timer`
+units are `enabled/active` instead. **Fail:** any long-running unit `disabled`
+or `inactive`; report `disabled` as the more serious of the two, since a reboot
+would not restore it. Do **not** substitute a `curl` against `:3100`, `:9119` or
+the public host — all three answer normally with the gateway dead.
+
+Historical form of this case (superseded, kept because its trap still applies):
+every unit in the *enabled* set must be `active`. At `dfa32fe3c` that is **15**: 14 `hermes-*`
 (`calendar-poller`, `calendar-triage`, `dashboard`, `digest`, `email-batcher`,
 `email-poller`, `email-triage`, `embed`, `escalation`, `gateway`, `wa-batcher`,
 `wa-bridge-connectar`, `wa-bridge-personal`, `wa-triage`) plus
@@ -265,6 +294,13 @@ gone.
 
 ### B6 — transfer moves rows but never memory
 
+**Setup, or the case is vacuous:** the departing uid must own at least one
+layer-4 `memories` row before the delete, and the count goes in the evidence. A
+member enrolled minutes ago owns none, so `0 transferred, 0 deleted` is what the
+command prints whether the rule holds or not (that is exactly what the
+2026-08-17 run recorded as PASS). Write one as that principal through the store's
+own write path — not an `INSERT` — then re-count.
+
 `H member delete <uid> --strategy transfer --transfer-to <uid2>`.
 
 **Pass:** the summary reports rows transferred, prints *"Their curated memory
@@ -331,6 +367,19 @@ that nothing had ever run it unprompted.
 
 ### D2 — adoption seeds what it promises
 
+**A suggestion has to exist, and four gates decide whether one can.** In
+`generate_suggestion`: the one-open cap (a `proposed` row blocks generation), the
+monthly clock (`_generation_due` — the interval since this profile last
+proposed), the evidence bar (`_evidence_strong_enough`: **two or more skills with
+recorded uses**, plus orphan operational goals or more than one participant), and
+the dedup key of any `dismissed` row. Read all four before reporting *why* there
+is no suggestion — "none pending" is a symptom of one of them, and which one
+matters. On 2026-08-18 the box had **0 skills with recorded uses** and its last
+suggestion adopted on 2026-08-16, so two independent gates were shut; no amount
+of re-running the command would produce one, and the case is a
+`SKIP (no suggestion generatable)` until real usage accumulates. Do not fabricate
+a row in the production database to unblock it.
+
 `H profile adopt <suggestion-id>` on a `uat` suggestion.
 
 **Pass:** the new profile gets its sub-goal, the published entity goal, and an
@@ -367,6 +416,11 @@ H doctor
 **Pass:** one verdict — `comfortable` / `watch` / `constrained` — and it names
 the bound that produced it. `constrained` is report-only; it must not refuse
 work.
+
+**`comfortable` on an idle box does not exercise the naming half** — nothing is
+binding, so there is no bound to print and the assertion cannot fail. Either
+reach a binding state (a temp home whose `max_concurrent_sessions` the current
+load already exceeds) or record `PASS (vacuous — verdict unbound)`.
 
 ### E2 — the latency figure is about turns a human waited for
 
@@ -438,8 +492,19 @@ browser; otherwise **SKIP (no browser)**.
 
 ### G4 — the memory screens are per-principal
 
+Count first (rule 9): `SELECT owner_user_id, visibility, count(*) FROM
+app_prod.memories GROUP BY 1,2`. Rows the member must **not** see have to exist,
+or a screen showing nothing proves nothing. On 2026-08-18 there were 139 —
+128 `private:leo_owner`, 11 `private:owner`.
+
 **Pass:** a member sees their own memory and the profile-shared block, and not
-another person's participation memory.
+another person's participation memory — with both counts in the evidence.
+
+The surface is client-side, so without a browser assert it at the seam the screen
+reads through: `PgvectorMemoryStore.query(principal, …)` for the owner and for a
+member, on one connection. Verified 2026-08-18 at `763eb6e2d` — owner 20/20 rows
+all `leo_owner`, member **0**, `role_reads False`. That is a read; pass
+`record_use=False` so the check does not write `uses` back onto the owner's rows.
 
 ---
 
@@ -486,6 +551,7 @@ half of the bug: it made every retry fail with "profile already exists").
 | `commit-channel` with a live bot (D4) | needs a real platform token you are authorised to use | a provisioned test bot token |
 | Delivery to a real phone / push | needs a human holding the device | a human tester |
 | Whether the behaviour is *wanted* | acceptance is a judgement, not an assertion — this suite proves the system does what we said it does | Leo's review of the run |
+| Adoption (D2) and retirement's success branch (D3) | no suggestion can be generated: the evidence bar needs two skills with recorded uses (the box has none) and the monthly clock is shut until ~mid-September. Fabricating a `profile_suggestions` row in the production database would test the adoption code against data no user could have produced | real skill usage on the box, or a documented `--force` generation path for testing |
 | Box-wide session cap enforcement | 3 profiles × 15 means the box can be *asked* for 45; FG-31 reports the total and enforces nothing, by decision | a decision to make the cap box-wide |
 
 ---
@@ -513,17 +579,17 @@ the third run printed the verdict above with no unaccounted untracked files.
 | B3 purge erases files | PASS | `Erased curated memory:` per path; dirs gone; account intentionally left |
 | B4 identity survives elsewhere | PASS | default participation gone; maintenance participation + identity remain |
 | B5 last participation takes identity | PASS | existing account enrolled into `maintenance`, purged there; participation and identity both gone |
-| B6 transfer never moves memory | PASS | exact "left in place — transfer moves what they owned…" wording; curated files verified present. Note: seeded members owned 0 DB rows (`0 transferred, 0 deleted`), so the rows-deleted check rests on the summary contract |
+| B6 transfer never moves memory | PASS (vacuous) | exact "left in place — transfer moves what they owned…" wording; curated files verified present. The rows half had **no subject**: the seeded members owned 0 rows, so `0 transferred, 0 deleted` was the only possible output whether or not the rule holds (re-read 2026-08-18, rule 8) |
 | B7 delete help is truthful | PASS | help states memory rows deleted under both strategies; purge erases curated files and identity on last participation |
 | C1 roster | PASS | role, email, activation, channels per principal; 50-row cap not observable (3 principals) |
 | C2 suspension drops bindings | PASS | real `resolve_principal` seam: principal → `None` while suspended → restored; roster shows `[SUSPENDED HERE]` |
 | C3 authority checked where it acts | PASS | over HTTP as an activated member: maintenance-scoped admin action and read → 403 `subject '…' is not enrolled in profile 'maintenance'`; default-scoped `whoami` → 200 |
 | C4 account verbs absent | PASS | CLI parser error on `account`; member verbs enrolment-scoped only; HTTP account probes → 404 (earlier 405s were the GET-only SPA catch-all — a bogus GET 404s too) |
 | D1 suggestion pass is scheduled | PASS | timer enabled+active; unprompted run 08:10, `Result=success`, `ExecMainStatus=0`, next 2026-08-24 |
-| D2 adoption seeds correctly | SKIP | no pending suggestion; the only on-demand generator **crashes in this revision** — `hermes profile suggest` → `TypeError: GoalRegistryStore.__init__() missing 1 required positional argument: 'store'` at `hermes_cli/main.py:11489` (re-run reproduced). Timer path unaffected (`run_review_pass` builds the store correctly). Fabricating a suggestion row in the production DB is out of scope. Defect → PR, per "If a case fails" |
+| D2 adoption seeds correctly | SKIP | no pending suggestion; the only on-demand generator **crashed in this revision** — `hermes profile suggest` → `TypeError: GoalRegistryStore.__init__() missing 1 required positional argument: 'store'` at `hermes_cli/main.py:11489` (re-run reproduced). Timer path unaffected (`run_review_pass` builds the store correctly). Fabricating a suggestion row in the production DB is out of scope. **Crash fixed since by #300** — re-checked 2026-08-18 at `763eb6e2d`, the command now answers `No profile suggestion generated this cycle`; the case stays SKIP for a different and more durable reason (two generation gates shut: 0 skills with recorded uses, and `_generation_due` false since the 2026-08-16 adoption). See §6 |
 | D3 retirement closes goals | PASS | honest-report contract on two real causes: bare profile `⚠ Goals NOT closed (RuntimeError: Supabase app datastore is not configured…)`; clone `⚠ Goals NOT closed (UndefinedTableError: relation "goals" does not exist)` — archive made, retry-safe, no fake exit-0 success (anti-#265). The `Goals closed: N` success branch is only reachable via adoption, blocked by D2 |
 | D4 commit-channel refusal | SKIP | no bot token provisioned (§6) |
-| E1 capacity names its bound | PASS | one verdict `comfortable` with its load figures in `status` and `doctor`; bound named only when binding (per the render path) |
+| E1 capacity names its bound | PASS (vacuous) | one verdict `comfortable` with its load figures in `status` and `doctor`. The naming half had **no subject**: nothing was binding on an idle box, so no bound could be printed and the assertion could not fail — the claim that it names one when binding is read off the render path, not observed |
 | E2 latency excludes machines | PASS | 23 interactive samples, p50 10.96s / p95 19.15s; exclusion via `sessions.source` + `cron_*` id convention; 8-sample floor prevents small windows binding |
 | F1 digest names what failed | PASS | one section's input broken in a render-only probe → `Capacity: unavailable — RuntimeError: uat-injected: config unreadable`, not omitted |
 | F2 one digest per week | PASS | two deliver-mode runs collapsed onto the single `entity-review:2026-W34` row (`ntf_6c9e1b4c…`); nothing stacked |
@@ -531,10 +597,19 @@ the third run printed the verdict above with no unaccounted untracked files.
 | G1 agent-home bundle is current | PASS | `BUILD_ID` mtime 01:54:52+08, right after the last commit touching `agent-home/`/root lock (`5afaa8dcf`); zero such changes between it and HEAD |
 | G2 agent-home health | PASS | `/` → 200 with client-side `/login` redirect in the React tree; `/login` → 200 |
 | G3 authenticated page | PASS | session minted per the box skill; `/capacity` SSR renders `14.7 GB` / `comfortable` / `p50` / `p95` matching the CLI. Memory-map geometry not proven — client-side fetch, no browser (documented trap) |
-| G4 per-principal memory | PASS | real member login via `/api/session/login` resolves the member principal (`is_owner: false`); memory fetches principal-bound rows. Content-diff not demonstrable: zero memory rows exist box-wide; map is client-side |
+| G4 per-principal memory | PASS | real member login via `/api/session/login` resolves the member principal (`is_owner: false`); memory fetches principal-bound rows. The recorded reason was **wrong** — `app_prod.memories` holds 139 rows (128 `private:leo_owner`, 11 `private:owner`), not zero, so the content diff was demonstrable all along. Re-run at the store seam 2026-08-18 at `763eb6e2d`: owner `query()` → 20/20 rows all `leo_owner`, the member → **0**, `role_reads False`. The withholding is now observed rather than assumed; the map's geometry remains unproven (client-side, no browser) |
 | H1 clone-all exclusions | PASS | exact contract wording; clone has shared `MEMORY.md`, no `memories/users/`, no `persons/`, no sessions/backups/snapshots |
 | H2 clone refuses cleanly | PASS | one error naming `/opt/data/hermes-home-staging/uat-unreadable.bak`; no half-made profile dir (#286 fixed) |
 | H3 deletion is clean | PASS | dir gone; list back to `default` + `maintenance` |
+
+**Reviewed 2026-08-18 at `763eb6e2d`** (the box has since moved on from
+`17fa7bbbf` through #298–#301). Every claim above was read against the live box
+rather than accepted: revision, tree, 15 units, drift, installed deploy tool
+`cmp`-identical, and no `uat` leftovers — profiles are back to `default` +
+`maintenance`, the roster to `leo_owner` + the older FG-24 systest member, and the
+one `profile_suggestions` row is the `adopted` `systest30` from 2026-08-16, not
+from this run, so A6 holds. Three verdicts were downgraded and one reason
+corrected, per rules 8 and 9; nothing was upgraded, and no row became a FAIL.
 
 **Run-impact disclosures:** the §F double run (and a final re-render to scrub
 uat lines from the digest body) re-delivered the W34 digest row — if the

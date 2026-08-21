@@ -6,6 +6,7 @@ import { useState } from "react";
 import {
   AddToProjectSheet,
 } from "@/components/projects/AddToProjectSheet";
+import { ProjectLifecycleMenu } from "@/components/projects/ProjectLifecycleMenu";
 import { dayDistance } from "@/components/projects/format";
 import { BoardPanel } from "@/components/projects/panels/BoardPanel";
 import { BriefPanel } from "@/components/projects/panels/BriefPanel";
@@ -70,11 +71,17 @@ export function ProjectDetailView({
   board,
   playbook,
   directives,
+  callerUserId,
+  isInstanceAdmin,
 }: {
   project: ProjectDetail;
   board: ProjectBoardView | null;
   playbook: ProjectPlaybookResponse | null;
   directives: ProjectDirectivesResponse | null;
+  /** The signed-in principal's user id — the lifecycle gate (§13). */
+  callerUserId: string;
+  /** Box-wide owner/admin outranks the per-project matrix (§11). */
+  isInstanceAdmin: boolean;
 }) {
   const router = useRouter();
   const [busy, setBusy] = useState(false);
@@ -152,6 +159,11 @@ export function ProjectDetailView({
               <Pill tone={HEALTH_TONE[project.health]}>
                 {HEALTH_LABEL[project.health]}
               </Pill>
+              <ProjectLifecycleMenu
+                project={project}
+                callerUserId={callerUserId}
+                isInstanceAdmin={isInstanceAdmin}
+              />
             </div>
             {project.goal ? (
               <p className="mt-1 text-sm text-[var(--color-muted)]">
@@ -166,6 +178,12 @@ export function ProjectDetailView({
             ) : null}
 
             <div className="mt-3 flex flex-wrap gap-2">
+              {project.archived ? (
+                <p className="text-sm text-[var(--color-muted)]">
+                  This project is archived — restore it (⋯) to run it again.
+                </p>
+              ) : (
+              <>
               <button
                 type="button"
                 onClick={() => void post(`${slugPath}/runs`)}
@@ -195,6 +213,8 @@ export function ProjectDetailView({
               >
                 Add
               </button>
+              </>
+              )}
             </div>
 
             {error ? (
@@ -226,7 +246,11 @@ export function ProjectDetailView({
           {/* ── Panels — stacked on a phone, two columns from md: ── */}
           <div className="flex flex-col gap-4 md:grid md:grid-cols-2 md:items-start">
             <BriefPanel project={project} />
-            <OutputsPanel slug={project.slug} outputs={project.outputs} />
+            <OutputsPanel
+              slug={project.slug}
+              outputs={project.outputs}
+              archived={project.archived}
+            />
             <ProgressPanel
               slug={project.slug}
               project={project}
@@ -235,7 +259,11 @@ export function ProjectDetailView({
             <BoardPanel slug={project.slug} board={board} />
             <RunsPanel slug={project.slug} runs={project.runs} />
             <PlanPanel playbook={playbook} />
-            <GuidancePanel slug={project.slug} initial={directives} />
+            <GuidancePanel
+              slug={project.slug}
+              initial={directives}
+              archived={project.archived}
+            />
             <PeoplePanel project={project} />
             <FilesPanel project={project} />
             <ReferencesPanel project={project} />

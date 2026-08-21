@@ -187,6 +187,15 @@ def test_list_pagination_loses_no_rows_under_a_filter(env):
         )
         slugs.append(project["slug"])
         ids[project["slug"]] = project["id"]
+    # Same-second rows sort on random project ids — stagger the timestamps
+    # so "newest first" is deterministic instead of a coin flip.
+    with projects_db.connect_closing() as conn:
+        with projects_db.write_txn(conn):
+            for i, slug in enumerate(slugs):
+                conn.execute(
+                    "UPDATE projects SET created_at = ? WHERE slug = ?",
+                    (1_700_000_000 + i, slug),
+                )
     newest, oldest = slugs[-1], slugs[0]
     _waiting_run(ids[newest])
     _waiting_run(ids[oldest])

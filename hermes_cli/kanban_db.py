@@ -2439,6 +2439,17 @@ def _resolve_task_scope(
     return owner, resolved
 
 
+class ArchivedProjectError(ValueError):
+    """§13 (U9/U13): a card was attempted against a shelved project.
+
+    Its own identity so callers can map THIS refusal precisely — the
+    to-do promote route answers 409 like the Projects router, the CLI
+    its own refusal voice — without hijacking the plain ``ValueError``
+    family ``create_task`` raises for ordinary input errors. Subclassing
+    ``ValueError`` keeps every existing caller's catch intact (the
+    kanban tool's included)."""
+
+
 def create_task(
     conn: sqlite3.Connection,
     *,
@@ -2535,6 +2546,18 @@ def create_task(
             # creation or persist a dangling reference — drop the link and
             # create the task as an ordinary (scratch) task.
             project_id = None
+        elif project_obj.archived:
+            # §13 (U9): a shelved project does not grow — and this writer
+            # sits BELOW the Projects router, so the gate lives here, once,
+            # where the project is already resolved. Raise (never null the
+            # id and keep the card): callers map this to their refusal —
+            # the to-do promote route answers 409 like the router does.
+            # ``archived`` is a declared, coerced field on ``Project``
+            # (U14) — plain access, not a getattr escape hatch.
+            raise ArchivedProjectError(
+                f"project {project_obj.slug} is archived — restore it "
+                "before adding a card"
+            )
         else:
             # Canonicalise (a slug may have been passed) and anchor the
             # worktree under the project's primary repo.

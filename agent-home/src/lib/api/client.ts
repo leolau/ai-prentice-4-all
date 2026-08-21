@@ -1257,6 +1257,38 @@ export class HermesApiClient {
     });
   }
 
+  /** Shelve it (§13): the archived flag and status land in one call, the
+   * schedule detaches by the same call. Answers the updated row, never an
+   * ack — the list merges it. */
+  async archiveProject(slug: string, reason?: string): Promise<Project> {
+    return this.request(
+      `/api/registry/projects/${encodeURIComponent(slug)}/archive`,
+      { method: "POST", json: reason ? { reason } : {} },
+    );
+  }
+
+  /** Bring a shelved project back — lands in `paused`, never `active`, and
+   * the schedule is not resurrected (§12). Answers the updated row. */
+  async restoreProject(slug: string): Promise<Project> {
+    return this.request(
+      `/api/registry/projects/${encodeURIComponent(slug)}/restore`,
+      { method: "POST", json: {} },
+    );
+  }
+
+  /** Hard delete — the narrow exception (decision 17): human-only upstream,
+   * `confirm` must equal the slug, and a 409 names what history the record
+   * still carries. */
+  async deleteProject(
+    slug: string,
+    confirm: string,
+  ): Promise<{ deleted: string }> {
+    return this.request(
+      `/api/registry/projects/${encodeURIComponent(slug)}?confirm=${encodeURIComponent(confirm)}`,
+      { method: "DELETE" },
+    );
+  }
+
   /** Autonomy gets its own route so the audit line is unmistakable (§12). */
   async setProjectAutonomy(
     slug: string,

@@ -1038,6 +1038,9 @@ auth and is not reachable from `agent-home`).
 | `GET /` | readable projects: filters `status`, `cadence`, `health`, `q`, `archived`; keyset `cursor` → `{items, next_cursor}`. Each item: goal progress, card rollup, member count, `cadence`, `next_run_at`, `health`, `due_at` |
 | `POST /` | create: **goal [1], description [2], at least one output [3], host profile + creator as lead [4]** — refused without them (§2.2) — plus `name` (defaults from `goal`, §2.2), slug?, icon/colour, `cadence`, `target_audience`, `definition_of_done`, `board_slug` (bind or create), folders, first goal link |
 | `GET /{slug}` | the whole record in one read: fields 1–15 — outputs + their deliveries, members + profiles, contacts (members only), active playbook, active directives, tools/skills (with the host-profile intersection applied so the UI shows what would *actually* run), derived progress + score + health, board rollup, links grouped by kind, last N `task_events`, last 5 runs |
+| `POST /{slug}/archive` | shelve it (§13): `archived=1` **and** `status='archived'` in one transaction, plus `detach_project_schedule()` so a shelved project cannot keep firing. Optional `reason`, recorded with who did it. Lead / instance admin. Returns the **updated project row**, never an ack |
+| `POST /{slug}/restore` | bring it back: `archived=0`, `status='paused'`. Deliberately not straight to `active` — re-entry is a decision, and `paused` keeps the §2.2 exit gate meaningful. The schedule is **not** re-created; `PUT /schedule` does that |
+| `DELETE /{slug}?confirm=<slug>` | hard delete, the narrow case (§13): **human-only** (`_require_human`), owner or lead, and refused `409` unless the project is already archived **and** carries no run, no delivered or accepted output, and no card. Anything else has history: archive it. Clears the `project_meta` active pointer, detaches the schedule, then deletes — the `project_*` tables cascade on the FK |
 | `PATCH /{slug}` | `goal`, `name` (independently — re-wording the goal never silently renames the project, and renaming never rewrites the goal), description, status, cadence, `due_at`, `review_every`, `target_audience`, `score_rubric`, icon/colour, visibility, `board_slug`, `definition_of_done`, `max_in_progress`, `budget_usd_per_run` |
 | `PATCH /{slug}/tools` | `toolsets` [13] + `skills` [14]; validates names and returns the resolved intersection, so an impossible request is refused loudly (§4.1) |
 | `GET /{slug}/outputs`, `POST /{slug}/outputs`, `PATCH /{slug}/outputs/{id}`, `DELETE /{slug}/outputs/{id}` | the deliverables [3]; delete refuses on the last required output |
@@ -1178,7 +1181,80 @@ prefilled from it and editable inline, so the split costs the user nothing), [2]
 output (everything mandatory except participants, which default to you + the
 current profile); step 2 is "how should this run" — cadence, autonomy, host
 profile — and is skippable into a `manual` `one_off`. Ten optional fields on a
-create form would guarantee nobody fills in the four that matter.
+create form would guarantee nobody fills in the four that matter. The form pins
+the host profile to the profile serving the page (a read-only field) — the
+record lives where you can see it, so hosting a project on a *named* profile
+stays a CLI act, not a form choice.
+
+**The create form needs a door.** The list header carries a primary **New project**
+action, and the empty state's CTA is the same one — a Projects page with no way to
+create a project is not a missing nicety, it is the feature being unreachable for
+everyone except a CLI operator. `/projects/new` is a server-rendered route (not a
+modal): the two mandatory Markdown-ish fields need room, a refused submit must be
+linkable and reloadable without losing what was typed, and the BFF's 422 `missing`
+list maps onto the field that is blank. On success it redirects to
+`/projects/[slug]`, where the new project is already readable.
+
+### Removing a project — archive is the verb, delete is the exception
+
+A project is a durable record, so "remove" cannot mean "forget". Two verbs, and
+the UI must not present them as siblings:
+
+- **Archive** is the ordinary one: reversible, keeps every run, output, retro and
+  score, drops the project out of the list, and stops it running. It is the
+  answer for "I'm done with this" and for "this was a mistake, three runs ago".
+- **Delete** exists for the genuinely empty mistake — the project created with a
+  typo in its goal that never ran. It is refused the moment there is anything to
+  learn from: any run, any delivered or accepted output, any card.
+
+Why delete is narrow rather than a big red button with a cascade: the record's
+child tables cascade on the foreign key, but **cards do not** — `tasks.project_id`
+lives in the per-profile kanban store, a different database with no FK back to
+`projects`. A hard delete of a project with cards would leave the board pointing
+at a project id that no longer resolves, and the board is somebody's actual work.
+Refusing is honest; a cascade across two stores is a data-loss feature.
+
+The affordances, and where they are *not*:
+
+```
+/projects/[slug]  ⋯ overflow menu, never a bare button in the header
+                  ├─ Archive project…        → reason field, one confirm
+                  ├─ Restore project         (only when archived)
+                  └─ Delete permanently…     (only when the §12 preconditions
+                                              hold; typed-slug confirmation,
+                                              and the dialog says what would be
+                                              lost and what archive keeps)
+/projects         Archived chip beside All — restore is only discoverable if a
+                  shelved project can be found again
+```
+
+Every one of these is a `BusyRegion` write that merges the **returned project
+row** (the ed.3.1 lesson: a write that returns an ack the UI renders as a row is
+indistinguishable from a write that did nothing), and delete redirects to
+`/projects` with the row gone rather than leaving a detail page for something
+that no longer exists. A `viewer` sees none of the three; a member who is not a
+lead sees Archive disabled with the reason, not hidden — "why can't I" is a
+better question than "where did it go".
+
+**A shelved project does not run and does not learn.** Archive stops
+*execution and learning* — while archived, every act that would grow what
+the project does or knows — start, continue, retro or score a run, add a
+card, save or activate a playbook, declare, change or deliver an output,
+accept an output, add or activate guidance, set a schedule, change the
+tools or the autonomy, re-summarise — is refused `409` naming the archive
+and pointing at restore; the panels and the run page hide the same
+affordances with the same hint. The gate also holds one layer below the
+router: the card writer itself (`kanban_db.create_task`) refuses an
+archived project, so the to-do promote route and
+`hermes kanban create --project` cannot grow the board either. Record
+bookkeeping deliberately stays open — it writes the *record*, not what
+the project does: correcting a typo (`PATCH /{slug}`), links (how samples,
+references, files, memories and conversation histories attach to a
+project), member/profile/contact bookkeeping, every DELETE verb and
+directive retirement, and cancel. Archive itself refuses to shelve a
+project holding a `running`/`waiting` run — it asks the store for *every*
+open run, not a page of the newest — so cancel is the sanctioned way out
+of an open run. Restore is the one act that unblocks everything else.
 
 **Adding to a project is a link, from both ends.** The detail page has an "Add"
 sheet (search across files, arrivals, to-dos, goals, conversations), and
@@ -1193,6 +1269,9 @@ the to-do to `working`.
 ```
 src/app/projects/page.tsx                      list, server-rendered
 src/app/projects/loading.tsx
+src/app/projects/new/page.tsx                  the two-step create form (§13)
+src/components/projects/NewProjectForm.tsx     client form, 422 → field errors
+src/components/projects/ProjectLifecycleMenu.tsx  archive / restore / delete…
 src/app/projects/[slug]/page.tsx               detail
 src/app/projects/[slug]/loading.tsx
 src/app/projects/[slug]/runs/[no]/page.tsx     one run
@@ -1221,6 +1300,7 @@ Client methods on `HermesApiClient`: `projects()`, `project()`, `createProject()
 `deliverProjectOutput()`, `acceptProjectOutput()`, `scoreProjectRun()`,
 `projectContacts()`, `addProjectContact()`, `setProjectTools()`,
 `projectMembers()`, `addProjectMember()`, `addProjectProfile()`,
+`archiveProject()`, `restoreProject()`, `deleteProject()`,
 `linkToProject()`, `unlinkFromProject()`, `projectActivity()`,
 `projectConversations()`, `projectEvents()`; types in `src/types/index.ts`.
 
@@ -1452,6 +1532,42 @@ Behaviour contracts, not change detectors (`AGENTS.md`).
   (and References/Memories hide) rather than rendering empty;
   the two-step create form blocks on [1]–[3] and defaults [4]; `filters.ts` passes the server/client
   boundary test; nav tests updated for the secondary slot and the Home card.
+- **The create action exists on the page**, not only in the API: the list header
+  and the empty state both route to `/projects/new`, and the form's submit posts
+  the §2.2 four. A test that asserts `createProject()` exists on the client while
+  no rendered surface calls it is exactly the hole that shipped.
+- A 422 from create names the blank field in the form rather than a toast, and a
+  refused submit preserves what was typed.
+
+**Lifecycle (§13)**
+- Archive sets `archived=1` **and** `status='archived'`, and a project with a
+  schedule has its cron job detached by the same call — the invariant is that no
+  archived project has a live `cron_job_id`.
+- An archived project is absent from the default list, present under Archived,
+  and its detail page still renders the whole record read-only-ish (restore is
+  the only write offered).
+- Restore lands in `paused`, never `active`, and does **not** resurrect the
+  schedule.
+- While archived, every growing act — start/continue/retro/score a run, add
+  a card, save or activate a playbook, declare/change/deliver/accept an
+  output, add or activate guidance, set a schedule, change the tools or the
+  autonomy, re-summarise — is refused `409` until restore, and the refusal
+  also holds at the card writer (`kanban_db.create_task`), so the to-do
+  promote route and `hermes kanban create --project` inherit it. What stays
+  allowed is record bookkeeping, not growth: `PATCH /{slug}` (record
+  fields), links, member/profile/contact bookkeeping, the DELETE verbs,
+  directive retirement, and cancel. Archive refuses to shelve a project
+  holding a `running`/`waiting` run — it scans every run, not a page — and
+  cancel (or finishing it) is the way out.
+- Delete refuses (409, naming what it found) when the project has a run, a
+  delivered or accepted output, a card, or is not archived; it refuses (403)
+  for a session-less or agent caller, and for a member who is not a lead; and
+  the `confirm` parameter must equal the slug.
+- A permitted delete leaves nothing behind: the `project_*` rows are gone, the
+  active-project pointer no longer names it, no cron job survives, and
+  `GET /{slug}` is a 404 for everyone.
+- Archive and delete both return the row shape the UI merges, and the UI reflects
+  the new state without a reload.
 
 **Live (systest box), after deploy**
 - Create a repeatable project with a 4-step playbook including a checkpoint, set
@@ -1480,6 +1596,8 @@ Behaviour contracts, not change detectors (`AGENTS.md`).
 | 9b | **Score**: `POST /runs/{n}/score`, `score_self` with the retro, the derived project score, the ≥2 divergence column, `score_rubric` | Needs runs to exist; cheap and independently useful. |
 | 10 | **Retro + learning**: retro write-back, proposed playbook revisions and directives, skill-candidate provenance into `background_review` | Last, because it needs real runs to be worth anything. |
 | 11 | **Events + summary**: `GET /{slug}/events?since=`, `POST /{slug}/summarise` | |
+| 12 | **Lifecycle API**: `POST /{slug}/archive`, `POST /{slug}/restore`, `DELETE /{slug}` with the §13 preconditions + the human gate, and the CLI verbs `projects archive/restore/delete` (delete behind `--as-human --confirm <slug>`) | Backend first, so step 12b's menu cannot ship faster than the rules it depends on. The store functions (`archive_project`, `restore_project`, `delete_project`) already exist from the folder-workspace era — this is the router, the preconditions and the cleanup, not new SQL. |
+| 12b | **Management UI**: `/projects/new` + `NewProjectForm`, the list header and empty-state action, `ProjectLifecycleMenu` (archive / restore / delete…) and the Archived chip | The step that closes the gap the owner hit: create and remove existed at every layer *except* the one a user touches. |
 
 Steps 1–5 are backend-only and land first, so that by the time step 8 renders a
 panel there is a real project with real runs behind it — the sequencing that
@@ -1557,6 +1675,13 @@ worked for Incomings and To-dos.
     automation reacts to a score in v1; the divergence is the signal.
 16. **Contacts are project-scoped rows, not an address book**, and their
     addresses are member-only PII.
+17. **Removal is archive by default; hard delete is the narrow exception**
+    (owner decision, 2026-08-18). Archive is reversible, keeps the record and
+    detaches the schedule; delete is human-only, requires the project to be
+    already archived and to carry no run, accepted/delivered output or card, and
+    refuses rather than cascading across the kanban store — `tasks.project_id`
+    has no foreign key back to `projects`, so "delete everything" would mean
+    silently orphaning somebody's board.
 
 ---
 
@@ -1612,6 +1737,12 @@ sequencing did not name (8b, 9b) and a live-integration merge:
 | 10 | Retro → learning (playbook rev / directive / skill candidate, all inactive) | #275, #276 |
 | 11 | Event tail, rolling `summarise`, phase closeout | #276, #278 |
 | — | Live integration into `develop` | #279, #280 |
+| 12 | Lifecycle API: archive / restore / delete router, §13 preconditions, human gate, CLI verbs | #305 |
+| 12b | Management UI: `/projects/new` + `NewProjectForm`, the `[⋯]` menu, the Archived chip | #305 |
+| 12c | Lifecycle hardening (review U2–U6): the archived-inert gate, structured 422 forwarding to the form, the archived-inclusive card count, the flag-aware Archived chip, and the interaction + route tests | #307 |
+| 12d | Lifecycle completion (review U7–U8): the gate on every growing route, the archive-time open-run precondition, the run page's archived wiring, and the principal-blind delete count | #310 |
+| 12e | Below-router completion (review U9–U12): the writer-level archived gate in `create_task` (promote → 409, no orphan link), the unpaged open-run scan, the U8 consumer and run-page loader tests, and §13's narrowed wording | #312 |
+| 12f | Writer-gate residuals (review U13–U15): `ArchivedProjectError` identity with narrowed promote/CLI handlers, plain-field `archived` access, and real-path boundary tests on both doors | #314 |
 
 Verified at `7c737474f`: 185 Projects Python tests pass, 46 agent-home Projects
 tests pass, `tsc --noEmit` clean. The feature has **not** been deployed or
@@ -1658,6 +1789,118 @@ The design-relevant ones, in the order the second review recommends fixing them:
    page slice so paging *loses* matching rows.
 5. **E3 — the §12 event tail has no consumer**, so §13's live board updates do
    not happen; the page refreshes only after its own writes.
+6. **U1 — the Projects page has no way to create or remove a project** (owner
+   report, 2026-08-18). `POST /api/projects` validates the §2.2 four and
+   `createProject()` is on the client, but nothing rendered calls either:
+   `ProjectsList` has one button and it is "load more", and there is no
+   `/projects/new` route. Removal is worse than missing — it exists at no layer
+   above the store: `projects_db` has `archive_project`, `restore_project` and
+   `delete_project`, the Python router exposes neither (only `PATCH` with a
+   `status`, which sets the string without detaching the schedule), and
+   `api/projects/[slug]/route.ts` has `GET` and `PATCH` only. So the feature is
+   reachable only from a CLI, which is not the primary UI (`AGENTS.md`).
+   §13 now specifies the surfaces and §12 the endpoints; steps 12 and 12b
+   build them. Note the trap recorded in decision 17: a naive cascade would
+   orphan `tasks.project_id` rows in the per-profile kanban store, which has no
+   foreign key back to `projects`.
+7. **U2–U6 — Block 4b built the doors; two contracts are still unmet**
+   (review of `570be680f`, 2026-08-20). The lifecycle store/router/CLI match
+   §12 and decision 17, and `/projects/new` + the `[⋯]` menu exist. What does
+   not hold yet: **archive stops the cron job but not the project** — no
+   mutating route checks `archived`, so a shelved project still accepts a
+   manual run, an accepted output and a new directive, and the detail page
+   hides only its three header buttons while the Outputs and Guidance panels
+   keep their writes (§13 "stops it running", §16 "restore is the only write
+   offered"); and **the 422 → blank-field mapping cannot fire**, because the
+   BFF bridge flattens a structured `detail` to a string, so the `missing`
+   list §13 promises never reaches `NewProjectForm`. Three smaller ones: the
+   new BFF routes and client lifecycle methods have no tests and the new
+   component tests are markup-only; `deleteEligible` counts cards without
+   archived ones while the server counts them; and the Archived chip matches
+   on `status` so a row shelved before Block 4b is unreachable from it.
+   **Block 4c** of the end-to-end review is the worklist. **FIXED in Block 4c
+   (#307)**: every mutating route refuses an archived project `409` and the
+   panels hide the same affordances; the bridge forwards a structured `detail`
+   so the 422's `missing` list maps onto the blank field; the three new BFF
+   routes and both new components have handler-level tests; the detail payload
+   carries an archived-inclusive card count the delete gate reads; and the
+   Archived chip matches the `archived` flag as well as the status.
+
+8. **U7–U8 — the archived-inert rule is asserted generally and enforced on five
+   routes** (review of Block 4c, `b743715d1`/PR #307, 2026-08-21). U3–U6 are
+   closed. But `_refuse_if_archived` guards only run / accept / directives /
+   tools / schedule, while the §13 paragraph that lands with #307 promises it of
+   *every* growing act, so
+   `continue` a held run, `retro`, `score`, add a card, save or activate a
+   playbook revision, add or deliver an output, raise `autonomy` and
+   `summarise` all still land on a shelved project — and archive has no
+   precondition on an in-flight run, so a project holding a `waiting` run can
+   be shelved and then resumed, which §13's "stops it running" forbids. The run
+   page compounds it: it fetches the run only, so `RunView` cannot know the
+   project is archived and still offers Continue / Cancel / retro / score.
+   Either gate the rest or narrow this section's wording — they must not
+   disagree. U8 (low): the delete gate counts cards *with* the caller's
+   principal while the delete route counts without one, so a lead who cannot
+   see a colleague's private card is offered a Delete the route refuses.
+   **Block 4d** of the end-to-end review is the worklist, and the
+   "Block 4d — the implementation plan" section after it is the step-by-step:
+   the archive-time precondition on an open run, the twelve routes to gate
+   (with the deliberately-open list), the run page wiring, U8's
+   principal-blind count, and the tests for each. **FIXED in Block 4d
+   (#310)**: archive refuses a project holding a `running`/`waiting` run
+   (cancel is the sanctioned way out, and stays open on a shelved project);
+   the gate now covers every growing route, with the deliberately-open list
+   written into `_refuse_if_archived`'s docstring; the run page fetches the
+   project alongside the run and `RunView` hides Continue / Repeat / Save
+   retro / the score control behind the panels' hint while Cancel stays; and
+   the delete gate reads `card_rollup.total_all_principals`, the
+   principal-blind `COUNT(*)` the delete route agrees with.
+- **U9 (medium) — the archived gate holds at the Projects router and leaks one
+  layer below it.** `tasks.project_id` is also written by
+  `POST /api/registry/todos/{id}/promote` and
+  `hermes kanban create --project <slug>`, both of which reach
+  `kanban_db.create_task`, which resolves the project and never reads
+  `archived`. So a shelved project can still gain board cards (and, through
+  promote, a `project_links` row) — the orphan class hard delete's card blocker
+  exists to prevent, and §13's "a shelved project does not run and does not
+  learn" is true of the router and false of the system. The fix belongs in
+  `create_task`'s project branch, one gate for both callers, with promote
+  mapping the refusal to 409. Three lows land with it: **U10** archive's
+  open-run precondition scans only the newest 50 runs
+  (`list_project_runs(..., limit=50)`), so a standing project's old held run is
+  invisible to it — ask in SQL instead; **U11** nothing tests the U8 fix's
+  consumer (`ProjectLifecycleMenu` reading `total_all_principals`) or the run
+  page's project fetch and its fetch-failed path; **U12** `POST /{slug}/links`
+  stays open as bookkeeping, yet links are how samples, references, files,
+  memories and conversation histories attach — so either gate it or narrow §13
+  to "stops execution and learning; record bookkeeping stays open" with the
+  permitted list named. **Block 4e** of the end-to-end review is the worklist.
+  **FIXED in Block 4e (#312)**: `create_task` raises on an archived
+  project — promote maps the refusal to 409 and the link row never lands,
+  `hermes kanban create` prints it instead of a traceback; `_archive_sync`
+  asks SQL for *every* open run (no page window); the U8 consumer
+  (`ProjectLifecycleMenu` reading `total_all_principals`) and the run
+  page's loader (archived / live / fetch-failed / 404) have tests; and §13
+  now says what archive truly stops — execution and learning — with the
+  open record-bookkeeping list named. **Refined in Block 4f (#314)**:
+  the refusal has its own identity (`kanban_db.ArchivedProjectError`,
+  a `ValueError` subclass) so promote maps ONLY it to 409 and ordinary
+  `create_task` input errors keep their log line and generic failure; the
+  gate reads the declared `archived` field; and both doors have real-path
+  tests — a genuinely archived project through the real route and the real
+  CLI.
+- **U13–U15 — three lows left behind by the writer-level gate** (review of
+  Block 4e, at `31351551a`). The gate itself is right and reaches every card
+  writer, but: **U13** both handlers catch bare `ValueError`, so ordinary
+  `create_task` input errors (`initial_status must be one of …`, bad
+  `branch_name`) now answer promote's archive-flavoured `409` and lose their
+  log line — the refusal should carry its own
+  `ArchivedProjectError(ValueError)`; **U14** the gate reads
+  `getattr(project_obj, "archived", 0)` on a declared, coerced field, which
+  `AGENTS.md` rules out; **U15** the boundary's route test mocks
+  `create_task`, so nothing exercises promote against a genuinely archived
+  project and `hermes kanban create --project <archived>` has no test at all.
+  **Block 4f** of the end-to-end review is the worklist.
 
 ### 20.3 Testing gaps that let the above through
 

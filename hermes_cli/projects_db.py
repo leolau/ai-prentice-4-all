@@ -1049,6 +1049,29 @@ def update_project_fields(
     return cur.rowcount > 0
 
 
+def _needs_completion_missing(
+    conn: sqlite3.Connection, project_id: str, goal: Optional[str]
+) -> List[str]:
+    """The L2 quarantine's missing mandatory fields (§2.2), named in one
+    place: the status-set gate and the archive gate refuse with the same
+    sentence."""
+    missing: List[str] = []
+    if not str(goal or "").strip():
+        missing.append("a goal")
+    if not conn.execute(
+        "SELECT COUNT(*) AS n FROM project_outputs WHERE project_id = ?",
+        (project_id,),
+    ).fetchone()["n"]:
+        missing.append("at least one output")
+    if not conn.execute(
+        "SELECT COUNT(*) AS n FROM project_profiles "
+        "WHERE project_id = ? AND role = 'host'",
+        (project_id,),
+    ).fetchone()["n"]:
+        missing.append("a host profile")
+    return missing
+
+
 def set_project_status(
     conn: sqlite3.Connection, project_id: str, status: str
 ) -> bool:
@@ -1089,20 +1112,7 @@ def set_project_status(
             # L2: an imported legacy project must be completed before it can
             # live — the gate names every missing mandatory field, the same
             # shape as the planning-exit gate above.
-            missing = []
-            if not str(row["goal"] or "").strip():
-                missing.append("a goal")
-            if not conn.execute(
-                "SELECT COUNT(*) AS n FROM project_outputs WHERE project_id = ?",
-                (project_id,),
-            ).fetchone()["n"]:
-                missing.append("at least one output")
-            if not conn.execute(
-                "SELECT COUNT(*) AS n FROM project_profiles "
-                "WHERE project_id = ? AND role = 'host'",
-                (project_id,),
-            ).fetchone()["n"]:
-                missing.append("a host profile")
+            missing = _needs_completion_missing(conn, project_id, row["goal"])
             if missing:
                 raise ValueError(
                     f"project {project_id} was imported from a legacy store "
@@ -1300,17 +1310,48 @@ def set_primary(conn: sqlite3.Connection, project_id: str, path: str) -> bool:
 
 
 def archive_project(conn: sqlite3.Connection, project_id: str) -> bool:
+    """Shelve a project (§12, decision 17): ``archived=1`` **and**
+    ``status='archived'`` in one transaction — the two flags are one state
+    and must never disagree.
+
+    A ``needs_completion`` project cannot be shelved either (L2): complete
+    the record first — the refusal names the missing mandatory fields with
+    the same sentence the status-set gate uses.
+    """
     with write_txn(conn):
+        row = conn.execute(
+            "SELECT status, goal FROM projects WHERE id = ?", (project_id,)
+        ).fetchone()
+        if row is None:
+            return False
+        if row["status"] == "needs_completion":
+            missing = _needs_completion_missing(conn, project_id, row["goal"])
+            if missing:
+                raise ValueError(
+                    f"project {project_id} was imported from a legacy store "
+                    "and needs completion before it can be archived: missing "
+                    + ", ".join(missing)
+                )
         cur = conn.execute(
-            "UPDATE projects SET archived = 1 WHERE id = ?", (project_id,)
+            "UPDATE projects SET archived = 1, status = 'archived' "
+            "WHERE id = ?",
+            (project_id,),
         )
     return cur.rowcount > 0
 
 
 def restore_project(conn: sqlite3.Connection, project_id: str) -> bool:
+    """Bring a shelved project back: ``archived=0``, ``status='paused'``.
+
+    Deliberately not straight to ``active`` (§12): re-entry is a decision,
+    and ``paused`` keeps the §2.2 exit gate meaningful. The schedule is not
+    re-created — ``PUT /schedule`` does that.
+    """
     with write_txn(conn):
         cur = conn.execute(
-            "UPDATE projects SET archived = 0 WHERE id = ?", (project_id,)
+            "UPDATE projects SET archived = 0, status = 'paused' "
+            "WHERE id = ?",
+            (project_id,),
         )
     return cur.rowcount > 0
 
@@ -2338,6 +2379,25 @@ def list_project_runs(
             "SELECT * FROM project_runs WHERE project_id = ? "
             "ORDER BY run_no DESC LIMIT ?",
             (project_id, int(limit)),
+        ).fetchall()
+    ]
+
+
+def list_open_project_runs(
+    conn: sqlite3.Connection, project_id: str
+) -> List[dict]:
+    """Every resumable run — no limit, no ordering assumption (U10).
+
+    The archive precondition cannot page: ``list_project_runs`` reads the
+    NEWEST 50, so a long-standing project would hide an old run stuck at
+    a checkpoint from the gate. Ask in SQL instead."""
+    return [
+        dict(r)
+        for r in conn.execute(
+            "SELECT run_no, status FROM project_runs "
+            "WHERE project_id = ? AND status IN ('running', 'waiting') "
+            "ORDER BY run_no",
+            (project_id,),
         ).fetchall()
     ]
 

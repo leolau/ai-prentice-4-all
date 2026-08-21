@@ -1,6 +1,9 @@
 /**
  * GET /api/projects/:slug — the whole record in one read (design §12).
  * PATCH /api/projects/:slug — record fields, lead/admin (§11).
+ * DELETE /api/projects/:slug — hard delete (decision 17): human-only
+ * upstream, `?confirm=<slug>` must name the slug; upstream statuses pass
+ * through so the dialog can say *why* a delete was refused.
  */
 import { NextResponse } from "next/server";
 
@@ -27,4 +30,13 @@ export async function PATCH(
     );
   }
   return withPrincipal((client) => client.updateProject(slug, body));
+}
+
+export async function DELETE(
+  req: Request,
+  { params }: { params: Promise<{ slug: string }> },
+): Promise<NextResponse> {
+  const { slug } = await params;
+  const confirm = new URL(req.url).searchParams.get("confirm") ?? "";
+  return withPrincipal((client) => client.deleteProject(slug, confirm));
 }

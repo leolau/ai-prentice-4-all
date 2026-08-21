@@ -31,13 +31,37 @@ export async function withPrincipal<T>(
       // *retire one first*, the budget refusal — sits in ``err.body.detail``;
       // ``err.message`` is the internal path + status and never reaches a
       // user. No detail upstream means generic copy, never the topology.
-      const detail =
-        err.body &&
-        typeof (err.body as { detail?: unknown }).detail === "string"
-          ? (err.body as { detail: string }).detail
-          : "That didn't go through.";
+      const rawDetail = err.body
+        ? (err.body as { detail?: unknown }).detail
+        : undefined;
+      let detail = "That didn't go through.";
+      let extra: Record<string, unknown> | null = null;
+      if (typeof rawDetail === "string" && rawDetail) {
+        detail = rawDetail;
+      } else if (
+        rawDetail &&
+        typeof rawDetail === "object" &&
+        !Array.isArray(rawDetail)
+      ) {
+        // A structured refusal — the create route's `{missing, message}`
+        // (§13, U3). `detail` stays a string for every existing caller
+        // while the object's fields ride alongside, so the create form can
+        // map the 422 onto the field that is blank.
+        if (typeof (rawDetail as { message?: unknown }).message === "string") {
+          detail = (rawDetail as { message: string }).message;
+        }
+        const rest: Record<string, unknown> = {};
+        for (const [key, value] of Object.entries(
+          rawDetail as Record<string, unknown>,
+        )) {
+          if (key !== "detail" && key !== "message") rest[key] = value;
+        }
+        extra = rest;
+      }
       return NextResponse.json(
-        { error: "api_error", detail },
+        extra
+          ? { error: "api_error", detail, ...extra }
+          : { error: "api_error", detail },
         { status: err.status },
       );
     }
