@@ -124,16 +124,33 @@ what the two revisions deleted, and lists whatever is left untracked.
 So A1 has a second half: the deploy output must not name an untracked file it
 cannot account for. Report the path, its owner and its mtime; do not delete it.
 
-### A2 — every enabled unit is active
+### A2 — every unit that should run is enabled *and* active
+
+Enumerate the unit **files on disk**, not the enabled set — a unit that has been
+disabled drops out of the enabled set and a loop over that set then cannot see
+it. That is not hypothetical: on 2026-08-20 twelve units (gateway, digest,
+escalation, the three email workers, all four WhatsApp units, both calendar
+units) were stopped **and disabled** for 21 hours, while `agent-home`, the
+dashboard and the public URL all answered 200 and `deploy_state.py check`
+reported no drift — the captured state holds unit *file content*, not
+enable/active state.
 
 ```bash
-for u in $(systemctl list-unit-files 'hermes-*.service' 'agent-home*.service' \
-           --state=enabled --no-legend | awk '{print $1}'); do
-  printf '%-42s %s\n' "$u" "$(systemctl is-active "$u")"
+for u in $(ls /etc/systemd/system | grep -E '^(hermes-|agent-home).*\.service$'); do
+  printf '%-42s %s/%s\n' "$u" "$(systemctl is-enabled "$u" 2>&1)" "$(systemctl is-active "$u" 2>&1)"
 done; true
 ```
 
-**Pass:** every unit `active`. At `dfa32fe3c` that is **15**: 14 `hermes-*`
+**Pass:** every long-running unit `enabled/active`; the four timer-driven
+`.service` units (`drift-check`, `memory-projection`, `review-pass`,
+`secret-backup`) are `static/inactive`, which is correct — check their `.timer`
+units are `enabled/active` instead. **Fail:** any long-running unit `disabled`
+or `inactive`; report `disabled` as the more serious of the two, since a reboot
+would not restore it. Do **not** substitute a `curl` against `:3100`, `:9119` or
+the public host — all three answer normally with the gateway dead.
+
+Historical form of this case (superseded, kept because its trap still applies):
+every unit in the *enabled* set must be `active`. At `dfa32fe3c` that is **15**: 14 `hermes-*`
 (`calendar-poller`, `calendar-triage`, `dashboard`, `digest`, `email-batcher`,
 `email-poller`, `email-triage`, `embed`, `escalation`, `gateway`, `wa-batcher`,
 `wa-bridge-connectar`, `wa-bridge-personal`, `wa-triage`) plus
