@@ -1349,10 +1349,16 @@ def _cmd_create(args: argparse.Namespace) -> int:
                 goal_max_turns=getattr(args, "goal_max_turns", None),
                 initial_status=getattr(args, "initial_status", "running"),
             )
-        except ValueError as exc:
+        except kb.ArchivedProjectError as exc:
             # The writer's refusal — an archived project (U9) — not a
             # traceback.
             print(f"kanban create: {exc}", file=sys.stderr)
+            return 2
+        except ValueError as exc:
+            # Ordinary ``create_task`` input errors keep their own report
+            # (U13) — exit 2 like every other argument failure, not the
+            # archived refusal's identity.
+            print(f"kanban create: invalid arguments: {exc}", file=sys.stderr)
             return 2
         task = kb.get_task(conn, task_id)
     if getattr(args, "json", False):
