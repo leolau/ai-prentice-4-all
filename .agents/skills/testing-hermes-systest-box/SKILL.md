@@ -188,21 +188,54 @@ assuming the code is wrong.
 
 ## Gotchas that produce false results
 
-1. **`journalctl` is nearly empty and grepping it is vacuous.** Every unit uses
+1. **A port that answers 200 proves nothing about the agent, and no check we have
+   watches whether a unit is *running*.** On 2026-08-20 twelve units — gateway,
+   digest, escalation, the three email workers, all four WhatsApp units, both
+   calendar units — were stopped **and disabled** for 21 hours while
+   `agent-home` (`:3100`), the dashboard (`:9119`) and the public `/login` all
+   answered normally and `deploy_state.py check` reported no drift (it compares
+   unit *file* content, not enable/active state). Start every box visit with
+   the enable/active set, per unit, and treat `disabled` as worse than
+   `inactive` — a reboot would not restore it:
+   ```sh
+   for u in $(ls /etc/systemd/system | grep -E '^(hermes-|agent-home).*\.service$'); do
+     printf '%-40s %s/%s\n' "$u" "$(systemctl is-enabled $u 2>&1)" "$(systemctl is-active $u 2>&1)"
+   done
+   ```
+   Related: a gateway log line saying `Exiting with code 1 … so systemd
+   Restart=on-failure can revive the gateway` is not evidence it was revived —
+   systemd does not restart after an explicit `stop`, and cannot restart a
+   disabled unit.
+2. **`Conflict: terminated by other getUpdates request` means a second instance
+   of the same bot token is polling, usually off-box.** Confirm there is only
+   one `hermes gateway run` on the box (`ps -ef | grep 'gateway run'`) before
+   touching anything: two pollers steal the long-poll from each other, so the
+   symptom is erratic replies rather than silence, and restarting the box's
+   gateway does not help. Find the other holder of the token.
+3. **`Agent Home needs a connection to reach your agent` is not an application
+   error.** It is the static `agent-home/public/offline.html`, served by the
+   service worker only when the browser's own navigation fetch never completed
+   (`sw.js` is network-first for navigations and does not intercept `/api/` or
+   `/auth/`). It cannot distinguish a dead phone network from a dead origin,
+   and the PWA keeps showing it until one navigation succeeds. Also: Caddy
+   keeps **no request log** (`/etc/caddy/Caddyfile` has no `log` directive,
+   `/var/log/caddy` is empty), so "did the request reach the box?" is currently
+   unanswerable.
+4. **`journalctl` is nearly empty and grepping it is vacuous.** Every unit uses
    `StandardOutput=append:<file>`, so journald holds only ~4–6 systemd lines per unit. Always
    grep the **actual log files**. Verify with
    `systemctl show -p StandardOutput <unit>`.
-2. **Logs mix pre-/post-migration history.** Old failures reference the old interpreter path
+5. **Logs mix pre-/post-migration history.** Old failures reference the old interpreter path
    `/root/.local/share/uv/python/...`; current-era lines reference `/opt/uv/python`. Use that as
    an era marker, and compare line numbers against the last startup banner and
    `systemctl show -p ExecMainStartTimestamp,NRestarts <unit>` before calling something a
    regression.
-3. **Check the real process owner**, not the unit file:
+6. **Check the real process owner**, not the unit file:
    `ps -o user=,uid= -p $(systemctl show -p MainPID --value <unit>)`.
-4. **SQLite needs a writable *directory*, not just a writable file** (for `-wal`/`-shm`
+7. **SQLite needs a writable *directory*, not just a writable file** (for `-wal`/`-shm`
    sidecars). Test on a **copy** in `/tmp` chowned to hermes and force an actual commit; never
    write production DBs.
-5. **Supabase datastore import path is `hermes_cli.datastore`**, not `tools.datastore`:
+8. **Supabase datastore import path is `hermes_cli.datastore`**, not `tools.datastore`:
    ```python
    from hermes_cli.datastore import get_store
    store = get_store("supabase-app")
@@ -211,9 +244,27 @@ assuming the code is wrong.
    await conn.close()
    ```
    Run it with the `.env` sourced: `set -a; . /opt/data/hermes-home-staging/.env; set +a`.
-6. **`SUPABASE_ACCESS_TOKEN` is not in hermes' login-shell env.** It lives only in
+9. **`SUPABASE_ACCESS_TOKEN` is not in hermes' login-shell env.** It lives only in
    `HERMES_HOME/.env`, so a bare `sudo -u hermes -H supabase projects list` will not
    authenticate until that file is sourced.
+10. **The layer-4 schema names are not the obvious ones.** `app_prod.memories`
+    keys its owner as `owner_user_id` (not `principal_id`), and `principals`
+    labels people with `display` (not `display_name`). Guessing either gives an
+    `UndefinedColumnError` that reads like a missing table. A bare-Python probe
+    also needs the dotenv loaded first
+    (`from hermes_cli.env_loader import load_hermes_dotenv; load_hermes_dotenv()`)
+    or the DSN is empty and the failure looks like connectivity.
+11. **`hermes profile suggest` answering "no suggestion generated" is usually a
+    gate, not a bug.** Generation requires all four: no open suggestion for the
+    profile, the monthly clock elapsed (`_generation_due`), **two** skills with
+    recorded uses, and one corroborating signal (orphan goals or >1
+    participant). This box has never met the skill bar, so FG-30's adoption path
+    cannot be exercised without fabricating production rows — which is not
+    permitted.
+12. **Root-owned files left in `HERMES_HOME` break `hermes` reads far from where
+    they were created.** Two (`config.yaml.bak-1786027505`, `uploads/`) broke
+    `profile create --clone-all` weeks later. Anything a root command leaves
+    behind is a future defect: `chown hermes` it in the same visit.
 
 ## Privilege-model checks worth repeating
 

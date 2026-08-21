@@ -35,6 +35,7 @@ prose is worse than an old date.
 | Document | Answers |
 |---|---|
 | this file | what exists, what is verified, what is missing |
+| `pickup-2026-08-21.md` | the last arc's fixes, the traps they came from, what is open |
 | `deployment-path.md` | capture/render/check, the offsite backup, cold rebuild |
 | `deploy-credential.md` | the three deploy keys and why only one may write |
 | `runtime-drift.md` | interpreter/package pinning and the weekly timer |
@@ -321,6 +322,17 @@ compares, "we have backups" is a belief. Do this periodically, not once.
   does cover it — check the index if you need proof.
 - **Alibaba OSS is unavailable** on this account (`ListBuckets` → `UserDisable`),
   which is why the offsite destination is a private GitHub repo.
+- **Which units are supposed to be *running* is not captured state.** The
+  snapshot holds unit files and drop-ins — their content — and `check` compares
+  those plus anything installed the snapshot has never seen. Nothing records
+  `is-enabled`/`is-active`, so on 2026-08-20 twelve units (gateway, digest,
+  escalation, email, WhatsApp, calendar) were stopped **and disabled** for 21
+  hours and the check reported no drift the whole time — while `agent-home`,
+  the dashboard and the public URL kept answering 200, so no probe noticed
+  either. `disabled` also means a reboot would not have restored them. Until
+  the enabled/active set is captured and compared, a box visit must ask
+  `systemctl is-enabled`/`is-active` per unit and never infer liveness from a
+  port. See `pickup-2026-08-21.md`.
 - **Only `hermes-systest` exists.** Everything is parameterized by
   `--deployment`, but no second deployment has ever been captured.
 - **The box cannot publish its own state.** `capture` commits locally and the
