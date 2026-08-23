@@ -99,3 +99,28 @@
   max-height: min(50dvh, 26rem);
   padding: 0.25rem;
 }
+
+/* Drag grip — the header area moves the panel; resize grip — the corner.
+   touch-action: none lets pointer drags win over page scrolling on touch. */
+.leadchat-drag {
+  cursor: grab;
+  touch-action: none;
+}
+
+.leadchat-drag:active {
+  cursor: grabbing;
+}
+
+.leadchat-resize {
+  position: absolute;
+  right: 4px;
+  bottom: 4px;
+  width: 20px;
+  height: 20px;
+  cursor: nwse-resize;
+  touch-action: none;
+  border-right: 2px solid var(--color-border);
+  border-bottom: 2px solid var(--color-border);
+  border-bottom-right-radius: 6px;
+  opacity: 0.7;
+}
