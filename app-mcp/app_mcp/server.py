@@ -161,8 +161,8 @@ async def _run_action(
 @mcp.tool()
 async def app_state() -> dict[str, Any]:
     """Which page of agent-home the user is on and which UI element they last
-    touched. Use this to resolve references like \"this page\" or \"the button
-    I'm on\" before acting."""
+    touched. Use this to resolve references like "this page" or "the button
+    I'm on" before acting."""
     return hub.state_summary()
 
 
@@ -209,7 +209,7 @@ async def app_act(
     """Perform a SAFE action on the user's app UI and report the outcome.
     Actions: click, type, select, focus, read, scroll (target one element by
     element_id from app_describe_page, or by name/selector); navigate (pass
-    path, e.g. \"/todos\"); snapshot. Refuses elements that look destructive —
+    path, e.g. "/todos"); snapshot. Refuses elements that look destructive —
     those need app_act_destructive."""
     return await _run_action(action, element_id, name, selector, value, path, enforce_guard=True)
 
