@@ -250,6 +250,11 @@ shrunk to stay out of the content's way:
    `StatusIndicator`, `streamChatTurn`, approval cards — so it is a surface,
    not a second chat implementation. History reloads from
    `GET /api/chat/messages` whenever the panel opens with a pinned session.
+   The panel is a floating window rather than a modal: the header carries a
+   **Chats** link that jumps to the full `/chat` page, and the user can drag
+   the header to move it or drag the corner grip to resize it; the chosen
+   geometry persists in `localStorage` (`agent-home:leadchat-rect`) and is
+   restored the next time the panel opens.
 
 "Long-running" is what the agent core already provides, not new machinery:
 the Python conversation loop compacts context automatically when it
@@ -260,7 +265,8 @@ of the shell, like the FABs themselves; user-built apps (§5) compose *with*
 these two buttons rather than replacing them.
 
 Tests: `CoralHost.test.tsx` (launcher) + `LeadChatHost.test.tsx` (open/close,
-session pinning, history reload, session reuse).
+Chats link, session pinning, history reload, session reuse, move/resize
+persistence).
 
 ---
 
