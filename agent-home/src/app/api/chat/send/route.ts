@@ -13,6 +13,7 @@ import { HermesApiError } from "@/lib/api/client";
 import { apiClientForRequest, getPrincipal } from "@/lib/auth/principal";
 import { profileFromBody } from "@/lib/chat/profile";
 import { mediaRef } from "@/lib/chat/media-ref";
+import { withUiContext } from "@/lib/chat/ui-context";
 import { canReadMediaPath, createMediaSignedUrl } from "@/lib/supabase/storage";
 import type { AgentAttachmentPayload, ChatAttachment, Principal } from "@/types";
 
@@ -22,6 +23,8 @@ interface SendBody {
   attachments?: unknown;
   /** Which profile's brain answers this turn (FG-28); default when absent. */
   profile?: unknown;
+  /** app-mcp awareness line reported by the browser bridge; see ui-context.ts. */
+  uiContext?: unknown;
 }
 
 /**
@@ -110,7 +113,7 @@ export async function POST(request: Request): Promise<NextResponse> {
       { status: 400 },
     );
   }
-  const message = withAttachments(rawMessage, attachments);
+  const message = withUiContext(withAttachments(rawMessage, attachments), body.uiContext);
 
   try {
     const client = await apiClientForRequest({ profile: profileFromBody(body) });
