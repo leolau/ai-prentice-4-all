@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useSyncExternalStore } from "react";
+import { useCallback, useRef, useSyncExternalStore } from "react";
 
 /**
  * A `localStorage`-backed value exposed as React state. Uses
@@ -16,6 +16,11 @@ export function usePersistentState<T>(
   serialize: (value: T) => string,
 ): [T, (next: T) => void] {
   const eventName = `persistent-state:${key}`;
+  // `useSyncExternalStore` re-checks the snapshot on every render and treats
+  // any new reference as a change — a `parse` that builds an object would
+  // therefore loop forever. Cache by raw string so identical stored content
+  // keeps returning the SAME value.
+  const cacheRef = useRef<{ raw: string | null; value: T } | null>(null);
 
   const subscribe = useCallback(
     (onChange: () => void) => {
@@ -33,12 +38,22 @@ export function usePersistentState<T>(
   );
 
   const getSnapshot = useCallback((): T => {
+    let raw: string | null;
     try {
-      const raw = window.localStorage.getItem(key);
-      return raw === null ? fallback : parse(raw);
+      raw = window.localStorage.getItem(key);
     } catch {
       return fallback;
     }
+    const cache = cacheRef.current;
+    if (cache && cache.raw === raw) return cache.value;
+    let value: T;
+    try {
+      value = raw === null ? fallback : parse(raw);
+    } catch {
+      value = fallback;
+    }
+    cacheRef.current = { raw, value };
+    return value;
   }, [key, fallback, parse]);
 
   const value = useSyncExternalStore(subscribe, getSnapshot, () => fallback);
