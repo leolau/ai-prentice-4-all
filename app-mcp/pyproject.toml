@@ -1,0 +1,15 @@
+[project]
+name = "app-mcp"
+version = "0.1.0"
+description = "Runtime UI introspection + control bridge between the Hermes agent and agent-home"
+requires-python = ">=3.11"
+# Both are already pinned in the hermes-agent venv on the box (mcp==1.26.0,
+# websockets 15.x) — the service reuses that venv rather than growing a second.
+dependencies = [
+    "mcp>=1.26,<2",
+    "websockets>=15,<16",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
