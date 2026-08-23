@@ -14,7 +14,7 @@
  * must not notice — reconnect quietly with backoff, never surface errors.
  */
 import { executeCommand, type AppMcpCommand } from "@/lib/app-mcp/actions";
-import { elementRef } from "@/lib/app-mcp/snapshot";
+import { elementRef, inShellChrome } from "@/lib/app-mcp/snapshot";
 import { getLastActiveElement, setUiContext } from "@/lib/app-mcp/state";
 
 interface ServiceMessage {
@@ -67,6 +67,9 @@ function scheduleStateReport(): void {
 
 function noteActiveElement(target: EventTarget | null): void {
   if (!(target instanceof Element)) return;
+  // Interactions with the shell chrome (lead-chat composer, Coral launcher)
+  // must not shadow the page the user is actually looking at.
+  if (inShellChrome(target)) return;
   const ref = elementRef(target);
   if (!ref.name && ref.role === "element") return;
   setUiContext({ path: window.location.pathname, element: ref });

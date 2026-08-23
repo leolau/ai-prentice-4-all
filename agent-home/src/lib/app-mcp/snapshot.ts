@@ -36,6 +36,20 @@ const INTERACTIVE_SELECTOR = [
   '[role="option"]',
 ].join(",");
 
+/**
+ * The shell's floating chrome — the Coral launcher and the lead-chat panel.
+ * app-mcp deliberately sees THROUGH it: when the user asks "which page are we
+ * on?" they mean the page behind the panel they are chatting from, and the
+ * composer they are typing in must not become the "last active element".
+ */
+export const SHELL_CHROME_SELECTOR =
+  '[data-component="LeadChatHost"], [data-component="CoralHost"]';
+
+/** True when `el` lives inside the shell's floating chrome. */
+export function inShellChrome(el: Element): boolean {
+  return Boolean(el.closest(SHELL_CHROME_SELECTOR));
+}
+
 let nextId = 1;
 
 function isHidden(el: Element): boolean {
@@ -147,7 +161,7 @@ export function elementRef(el: Element): { role: string; name: string } {
 export function snapshotElements(root: ParentNode = document): AppMcpElement[] {
   const out: AppMcpElement[] = [];
   for (const el of Array.from(root.querySelectorAll(INTERACTIVE_SELECTOR))) {
-    if (isHidden(el)) continue;
+    if (isHidden(el) || inShellChrome(el)) continue;
     const html = el as HTMLElement;
     if (!html.dataset.appmcpId) html.dataset.appmcpId = String(nextId++);
     const entry: AppMcpElement = {
