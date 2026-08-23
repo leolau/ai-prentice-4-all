@@ -15,9 +15,11 @@ import {
 } from "@/components/coral/coral-registry";
 import { AppPetal, PetalBubble } from "@/components/coral/CoralPetal";
 
-/** Bloom radii in px (the lg viewport scales the whole bloom ×1.25 in CSS). */
+/** Bloom radii in px (the lg viewport scales the whole bloom ×1.25 in CSS).
+ * MEMBER_RING is sized so the clamped 188° fan member stays on-screen at
+ * 320 px viewport width (260 px clipped it by ~11 px; 230 px leaves 18 px). */
 const PETAL_RADIUS = 150;
-const MEMBER_RING = 260;
+const MEMBER_RING = 230;
 const STAGGER_MS = 24;
 
 /**
