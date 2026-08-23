@@ -1,7 +1,7 @@
 # Production Environment — Hermes Stack on Hetzner
 
 > **Audience**: any agent/operator maintaining this system.
-> Migrated from Alibaba Cloud (cn-hongkong) on **2026-08-20**. Full migration history: `hetzner-arm-migration-runbook.md`.
+> Migrated from Alibaba Cloud (cn-hongkong) on **2026-08-20**. Full migration history: `hetzner-migration-runbook.md`.
 > **No secrets are stored in this file.** See "Credentials & Access" for where they live.
 
 ---
@@ -81,14 +81,64 @@ All units in `/etc/systemd/system/`, run as user `hermes` (uid 996 / gid 986 —
 
 ## 5. Deployment Procedures
 
-### 5.1 Dashboard update
+### 5.1 Full code deploy — two ways of running it
+
+The reviewed deploy tool is `/opt/data/deploy-hermes.sh` (source: `deploy/hermes-deploy.sh`).
+What it does: check for local modifications → fetch and fast-forward `origin/develop`
+(3 retries) → remove files the new revision deleted → `pip install -e .` → rebuild
+dashboard/agent-home only when their sources moved → fix ownership → restart all
+enabled `hermes-*` services + `agent-home` → verify `active` → print `deploy OK (<sha>)`.
+Full step-by-step: `README.md` § "Deploying a code change" (written for the old
+Alibaba box; its `aliyun ecs RunCommand` transport no longer applies here).
+
+**Shared prerequisites (both ways):**
+
+- Code reaches the box only via git: `develop` requires a PR — branch → PR → merge,
+  never a direct push.
+- The script needs **root** (systemd restarts, `chown` of the checkout/`.venv`).
+- The deploy restarts all 15 services — check that no gateway conversation is
+  mid-turn before triggering it (the pollers/bridges pause for the restart window;
+  this box is the only host, so the side-effect rule in §4.2 is satisfied by
+  restarting in place).
+- The deploy tool does not deploy itself: a merged change to `deploy/hermes-deploy.sh`
+  is inert until someone copies it onto the box (`install -m 755 deploy/hermes-deploy.sh /opt/data/deploy-hermes.sh`). The script reports `DEPLOY TOOL STALE` when they differ.
+
+**Way A — remote: SSH in from another machine and run it there.**
+
+```bash
+ssh -i ~/.ssh/hetzner_hermes_ed25519 root@188.245.219.105 \
+  '/opt/data/deploy-hermes.sh develop'
+```
+
+Output is live; no invocation id, no polling, nothing to decode. (This replaces the
+old `aliyun ecs RunCommand` + `DescribeInvocationResults` + base64 flow, which existed
+only because the previous box had no SSH.)
+
+**Way B — local: run it on-box from a colocated session.**
+
+Agent sessions now run on this box itself (e.g. under `/opt/data/aicoding/`). From
+there the remote machinery is pure overhead — run the script directly. If the
+session's user has root:
+
+```bash
+/opt/data/deploy-hermes.sh develop
+```
+
+If it does not (e.g. an unprivileged service account without sudo), the session
+still cannot execute the deploy — route through Way A or another root path. Being
+on the box changes *how the command is carried*, not who may run it.
+
+Either way, success ends with `deploy OK (<sha>)` and all services `active`; verify
+independently with the §5.7 health check.
+
+### 5.2 Dashboard update
 ```bash
 # code lives at /opt/data/hermes-agent (Python, uv-managed)
 cd /opt/data/hermes-agent && git pull   # or deploy via the hermes tooling
 sudo systemctl restart hermes-dashboard  # unit runs with --skip-build (uses prebuilt assets)
 ```
 
-### 5.2 agent-home (Next.js) update
+### 5.3 agent-home (Next.js) update
 ```bash
 cd /opt/data/hermes-agent/agent-home
 npm install --no-audit --no-fund      # root workspace deps hoisted from /opt/data/hermes-agent
@@ -97,21 +147,21 @@ sudo systemctl restart agent-home
 ```
 Build tools note: `build-essential` + `python3-dev` are required (node-pty native module).
 
-### 5.3 Python dependency changes
+### 5.4 Python dependency changes
 ```bash
 cd /opt/data/hermes-agent && uv sync            # lockfile deps
 uv pip install --python .venv/bin/python <pkg>  # manual extras (source venv historically had ~60 beyond the lock)
 ```
 Embed service venv: `/opt/data/hermes-embed/venv` (torch-cpu, sentence-transformers, fastapi, uvicorn).
 
-### 5.4 WA bridge update
+### 5.5 WA bridge update
 ```bash
 cd /opt/data/hermes-agent/scripts/whatsapp-bridge && npm install
 sudo systemctl restart hermes-wa-bridge-connectar hermes-wa-bridge-personal
 # check logs: tail -f /var/log/hermes-wa-bridge-connectar.log — expect "✅ WhatsApp connected!"
 ```
 
-### 5.5 Supabase upgrade
+### 5.6 Supabase upgrade
 ```bash
 cd /opt/data/supabase/docker
 docker compose pull && docker compose up -d
@@ -119,7 +169,7 @@ docker compose pull && docker compose up -d
 ```
 ⚠️ **Schema-version caution**: the supabase/postgres image's entrypoint initializes a schema version that may be NEWER than what app code expects (observed: fresh init lacked `auth.users.is_sso_user`). Prefer in-place upgrades of the running data dir; never restore a dump into a freshly-initialized cluster without schema verification.
 
-### 5.6 Full-stack health check
+### 5.7 Full-stack health check
 ```bash
 docker ps --format '{{.Names}}: {{.Status}}' | grep -c healthy   # expect 11
 systemctl --failed                                               # expect empty
