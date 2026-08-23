@@ -10,6 +10,8 @@
  */
 import type { ChatApprovalRequest, ChatAttachment } from "@/types";
 
+import { formatUiContext, getUiContext } from "@/lib/app-mcp/state";
+
 export interface ChatStreamHandlers {
   /** Incremental assistant text. */
   onDelta?(delta: string): void;
@@ -78,6 +80,7 @@ export async function streamChatTurn(
       message: params.message,
       attachments: params.attachments,
       profile: params.profile,
+      uiContext: formatUiContext(getUiContext()) ?? undefined,
     }),
     signal: params.signal,
   });

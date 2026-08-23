@@ -32,6 +32,16 @@ export function sessionSecret(): string {
 }
 
 /**
+ * HMAC secret shared with the app-mcp service to sign short-lived WebSocket
+ * tickets (secret; `.env`). Optional — when unset the ticket route answers
+ * 503 and the browser bridge simply never connects, so the rest of the app is
+ * unaffected.
+ */
+export function appMcpSecret(): string | undefined {
+  return process.env.AGENT_HOME_APP_MCP_SECRET || undefined;
+}
+
+/**
  * Base URL of the Python AI layer (`/api/*`, `/auth/*`). Deploy topology,
  * defaults to the on-box loopback the current prod Caddy fronts.
  */

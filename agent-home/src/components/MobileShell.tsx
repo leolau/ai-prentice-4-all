@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 
+import { AppMcpBridge } from "@/components/app-mcp/AppMcpBridge";
 import { CoralHost } from "@/components/coral/CoralHost";
 import { LeadChatHost } from "@/components/coral/LeadChatHost";
 import { getPrincipal } from "@/lib/auth/principal";
@@ -110,6 +111,7 @@ export async function MobileShell({
         </main>
         {showCoral ? <CoralHost badgeCounts={badgeCounts} /> : null}
         {showCoral ? <LeadChatHost /> : null}
+        {showCoral ? <AppMcpBridge /> : null}
       </div>
     </div>
   );

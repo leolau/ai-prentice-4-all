@@ -14,6 +14,7 @@ import { HermesApiError } from "@/lib/api/client";
 import { apiClientForRequest, getPrincipal } from "@/lib/auth/principal";
 import { profileFromBody } from "@/lib/chat/profile";
 import { mediaRef } from "@/lib/chat/media-ref";
+import { withUiContext } from "@/lib/chat/ui-context";
 import { canReadMediaPath, createMediaSignedUrl } from "@/lib/supabase/storage";
 import type { AgentAttachmentPayload, ChatAttachment, Principal } from "@/types";
 
@@ -23,6 +24,12 @@ interface SendBody {
   attachments?: unknown;
   /** Which profile's brain answers this turn (FG-28); default when absent. */
   profile?: unknown;
+  /**
+   * app-mcp awareness: one line describing the page and element the user is
+   * on, reported by the browser bridge. Prepended to the message so the
+   * agent can understand references like "this page" or "the button I'm on".
+   */
+  uiContext?: unknown;
 }
 
 function withAttachments(message: string, attachments: ChatAttachment[]): string {
@@ -113,7 +120,7 @@ export async function POST(request: Request): Promise<Response> {
   if (!rawMessage && attachments.length === 0) {
     return jsonError("empty_message", "A message or attachment is required.", 400);
   }
-  const message = withAttachments(rawMessage, attachments);
+  const message = withUiContext(withAttachments(rawMessage, attachments), body.uiContext);
 
   try {
     const client = await apiClientForRequest({ profile: profileFromBody(body) });
