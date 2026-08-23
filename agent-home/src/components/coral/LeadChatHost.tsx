@@ -348,6 +348,7 @@ export function LeadChatHost() {
         onClick={() => setOpen((cur) => !cur)}
         aria-expanded={open}
         aria-label={open ? "Close lead chat" : "Open lead chat"}
+        hidden={open}
         className="coral-fab fixed z-[60] flex h-14 w-14 items-center justify-center rounded-full text-xl text-[var(--color-accent-fg)]"
         style={{
           right: "1rem",
@@ -356,7 +357,7 @@ export function LeadChatHost() {
             "linear-gradient(135deg, var(--color-accent), color-mix(in srgb, var(--color-accent) 60%, #ff7e6b))",
         }}
       >
-        <span aria-hidden>{open ? "✕" : "✦"}</span>
+        <span aria-hidden>✦</span>
       </button>
     </div>
   );
