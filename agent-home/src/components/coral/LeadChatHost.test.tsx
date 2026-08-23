@@ -83,6 +83,18 @@ describe("LeadChatHost panel", () => {
     expect(screen.queryByRole("dialog")).toBeNull();
   });
 
+  it("hides the floating button while the panel is open", () => {
+    render(<LeadChatHost />);
+    openLeadChat();
+    expect(screen.getByRole("dialog", { name: /lead chat/i })).toBeTruthy();
+    // The FAB carries aria-label "Close lead chat" when open, but it is
+    // hidden — role queries skip hidden elements, so nothing matches.
+    expect(screen.queryByRole("button", { name: /open lead chat/i })).toBeNull();
+    expect(screen.queryByRole("button", { name: /close lead chat/i })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: /^close$/i }));
+    expect(screen.getByRole("button", { name: /open lead chat/i })).toBeTruthy();
+  });
+
   it("pins the session id returned by the first turn", async () => {
     // Pinning the session re-runs the history-load effect; stub fetch so it
     // resolves to the just-finished exchange instead of failing and wiping
