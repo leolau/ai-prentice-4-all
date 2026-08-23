@@ -27,7 +27,7 @@ export default async function LoginPage() {
   }
 
   return (
-    <MobileShell title="Sign in" showNav={false}>
+    <MobileShell title="Sign in" showCoral={false}>
       <p className="mb-6 text-sm text-[var(--color-muted)]">
         Sign in with your Hermes account to open your agent home.
       </p>

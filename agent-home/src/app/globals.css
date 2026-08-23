@@ -21,10 +21,11 @@
 
 :root {
   color-scheme: dark;
-  /* Safe-area insets so the fixed bottom-nav clears the phone home indicator. */
+  /* Safe-area insets so fixed UI clears the phone home indicator. */
   --safe-top: env(safe-area-inset-top, 0px);
   --safe-bottom: env(safe-area-inset-bottom, 0px);
-  --bottom-nav-h: 4rem;
+  /* Vertical space the Coral floating launcher needs at the bottom edge. */
+  --coral-clearance: 5rem;
 }
 
 /*

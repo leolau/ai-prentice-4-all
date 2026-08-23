@@ -1,12 +1,18 @@
 import type { ComponentProps, ReactElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+
+// CoralHost (mounted by the shell unless opted out) calls usePathname —
+// mock to a neutral path so the server-render stays pure.
+vi.mock("next/navigation", () => ({
+  usePathname: () => "/",
+}));
 
 import { MobileShell } from "@/components/MobileShell";
 
-// Basic render test for the mobile shell (FG-20 Wave A). `showNav={false}`
-// avoids the client-only BottomNav (usePathname) so this stays a pure
-// server-render assertion, and skips the badge-count fetch entirely.
+// Basic render test for the mobile shell. `showCoral={false}` skips the
+// client-only CoralHost (usePathname) so this stays a pure server-render
+// assertion, and skips the badge-count fetch entirely.
 //
 // The shell is an async server component (it awaits the To-dos badge count),
 // and `renderToStaticMarkup` cannot render one: it suspends on synchronous
@@ -22,7 +28,7 @@ describe("MobileShell", () => {
   it("renders the title, the data-component root, and safe-area padding", async () => {
     const html = await renderShell({
       title: "Sign in",
-      showNav: false,
+      showCoral: false,
       children: <p>hello</p>,
     });
     expect(html).toContain('data-component="MobileShell"');
@@ -35,19 +41,19 @@ describe("MobileShell", () => {
   it("carries the adaptive breakpoints so it widens past a phone column", async () => {
     const html = await renderShell({
       title: "Home",
-      showNav: false,
+      showCoral: false,
       children: <p>panel</p>,
     });
-    // Tablet widens the column; desktop switches to the sidebar flex layout.
+    // Tablet widens the column; desktop keeps the centred wide layout.
     expect(html).toContain("md:max-w-2xl");
-    expect(html).toContain("lg:flex");
+    expect(html).toContain("lg:max-w-none");
     expect(html).toContain("lg:max-w-5xl");
   });
 
   it("renders optional actions in the header alongside the title", async () => {
     const html = await renderShell({
       title: "Chat",
-      showNav: false,
+      showCoral: false,
       actions: <span>test-actions</span>,
       children: <p>panel</p>,
     });
@@ -55,5 +61,15 @@ describe("MobileShell", () => {
     expect(html).toContain("test-actions");
     // The header inner div uses justify-between so actions sit on the right.
     expect(html).toContain("justify-between");
+  });
+
+  it("mounts the Coral launcher when not opted out", async () => {
+    // renderShell awaits the async shell; with showCoral left at its default
+    // the CoralHost client component appears in the markup as a placeholder.
+    const html = await renderShell({
+      title: "Home",
+      children: <p>panel</p>,
+    });
+    expect(html).toContain("CoralHost");
   });
 });
