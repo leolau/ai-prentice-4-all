@@ -31,8 +31,9 @@ const EDGE = 8;
  * session long-running rather than long-forgotten.
  *
  * The panel is a floating window, not a modal: drag the header to move it,
- * drag the corner to resize it. The chosen position and size are persisted
- * (`agent-home:leadchat-rect`) and restored the next time it opens.
+ * drag either corner grip (bottom-right or upper-left) to resize it. The
+ * chosen position and size are persisted (`agent-home:leadchat-rect`) and
+ * restored the next time it opens.
  */
 export function LeadChatHost() {
   const [open, setOpen] = useState(false);
@@ -114,7 +115,7 @@ export function LeadChatHost() {
   }
 
   function computeRect(
-    mode: "move" | "resize",
+    mode: "move" | "resize-br" | "resize-tl",
     origin: LeadChatRect,
     sx: number,
     sy: number,
@@ -134,13 +135,20 @@ export function LeadChatHost() {
       );
       return { x, y, w: origin.w, h: origin.h };
     }
-    const w = Math.min(Math.max(MIN_W, origin.w + dx), window.innerWidth - 2 * EDGE);
-    const h = Math.min(Math.max(MIN_H, origin.h + dy), window.innerHeight - 2 * EDGE);
-    return { x: origin.x, y: origin.y, w, h };
+    if (mode === "resize-br") {
+      const w = Math.min(Math.max(MIN_W, origin.w + dx), window.innerWidth - 2 * EDGE);
+      const h = Math.min(Math.max(MIN_H, origin.h + dy), window.innerHeight - 2 * EDGE);
+      return { x: origin.x, y: origin.y, w, h };
+    }
+    // Upper-left grip: the bottom-right corner stays anchored while the
+    // top-left edge follows the pointer.
+    const x = Math.min(Math.max(EDGE, origin.x + dx), origin.x + origin.w - MIN_W);
+    const y = Math.min(Math.max(EDGE, origin.y + dy), origin.y + origin.h - MIN_H);
+    return { x, y, w: origin.x + origin.w - x, h: origin.y + origin.h - y };
   }
 
-  /** Pointer-down starter for the header (move) or the corner grip (resize). */
-  function startPointer(mode: "move" | "resize") {
+  /** Pointer-down starter for the header (move) or a corner grip (resize). */
+  function startPointer(mode: "move" | "resize-br" | "resize-tl") {
     return (e: ReactPointerEvent) => {
       if (e.pointerType === "mouse" && e.button !== 0) return;
       e.preventDefault();
@@ -321,8 +329,14 @@ export function LeadChatHost() {
             onSend={(text, attachments) => void send(text, attachments)}
           />
           <div
+            className="leadchat-resize-tl"
+            onPointerDown={startPointer("resize-tl")}
+            title="Drag to resize"
+            aria-hidden
+          />
+          <div
             className="leadchat-resize"
-            onPointerDown={startPointer("resize")}
+            onPointerDown={startPointer("resize-br")}
             title="Drag to resize"
             aria-hidden
           />

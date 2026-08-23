@@ -100,7 +100,8 @@
   padding: 0.25rem;
 }
 
-/* Drag grip — the header area moves the panel; resize grip — the corner.
+/* Drag grip — the header area moves the panel; resize grips — two corners:
+   bottom-right (.leadchat-resize) and upper-left (.leadchat-resize-tl).
    touch-action: none lets pointer drags win over page scrolling on touch. */
 .leadchat-drag {
   cursor: grab;
@@ -122,5 +123,19 @@
   border-right: 2px solid var(--color-border);
   border-bottom: 2px solid var(--color-border);
   border-bottom-right-radius: 6px;
+  opacity: 0.7;
+}
+
+.leadchat-resize-tl {
+  position: absolute;
+  left: 4px;
+  top: 4px;
+  width: 20px;
+  height: 20px;
+  cursor: nwse-resize;
+  touch-action: none;
+  border-left: 2px solid var(--color-border);
+  border-top: 2px solid var(--color-border);
+  border-top-left-radius: 6px;
   opacity: 0.7;
 }
