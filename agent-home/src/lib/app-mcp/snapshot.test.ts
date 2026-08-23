@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { beforeEach, describe, expect, it } from "vitest";
 
-import { snapshotElements, accessibleName, selectorFor } from "@/lib/app-mcp/snapshot";
+import { snapshotElements, accessibleName, selectorFor, inShellChrome } from "@/lib/app-mcp/snapshot";
 
 function fixture(html: string): void {
   document.body.innerHTML = html;
@@ -94,5 +94,30 @@ describe("selectorFor", () => {
   it("uses the element id when present", () => {
     fixture(`<button id="send-btn">Send</button>`);
     expect(selectorFor(document.querySelector("button")!)).toBe("#send-btn");
+  });
+});
+
+describe("shell chrome exclusion", () => {
+  it("keeps the lead-chat panel and Coral launcher out of page snapshots", () => {
+    fixture(`
+      <main><button>Page action</button><a href="/todos">Tasks</a></main>
+      <div data-component="LeadChatHost">
+        <textarea placeholder="Message your agent"></textarea>
+        <button>Send</button>
+        <a href="/chat">Chats</a>
+      </div>
+      <div data-component="CoralHost"><button aria-label="Open apps">✦</button></div>
+    `);
+    const snap = snapshotElements(document);
+    expect(snap.map((e) => e.name).sort()).toEqual(["Page action", "Tasks"]);
+  });
+
+  it("identifies elements inside the shell chrome", () => {
+    fixture(`
+      <button id="bg">Background</button>
+      <div data-component="LeadChatHost"><button id="panel">Panel</button></div>
+    `);
+    expect(inShellChrome(document.querySelector("#panel")!)).toBe(true);
+    expect(inShellChrome(document.querySelector("#bg")!)).toBe(false);
   });
 });
