@@ -124,7 +124,6 @@
 
 /* Drag grip — the header area moves the panel; resize grips — two corners:
    bottom-right (.leadchat-resize) and upper-left (.leadchat-resize-tl).
-   Sized 32px for comfortable mobile touch targets.
    touch-action: none lets pointer drags win over page scrolling on touch. */
 .leadchat-drag {
   cursor: grab;
