@@ -11,10 +11,11 @@ import { CoralTile } from "@/components/coral/CoralPetal";
 const STAGGER_MS = 18;
 
 /**
- * Coral — the floating launcher and the app's only navigation surface
- * (design: docs/design/coral-app-framework.md). One button, bottom-right;
- * tapping it opens a panel anchored above the button with every registered
- * app as a tile (glyph + full label) in a grid, grouped into sections.
+ * Coral launcher — one of the two Coral floating buttons (the lead-chat
+ * button is `LeadChatHost`); design: docs/design/coral-app-framework.md.
+ * A small half-pill flush with the left edge; tapping it opens a panel
+ * anchored beside it with every registered app as a tile (glyph + full
+ * label) in a grid, grouped into sections.
  *
  * The layout comes from the registry, so this component never names a
  * destination — apps register, the launcher renders what's registered.
@@ -153,10 +154,10 @@ export function CoralHost({
         aria-expanded={open}
         aria-controls={open ? "coral-panel" : undefined}
         aria-label={open ? "Close Coral menu" : "Open Coral menu"}
-        className="coral-fab fixed z-[60] flex h-14 w-14 items-center justify-center rounded-full text-xl text-[var(--color-accent-fg)]"
+        className="coral-fab fixed z-[60] flex h-11 w-11 items-center justify-center rounded-l-none rounded-r-full text-base text-[var(--color-accent-fg)]"
         style={{
-          right: "1rem",
-          bottom: "calc(var(--safe-bottom) + 1rem)",
+          left: 0,
+          bottom: "calc(var(--safe-bottom) + 0.75rem)",
           background:
             "linear-gradient(135deg, var(--color-accent), color-mix(in srgb, var(--color-accent) 60%, #ff7e6b))",
         }}

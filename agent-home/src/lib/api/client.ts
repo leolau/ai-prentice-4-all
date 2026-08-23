@@ -199,6 +199,11 @@ export class HermesApiClient {
     if (json !== undefined) {
       finalHeaders.set("content-type", "application/json");
     }
+    // Latency measurement: every page render fans out through this one seam,
+    // so timing here attributes page-load seconds to specific upstream
+    // endpoints (visible in `journalctl -u agent-home`). Covers fetch +
+    // body read, which is everything the BFF pays for the call.
+    const started = Date.now();
     const res = await fetch(`${this.baseUrl}${path}`, {
       ...rest,
       headers: finalHeaders,
@@ -207,6 +212,10 @@ export class HermesApiClient {
       cache: "no-store",
     });
     const text = await res.text();
+    const elapsedMs = Date.now() - started;
+    const timingLine = `api-timing ${rest.method ?? "GET"} ${path} status=${res.status} elapsed_ms=${elapsedMs}`;
+    if (elapsedMs >= 500) console.warn(timingLine);
+    else console.log(timingLine);
     const parsed = text ? safeJson(text) : undefined;
     if (!res.ok) {
       throw new HermesApiError(
@@ -1361,7 +1370,7 @@ export class HermesApiClient {
   async createProjectCard(
     slug: string,
     payload: {
-      title?: string;
+      title: string;
       body?: string;
       assignee?: string;
       from_todo?: { profile?: string; id: string };
@@ -1621,7 +1630,7 @@ export class HermesApiClient {
       body: string;
       scope?: string;
       target_ref?: string;
-      rating?: string;
+      rating?: number;
     },
   ): Promise<{ id: string; applies_from: string }> {
     return this.request(

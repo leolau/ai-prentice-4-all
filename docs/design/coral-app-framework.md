@@ -231,6 +231,37 @@ and the FAB are unchanged from this document; only the open-state geometry
 with the bloom. The panel scales in from the button origin with staggered
 tiles, so the "bloom" survives as motion, not as layout.
 
+### 4.11 As-built revision (2026-08-23): Coral is two floating buttons
+
+Coral grew from one floating button into the **two-button floating
+infrastructure** of the app, one per screen corner, with the launcher itself
+shrunk to stay out of the content's way:
+
+1. **Launcher FAB — left edge.** Same registry/panel as §4.10, but the
+   button is now a 44 px half-pill (`rounded-l-none rounded-r-full`) flush
+   against the left edge (`left: 0`) above the safe-area inset, and the panel
+   anchors bottom-left beside it. The composer clears it with a left margin
+   instead of a right one.
+2. **Lead-chat FAB — bottom right.** A second, larger button that opens a
+   floating panel (not a route) bound to ONE long-running conversation: the
+   session id is pinned in `localStorage`
+   (`agent-home:lead-session`) on the first turn and reused forever. The
+   panel reuses the existing chat machinery — `Composer`, `MessageBubble`,
+   `StatusIndicator`, `streamChatTurn`, approval cards — so it is a surface,
+   not a second chat implementation. History reloads from
+   `GET /api/chat/messages` whenever the panel opens with a pinned session.
+
+"Long-running" is what the agent core already provides, not new machinery:
+the Python conversation loop compacts context automatically when it
+approaches the window limit (`agent/context_compressor.py`), so a pinned
+session keeps answering without the user ever starting a new one. Lead chat
+is deliberately NOT a registry app in Phase 1 — it is session infrastructure
+of the shell, like the FABs themselves; user-built apps (§5) compose *with*
+these two buttons rather than replacing them.
+
+Tests: `CoralHost.test.tsx` (launcher) + `LeadChatHost.test.tsx` (open/close,
+session pinning, history reload, session reuse).
+
 ---
 
 ## 5. Phase 2 — Internal app framework (architecture, not build)

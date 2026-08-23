@@ -1,6 +1,7 @@
 import type { ReactNode } from "react";
 
 import { CoralHost } from "@/components/coral/CoralHost";
+import { LeadChatHost } from "@/components/coral/LeadChatHost";
 import { getPrincipal } from "@/lib/auth/principal";
 import { readSession } from "@/lib/auth/session";
 import { HermesApiClient } from "@/lib/api/client";
@@ -108,6 +109,7 @@ export async function MobileShell({
           </div>
         </main>
         {showCoral ? <CoralHost badgeCounts={badgeCounts} /> : null}
+        {showCoral ? <LeadChatHost /> : null}
       </div>
     </div>
   );
