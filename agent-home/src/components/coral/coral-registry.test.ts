@@ -5,11 +5,8 @@ import "@/components/coral/coral-apps";
 import {
   __resetCoralRegistryForTests,
   buildCoralLayout,
-  clusterMemberAngles,
   getApps,
   isAppActive,
-  petalAngle,
-  petalPosition,
   registerApp,
   registerCluster,
 } from "@/components/coral/coral-registry";
@@ -134,45 +131,5 @@ describe("coral caps and registration errors", () => {
   it("rejects routes without a leading slash", () => {
     __resetCoralRegistryForTests();
     expect(() => registerApp(app({ id: "bad", route: "todos" }))).toThrow(/must start with/);
-  });
-});
-
-describe("coral bloom geometry", () => {
-  it("puts a single petal on the diagonal", () => {
-    expect(petalAngle(0, 1)).toBe(135);
-  });
-
-  it("spreads petals evenly from straight-up to straight-left", () => {
-    expect(petalAngle(0, 8)).toBe(90);
-    expect(petalAngle(7, 8)).toBe(180);
-    expect(petalAngle(3, 7)).toBeCloseTo(135, 5);
-  });
-
-  it("maps angles to screen offsets (up is negative y)", () => {
-    const up = petalPosition(0, 2, 120);
-    expect(up.x).toBeCloseTo(0, 1);
-    expect(up.y).toBeCloseTo(-120, 1);
-    const left = petalPosition(1, 2, 120);
-    expect(left.x).toBeCloseTo(-120, 1);
-    expect(left.y).toBeCloseTo(0, 1);
-  });
-
-  it("fans cluster members around the cluster angle, clamped on-screen", () => {
-    const angles = clusterMemberAngles(170, 7);
-    expect(angles).toHaveLength(7);
-    for (const a of angles) {
-      expect(a).toBeGreaterThanOrEqual(90);
-      expect(a).toBeLessThanOrEqual(188);
-    }
-    // Ascending and evenly spaced once clamping stops biting.
-    for (let i = 1; i < angles.length; i += 1) {
-      expect(angles[i]).toBeGreaterThan(angles[i - 1] ?? 0);
-    }
-  });
-
-  it("shifts the fan up when the cluster sits near straight-up", () => {
-    const angles = clusterMemberAngles(95, 5);
-    expect(angles[0]).toBe(90);
-    expect(angles[angles.length - 1]).toBeLessThanOrEqual(195);
   });
 });

@@ -130,66 +130,6 @@ export function isAppActive(pathname: string, route: string): boolean {
   return route === "/" ? pathname === "/" : pathname.startsWith(route);
 }
 
-/**
- * Bloom geometry. Screen coordinates (y grows downward); the button sits at
- * the origin and petals fan through the second quadrant — straight up (90°)
- * to straight left (180°). One petal gets the diagonal; a full arc spreads
- * evenly between the two ends.
- */
-export function petalPosition(
-  index: number,
-  total: number,
-  radius: number,
-): { x: number; y: number } {
-  const angle = petalAngle(index, total);
-  const rad = (angle * Math.PI) / 180;
-  return {
-    x: Math.round(radius * Math.cos(rad) * 10) / 10,
-    y: Math.round(-radius * Math.sin(rad) * 10) / 10,
-  };
-}
-
-/** Angle in degrees for petal `index` of `total`, in [90, 180]. */
-export function petalAngle(index: number, total: number): number {
-  if (total <= 1) return 135;
-  return 90 + (90 * index) / (total - 1);
-}
-
-/**
- * Cluster fan-out geometry: members fan on an outer ring centred on the
- * cluster petal's angle, spaced `spacingDeg` apart, clamped so nothing
- * swings below the button's centre line (off-screen near the bottom-right
- * button — 188° is the lowest angle whose ring position stays visible).
- */
-export function clusterMemberAngles(
-  clusterAngle: number,
-  count: number,
-  spacingDeg = 16,
-): number[] {
-  if (count <= 0) return [];
-  if (count === 1) return [clampAngle(clusterAngle)];
-  const spread = spacingDeg * (count - 1);
-  let start = clusterAngle - spread / 2;
-  let end = clusterAngle + spread / 2;
-  if (start < 90) {
-    end += 90 - start;
-    start = 90;
-  }
-  if (end > 188) {
-    start -= end - 188;
-    end = 188;
-  }
-  start = clampAngle(start);
-  end = clampAngle(end);
-  return Array.from({ length: count }, (_, i) =>
-    count === 1 ? start : start + ((end - start) * i) / (count - 1),
-  );
-}
-
-function clampAngle(angle: number): number {
-  return Math.min(188, Math.max(90, angle));
-}
-
 /** Test hook — clears the registries. Never call from app code. */
 export function __resetCoralRegistryForTests(): void {
   apps.length = 0;

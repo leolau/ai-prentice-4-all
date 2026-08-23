@@ -1,35 +1,43 @@
 /*
- * Coral launcher — bloom geometry and motion (design: coral-app-framework.md §4.5).
- * Positions are computed by the registry (petalPosition / clusterMemberAngles)
- * and handed to petals as --coral-x / --coral-y; this file only owns motion.
- * The keyframe animates FROM the button origin TO the petal's own styles, so
- * `animation: none` (reduced motion) leaves every petal in its final spot.
+ * Coral launcher — panel + tile motion (design: coral-app-framework.md).
+ * The launcher opens as a grid panel anchored above the floating button;
+ * tiles stagger in from a slight scale so the open still feels like a bloom.
+ * Keyframes animate FROM a reduced state TO the element's own styles, so
+ * `animation: none` (reduced motion) leaves everything in its final spot.
  */
 
-.coral-bloom {
+.coral-panel {
+  position: fixed;
+  z-index: 50;
+  right: 1rem;
+  bottom: calc(var(--safe-bottom) + 5.5rem);
+  width: min(calc(100vw - 2rem), 26rem);
+  max-height: min(70dvh, 36rem);
+  overflow-y: auto;
+  border: 1px solid var(--color-border);
+  border-radius: 1.5rem;
+  background: var(--color-surface);
+  box-shadow: 0 12px 40px 0 rgb(0 0 0 / 0.45);
+  padding: 1rem;
   transform-origin: bottom right;
+  animation: coral-panel-in 200ms cubic-bezier(0.2, 0.9, 0.3, 1.05) backwards;
 }
 
-@media (min-width: 1024px) {
-  /* More room on desktop: widen the whole bloom, petals included. */
-  .coral-bloom {
-    transform: scale(1.25);
+@keyframes coral-panel-in {
+  from {
+    transform: scale(0.7);
+    opacity: 0;
   }
 }
 
-.coral-petal {
-  animation: coral-petal-in 280ms cubic-bezier(0.2, 0.9, 0.3, 1.2) backwards;
+.coral-tile {
+  animation: coral-tile-in 180ms ease-out backwards;
   animation-delay: var(--coral-delay, 0ms);
 }
 
-.coral-member {
-  animation: coral-petal-in 220ms cubic-bezier(0.2, 0.9, 0.3, 1.15) backwards;
-  animation-delay: var(--coral-delay, 0ms);
-}
-
-@keyframes coral-petal-in {
+@keyframes coral-tile-in {
   from {
-    transform: translate(0, 0) scale(0.2);
+    transform: scale(0.6);
     opacity: 0;
   }
 }
@@ -60,11 +68,9 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .coral-petal,
-  .coral-member,
-  .coral-backdrop {
-    animation: none;
-  }
+  .coral-panel,
+  .coral-tile,
+  .coral-backdrop,
   .coral-fab {
     animation: none;
   }
