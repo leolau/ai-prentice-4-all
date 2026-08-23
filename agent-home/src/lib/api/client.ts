@@ -1370,7 +1370,7 @@ export class HermesApiClient {
   async createProjectCard(
     slug: string,
     payload: {
-      title: string;
+      title?: string;
       body?: string;
       assignee?: string;
       from_todo?: { profile?: string; id: string };
@@ -1630,7 +1630,7 @@ export class HermesApiClient {
       body: string;
       scope?: string;
       target_ref?: string;
-      rating?: number;
+      rating?: string;
     },
   ): Promise<{ id: string; applies_from: string }> {
     return this.request(
