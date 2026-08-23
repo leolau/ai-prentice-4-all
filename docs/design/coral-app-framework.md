@@ -252,9 +252,10 @@ shrunk to stay out of the content's way:
    `GET /api/chat/messages` whenever the panel opens with a pinned session.
    The panel is a floating window rather than a modal: the header carries a
    **Chats** link that jumps to the full `/chat` page, and the user can drag
-   the header to move it or drag the corner grip to resize it; the chosen
-   geometry persists in `localStorage` (`agent-home:leadchat-rect`) and is
-   restored the next time the panel opens.
+   the header to move it or drag either corner grip (bottom-right or
+   upper-left) to resize it; the chosen geometry persists in `localStorage`
+   (`agent-home:leadchat-rect`) and is restored the next time the panel
+   opens.
 
 "Long-running" is what the agent core already provides, not new machinery:
 the Python conversation loop compacts context automatically when it
@@ -266,7 +267,7 @@ these two buttons rather than replacing them.
 
 Tests: `CoralHost.test.tsx` (launcher) + `LeadChatHost.test.tsx` (open/close,
 Chats link, session pinning, history reload, session reuse, move/resize
-persistence).
+persistence for both corner grips).
 
 ---
 
