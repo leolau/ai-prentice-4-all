@@ -5,12 +5,12 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 afterEach(cleanup);
 
-// CoralHost uses usePathname — mock to a neutral path so no petal is active.
+// CoralHost uses usePathname — mock to a neutral path so no tile is active.
 vi.mock("next/navigation", () => ({
   usePathname: () => "/",
 }));
 // NavGlyph's useLinkStatus only works inside the App Router's link context;
-// in unit tests the petal just shows its glyph.
+// in unit tests the tile just shows its glyph.
 vi.mock("next/link", async (importOriginal) => {
   const actual = await importOriginal<typeof import("next/link")>();
   return {
@@ -20,12 +20,32 @@ vi.mock("next/link", async (importOriginal) => {
 });
 
 import { CoralHost } from "@/components/coral/CoralHost";
-import { buildCoralLayout } from "@/components/coral/coral-registry";
 
-const openCoral = () => fireEvent.click(screen.getByRole("button", { name: /open coral menu/i }));
+const ALL_DESTINATIONS = [
+  "Home",
+  "To-dos",
+  "Chat",
+  "Inbox",
+  "Memory",
+  "Projects",
+  "Files",
+  "Activity",
+  "Graph",
+  "Capacity",
+  "Users",
+  "Suggestions",
+  "Tools",
+  "Core area",
+  "Agent webview",
+  "Settings",
+  "Getting started",
+];
+
+const openCoral = () =>
+  fireEvent.click(screen.getByRole("button", { name: /open coral menu/i }));
 
 describe("CoralHost (SSR)", () => {
-  it("renders the FAB closed — no petals in server markup", () => {
+  it("renders the FAB closed — no panel in server markup", () => {
     const html = renderToStaticMarkup(<CoralHost />);
     expect(html).toContain('data-component="CoralHost"');
     expect(html).toContain("Open Coral menu");
@@ -34,17 +54,24 @@ describe("CoralHost (SSR)", () => {
   });
 });
 
-describe("CoralHost bloom", () => {
-  it("opens on tap and shows every top-level petal", () => {
+describe("CoralHost grid panel", () => {
+  it("opens on tap and shows every destination at once — no nesting", () => {
     render(<CoralHost />);
     openCoral();
     const menu = screen.getByRole("menu", { name: /coral launcher/i });
-    expect(menu).toBeTruthy();
-    // 6 app petals + 2 cluster buttons.
-    for (const label of ["Home", "To-dos", "Chat", "Inbox", "Memory", "Projects", "Workspace", "System"]) {
+    for (const label of ALL_DESTINATIONS) {
       expect(menu.textContent).toContain(label);
     }
+    // Cluster categories render as section headers.
+    expect(menu.textContent).toContain("Workspace");
+    expect(menu.textContent).toContain("System");
     expect(screen.getByRole("button", { name: /close coral menu/i })).toBeTruthy();
+  });
+
+  it("renders one menuitem per destination (17 tiles)", () => {
+    render(<CoralHost />);
+    openCoral();
+    expect(screen.getAllByRole("menuitem")).toHaveLength(17);
   });
 
   it("marks the active route with aria-current", () => {
@@ -71,45 +98,16 @@ describe("CoralHost bloom", () => {
     expect(screen.queryByRole("menu")).toBeNull();
   });
 
-  it("fans a cluster's members and Escape closes the fan before the bloom", () => {
-    render(<CoralHost />);
-    openCoral();
-    const workspace = screen.getByRole("menuitem", { name: /workspace/i });
-    fireEvent.click(workspace);
-    // Cluster members appear.
-    for (const label of ["Files", "Activity", "Graph", "Capacity"]) {
-      expect(screen.getByRole("menu", { name: /coral launcher/i }).textContent).toContain(label);
-    }
-    // First Escape closes the fan only; the bloom stays.
-    fireEvent.keyDown(window, { key: "Escape" });
-    const menu = screen.getByRole("menu", { name: /coral launcher/i });
-    expect(menu.textContent).not.toContain("Files");
-    expect(menu.textContent).toContain("Workspace");
-    // Second Escape closes the bloom.
-    fireEvent.keyDown(window, { key: "Escape" });
-    expect(screen.queryByRole("menu")).toBeNull();
-  });
-
-  it("renders the todos badge count on the Tasks petal", () => {
+  it("renders the todos badge count on the To-dos tile", () => {
     render(<CoralHost badgeCounts={{ "todos-open": 4 }} />);
     openCoral();
     expect(screen.getByRole("menu", { name: /coral launcher/i }).textContent).toContain("4");
   });
 
-  it("covers every registered destination through petals + cluster fans", () => {
+  it("tiles are real links with their routes", () => {
     render(<CoralHost />);
     openCoral();
-    const menu = screen.getByRole("menu", { name: /coral launcher/i });
-    for (const petal of buildCoralLayout()) {
-      if (petal.type === "app") {
-        expect(menu.textContent).toContain(petal.app.name);
-      } else {
-        fireEvent.click(screen.getByRole("menuitem", { name: petal.label }));
-        for (const member of petal.members) {
-          expect(menu.textContent).toContain(member.name);
-        }
-        fireEvent.click(screen.getByRole("menuitem", { name: petal.label }));
-      }
-    }
+    const settings = screen.getByRole("menuitem", { name: /settings/i });
+    expect(settings.getAttribute("href")).toBe("/settings");
   });
 });

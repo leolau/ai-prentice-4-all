@@ -210,6 +210,27 @@ sidebar fallback** — the point of Phase 1 is one navigation everywhere.
 | PWA standalone mode interferes with gestures | The bloom uses only taps and Esc; nothing conflicts with pull-to-refresh or edge swipes. |
 | Badge timing regressions (todos count) | The server-side `unstable_cache` fetch moves from MobileShell's nav rendering into the registry's badge-fill step, unchanged in mechanism; a test asserts the badge slot contract. |
 
+### 4.10 As-built revision (2026-08-23): radial bloom → grid panel
+
+The radial bloom of §4.3 shipped, was seen live the same day, and was
+replaced. The arithmetic never worked: 60 px petals on a 150 px arc give
+≈34 px of centre-to-centre spacing for 8 petals over 90°, so overlap was
+geometrically unavoidable at any radius a phone screen allows — and the
+cluster fan on a second ring tangled with the first. The screenshot evidence
+beat the design.
+
+As built, tapping Coral opens a **grid panel** anchored above the button
+(full-width sheet on phones, 26 rem rounded panel on wider viewports):
+top-level apps in a 4-column grid, then one section per cluster with its
+members in the same grid. Every tile is glyph + full label; nothing overlaps
+at any viewport; all 17 destinations are visible with zero nesting, which
+also removes the two-layer Esc choreography. The registry, manifest contract,
+caps, a11y behaviour (focus-in, Esc, backdrop, arrow roving, reduced motion)
+and the FAB are unchanged from this document; only the open-state geometry
+(§4.3, §4.5) is superseded. `petalPosition`/`clusterMemberAngles` were deleted
+with the bloom. The panel scales in from the button origin with staggered
+tiles, so the "bloom" survives as motion, not as layout.
+
 ---
 
 ## 5. Phase 2 — Internal app framework (architecture, not build)
