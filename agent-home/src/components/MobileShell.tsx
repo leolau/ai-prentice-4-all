@@ -2,6 +2,7 @@ import type { ReactNode } from "react";
 
 import { BottomNav } from "@/components/BottomNav";
 import { SideNav } from "@/components/SideNav";
+import { CoralHost } from "@/components/coral/CoralHost";
 import { getPrincipal } from "@/lib/auth/principal";
 import { readSession } from "@/lib/auth/session";
 import { HermesApiClient } from "@/lib/api/client";
@@ -109,6 +110,7 @@ export async function MobileShell({
           </div>
         </main>
         {showNav ? <BottomNav badgeCounts={badgeCounts} /> : null}
+        {showNav ? <CoralHost badgeCounts={badgeCounts} /> : null}
       </div>
     </div>
   );
