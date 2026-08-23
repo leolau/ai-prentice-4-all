@@ -211,6 +211,26 @@ describe("LeadChatHost move & resize", () => {
     expect(stored?.h).toBeGreaterThanOrEqual(240);
   });
 
+  it("persists a new size after dragging the upper-left grip", () => {
+    // Seed a known box so the math is deterministic: dragging the top-left
+    // corner outward 30x20 grows the panel while anchoring bottom-right.
+    localStorage.setItem(
+      "agent-home:leadchat-rect",
+      JSON.stringify({ x: 100, y: 100, w: 300, h: 300 }),
+    );
+    render(<LeadChatHost />);
+    openLeadChat();
+    const handle = document.querySelector(".leadchat-resize-tl") as Element;
+    fireEvent.pointerDown(handle, { clientX: 100, clientY: 100, button: 0 });
+    fireEvent.pointerMove(window, { clientX: 70, clientY: 80 });
+    fireEvent.pointerUp(window, { clientX: 70, clientY: 80 });
+
+    const stored = JSON.parse(
+      localStorage.getItem("agent-home:leadchat-rect") ?? "null",
+    );
+    expect(stored).toEqual({ x: 70, y: 80, w: 330, h: 320 });
+  });
+
   it("restores the persisted rect on the next open", () => {
     localStorage.setItem(
       "agent-home:leadchat-rect",
