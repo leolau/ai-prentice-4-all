@@ -18,11 +18,16 @@ export async function GET(request: Request): Promise<NextResponse> {
   const raw = url.searchParams.get("archived");
   const archived =
     raw === "only" || raw === "include" || raw === "exclude" ? raw : undefined;
+  const rawLimit = Number(url.searchParams.get("limit"));
+  const limit = Number.isFinite(rawLimit)
+    ? Math.min(200, Math.max(1, Math.floor(rawLimit)))
+    : undefined;
   try {
     const client = await apiClientForRequest({ profile: profileFromUrl(request.url) });
     const data = await client.sessions({
       source: "agent_home",
       order: "recent",
+      limit,
       archived,
       tags: url.searchParams.get("tags") ?? undefined,
       excludeTags: url.searchParams.get("exclude_tags") ?? undefined,

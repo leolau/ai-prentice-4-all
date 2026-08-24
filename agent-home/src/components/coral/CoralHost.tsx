@@ -11,6 +11,7 @@ import {
   restoreLeadChatAfterMenu,
 } from "@/components/coral/coral-interlock";
 import { CoralTile } from "@/components/coral/CoralPetal";
+import { useChatUnreadCount } from "@/components/coral/useChatUnread";
 
 const STAGGER_MS = 18;
 
@@ -37,6 +38,12 @@ export function CoralHost({
   const panelRef = useRef<HTMLDivElement>(null);
 
   const petals = buildCoralLayout();
+
+  // Server-supplied badges (e.g. todos-open) plus the client-side unread
+  // count — last-read state lives in this browser, so the shell can't see it.
+  const chatUnread = useChatUnreadCount();
+  const allBadges: Record<string, number> =
+    chatUnread > 0 ? { ...badgeCounts, "chat-unread": chatUnread } : badgeCounts;
 
   const close = (reason: "dismiss" | "navigate") => {
     setOpen(false);
@@ -114,7 +121,7 @@ export function CoralHost({
                         active={isAppActive(pathname, petal.app.route)}
                         badgeCount={
                           petal.app.badgeSlot
-                            ? badgeCounts[petal.app.badgeSlot]
+                            ? allBadges[petal.app.badgeSlot]
                             : undefined
                         }
                         delayMs={nextDelay()}
@@ -144,7 +151,7 @@ export function CoralHost({
                           active={isAppActive(pathname, member.route)}
                           badgeCount={
                             member.badgeSlot
-                              ? badgeCounts[member.badgeSlot]
+                              ? allBadges[member.badgeSlot]
                               : undefined
                           }
                           delayMs={nextDelay()}
