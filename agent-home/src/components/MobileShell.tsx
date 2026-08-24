@@ -22,7 +22,9 @@ const getCachedFacets = unstable_cache(
     return client.todosFacets();
   },
   ["todos-facets-badge"],
-  { revalidate: 30 },
+  // The badge is decorative — a 2-minute-old count is fine, and it cuts
+  // hits on the facets endpoint (the per-render backend hotspot).
+  { revalidate: 120 },
 );
 
 /**
