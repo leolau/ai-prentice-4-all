@@ -6,6 +6,10 @@ import { usePathname } from "next/navigation";
 import "@/components/coral/coral-apps";
 import "./coral.css";
 import { buildCoralLayout, isAppActive } from "@/components/coral/coral-registry";
+import {
+  parkLeadChatForMenu,
+  restoreLeadChatAfterMenu,
+} from "@/components/coral/coral-interlock";
 import { CoralTile } from "@/components/coral/CoralPetal";
 
 const STAGGER_MS = 18;
@@ -36,6 +40,7 @@ export function CoralHost({
 
   const close = (reason: "dismiss" | "navigate") => {
     setOpen(false);
+    restoreLeadChatAfterMenu();
     if (reason === "dismiss") fabRef.current?.focus();
   };
 
@@ -44,6 +49,7 @@ export function CoralHost({
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== "Escape") return;
       setOpen(false);
+      restoreLeadChatAfterMenu();
       fabRef.current?.focus();
     };
     window.addEventListener("keydown", onKey);
@@ -155,7 +161,16 @@ export function CoralHost({
       <button
         ref={fabRef}
         type="button"
-        onClick={() => (open ? close("dismiss") : setOpen(true))}
+        onClick={() => {
+          if (open) {
+            close("dismiss");
+          } else {
+            // The menu and the lead chat shouldn't stack — park the chat;
+            // close() opens it back up when the menu goes away.
+            parkLeadChatForMenu();
+            setOpen(true);
+          }
+        }}
         aria-expanded={open}
         aria-controls={open ? "coral-panel" : undefined}
         aria-label={open ? "Close Coral menu" : "Open Coral menu"}

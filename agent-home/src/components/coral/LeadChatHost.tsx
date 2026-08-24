@@ -6,6 +6,10 @@ import Link from "next/link";
 import { Composer } from "@/components/chat/Composer";
 import { MessageBubble } from "@/components/chat/MessageBubble";
 import { StatusIndicator, type ChatActivity } from "@/components/chat/StatusIndicator";
+import {
+  onLeadChatRequest,
+  reportLeadChatOpen,
+} from "@/components/coral/coral-interlock";
 import { streamChatTurn } from "@/lib/chat/stream";
 import { usePersistentState } from "@/lib/use-persistent-state";
 import type { ChatApprovalRequest, ChatAttachment, ChatMessage } from "@/types";
@@ -98,6 +102,15 @@ export function LeadChatHost() {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [open]);
+
+  // Interlock with the launcher menu (coral-interlock): it parks this panel
+  // while the menu is up and opens it back up afterwards.
+  useEffect(() => {
+    reportLeadChatOpen(open);
+    return () => reportLeadChatOpen(false);
+  }, [open]);
+
+  useEffect(() => onLeadChatRequest((requested) => setOpen(requested)), []);
 
   /** The panel's current box — measured from the DOM until the user moves it. */
   function originRect(): LeadChatRect {
