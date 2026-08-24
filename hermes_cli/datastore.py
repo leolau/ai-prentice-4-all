@@ -180,7 +180,7 @@ def active_profile_slug() -> str:
 
     A ``HERMES_HOME`` that is neither the default home nor a known profile
     directory resolves to ``"custom"`` there, which is *not* unique: two
-    unrelated homes would collide on one schema.  Those are disambiguated by
+    unrelated homes could collide on one schema.  Those are disambiguated by
     a digest of the resolved path.
     """
     from hermes_cli.profiles import get_active_profile_name
@@ -589,6 +589,8 @@ async def initialize_supabase_app(connection: asyncpg.Connection) -> None:
             ADD COLUMN IF NOT EXISTS trace_id TEXT;
         CREATE INDEX IF NOT EXISTS changes_trace_id_idx
             ON {prod}.changes (trace_id);
+        CREATE INDEX IF NOT EXISTS changes_ts_idx
+            ON {prod}.changes (ts DESC);
 
         CREATE TABLE IF NOT EXISTS {prod}.promotions (
             id TEXT PRIMARY KEY,
