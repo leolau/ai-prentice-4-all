@@ -496,7 +496,7 @@ export function ChatPane({
     void refreshSessions();
   }
 
-  // ── Tag handlers ────────────────────────────────────────────────
+  // ── Tag handlers ──────────────────────────────────────────────────
 
   async function loadAllTags() {
     try {
@@ -631,7 +631,7 @@ export function ChatPane({
     void refreshSessions();
   }, [includeTags, excludeTags, matchMode]);
 
-  // ── Search handlers ─────────────────────────────────────────────
+  // ── Search handlers ──────────────────────────────────────────────
 
   async function crossSessionSearch(q: string) {
     const res = await fetch(
