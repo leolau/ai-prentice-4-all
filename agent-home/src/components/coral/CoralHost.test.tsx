@@ -68,6 +68,15 @@ describe("CoralHost grid panel", () => {
     expect(screen.getByRole("button", { name: /close coral menu/i })).toBeTruthy();
   });
 
+  it("tints the Main, Workspace and System sections distinctly", () => {
+    render(<CoralHost />);
+    openCoral();
+    const menu = screen.getByRole("menu", { name: /coral launcher/i });
+    expect(menu.querySelector(".coral-section--main")).toBeTruthy();
+    expect(menu.querySelector(".coral-section--workspace")).toBeTruthy();
+    expect(menu.querySelector(".coral-section--system")).toBeTruthy();
+  });
+
   it("renders one menuitem per destination (17 tiles)", () => {
     render(<CoralHost />);
     openCoral();

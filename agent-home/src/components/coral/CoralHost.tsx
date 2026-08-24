@@ -95,33 +95,38 @@ export function CoralHost({
             onKeyDown={onPanelKeyDown}
             className="coral-panel"
           >
-            <div className="grid grid-cols-4 gap-1">
-              {petals
-                .filter((p) => p.type === "app")
-                .map((petal) => {
-                  if (petal.type !== "app") return null;
-                  return (
-                    <CoralTile
-                      key={petal.app.id}
-                      app={petal.app}
-                      active={isAppActive(pathname, petal.app.route)}
-                      badgeCount={
-                        petal.app.badgeSlot
-                          ? badgeCounts[petal.app.badgeSlot]
-                          : undefined
-                      }
-                      delayMs={nextDelay()}
-                      onClose={() => close("navigate")}
-                    />
-                  );
-                })}
-            </div>
+            <section className="coral-section coral-section--main">
+              <div className="grid grid-cols-4 gap-1">
+                {petals
+                  .filter((p) => p.type === "app")
+                  .map((petal) => {
+                    if (petal.type !== "app") return null;
+                    return (
+                      <CoralTile
+                        key={petal.app.id}
+                        app={petal.app}
+                        active={isAppActive(pathname, petal.app.route)}
+                        badgeCount={
+                          petal.app.badgeSlot
+                            ? badgeCounts[petal.app.badgeSlot]
+                            : undefined
+                        }
+                        delayMs={nextDelay()}
+                        onClose={() => close("navigate")}
+                      />
+                    );
+                  })}
+              </div>
+            </section>
             {petals
               .filter((p) => p.type === "cluster")
               .map((petal) => {
                 if (petal.type !== "cluster") return null;
                 return (
-                  <section key={petal.id} className="mt-4">
+                  <section
+                    key={petal.id}
+                    className={`coral-section coral-section--${petal.id} mt-4`}
+                  >
                     <h3 className="mb-1 px-1 text-xs font-semibold uppercase tracking-wide text-[var(--color-muted)]">
                       {petal.label}
                     </h3>
