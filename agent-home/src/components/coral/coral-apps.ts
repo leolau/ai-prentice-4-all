@@ -45,6 +45,7 @@ registerApp({
   route: "/chat",
   category: "chat",
   order: 20,
+  badgeSlot: "chat-unread",
 });
 
 registerApp({

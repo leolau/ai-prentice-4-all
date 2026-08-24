@@ -14,9 +14,10 @@ export type AppKind = "next-route" | "webview" | "composed";
 /**
  * A named badge slot, not a number — the count arrives from the shell as a
  * prop so the registry stays a plain, server-safe constant (same contract the
- * old `NavItem.badge` had).
+ * old `NavItem.badge` had). `chat-unread` is fed client-side by the
+ * launcher's unread hook (last-read state lives in the browser).
  */
-export type BadgeSlot = "todos-open";
+export type BadgeSlot = "todos-open" | "chat-unread";
 
 export interface AppManifest {
   /** Stable unique id, kebab-case: "todos", "memory-map". */

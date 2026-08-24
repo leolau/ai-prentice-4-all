@@ -42,6 +42,17 @@ export function appMcpSecret(): string | undefined {
 }
 
 /**
+ * Shared secret guarding the app-channel push seams (secret; `.env`): the
+ * Python sender presents it as `x-app-push-secret` when pulling the push
+ * config (`/api/notifications/config`). Must equal the gateway's
+ * `APP_PUSH_SECRET`. Optional — when unset the service endpoint answers 401
+ * and deliveries simply skip the notification.
+ */
+export function appPushSecret(): string | undefined {
+  return process.env.AGENT_HOME_APP_PUSH_SECRET || undefined;
+}
+
+/**
  * Base URL of the Python AI layer (`/api/*`, `/auth/*`). Deploy topology,
  * defaults to the on-box loopback the current prod Caddy fronts.
  */

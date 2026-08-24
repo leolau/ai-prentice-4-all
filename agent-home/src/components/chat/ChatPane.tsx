@@ -16,6 +16,7 @@ import { SessionTabs } from "@/components/chat/SessionTabs";
 import { StatusIndicator } from "@/components/chat/StatusIndicator";
 import { TagFilterBar } from "@/components/chat/TagFilterBar";
 import { chatHeaderActionsRef } from "@/lib/chat/header-actions";
+import { markSessionRead } from "@/lib/chat/last-read";
 import {
   setLastAssistantContent,
   withLiveTurn,
@@ -164,6 +165,13 @@ export function ChatPane({
     selectedRef.current = sessionId;
   }, [sessionId]);
 
+  // Deep-linked open (notification tap / ?session=…): the transcript is
+  // rendered server-side, so mark it read once on mount for the unread badge.
+  useEffect(() => {
+    if (initialSessionId) markSessionRead(initialSessionId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   // Register the chat header action callbacks (startNew / openArchived) into the
   // shared ref so the ChatHeaderActions component in the MobileShell header can
   // invoke them.  Runs on every render (no deps) so the ref always holds the
@@ -243,6 +251,7 @@ export function ChatPane({
         setMessages(
           withLiveTurn(visible(body.messages ?? []), liveRef.current.get(keyOf(id))),
         );
+        markSessionRead(id);
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load conversation.");
@@ -320,6 +329,7 @@ export function ChatPane({
         setSessionId(landed);
         selectedRef.current = landed;
       }
+      if (landed && onThisSession()) markSessionRead(landed);
       void refreshSessions();
     } catch (err) {
       const aborted = err instanceof DOMException && err.name === "AbortError";
