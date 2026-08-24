@@ -180,7 +180,7 @@ def active_profile_slug() -> str:
 
     A ``HERMES_HOME`` that is neither the default home nor a known profile
     directory resolves to ``"custom"`` there, which is *not* unique: two
-    unrelated homes could collide on one schema.  Those are disambiguated by
+    unrelated homes would collide on one schema.  Those are disambiguated by
     a digest of the resolved path.
     """
     from hermes_cli.profiles import get_active_profile_name
