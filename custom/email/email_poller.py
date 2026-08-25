@@ -29,6 +29,8 @@ HEALTH_PORT = 7901
 # Make custom/shared importable so the poller can register attachment files.
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import google_oauth
+
 def get_db():
     conn = sqlite3.connect(DB_PATH, timeout=30)
     conn.row_factory = sqlite3.Row
@@ -207,12 +209,19 @@ def poll_account(account, db):
     address = account['address']
     imap_host = account['imap']['host']
     imap_port = account['imap']['port']
-    cred_env = account['credentials_env']
     folders = account.get('folders', ['INBOX'])
 
-    password = os.environ.get(cred_env, '').replace('\xa0', ' ').strip()
-    if not password:
-        print(f"[poller] WARNING: No password for {address} (env: {cred_env})")
+    cred = google_oauth.credentials_for_email(
+        'email', account.get('google_account') or address,
+        required_scope=google_oauth.MAIL_SCOPE,
+    )
+    if cred is None:
+        print(
+            f"[poller] WARNING: no credential-store entry with the email "
+            f"service for {address} (connect it in Settings and grant the "
+            f"Mail scope)"
+        )
+        poll_status.setdefault('accounts', {}).setdefault(account_id, {})['auth'] = 'no_credential'
         return 0
 
     # Ensure account exists in DB
@@ -227,14 +236,28 @@ def poll_account(account, db):
     else:
         last_uid = existing['last_uid'] or 0
 
+    def _connect_and_auth():
+        if account['imap'].get('tls', True):
+            conn = imaplib.IMAP4_SSL(imap_host, imap_port)
+        else:
+            conn = imaplib.IMAP4(imap_host, imap_port)
+        token = google_oauth.get_access_token(cred)
+        conn.authenticate(
+            'XOAUTH2',
+            lambda challenge: google_oauth.xoauth2_string(address, token).encode(),
+        )
+        return conn
+
     total_new = 0
     try:
-        if account['imap'].get('tls', True):
-            mail = imaplib.IMAP4_SSL(imap_host, imap_port)
-        else:
-            mail = imaplib.IMAP4(imap_host, imap_port)
-
-        mail.login(address, password)
+        try:
+            mail = _connect_and_auth()
+        except imaplib.IMAP4.error as first_error:
+            # Stale access token or rotated refresh: invalidate and retry once.
+            google_oauth.invalidate(cred)
+            print(f"[poller] {address}: XOAUTH2 failed ({first_error}); retrying once")
+            mail = _connect_and_auth()
+        poll_status.setdefault('accounts', {}).setdefault(account_id, {})['auth'] = 'xoauth2'
 
         for folder in folders:
             try:
@@ -389,6 +412,9 @@ def poll_account(account, db):
     except Exception as e:
         print(f"[poller] {address}: Connection error: {e}")
         traceback.print_exc()
+        poll_status.setdefault('accounts', {}).setdefault(account_id, {}).update(
+            auth='auth_error', last_auth_error=str(e)[:200]
+        )
         db.execute("UPDATE email_accounts SET status = 'error' WHERE id = ?", (account_id,))
         db.commit()
         return 0
