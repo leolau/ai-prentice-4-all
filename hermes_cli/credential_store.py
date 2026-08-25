@@ -725,7 +725,13 @@ def materialize_root() -> Path:
     return get_hermes_home() / "credentials-materialized"
 
 
-async def _resolve_mount_principal(principal: Any) -> Any:
+async def resolve_owner_principal(principal: Any = None) -> Any:
+    """The acting principal for service-context reads (owner fallback).
+
+    Background consumers (sandbox mounts, platform adapters) have no logged-in
+    user; they act under the enrolled owner, mirroring the dashboard's
+    no-session fallback.
+    """
     if principal is not None:
         return principal
     store = default_credential_store()
@@ -747,7 +753,7 @@ async def materialize_for_mounts(principal: Any = None) -> List[str]:
     backend docs) into ``credentials-materialized/`` so mount paths are
     uniform and never expose the store tree itself.
     """
-    actor = await _resolve_mount_principal(principal)
+    actor = await resolve_owner_principal(principal)
     if actor is None:
         return []
     store = default_credential_store()
