@@ -761,6 +761,20 @@ def cmd_mcp_login(args):
     _reauth_oauth_server(name, servers[name])
 
 
+def cmd_mcp_oauth_paste(args):
+    """Deliver a pasted OAuth redirect to a waiting flow on this host.
+
+    Headless boxes can't receive the browser's ``127.0.0.1`` callback when
+    the browser runs elsewhere; this writes the copied redirect URL where
+    the waiting ``hermes mcp login`` / gateway flow polls for it
+    (``tools.mcp_oauth.write_drop_redirect``).
+    """
+    from tools.mcp_oauth import write_drop_redirect
+
+    path = write_drop_redirect(args.name, args.redirect)
+    _success(f"Redirect staged at {path} — the waiting flow will complete it.")
+
+
 def cmd_mcp_reauth(args):
     """Re-authenticate one OAuth MCP server, or all of them sequentially.
 
@@ -953,6 +967,7 @@ def mcp_command(args):
         "configure": cmd_mcp_configure,
         "config": cmd_mcp_configure,
         "login": cmd_mcp_login,
+        "oauth-paste": cmd_mcp_oauth_paste,
         "reauth": cmd_mcp_reauth,
     }
 

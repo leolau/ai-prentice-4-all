@@ -94,6 +94,9 @@ class OAuthNonInteractiveError(RuntimeError):
 # Port used by the most recent build_oauth_auth() call.  Exposed so that
 # tests can verify the callback server and the redirect_uri share a port.
 _oauth_port: int | None = None
+# Server name for the most recent OAuth build; lets the headless completion
+# path (drop file + `hermes mcp oauth-paste`) address the waiting flow.
+_oauth_server_name: str | None = None
 # Interactivity gate for OAuth stdin prompts. A ContextVar (NOT threading.local)
 # is required: background MCP discovery sets this on the discovery thread, but
 # the actual connect+OAuth runs on the dedicated `mcp-event-loop` thread via
@@ -543,6 +546,18 @@ async def _redirect_handler(authorization_url: str) -> None:
     else:
         print("  (Headless environment detected — open the URL manually.)\n", file=sys.stderr)
 
+    # Headless completion path: the browser's redirect targets 127.0.0.1 on
+    # the machine where IT runs, which is not this host when the browser is
+    # elsewhere. A second process on this host can deliver the redirect.
+    if _oauth_server_name:
+        print(
+            f"  If the redirect cannot reach this host, copy the full URL from the\n"
+            f"  browser address bar after authorizing and run on this host:\n"
+            f"    hermes mcp oauth-paste {_oauth_server_name} '<redirect-url>'\n"
+            f"  The waiting flow picks it up and completes.\n",
+            file=sys.stderr,
+        )
+
 
 async def _wait_for_callback() -> tuple[str, str | None]:
     """Wait for the OAuth callback to arrive on the local callback server.
@@ -613,6 +628,10 @@ async def _wait_for_callback() -> tuple[str, str | None]:
         while elapsed < timeout:
             if result["auth_code"] is not None or result["error"] is not None:
                 break
+            # Headless completion: a second process (hermes mcp oauth-paste,
+            # or the agent relaying a user-pasted redirect) can drop the
+            # redirect URL where the browser's loopback redirect can't reach.
+            _consume_drop_file(result)
             await asyncio.sleep(poll_interval)
             elapsed += poll_interval
     finally:
@@ -652,7 +671,11 @@ def _paste_callback_reader(result: dict) -> None:
         return
     if not line:
         return  # EOF
-    line = line.strip()
+    _apply_redirect_line(line.strip(), result)
+
+
+def _apply_redirect_line(line: str, result: dict) -> None:
+    """Parse one redirect-URL / query-string / skip line into *result*."""
     if not line:
         return
 
@@ -665,8 +688,6 @@ def _paste_callback_reader(result: dict) -> None:
     # to OAuthNonInteractiveError (already handled by mcp_tool.py as a
     # non-fatal "skip this server and continue startup" path).
     if line.lower() in _SKIP_TOKENS:
-        if result.get("auth_code") is not None or result.get("error") is not None:
-            return
         result["error"] = _USER_SKIPPED_SENTINEL
         print(
             "  OAuth skipped. Run `hermes mcp login <server>` later to "
@@ -712,7 +733,54 @@ def _paste_callback_reader(result: dict) -> None:
     result["state"] = state
     result["error"] = error
     if code:
-        print("  Got authorization code from paste — completing flow.", file=sys.stderr)
+        print("  Got authorization code — completing flow.", file=sys.stderr)
+
+
+def drop_redirect_path(server_name: str) -> Path:
+    """Where ``hermes mcp oauth-paste`` delivers a redirect for a waiting flow.
+
+    Headless hosts (gateway, dashboard, agent-driven terminals) have no TTY
+    to paste into, and a browser on another machine cannot reach the
+    ``127.0.0.1`` callback; a second process drops the redirect URL here and
+    the waiting flow polls for it. Carries only a single-use authorization
+    code, but is kept 0600 inside a 0700 dir like the rest of the OAuth state.
+    """
+    from hermes_constants import get_hermes_home
+
+    return get_hermes_home() / "mcp-oauth-pending" / f"{_safe_filename(server_name)}.redirect"
+
+
+def write_drop_redirect(server_name: str, url_or_query: str) -> Path:
+    """Persist a redirect URL/query for a waiting OAuth flow (0600, dir 0700)."""
+    path = drop_redirect_path(server_name)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(f".tmp.{os.getpid()}")
+    tmp.write_text(url_or_query.strip() + "\n", encoding="utf-8")
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, path)
+    secure_parent_dir(path)
+    return path
+
+
+def _consume_drop_file(result: dict) -> None:
+    """Feed a pending drop-file redirect into *result* and remove the file."""
+    name = _oauth_server_name
+    if not name:
+        return
+    path = drop_redirect_path(name)
+    try:
+        if not path.exists():
+            return
+        line = path.read_text(encoding="utf-8").strip()
+        path.unlink(missing_ok=True)
+    except OSError:
+        return
+    if line:
+        print(
+            f"  Got authorization redirect from {path.name} — completing flow.",
+            file=sys.stderr,
+        )
+        _apply_redirect_line(line, result)
 
 
 # ---------------------------------------------------------------------------
@@ -736,7 +804,7 @@ def remove_oauth_tokens(server_name: str) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _configure_callback_port(cfg: dict) -> int:
+def _configure_callback_port(cfg: dict, server_name: str | None = None) -> int:
     """Pick or validate the OAuth callback port.
 
     Stores the resolved port into ``cfg['_resolved_port']`` so sibling
@@ -744,16 +812,18 @@ def _configure_callback_port(cfg: dict) -> int:
     resolved port.
 
     NOTE: also sets the legacy module-level ``_oauth_port`` so existing
-    calls to ``_wait_for_callback`` keep working. The legacy global is
-    the root cause of issue #5344 (port collision on concurrent OAuth
-    flows); replacing it with a ContextVar is out of scope for this
-    consolidation PR.
+    calls to ``_wait_for_callback`` keep working (plus ``_oauth_server_name``
+    for the headless drop-file completion path). The legacy global is the
+    root cause of issue #5344 (port collision on concurrent OAuth flows);
+    replacing it with a ContextVar is out of scope for this consolidation PR.
     """
-    global _oauth_port
+    global _oauth_port, _oauth_server_name
     requested = int(cfg.get("redirect_port", 0))
     port = _find_free_port() if requested == 0 else requested
     cfg["_resolved_port"] = port
     _oauth_port = port  # legacy consumer: _wait_for_callback reads this
+    if server_name is not None:
+        _oauth_server_name = server_name
     return port
 
 
@@ -858,7 +928,7 @@ def build_oauth_auth(
             "initial authorization, then cached tokens will be reused."
         )
 
-    _configure_callback_port(cfg)
+    _configure_callback_port(cfg, server_name)
     client_metadata = _build_client_metadata(cfg)
     _maybe_preregister_client(storage, cfg, client_metadata)
 

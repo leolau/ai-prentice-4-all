@@ -1177,6 +1177,7 @@ def _media_delivery_denied_paths() -> List[Path]:
         "credentials-pending",
         "google-workspace",
         "google-workspace-materialized",
+        "mcp-oauth-pending",
     )
     for hermes_root in (_HERMES_HOME, _HERMES_ROOT):
         for rel in _ROOT_CREDENTIAL_FILES:
