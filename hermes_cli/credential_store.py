@@ -28,6 +28,7 @@ Security contract:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -724,17 +725,39 @@ def materialize_root() -> Path:
     return get_hermes_home() / "credentials-materialized"
 
 
-async def materialize_for_mounts(principal: Any) -> List[str]:
+async def resolve_owner_principal(principal: Any = None) -> Any:
+    """The acting principal for service-context reads (owner fallback).
+
+    Background consumers (sandbox mounts, platform adapters) have no logged-in
+    user; they act under the enrolled owner, mirroring the dashboard's
+    no-session fallback.
+    """
+    if principal is not None:
+        return principal
+    store = default_credential_store()
+    if store.backend == "supabase":
+        from hermes_cli.access import PrincipalStore
+
+        return await PrincipalStore(store._store).get_owner()
+    from hermes_cli.access import Principal
+
+    return Principal(user_id="owner", display="owner", role="owner")
+
+
+async def materialize_for_mounts(principal: Any = None) -> List[str]:
     """Write the principal's readable entries as 0600 files for mounting.
 
     Returns HERMES_HOME-relative paths suitable for
-    :func:`tools.credential_files.register_credential_file`. File backend
-    entries are already on disk; callers register those directly.
+    :func:`tools.credential_files.register_credential_file`. Works for both
+    backends: entries are copied out of the store (Supabase rows or file
+    backend docs) into ``credentials-materialized/`` so mount paths are
+    uniform and never expose the store tree itself.
     """
-    store = default_credential_store()
-    if store.backend != "supabase":
+    actor = await resolve_owner_principal(principal)
+    if actor is None:
         return []
-    entries = await store.list(principal)
+    store = default_credential_store()
+    entries = await store.list(actor)
     root = materialize_root()
     shutil.rmtree(root, ignore_errors=True)
     paths: List[str] = []
@@ -775,3 +798,20 @@ async def materialize_for_mounts(principal: Any) -> List[str]:
             raise
         paths.append(str(rel))
     return paths
+
+
+def materialize_for_mounts_sync(principal: Any = None) -> List[str]:
+    """Sync facade over :func:`materialize_for_mounts`.
+
+    Skill activation runs both inside the event loop (gateway) and in plain
+    threads (CLI); a running loop gets a dedicated thread so ``asyncio.run``
+    stays legal.
+    """
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(materialize_for_mounts(principal))
+    import concurrent.futures
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        return pool.submit(asyncio.run, materialize_for_mounts(principal)).result()

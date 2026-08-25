@@ -106,7 +106,18 @@ def is_write_denied(path: str) -> bool:
         if resolved.startswith(prefix):
             return True
 
-    mcp_tokens_dir_name = "mcp-tokens"
+    denied_dir_names = (
+        "mcp-tokens",
+        "pairing",
+        # Unified credential store trees (docs/design/unified-credential-store.md):
+        # per-principal entries, materialized mount copies, pending OAuth
+        # sessions, and the Google client/legacy token dir.
+        "credentials",
+        "credentials-materialized",
+        "credentials-pending",
+        "google-workspace",
+        "google-workspace-materialized",
+    )
 
     hermes_dirs = []
     for base in (_hermes_home_path(), _hermes_root_path()):
@@ -118,18 +129,13 @@ def is_write_denied(path: str) -> bool:
             continue
 
     for base_real in hermes_dirs:
-        try:
-            mcp_real = os.path.realpath(os.path.join(base_real, mcp_tokens_dir_name))
-            if resolved == mcp_real or resolved.startswith(mcp_real + os.sep):
-                return True
-        except Exception:
-            pass
-        try:
-            pairing_real = os.path.realpath(os.path.join(base_real, "pairing"))
-            if resolved == pairing_real or resolved.startswith(pairing_real + os.sep):
-                return True
-        except Exception:
-            pass
+        for dir_name in denied_dir_names:
+            try:
+                denied_real = os.path.realpath(os.path.join(base_real, dir_name))
+                if resolved == denied_real or resolved.startswith(denied_real + os.sep):
+                    return True
+            except Exception:
+                pass
 
     safe_roots = get_safe_write_roots()
     if safe_roots:
@@ -244,6 +250,9 @@ def get_read_block_error(path: str) -> Optional[str]:
         ".anthropic_oauth.json",
         ".env",
         "webhook_subscriptions.json",
+        "google_token.json",
+        "google_client_secret.json",
+        "google_oauth_pending.json",
         os.path.join("auth", "google_oauth.json"),
         # Bitwarden Secrets Manager disk cache: stores plaintext secret values
         # to avoid re-fetching across back-to-back CLI invocations. The file
@@ -287,6 +296,37 @@ def get_read_block_error(path: str) -> Optional[str]:
             "and cannot be read directly. (Defense-in-depth — not a "
             "security boundary; the terminal tool can still bypass.)"
         )
+
+    # Unified credential store trees: per-principal entries, materialized
+    # mount copies, pending OAuth sessions, Google client secrets.
+    for hd in hermes_dirs:
+        for dir_name in (
+            "credentials",
+            "credentials-materialized",
+            "credentials-pending",
+            "google-workspace",
+            "google-workspace-materialized",
+        ):
+            try:
+                store_dir = (hd / dir_name).resolve()
+            except Exception:
+                continue
+            if resolved == store_dir:
+                return (
+                    f"Access denied: {path} is a Hermes credential store "
+                    "directory and cannot be read directly. (Defense-in-depth "
+                    "— not a security boundary; the terminal tool can still "
+                    "bypass.)"
+                )
+            try:
+                resolved.relative_to(store_dir)
+            except ValueError:
+                continue
+            return (
+                f"Access denied: {path} is a Hermes credential store file "
+                "and cannot be read directly. (Defense-in-depth — not a "
+                "security boundary; the terminal tool can still bypass.)"
+            )
 
     # Block common secret-bearing project-local .env files anywhere on disk.
     # The agent helping a user with their project rarely needs to read raw

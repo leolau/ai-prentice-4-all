@@ -32,22 +32,11 @@ DB_PATH = os.environ.get('DB_PATH', '/opt/data/whatsapp-messages/whatsapp_data.d
 CONFIG_PATH = os.environ.get('CALENDAR_CONFIG_PATH', '/opt/data/calendar/config.json')
 HEALTH_PORT = int(os.environ.get('CALENDAR_HEALTH_PORT', '7903'))
 
-GCAL_CLIENT_ID = os.environ.get('GCAL_CLIENT_ID', '')
-GCAL_CLIENT_SECRET = os.environ.get('GCAL_CLIENT_SECRET', '')
+import google_oauth
 
-#: Where the Google Workspace MCP server keeps its per-account OAuth files.
-#: The agent already runs that server against these calendars, so the tokens
-#: it holds are the ones this poller needs; a second GCAL_* provisioning was
-#: only ever a way to have the same consent twice.
-WORKSPACE_CREDENTIALS_DIR = os.environ.get(
-    'WORKSPACE_MCP_CREDENTIALS_DIR',
-    os.path.join(
-        os.environ.get('HERMES_HOME', os.path.expanduser('~')),
-        'google-workspace',
-        'credentials',
-    ),
-)
-CALENDAR_SCOPE = 'https://www.googleapis.com/auth/calendar'
+#: Calendar consent is the one scope this poller needs; entries without it
+#: are refused by the shared helper.
+CALENDAR_SCOPE = google_oauth.CALENDAR_SCOPE
 
 TOKEN_URL = 'https://oauth2.googleapis.com/token'
 CALENDAR_API_BASE = 'https://www.googleapis.com/calendar/v3'
@@ -59,15 +48,8 @@ DEFAULT_REMINDERS = {
     'low': [15],
 }
 
-# Cache access tokens per account (token, expiry_time)
-_token_cache = {}
-
-#: One account's OAuth material. The client pair travels with the refresh
-#: token because each Workspace account was consented under its own OAuth
-#: client — refreshing account B's token with account A's client id fails.
-GoogleCredentials = namedtuple(
-    'GoogleCredentials', ('client_id', 'client_secret', 'refresh_token')
-)
+#: One account's OAuth material (client pair + refresh token + store identity).
+GoogleCredentials = google_oauth.GoogleCredentials
 
 
 def get_db():
@@ -85,83 +67,9 @@ def load_config():
     return {}
 
 
-def as_credentials(credentials):
-    """Coerce a bare refresh token into a full :class:`GoogleCredentials`.
-
-    Callers that only have a token fall back to the process-wide GCAL_*
-    client pair, which is how the env-var provisioning has always worked.
-    """
-    if isinstance(credentials, GoogleCredentials):
-        return credentials
-    return GoogleCredentials(GCAL_CLIENT_ID, GCAL_CLIENT_SECRET, credentials or '')
-
-
-def workspace_credentials(email):
-    """Read one account's OAuth material from the Workspace MCP store.
-
-    Returns ``None`` when there is no file for the address, when it is
-    unreadable, or when the consent it records does not cover Calendar.
-    """
-    if not email:
-        return None
-    path = os.path.join(WORKSPACE_CREDENTIALS_DIR, f'{email}.json')
-    try:
-        with open(path, encoding='utf-8') as handle:
-            data = json.load(handle)
-    except (OSError, ValueError):
-        return None
-
-    scopes = data.get('scopes') or []
-    if scopes and CALENDAR_SCOPE not in scopes:
-        print(f"[calendar] {email}: workspace credential lacks the calendar scope")
-        return None
-
-    creds = GoogleCredentials(
-        data.get('client_id', '') or GCAL_CLIENT_ID,
-        data.get('client_secret', '') or GCAL_CLIENT_SECRET,
-        data.get('refresh_token', ''),
-    )
-    if not (creds.client_id and creds.client_secret and creds.refresh_token):
-        return None
-    return creds
-
-
 def get_access_token(account_id, credentials):
-    """Get a valid access token, refreshing if needed."""
-    cached = _token_cache.get(account_id)
-    if cached:
-        token, expiry = cached
-        if datetime.now(timezone.utc) < expiry - timedelta(minutes=2):
-            return token
-
-    creds = as_credentials(credentials)
-    if not creds.client_id or not creds.client_secret:
-        raise RuntimeError(
-            f"No OAuth client for account {account_id}: set GCAL_CLIENT_ID and "
-            f"GCAL_CLIENT_SECRET, or provide a workspace credential file"
-        )
-    if not creds.refresh_token:
-        raise RuntimeError(f"No refresh token for account {account_id}")
-
-    data = urlencode({
-        'refresh_token': creds.refresh_token,
-        'client_id': creds.client_id,
-        'client_secret': creds.client_secret,
-        'grant_type': 'refresh_token',
-    }).encode()
-
-    req = Request(TOKEN_URL, data=data, method='POST')
-    req.add_header('Content-Type', 'application/x-www-form-urlencoded')
-
-    with urlopen(req) as resp:
-        result = json.loads(resp.read().decode())
-
-    access_token = result['access_token']
-    expires_in = result.get('expires_in', 3600)
-    expiry = datetime.now(timezone.utc) + timedelta(seconds=expires_in)
-    _token_cache[account_id] = (access_token, expiry)
-
-    return access_token
+    """A valid access token for the account; caching + refresh live in the helper."""
+    return google_oauth.get_access_token(credentials)
 
 
 def gcal_api(access_token, path, params=None):
@@ -440,43 +348,22 @@ def sync_attendees(db, event_id, attendees):
         )
 
 
-def get_refresh_token_for_account(account_config):
-    """Get refresh token from env var specified in config."""
-    env_var = account_config.get('refresh_token_env', '')
-    if env_var:
-        return os.environ.get(env_var, '')
-
-    # Fallback: try numbered env vars
-    account_id = account_config.get('id', '')
-    num = account_id.replace('gcal', '')
-    return os.environ.get(f'GCAL_REFRESH_TOKEN_{num}', '')
-
-
 def credentials_for_account(account, account_config):
     """Resolve one account's OAuth material, or ``None`` if it has none.
 
-    An explicit GCAL_* refresh token wins, so an operator can point a single
-    account somewhere else; otherwise the Workspace MCP store is used, which
-    is where this box's Google consent actually lives.
+    The unified credential store is the source (an entry must opt the account
+    into the ``calendar`` service); until PR5 the helper also falls back to
+    the legacy per-account workspace files.
     """
-    account_id = account['id']
-    refresh_token = get_refresh_token_for_account(account_config) or os.environ.get(
-        f"GCAL_REFRESH_TOKEN_{account_id.replace('gcal', '')}", ''
+    creds = google_oauth.credentials_for_email(
+        'calendar', account['email'], required_scope=CALENDAR_SCOPE
     )
-    if refresh_token and GCAL_CLIENT_ID and GCAL_CLIENT_SECRET:
-        return GoogleCredentials(GCAL_CLIENT_ID, GCAL_CLIENT_SECRET, refresh_token)
-
-    creds = workspace_credentials(account['email'])
     if creds:
         return creds
-
-    # A token with no client pair is unusable on its own, but saying so is
-    # more useful than the generic "no refresh token" below.
-    if refresh_token:
-        print(
-            f"[calendar] {account_id} ({account['email']}): refresh token set but "
-            f"GCAL_CLIENT_ID/GCAL_CLIENT_SECRET are not"
-        )
+    print(
+        f"[calendar] {account['id']} ({account['email']}): no credential-store "
+        "entry with the calendar service"
+    )
     return None
 
 
@@ -500,7 +387,7 @@ def poll_all_accounts(db, config):
         if not credentials:
             print(
                 f"[calendar] Skipping {account['id']} ({account['email']}): no "
-                f"credentials in GCAL_* or {WORKSPACE_CREDENTIALS_DIR}"
+                "credential-store entry with the calendar service"
             )
             continue
 
@@ -560,15 +447,6 @@ def start_health_server():
 
 
 def main():
-    if not (GCAL_CLIENT_ID and GCAL_CLIENT_SECRET) and not os.path.isdir(
-        WORKSPACE_CREDENTIALS_DIR
-    ):
-        print(
-            "[calendar] ERROR: no credentials — set GCAL_CLIENT_ID and "
-            f"GCAL_CLIENT_SECRET, or populate {WORKSPACE_CREDENTIALS_DIR}"
-        )
-        return
-
     config = load_config()
     poll_interval = config.get('calendar', {}).get('poll_interval_seconds', 60)
 

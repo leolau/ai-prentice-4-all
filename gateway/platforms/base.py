@@ -1171,6 +1171,12 @@ def _media_delivery_denied_paths() -> List[Path]:
     _ROOT_CREDENTIAL_DIRS = (
         "pairing",
         "mcp-tokens",
+        # Unified credential store trees (docs/design/unified-credential-store.md).
+        "credentials",
+        "credentials-materialized",
+        "credentials-pending",
+        "google-workspace",
+        "google-workspace-materialized",
     )
     for hermes_root in (_HERMES_HOME, _HERMES_ROOT):
         for rel in _ROOT_CREDENTIAL_FILES:

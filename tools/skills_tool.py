@@ -1447,6 +1447,18 @@ def skill_view(
                     skill_name,
                     exc_info=True,
                 )
+            try:
+                from hermes_cli.credential_store import materialize_for_mounts_sync
+                from tools.credential_files import register_credential_file
+
+                for rel_path in materialize_for_mounts_sync():
+                    register_credential_file(rel_path)
+            except Exception:
+                logger.debug(
+                    "Could not materialize store credentials for skill %s",
+                    skill_name,
+                    exc_info=True,
+                )
 
         rendered_content = content
         if preprocess:
