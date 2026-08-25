@@ -1,7 +1,8 @@
 /**
  * GET /api/chat/sessions — BFF conversation list (FG-20 Wave C1). Forwards to
- * the Python API `GET /api/sessions` (agent_home source, recent-first) under
- * the bridged C1 principal so the mobile chat list can refresh after a send.
+ * the Python API `GET /api/sessions` (recent-first, all sources except cron)
+ * under the bridged C1 principal so the mobile chat list can refresh after a
+ * send.
  */
 import { NextResponse } from "next/server";
 
@@ -25,7 +26,7 @@ export async function GET(request: Request): Promise<NextResponse> {
   try {
     const client = await apiClientForRequest({ profile: profileFromUrl(request.url) });
     const data = await client.sessions({
-      source: "agent_home",
+      excludeSources: "cron",
       order: "recent",
       limit,
       archived,
