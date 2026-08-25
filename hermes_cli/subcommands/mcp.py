@@ -86,6 +86,16 @@ def build_mcp_parser(subparsers, *, cmd_mcp: Callable) -> None:
     )
     mcp_login_p.add_argument("name", help="Server name to re-authenticate")
 
+    mcp_paste_p = mcp_sub.add_parser(
+        "oauth-paste",
+        help="Deliver a pasted OAuth redirect to a waiting login flow (headless hosts)",
+    )
+    mcp_paste_p.add_argument("name", help="Server name the redirect belongs to")
+    mcp_paste_p.add_argument(
+        "redirect",
+        help="Redirect URL (or ?code=...&state=...) copied from the browser address bar",
+    )
+
     mcp_reauth_p = mcp_sub.add_parser(
         "reauth",
         help="Re-authenticate one OAuth MCP server, or all of them (--all)",

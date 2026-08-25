@@ -117,6 +117,7 @@ def is_write_denied(path: str) -> bool:
         "credentials-pending",
         "google-workspace",
         "google-workspace-materialized",
+        "mcp-oauth-pending",
     )
 
     hermes_dirs = []
@@ -306,6 +307,7 @@ def get_read_block_error(path: str) -> Optional[str]:
             "credentials-pending",
             "google-workspace",
             "google-workspace-materialized",
+            "mcp-oauth-pending",
         ):
             try:
                 store_dir = (hd / dir_name).resolve()
