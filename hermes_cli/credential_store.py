@@ -70,7 +70,7 @@ CREDENTIAL_KINDS: Dict[str, KindSpec] = {
     "google-oauth2": KindSpec(
         name="google-oauth2",
         required=("client_id", "client_secret", "refresh_token", "token_uri"),
-        optional=("token", "expiry", "scopes"),
+        optional=("token", "expiry", "scopes", "type"),
         secret_fields=("client_secret", "refresh_token", "token"),
     ),
     "telegram-token": KindSpec(
