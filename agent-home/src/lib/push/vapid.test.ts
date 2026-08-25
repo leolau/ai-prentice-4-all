@@ -1,12 +1,18 @@
+import { createPrivateKey } from "node:crypto";
+
 import { describe, expect, it } from "vitest";
 
 import { generateVapidKeypair } from "@/lib/push/vapid";
 
 describe("generateVapidKeypair", () => {
-  it("emits a PKCS#8 PEM private key and a 65-byte uncompressed public point", () => {
+  it("emits a b64url PKCS#8 DER private key and a 65-byte uncompressed public point", () => {
     const doc = generateVapidKeypair();
-    expect(doc.private_key).toContain("-----BEGIN PRIVATE KEY-----");
-    expect(doc.private_key).toContain("-----END PRIVATE KEY-----");
+    // py_vapid parses RAW/DER only — the stored key must be base64url DER.
+    expect(doc.private_key).not.toContain("-----BEGIN");
+    const der = Buffer.from(doc.private_key, "base64url");
+    expect(der.length).toBeGreaterThan(100);
+    const key = createPrivateKey({ key: der, format: "der", type: "pkcs8" });
+    expect(key.asymmetricKeyType).toBe("ec");
 
     // The browser's applicationServerKey is base64url of 0x04 || X || Y.
     const raw = Buffer.from(doc.public_key, "base64url");

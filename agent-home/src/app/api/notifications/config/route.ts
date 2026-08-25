@@ -7,7 +7,7 @@
 import { NextResponse } from "next/server";
 
 import { verifyAppPushSecret } from "@/lib/push/secret";
-import { getVapid, listSubscriptions, pushConfigured } from "@/lib/push/store";
+import { ensureVapid, listSubscriptions, pushConfigured } from "@/lib/push/store";
 
 export async function GET(request: Request): Promise<NextResponse> {
   if (!verifyAppPushSecret(request)) {
@@ -17,11 +17,9 @@ export async function GET(request: Request): Promise<NextResponse> {
     return NextResponse.json({ error: "push_not_configured" }, { status: 404 });
   }
   try {
-    const vapid = await getVapid();
-    if (!vapid) {
-      // No device has enrolled yet — nothing to push with.
-      return NextResponse.json({ error: "push_not_configured" }, { status: 404 });
-    }
+    // ensureVapid heals the pre-DER-fix PEM documents; the keypair is
+    // created/regenerated here rather than failing the sender.
+    const vapid = await ensureVapid();
     const subscriptions = await listSubscriptions();
     return NextResponse.json({
       vapid_private_key: vapid.private_key,
