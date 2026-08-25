@@ -37,10 +37,20 @@ if _SCRIPTS_DIR not in sys.path:
     sys.path.insert(0, _SCRIPTS_DIR)
 
 from _hermes_home import get_hermes_home
+import _store_bridge as bridge
 
 HERMES_HOME = get_hermes_home()
 TOKEN_PATH = HERMES_HOME / "google_token.json"
 CLIENT_SECRET_PATH = HERMES_HOME / "google_client_secret.json"
+
+
+def _token_file() -> Path:
+    """The authorized_user file to hand to google-auth/gws (store-first)."""
+    if bridge.AVAILABLE:
+        materialized = bridge.materialized_token_file()
+        if materialized is not None:
+            return materialized
+    return TOKEN_PATH
 
 SCOPES = [
     "https://www.googleapis.com/auth/gmail.readonly",
@@ -62,7 +72,9 @@ def _normalize_authorized_user_payload(payload: dict) -> dict:
 
 
 def _ensure_authenticated():
-    if not TOKEN_PATH.exists():
+    if bridge.AVAILABLE and bridge.pick_entry() is not None:
+        return
+    if not _token_file().exists():
         print("Not authenticated. Run the setup script first:", file=sys.stderr)
         print(f"  python {Path(__file__).parent / 'setup.py'}", file=sys.stderr)
         sys.exit(1)
@@ -70,7 +82,7 @@ def _ensure_authenticated():
 
 def _stored_token_scopes() -> list[str]:
     try:
-        data = json.loads(TOKEN_PATH.read_text())
+        data = json.loads(_token_file().read_text())
     except Exception:
         return list(SCOPES)
     scopes = data.get("scopes")
@@ -88,7 +100,7 @@ def _gws_binary() -> str | None:
 
 def _gws_env() -> dict[str, str]:
     env = os.environ.copy()
-    env["GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE"] = str(TOKEN_PATH)
+    env["GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE"] = str(_token_file())
     return env
 
 
@@ -185,15 +197,19 @@ def get_credentials():
     from google.oauth2.credentials import Credentials
     from google.auth.transport.requests import Request
 
-    creds = Credentials.from_authorized_user_file(str(TOKEN_PATH), _stored_token_scopes())
+    token_file = _token_file()
+    creds = Credentials.from_authorized_user_file(str(token_file), _stored_token_scopes())
     if creds.expired and creds.refresh_token:
         creds.refresh(Request())
-        TOKEN_PATH.write_text(
-            json.dumps(
-                _normalize_authorized_user_payload(json.loads(creds.to_json())),
-                indent=2,
+        if token_file == TOKEN_PATH:
+            # Store-managed entries already persisted their refresh inside
+            # _token_file(); only the legacy file needs a write-back here.
+            TOKEN_PATH.write_text(
+                json.dumps(
+                    _normalize_authorized_user_payload(json.loads(creds.to_json())),
+                    indent=2,
+                )
             )
-        )
     if not creds.valid:
         print("Token is invalid. Re-run setup.", file=sys.stderr)
         sys.exit(1)

@@ -37,6 +37,7 @@ if _SCRIPTS_DIR not in sys.path:
     sys.path.insert(0, _SCRIPTS_DIR)
 
 from _hermes_home import display_hermes_home, get_hermes_home
+import _store_bridge as bridge
 
 HERMES_HOME = get_hermes_home()
 TOKEN_PATH = HERMES_HOME / "google_token.json"
@@ -162,10 +163,12 @@ def check_auth_live():
     # final status line reflects the live-call outcome (OK or FAILED).
     if not check_auth(quiet=True):
         return False
+    token_file = bridge.materialized_token_file() if bridge.AVAILABLE else None
+    token_file = token_file or TOKEN_PATH
     try:
         from googleapiclient.discovery import build
         from google.oauth2.credentials import Credentials
-        creds = Credentials.from_authorized_user_file(str(TOKEN_PATH))
+        creds = Credentials.from_authorized_user_file(str(token_file))
         service = build("calendar", "v3", credentials=creds)
         service.calendarList().list(maxResults=1).execute()
         print("LIVE_CHECK_OK: Real API call succeeded.")
@@ -182,8 +185,39 @@ def check_auth_live():
         return False
 
 
-def check_auth(quiet: bool = False):
+def _check_store_auth(quiet: bool = False, account: str | None = None) -> bool | None:
+    """Validate via the unified store. None = no store entries; fall through."""
+    if not bridge.AVAILABLE:
+        return None
+    entries = bridge.google_entries(account)
+    if not entries:
+        return None
+    entry = entries[0]
+    try:
+        payload = bridge.refresh_entry(entry)
+    except Exception as e:  # noqa: BLE001 — mirror the legacy error taxonomy
+        err_str = str(e).lower()
+        if "token_revoked" in err_str or "invalid_grant" in err_str:
+            print(f"TOKEN_REVOKED: {e}")
+            print("  Re-run setup (or Settings → Connected accounts) to re-authenticate.")
+        else:
+            print(f"REFRESH_FAILED: {e}")
+        return False
+    missing = _missing_scopes_from_payload(payload)
+    if missing:
+        print(f"AUTHENTICATED (partial): store account {entry.name} missing {len(missing)} scopes:")
+        for s in missing:
+            print(f"  - {s}")
+    if not quiet:
+        print(f"AUTHENTICATED: store-managed account {entry.name} ({bridge.backend_name()})")
+    return True
+
+
+def check_auth(quiet: bool = False, account: str | None = None):
     """Check if stored credentials are valid. Prints status, exits 0 or 1."""
+    store_verdict = _check_store_auth(quiet=quiet, account=account)
+    if store_verdict is not None:
+        return store_verdict
     if not TOKEN_PATH.exists():
         print(f"NOT_AUTHENTICATED: No token at {TOKEN_PATH}")
         return False
@@ -271,6 +305,9 @@ def store_client_secret(path: str):
         sys.exit(1)
 
     CLIENT_SECRET_PATH.write_text(json.dumps(data, indent=2))
+    store_dir = HERMES_HOME / "google-workspace"
+    store_dir.mkdir(parents=True, exist_ok=True)
+    (store_dir / "client_secret.json").write_text(json.dumps(data, indent=2))
     print(f"OK: Client secret saved to {CLIENT_SECRET_PATH}")
 
 
@@ -328,6 +365,24 @@ def _extract_code_and_state(code_or_url: str) -> tuple[str, str | None]:
 
 def get_auth_url():
     """Print the OAuth authorization URL. User visits this in a browser."""
+    if not CLIENT_SECRET_PATH.exists() and bridge.AVAILABLE:
+        try:
+            client_id, client_secret = bridge._go.load_google_client()
+            CLIENT_SECRET_PATH.write_text(
+                json.dumps(
+                    {
+                        "installed": {
+                            "client_id": client_id,
+                            "client_secret": client_secret,
+                            "redirect_uris": [REDIRECT_URI],
+                        }
+                    },
+                    indent=2,
+                )
+            )
+        except Exception as e:  # noqa: BLE001
+            print(f"ERROR: No client secret stored and none resolvable: {e}")
+            sys.exit(1)
     if not CLIENT_SECRET_PATH.exists():
         print("ERROR: No client secret stored. Run --client-secret first.")
         sys.exit(1)
@@ -410,16 +465,53 @@ def exchange_auth_code(code: str):
         print(f"WARNING: Token missing some Google Workspace scopes: {', '.join(missing_scopes)}")
         print("Some services may not be available.")
 
-    TOKEN_PATH.write_text(json.dumps(token_payload, indent=2))
     PENDING_AUTH_PATH.unlink(missing_ok=True)
-    print(f"OK: Authenticated. Token saved to {TOKEN_PATH}")
-    print(f"Profile-scoped token location: {display_hermes_home()}/google_token.json")
+    if bridge.AVAILABLE:
+        email = None
+        try:
+            email = bridge._go.fetch_userinfo_email(str(creds.token or ""))
+        except Exception:  # noqa: BLE001 — naming fallback below
+            email = None
+        name = (
+            email
+            or os.environ.get("GOOGLE_WORKSPACE_ACCOUNT", "").strip()
+            or "default"
+        )
+        bridge.put_entry(name, token_payload, services=["workspace"])
+        print(f"OK: Authenticated. Token stored for {name} ({bridge.backend_name()} backend).")
+    else:
+        TOKEN_PATH.write_text(json.dumps(token_payload, indent=2))
+        print(f"OK: Authenticated. Token saved to {TOKEN_PATH}")
+        print(f"Profile-scoped token location: {display_hermes_home()}/google_token.json")
 
 
-def revoke():
-    """Revoke stored token and delete it."""
+def revoke(account: str | None = None):
+    """Revoke stored token(s) and delete them (store entries and/or legacy file)."""
+    handled = False
+    if bridge.AVAILABLE:
+        import urllib.request
+
+        for entry in bridge.google_entries(account):
+            handled = True
+            try:
+                payload = bridge.refresh_entry(entry)
+                urllib.request.urlopen(
+                    urllib.request.Request(
+                        f"https://oauth2.googleapis.com/revoke?token={payload.get('token', '')}",
+                        method="POST",
+                        headers={"Content-Type": "application/x-www-form-urlencoded"},
+                    ),
+                    timeout=15,
+                )
+                print(f"Token for {entry.name} revoked with Google.")
+            except Exception as e:  # noqa: BLE001
+                print(f"Remote revocation failed for {entry.name} (token may already be invalid): {e}")
+            bridge.delete_entry(entry.name)
+            print(f"Deleted store entry {entry.name}.")
+
     if not TOKEN_PATH.exists():
-        print("No token to revoke.")
+        if not handled:
+            print("No token to revoke.")
         return
 
     _ensure_deps()
@@ -449,6 +541,67 @@ def revoke():
     print(f"Deleted {TOKEN_PATH}")
 
 
+def list_accounts():
+    """Print the unified store's Google accounts (name, services, visibility)."""
+    if not bridge.AVAILABLE:
+        print("ERROR: unified credential store not importable here.")
+        sys.exit(1)
+    entries = bridge.google_entries()
+    if not entries:
+        print("No Google accounts in the store.")
+        return
+    for entry in entries:
+        print(
+            f"{entry.name}  services={','.join(entry.services) or '-'}  "
+            f"visibility={entry.visibility}"
+        )
+
+
+def migrate_legacy():
+    """Move legacy google_token.json into the unified store (idempotent)."""
+    if not bridge.AVAILABLE:
+        print("ERROR: unified credential store not importable here.")
+        sys.exit(1)
+    moved = 0
+    if TOKEN_PATH.exists():
+        try:
+            payload = json.loads(TOKEN_PATH.read_text())
+        except Exception as e:  # noqa: BLE001
+            print(f"ERROR: legacy token unreadable: {e}")
+            sys.exit(1)
+        token = str(payload.get("token") or "")
+        if not token and payload.get("refresh_token"):
+            try:
+                doc = bridge._go.refresh_access_token(
+                    client_id=str(payload.get("client_id") or ""),
+                    client_secret=str(payload.get("client_secret") or ""),
+                    refresh_token=str(payload.get("refresh_token") or ""),
+                )
+                token = str(doc.get("access_token") or "")
+                payload["token"] = token
+            except Exception as e:  # noqa: BLE001
+                print(f"WARNING: legacy refresh failed; naming fallback: {e}")
+        email = bridge._go.fetch_userinfo_email(token) if token else None
+        name = (
+            email
+            or os.environ.get("GOOGLE_WORKSPACE_ACCOUNT", "").strip()
+            or "default"
+        )
+        bridge.put_entry(name, payload, services=["workspace"])
+        TOKEN_PATH.rename(TOKEN_PATH.with_name("google_token.json.migrated.bak"))
+        moved += 1
+        print(f"Migrated legacy token to store entry {name}.")
+    if CLIENT_SECRET_PATH.exists():
+        store_dir = HERMES_HOME / "google-workspace"
+        store_dir.mkdir(parents=True, exist_ok=True)
+        dest = store_dir / "client_secret.json"
+        if not dest.exists():
+            dest.write_text(CLIENT_SECRET_PATH.read_text())
+            print(f"Copied client secret to {dest}")
+    if moved == 0:
+        print("Nothing to migrate (no legacy google_token.json).")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Google Workspace OAuth setup for Hermes")
     group = parser.add_mutually_exclusive_group(required=True)
@@ -459,10 +612,13 @@ def main():
     group.add_argument("--auth-code", metavar="CODE", help="Exchange auth code for token")
     group.add_argument("--revoke", action="store_true", help="Revoke and delete stored token")
     group.add_argument("--install-deps", action="store_true", help="Install Python dependencies")
+    group.add_argument("--migrate-legacy", action="store_true", help="Move legacy google_token.json into the unified store")
+    group.add_argument("--list-accounts", action="store_true", help="List the unified store's Google accounts")
+    parser.add_argument("--account", metavar="EMAIL", help="Select one stored account")
     args = parser.parse_args()
 
     if args.check:
-        sys.exit(0 if check_auth() else 1)
+        sys.exit(0 if check_auth(account=args.account) else 1)
     if getattr(args, "check_live", False):
         sys.exit(0 if check_auth_live() else 1)
     elif args.client_secret:
@@ -472,9 +628,13 @@ def main():
     elif args.auth_code:
         exchange_auth_code(args.auth_code)
     elif args.revoke:
-        revoke()
+        revoke(account=args.account)
     elif args.install_deps:
         sys.exit(0 if install_deps() else 1)
+    elif args.migrate_legacy:
+        migrate_legacy()
+    elif args.list_accounts:
+        list_accounts()
 
 
 if __name__ == "__main__":

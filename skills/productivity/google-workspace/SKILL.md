@@ -1,14 +1,12 @@
 ---
 name: google-workspace
 description: "Gmail, Calendar, Drive, Docs, Sheets via gws CLI or Python."
-version: 1.1.0
+version: 1.2.0
 author: Nous Research
 license: MIT
 platforms: [linux, macos, windows]
 required_credential_files:
-  - path: google_token.json
-    description: Google OAuth2 token (created by setup script)
-  - path: google_client_secret.json
+  - path: google-workspace/client_secret.json
     description: Google OAuth2 client credentials (downloaded from Google Cloud Console)
 metadata:
   hermes:
@@ -20,6 +18,13 @@ metadata:
 # Google Workspace
 
 Gmail, Calendar, Drive, Contacts, Sheets, and Docs — through Hermes-managed OAuth and a thin CLI wrapper. When `gws` is installed, the skill uses it as the execution backend for broader Google Workspace coverage; otherwise it falls back to the bundled Python client implementation.
+
+Tokens live in the **unified credential store** (`docs/design/unified-credential-store.md`):
+per-login entries in Supabase on deployments that have it, else per-profile
+files under `$HERMES_HOME/credentials/`. On multi-user boxes the same store is
+managed from agent-home **Settings → Connected accounts**; this script is the
+CLI/chat-side surface over it. Legacy single-file tokens (`google_token.json`)
+are migrated with `--migrate-legacy`.
 
 ## References
 
@@ -33,7 +38,9 @@ Gmail, Calendar, Drive, Contacts, Sheets, and Docs — through Hermes-managed OA
 ## First-Time Setup
 
 The setup is fully non-interactive — you drive it step by step so it works
-on CLI, Telegram, Discord, or any platform.
+on CLI, Telegram, Discord, or any platform. On boxes with agent-home
+multi-user, prefer directing the user to **Settings → Connected accounts**,
+which runs the same flow per login.
 
 Define a shorthand first:
 
@@ -48,36 +55,24 @@ $GSETUP --check
 ```
 
 If it prints `AUTHENTICATED`, skip to Usage — setup is already done.
+`--list-accounts` shows every stored Google account (name, services,
+visibility); `--account EMAIL` selects one when several exist.
 
 ### Step 1: Triage — ask the user what they need
 
-Before starting OAuth setup, ask the user TWO questions:
-
-**Question 1: "What Google services do you need? Just email, or also
+**"What Google services do you need? Just email, or also
 Calendar/Drive/Sheets/Docs?"**
 
-- **Email only** → They don't need this skill at all. Use the `himalaya` skill
-  instead — it works with a Gmail App Password (Settings → Security → App
-  Passwords) and takes 2 minutes to set up. No Google Cloud project needed.
-  Load the himalaya skill and follow its setup instructions.
+- **Email only, no Google Cloud project** → the `himalaya` skill works with a
+  Gmail App Password and takes 2 minutes. Load it and follow its setup.
+- **Anything else** → continue here. The consent screen lists the full
+  workspace scope set; the user may deselect what they don't need — granted
+  (possibly partial) scopes are stored with the token, and `--check` reports
+  `AUTHENTICATED (partial)` listing what's missing.
 
-- **Email + Calendar** → Continue with this skill, but use
-  `--services email,calendar` during auth so the consent screen only asks for
-  the scopes they actually need.
-
-- **Calendar/Drive/Sheets/Docs only** → Continue with this skill and use a
-  narrower `--services` set like `calendar,drive,sheets,docs`.
-
-- **Full Workspace access** → Continue with this skill and use the default
-  `all` service set.
-
-**Question 2: "Does your Google account use Advanced Protection (hardware
-security keys required to sign in)? If you're not sure, you probably don't
-— it's something you would have explicitly enrolled in."**
-
-- **No / Not sure** → Normal setup. Continue below.
-- **Yes** → Their Workspace admin must add the OAuth client ID to the org's
-  allowed apps list before Step 4 will work. Let them know upfront.
+**"Does your Google account use Advanced Protection (hardware security keys
+required to sign in)?"** If yes, their Workspace admin must allowlist the
+OAuth client ID before Step 4 will work.
 
 ### Step 2: Create OAuth credentials (one-time, ~5 minutes)
 
@@ -116,19 +111,14 @@ explicit (for example `~/Downloads/hermes-google-client-secret.json`), then run
 
 ### Step 3: Get authorization URL
 
-Use the service set chosen in Step 1. Examples:
-
 ```bash
-$GSETUP --auth-url --services email,calendar --format json
-$GSETUP --auth-url --services calendar,drive,sheets,docs --format json
-$GSETUP --auth-url --services all --format json
+$GSETUP --auth-url
 ```
 
-This returns JSON with an `auth_url` field and also saves the exact URL to
-`~/.hermes/google_oauth_last_url.txt`.
+The script prints the bare authorization URL (PKCE, offline access,
+`prompt=consent`). Agent rules for this step:
 
-Agent rules for this step:
-- Extract the `auth_url` field and send that exact URL to the user as a single line.
+- Send that exact URL to the user as a single line.
 - Tell the user that the browser will likely fail on `http://localhost:1` after approval, and that this is expected.
 - Tell them to copy the ENTIRE redirected URL from the browser address bar.
 - If the user gets `Error 403: access_denied`, send them directly to `https://console.cloud.google.com/auth/audience` to add themselves as a test user.
@@ -136,17 +126,15 @@ Agent rules for this step:
 ### Step 4: Exchange the code
 
 The user will paste back either a URL like `http://localhost:1/?code=4/0A...&scope=...`
-or just the code string. Either works. The `--auth-url` step stores a temporary
-pending OAuth session locally so `--auth-code` can complete the PKCE exchange
-later, even on headless systems:
+or just the code string. Either works:
 
 ```bash
-$GSETUP --auth-code "THE_URL_OR_CODE_THE_USER_PASTED" --format json
+$GSETUP --auth-code "THE_URL_OR_CODE_THE_USER_PASTED"
 ```
 
-If `--auth-code` fails because the code expired, was already used, or came from
-an older browser tab, it now returns a fresh `fresh_auth_url`. In that case,
-immediately send the new URL to the user and have them retry with the newest
+The token is stored in the unified store under the consenting account's
+email (resolved via Google userinfo). If the exchange fails because the code
+expired or was already used, run `--auth-url` again and retry with the newest
 browser redirect only.
 
 ### Step 5: Verify
@@ -159,10 +147,12 @@ Should print `AUTHENTICATED`. Setup is complete — token refreshes automaticall
 
 ### Notes
 
-- Token is stored at `~/.hermes/google_token.json` and auto-refreshes.
-- Pending OAuth session state/verifier are stored temporarily at `~/.hermes/google_oauth_pending.json` until exchange completes.
-- If `gws` is installed, `google_api.py` points it at the same `~/.hermes/google_token.json` credentials file. Users do not need to run a separate `gws auth login` flow.
-- To revoke: `$GSETUP --revoke`
+- Store-managed tokens refresh through a conditional single-writer update; background pollers that opt an account in (email/calendar services) read the same entries.
+- `https://mail.google.com/` is NOT part of this skill's scope set; accounts that must also feed the IMAP email poller need that scope consented via Connected accounts.
+- Pending OAuth session state/verifier are stored temporarily at `$HERMES_HOME/google_oauth_pending.json` until exchange completes.
+- If `gws` is installed, `google_api.py` points it at a materialized copy of the store entry; users do not need to run a separate `gws auth login` flow.
+- Legacy installs: `$GSETUP --migrate-legacy` moves `google_token.json` (and the client secret) into the store, leaving `.migrated.bak` backups.
+- To revoke: `$GSETUP --revoke` (add `--account EMAIL` to target one of several).
 
 ## Usage
 
@@ -188,7 +178,7 @@ $GAPI gmail send --to user@example.com --subject "Hello" --body "Message text"
 $GAPI gmail send --to user@example.com --subject "Report" --body "<h1>Q4</h1><p>Details...</p>" --html
 $GAPI gmail send --to user@example.com --subject "Hello" --from '"Research Agent" <user@example.com>' --body "Message text"
 
-# Reply (automatically threads and sets In-Reply-To)
+# Reply (automatically threads and In-Reply-To)
 $GAPI gmail reply MESSAGE_ID --body "Thanks, that works for me."
 $GAPI gmail reply MESSAGE_ID --from '"Support Bot" <user@example.com>' --body "Thanks"
 
@@ -203,7 +193,7 @@ $GAPI gmail modify MESSAGE_ID --remove-labels UNREAD
 ```bash
 # List events (defaults to next 7 days)
 $GAPI calendar list
-$GAPI calendar list --start 2026-03-01T00:00:00Z --end 2026-03-07T23:59:59Z
+$GAPI calendar list --start 2026-03-01T00:00:00Z --end 2026-03-07T00:00:00Z
 
 # Create event (ISO 8601 with timezone required)
 $GAPI calendar create --summary "Team Standup" --start 2026-03-01T10:00:00-06:00 --end 2026-03-01T10:30:00-06:00
@@ -298,12 +288,12 @@ All commands return JSON. Parse with `jq` or read directly. Key fields:
 - **Drive search**: `[{id, name, mimeType, modifiedTime, webViewLink}]`
 - **Drive get**: `{id, name, mimeType, modifiedTime, size, webViewLink, parents, owners}`
 - **Drive upload**: `{status: "uploaded", id, name, mimeType, webViewLink}`
-- **Drive download**: `{status: "downloaded", id, name, path, mimeType}`
+- **Drive download**: `{status: "downloaded", id, path, mimeType}`
 - **Drive create-folder**: `{status: "created", id, name, webViewLink}`
 - **Drive share**: `{status: "shared", permissionId, fileId, role, type}`
 - **Drive delete**: `{status: "trashed" | "deleted", fileId, permanent}`
 - **Contacts list**: `[{name, emails: [...], phones: [...]}]`
-- **Sheets get**: `[[cell, cell, ...], ...]`
+- **Sheets get**: `[[cell values...], ...]`
 - **Sheets create**: `{status: "created", spreadsheetId, title, spreadsheetUrl}`
 - **Docs create**: `{status: "created", documentId, title, url}`
 - **Docs append**: `{status: "appended", documentId, inserted_at, characters}`
@@ -311,17 +301,18 @@ All commands return JSON. Parse with `jq` or read directly. Key fields:
 ## Rules
 
 1. **Never send email, create/delete calendar events, delete Drive files, share files, or modify Docs/Sheets without confirming with the user first.** Show what will be done (recipients, file IDs, content, share role) and ask for approval. For `drive delete`, prefer the default trash (reversible) over `--permanent`.
-2. **Check auth before first use** — run `setup.py --check`. If it fails, guide the user through setup.
+2. **Check auth before first use** — run `setup.py --check`. If it fails, guide the user through setup (or to Settings → Connected accounts on multi-user boxes).
 3. **Use the Gmail search syntax reference** for complex queries — load it with `skill_view("google-workspace", file_path="references/gmail-search-syntax.md")`.
-4. **Calendar times must include timezone** — always use ISO 8601 with offset (e.g., `2026-03-01T10:00:00-06:00`) or UTC (`Z`).
+4. **Calendar times must include timezone** — always use ISO 8601 with offset (e.g. `2026-03-01T10:00:00-06:00`) or UTC (`Z`).
 5. **Respect rate limits** — avoid rapid-fire sequential API calls. Batch reads when possible.
 
 ## Troubleshooting
 
 | Problem | Fix |
 |---------|-----|
-| `NOT_AUTHENTICATED` | Run setup Steps 2-5 above |
+| `NOT_AUTHENTICATED` | Run setup Steps 2-5 above (or Settings → Connected accounts) |
 | `REFRESH_FAILED` | Token revoked or expired — redo Steps 3-5 |
+| `TOKEN_REVOKED` | Consent withdrawn — redo Steps 3-5 |
 | `HttpError 403: Insufficient Permission` | Missing API scope — `$GSETUP --revoke` then redo Steps 3-5 |
 | `AUTHENTICATED (partial)` or "Token missing scopes" | New write capabilities (Drive write/delete, Docs create/edit) require re-authorization. `$GSETUP --revoke` then redo Steps 3-5 to grant the upgraded scopes. |
 | `HttpError 403: Access Not Configured` | API not enabled — user needs to enable it in Google Cloud Console |
