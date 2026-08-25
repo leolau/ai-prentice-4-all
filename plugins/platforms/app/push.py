@@ -10,6 +10,10 @@ Env vars:
     APP_PUSH_BFF_URL    BFF base URL (default http://127.0.0.1:3100)
     APP_PUSH_SECRET     Shared secret for /api/notifications/config
                         (same value as agent-home's AGENT_HOME_APP_PUSH_SECRET)
+    APP_PUSH_SUB        VAPID `sub` claim (mailto:/https: contact). Must be
+                        a syntactically real address — Apple's push service
+                        answers 403 BadJwtToken to ones like
+                        mailto:hermes@localhost (probed on the box).
 
 ``pywebpush`` is imported lazily — the plugin degrades to "store the
 message, skip the push" when it isn't installed or enrollment is absent.
@@ -36,6 +40,10 @@ def _bff_url() -> str:
 
 def _secret() -> str:
     return os.getenv("APP_PUSH_SECRET", "").strip()
+
+
+def _subject() -> str:
+    return os.getenv("APP_PUSH_SUB", "mailto:hermes@localhost").strip()
 
 
 async def _fetch_push_config() -> Optional[Dict[str, Any]]:
@@ -132,7 +140,7 @@ async def send_push(session_id: str, title: str, body: str, url: str = "") -> in
                 subscription_info=subscription_info,
                 data=payload,
                 vapid_private_key=private_key,
-                vapid_claims={"sub": "mailto:hermes@localhost"},
+                vapid_claims={"sub": _subject()},
             )
             delivered += 1
         except WebPushException as exc:
