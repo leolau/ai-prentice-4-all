@@ -2,12 +2,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { GET } from "@/app/api/notifications/config/route";
 
-const getVapid = vi.fn();
+const ensureVapid = vi.fn();
 const listSubscriptions = vi.fn();
 const pushConfigured = vi.fn();
 
 vi.mock("@/lib/push/store", () => ({
-  getVapid: () => getVapid(),
+  ensureVapid: () => ensureVapid(),
   listSubscriptions: () => listSubscriptions(),
   pushConfigured: () => pushConfigured(),
 }));
@@ -36,7 +36,7 @@ describe("GET /api/notifications/config", () => {
     vi.stubEnv("AGENT_HOME_APP_PUSH_SECRET", "s3cret");
     const res = await get("nope");
     expect(res.status).toBe(401);
-    expect(getVapid).not.toHaveBeenCalled();
+    expect(ensureVapid).not.toHaveBeenCalled();
   });
 
   it("401s when the box has no secret configured", async () => {
@@ -47,23 +47,27 @@ describe("GET /api/notifications/config", () => {
 
   it("hands the sender the private key and subscriptions", async () => {
     vi.stubEnv("AGENT_HOME_APP_PUSH_SECRET", "s3cret");
-    getVapid.mockResolvedValue({ private_key: "PEM", public_key: "PUB" });
+    ensureVapid.mockResolvedValue({ private_key: "DER", public_key: "PUB" });
     listSubscriptions.mockResolvedValue([
       { endpoint: "https://push.example/a", keys: { p256dh: "k", auth: "a" } },
     ]);
     const res = await get("s3cret");
     expect(res.status).toBe(200);
     const body = await res.json();
-    expect(body.vapid_private_key).toBe("PEM");
+    expect(body.vapid_private_key).toBe("DER");
     expect(body.subscriptions).toEqual([
       { endpoint: "https://push.example/a", keys: { p256dh: "k", auth: "a" } },
     ]);
   });
 
-  it("404s before any device has enrolled", async () => {
+  it("generates the keypair on first pull and serves an empty subscription list", async () => {
     vi.stubEnv("AGENT_HOME_APP_PUSH_SECRET", "s3cret");
-    getVapid.mockResolvedValue(null);
+    ensureVapid.mockResolvedValue({ private_key: "FRESH", public_key: "PUB" });
+    listSubscriptions.mockResolvedValue([]);
     const res = await get("s3cret");
-    expect(res.status).toBe(404);
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.vapid_private_key).toBe("FRESH");
+    expect(body.subscriptions).toEqual([]);
   });
 });

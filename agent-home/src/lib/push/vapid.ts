@@ -11,7 +11,11 @@ import "server-only";
 import { generateKeyPairSync } from "node:crypto";
 
 export interface VapidDocument {
-  /** PKCS#8 PEM — consumed by pywebpush `vapid_private_key`. */
+  /**
+   * base64url PKCS#8 DER — what py_vapid's `from_string` parses (RAW or
+   * DER; it rejects PEM with an ASN.1 error), consumed by pywebpush's
+   * `vapid_private_key`.
+   */
   private_key: string;
   /** base64url uncompressed P-256 point — the browser's applicationServerKey. */
   public_key: string;
@@ -22,7 +26,7 @@ export function generateVapidKeypair(): VapidDocument {
   const { privateKey, publicKey } = generateKeyPairSync("ec", {
     namedCurve: "prime256v1",
   });
-  const privatePem = privateKey.export({ type: "pkcs8", format: "pem" });
+  const der = privateKey.export({ type: "pkcs8", format: "der" });
   // JWK carries the affine coordinates as fixed-width base64url octets.
   const jwk = publicKey.export({ format: "jwk" });
   if (!jwk.x || !jwk.y) {
@@ -32,7 +36,7 @@ export function generateVapidKeypair(): VapidDocument {
   const y = Buffer.from(jwk.y, "base64url");
   const raw = Buffer.concat([Buffer.from([0x04]), x, y]);
   return {
-    private_key: String(privatePem),
+    private_key: Buffer.from(der).toString("base64url"),
     public_key: raw.toString("base64url"),
     created_at: new Date().toISOString(),
   };

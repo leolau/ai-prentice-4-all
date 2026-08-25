@@ -72,10 +72,17 @@ export async function getVapid(): Promise<VapidDocument | null> {
   return readJson<VapidDocument>(VAPID_PATH);
 }
 
-/** The VAPID keypair — generated and stored on first use. */
+/** The VAPID keypair — generated and stored on first use. Also regenerates
+ * documents whose private key is PEM (pre-DER-fix): py_vapid rejects PEM. */
 export async function ensureVapid(): Promise<VapidDocument> {
   const existing = await getVapid();
-  if (existing?.private_key && existing?.public_key) return existing;
+  if (
+    existing?.private_key &&
+    existing?.public_key &&
+    !existing.private_key.startsWith("-----BEGIN")
+  ) {
+    return existing;
+  }
   const doc = generateVapidKeypair();
   await writeJson(VAPID_PATH, doc);
   return doc;
