@@ -71,6 +71,12 @@ def test_unknown_field_rejected():
         validate_payload("google-oauth2", {**GOOGLE_PAYLOAD, "bogus": 1})
 
 
+def test_authorized_user_type_accepted():
+    # Regression: google/complete stores authorized_user payloads, which
+    # carry "type"; the kind spec must accept it.
+    validate_payload("google-oauth2", {**GOOGLE_PAYLOAD, "type": "authorized_user"})
+
+
 def test_reserved_kinds_validate():
     validate_payload("telegram-token", {"bot_token": "123:ABC"})
     validate_payload("password", {"username": "u", "password": "p"})
