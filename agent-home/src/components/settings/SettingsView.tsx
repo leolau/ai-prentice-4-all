@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 
 import { EntityGoalSection } from "@/components/settings/EntityGoalSection";
 import { PushEnroll } from "@/components/push/PushEnroll";
+import { ConnectedAccounts } from "@/components/settings/ConnectedAccounts";
 import { BusyRegion } from "@/components/ui/BusyRegion";
 import { Spinner } from "@/components/ui/Spinner";
 import type { EntityGoal, SessionTag } from "@/types";
@@ -110,6 +111,8 @@ export function SettingsView({
       </section>
 
       <PushEnroll />
+
+      <ConnectedAccounts />
 
       <EntityGoalSection goal={entityGoal} readOnly={entityGoalReadOnly} />
 

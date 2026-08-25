@@ -77,6 +77,7 @@ import type {
   ProposedAction,
   Role,
   SessionCreateResponse,
+  CredentialEntry,
   SessionTag,
   SessionsResponse,
   TagSuggestion,
@@ -1739,6 +1740,77 @@ export class HermesApiClient {
     return this.request(
       `/api/registry/projects/${encodeURIComponent(slug)}/tools`,
       { method: "PATCH", json: payload },
+    );
+  }
+
+  // -- unified credential store (Settings → Connected accounts) ------------
+
+  /** The caller's readable credential entries, redacted. */
+  async credentials(): Promise<{ credentials: CredentialEntry[] }> {
+    return this.request("/api/credentials");
+  }
+
+  async credential(
+    provider: string,
+    name: string,
+  ): Promise<{ credential: CredentialEntry }> {
+    return this.request(
+      `/api/credentials/${encodeURIComponent(provider)}/${encodeURIComponent(name)}`,
+    );
+  }
+
+  /** Toggle services / visibility on an entry the caller owns. */
+  async patchCredential(
+    provider: string,
+    name: string,
+    payload: { services?: string[]; visibility?: string },
+  ): Promise<{ credential: CredentialEntry }> {
+    return this.request(
+      `/api/credentials/${encodeURIComponent(provider)}/${encodeURIComponent(name)}`,
+      { method: "PATCH", json: payload },
+    );
+  }
+
+  async deleteCredential(
+    provider: string,
+    name: string,
+  ): Promise<{ deleted: boolean }> {
+    return this.request(
+      `/api/credentials/${encodeURIComponent(provider)}/${encodeURIComponent(name)}`,
+      { method: "DELETE" },
+    );
+  }
+
+  /** Begin a Google OAuth connect; returns the consent URL to open. */
+  async googleStart(payload: {
+    name?: string;
+    services: string[];
+  }): Promise<{ auth_url: string; state: string }> {
+    return this.request("/api/credentials/google/start", {
+      method: "POST",
+      json: payload,
+    });
+  }
+
+  /** Finish the connect with the pasted code or redirect URL. */
+  async googleComplete(payload: { code_or_url: string }): Promise<{
+    credential: CredentialEntry;
+    account_email: string | null;
+    granted_scopes: string[];
+  }> {
+    return this.request("/api/credentials/google/complete", {
+      method: "POST",
+      json: payload,
+    });
+  }
+
+  async googleRefresh(name: string): Promise<{
+    refreshed: boolean;
+    write_won: boolean;
+  }> {
+    return this.request(
+      `/api/credentials/google/${encodeURIComponent(name)}/refresh`,
+      { method: "POST" },
     );
   }
 }

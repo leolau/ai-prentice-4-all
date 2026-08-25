@@ -28,6 +28,14 @@ describe("SettingsView", () => {
     expect(html).toContain("Colour theme");
   });
 
+  it("renders the Connected accounts section", () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ tags: [], credentials: [] })),
+    );
+    const html = renderToStaticMarkup(<SettingsView />);
+    expect(html).toContain("Connected accounts");
+  });
+
   it("renders the Tags section header", () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
       new Response(JSON.stringify({ tags: [] })),
