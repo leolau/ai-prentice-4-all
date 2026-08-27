@@ -6,6 +6,7 @@ import { LeadChatHost } from "@/components/coral/LeadChatHost";
 import { getPrincipal } from "@/lib/auth/principal";
 import { readSession } from "@/lib/auth/session";
 import { HermesApiClient } from "@/lib/api/client";
+import { storageConfigured } from "@/lib/env";
 import type { TodosFacets } from "@/types";
 
 // Cache the facets call for 30s so every page render doesn't hit the backend
@@ -23,7 +24,7 @@ const getCachedFacets = unstable_cache(
   },
   ["todos-facets-badge"],
   // The badge is decorative — a 2-minute-old count is fine, and it cuts
-  // hits on the facets endpoint (the per-render backend hotspot).
+  // hits to the facets endpoint (the per-render backend hotspot).
   { revalidate: 120 },
 );
 
@@ -37,13 +38,13 @@ const getCachedFacets = unstable_cache(
  * - **Phone (base):** a single phone-width column.
  * - **Tablet (`md`):** the content column widens so it stops looking like a
  *   phone stuck in the middle of the screen.
- * - **Desktop (`lg`+):** the content area fills the remaining width (centred,
+ * - **Desktop (`lg`+):** the content area fills the remaining width (centred
  *   with a comfortable max) — a real responsive webapp, not a phone frame.
  *
  * Feature panels render into `children`. `showCoral={false}` (e.g. the login
  * page) drops the launcher and its reserved space. `wide` lifts the desktop
  * max width for panels that lay out side-by-side columns (the memory map next
- * to its list) — at `max-w-5xl` both columns are too narrow to be readable.
+ * to its list) — at `max-w-5xl` both are too narrow to be readable.
  */
 export async function MobileShell({
   title,
@@ -112,7 +113,7 @@ export async function MobileShell({
           </div>
         </main>
         {showCoral ? <CoralHost badgeCounts={badgeCounts} /> : null}
-        {showCoral ? <LeadChatHost /> : null}
+        {showCoral ? <LeadChatHost storageEnabled={storageConfigured()} /> : null}
         {showCoral ? <AppMcpBridge /> : null}
       </div>
     </div>
