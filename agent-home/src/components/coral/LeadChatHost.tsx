@@ -39,7 +39,12 @@ const EDGE = 8;
  * chosen position and size are persisted (`agent-home:leadchat-rect`) and
  * restored the next time it opens.
  */
-export function LeadChatHost() {
+export function LeadChatHost({
+  storageEnabled = false,
+}: {
+  /** Whether Supabase Storage is configured on the box — gates the attach button. */
+  storageEnabled?: boolean;
+}) {
   const [open, setOpen] = useState(false);
   const [leadSession, setLeadSession] = usePersistentState<string | null>(
     "agent-home:lead-session",
@@ -157,7 +162,7 @@ export function LeadChatHost() {
     // top-left edge follows the pointer.
     const x = Math.min(Math.max(EDGE, origin.x + dx), origin.x + origin.w - MIN_W);
     const y = Math.min(Math.max(EDGE, origin.y + dy), origin.y + origin.h - MIN_H);
-    return { x, y, w: origin.x + origin.w - x, h: origin.y + origin.h - y };
+    return { x: origin.x + origin.w - x, y: origin.y + origin.h - y };
   }
 
   /** Pointer-down starter for the header (move) or a corner grip (resize). */
@@ -337,7 +342,7 @@ export function LeadChatHost() {
           </div>
           <Composer
             sending={sending}
-            storageEnabled={false}
+            storageEnabled={storageEnabled}
             sessionId={leadSession}
             onSend={(text, attachments) => void send(text, attachments)}
           />
