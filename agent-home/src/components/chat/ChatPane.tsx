@@ -420,6 +420,9 @@ export function ChatPane({
   async function refreshSessions() {
     try {
       const params = new URLSearchParams();
+      // Match the first-paint fetch: a refresh must not shrink the picker to
+      // the upstream's default page size.
+      params.set("limit", "200");
       if (includeTags.length > 0) params.set("tags", includeTags.join(","));
       if (excludeTags.length > 0) params.set("exclude_tags", excludeTags.join(","));
       params.set("tag_match", matchMode);
