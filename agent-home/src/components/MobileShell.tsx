@@ -24,7 +24,7 @@ const getCachedFacets = unstable_cache(
   },
   ["todos-facets-badge"],
   // The badge is decorative — a 2-minute-old count is fine, and it cuts
-  // hits to the facets endpoint (the per-render backend hotspot).
+  // hits on the facets endpoint (the per-render backend hotspot).
   { revalidate: 120 },
 );
 
@@ -38,13 +38,13 @@ const getCachedFacets = unstable_cache(
  * - **Phone (base):** a single phone-width column.
  * - **Tablet (`md`):** the content column widens so it stops looking like a
  *   phone stuck in the middle of the screen.
- * - **Desktop (`lg`+):** the content area fills the remaining width (centred
+ * - **Desktop (`lg`+):** the content area fills the remaining width (centred,
  *   with a comfortable max) — a real responsive webapp, not a phone frame.
  *
  * Feature panels render into `children`. `showCoral={false}` (e.g. the login
  * page) drops the launcher and its reserved space. `wide` lifts the desktop
  * max width for panels that lay out side-by-side columns (the memory map next
- * to its list) — at `max-w-5xl` both are too narrow to be readable.
+ * to its list) — at `max-w-5xl` both columns are too narrow to be readable.
  */
 export async function MobileShell({
   title,

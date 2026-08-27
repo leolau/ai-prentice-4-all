@@ -162,7 +162,7 @@ export function LeadChatHost({
     // top-left edge follows the pointer.
     const x = Math.min(Math.max(EDGE, origin.x + dx), origin.x + origin.w - MIN_W);
     const y = Math.min(Math.max(EDGE, origin.y + dy), origin.y + origin.h - MIN_H);
-    return { x: origin.x + origin.w - x, y: origin.y + origin.h - y };
+    return { x, y, w: origin.x + origin.w - x, h: origin.y + origin.h - y };
   }
 
   /** Pointer-down starter for the header (move) or a corner grip (resize). */

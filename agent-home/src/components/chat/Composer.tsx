@@ -167,7 +167,7 @@ export function Composer({
             type="button"
             onClick={submit}
             disabled={!canSend}
-            className="rounded-xl bg-[var(--color-accent)] px-3 py-3 text-sm font-semibold text-[var(--color-accent-fg)] disabled:opacity-60"
+            className="rounded-xl bg-[var(--color-accent)] px-4 py-3 text-sm font-semibold text-[var(--color-accent-fg)] disabled:opacity-60"
           >
             Send
           </button>
