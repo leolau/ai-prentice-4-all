@@ -45,6 +45,8 @@ export default async function Page({
     const list = await client.sessions({
       excludeSources: "cron",
       order: "recent",
+      // The picker offers every conversation, not a 30-row window.
+      limit: 200,
     });
     sessions = list.sessions;
     if (requested && !sessions.some((s) => s.id === requested)) {

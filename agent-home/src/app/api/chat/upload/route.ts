@@ -14,10 +14,9 @@
 import { NextResponse } from "next/server";
 
 import { apiClientForRequest, getPrincipal } from "@/lib/auth/principal";
+import { UPLOAD_MAX_BYTES } from "@/lib/chat/upload-limit";
 import { mediaBucket } from "@/lib/env";
 import { storageAvailable, uploadChatMedia } from "@/lib/supabase/storage";
-
-const MAX_BYTES = 10 * 1024 * 1024;
 
 /** SHA-256 of the bytes — the registry's identity for a file. */
 async function digest(bytes: ArrayBuffer): Promise<string> {
@@ -53,9 +52,9 @@ export async function POST(request: Request): Promise<NextResponse> {
       { status: 400 },
     );
   }
-  if (file.size > MAX_BYTES) {
+  if (file.size > UPLOAD_MAX_BYTES) {
     return NextResponse.json(
-      { error: "too_large", detail: "File exceeds the 10 MB limit." },
+      { error: "too_large", detail: "File exceeds the 100 MB limit." },
       { status: 413 },
     );
   }
