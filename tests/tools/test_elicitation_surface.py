@@ -55,6 +55,94 @@ def _ask(timeout=5):
     )
 
 
+class TestScopePersistence:
+    """With a persist_key, the user's scope choice must be remembered.
+
+    Live symptom (agent-home): clicking "Always approve" on an
+    ``approvals.tools`` gate asked again on the very next call — the choice
+    was collapsed to a bare accept and dropped. These pin the contract the
+    tool-approval plugin now relies on.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _hermes_home(self, tmp_path, monkeypatch):
+        home = tmp_path / ".hermes"
+        home.mkdir()
+        monkeypatch.setenv("HERMES_HOME", str(home))
+        from hermes_cli import config as cfgmod
+
+        getattr(cfgmod, "_CONFIG_CACHE", {}).clear()
+        yield
+        getattr(cfgmod, "_CONFIG_CACHE", {}).clear()
+
+    def _ask_with_scope(self, tool: str, choice: str, scope_key: str):
+        def notify(_data):
+            threading.Timer(
+                0.05, resolve_gateway_approval, args=(SESSION, choice)
+            ).start()
+
+        register_gateway_notify(SESSION, notify)
+        return request_elicitation_consent_detailed(
+            tool,
+            "needs approval",
+            timeout_seconds=5,
+            surface="tool-approval",
+            persist_key=tool,
+            persist_session_key=scope_key,
+        )
+
+    def test_always_is_permanent(self, gateway_session):
+        out = self._ask_with_scope(
+            "mcp_canva_read_design", "always", "chat-session-1"
+        )
+        assert out == ("accept", "approved")
+        assert approval_mod.is_approved("chat-session-1", "mcp_canva_read_design")
+        # Permanent means it survives a fresh process, via config.
+        import yaml
+
+        from hermes_constants import get_hermes_home
+
+        cfg = yaml.safe_load((get_hermes_home() / "config.yaml").read_text()) or {}
+        assert "mcp_canva_read_design" in (cfg.get("command_allowlist") or [])
+
+    def test_session_is_remembered_for_the_stable_key_only(self, gateway_session):
+        out = self._ask_with_scope(
+            "mcp_canva_list_designs", "session", "chat-session-1"
+        )
+        assert out == ("accept", "approved")
+        assert approval_mod.is_approved("chat-session-1", "mcp_canva_list_designs")
+        assert not approval_mod.is_approved("another-session", "mcp_canva_list_designs")
+
+    def test_once_persists_nothing(self, gateway_session):
+        out = self._ask_with_scope(
+            "mcp_canva_export_design", "once", "chat-session-1"
+        )
+        assert out == ("accept", "approved")
+        assert not approval_mod.is_approved(
+            "chat-session-1", "mcp_canva_export_design"
+        )
+
+    def test_no_persist_key_keeps_per_call_semantics(self, gateway_session):
+        def notify(_data):
+            threading.Timer(
+                0.05, resolve_gateway_approval, args=(SESSION, "always")
+            ).start()
+
+        register_gateway_notify(SESSION, notify)
+        out = request_elicitation_consent_detailed(
+            "mcp_canva_share_design",
+            "needs approval",
+            timeout_seconds=5,
+            surface="tool-approval",
+        )
+        assert out == ("accept", "approved")
+        # Server-driven elicitation stays per-call: nothing remembered.
+        assert not approval_mod.is_approved(
+            "chat-session-1", "mcp_canva_share_design"
+        )
+        assert not approval_mod.is_approved(SESSION, "mcp_canva_share_design")
+
+
 class TestUserDecisions:
     def test_button_press_approves(self, gateway_session):
         def notify(_data):
