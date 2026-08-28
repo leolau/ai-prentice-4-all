@@ -264,11 +264,11 @@ export function ProjectDetailView({
               initial={directives}
               archived={project.archived}
             />
-            <PeoplePanel project={project} />
-            <FilesPanel project={project} />
+            <PeoplePanel project={project} archived={project.archived} />
+            <FilesPanel project={project} archived={project.archived} />
             <ReferencesPanel project={project} />
             <MemoriesPanel project={project} />
-            <ToolsPanel project={project} />
+            <ToolsPanel project={project} archived={project.archived} />
           </div>
         </div>
       </BusyRegion>
