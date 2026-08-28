@@ -33,8 +33,11 @@ Configuration (``config.yaml`` — behavioural, so not ``.env``)::
 
 Semantics:
 
-* **Every call prompts.** There is no "approve for the session" — the point
-  of listing a tool here is that each individual call gets seen.
+* **Scope choices are honored.** ``once`` approves a single call;
+  ``session`` covers the chat session (keyed on the stable session id, not
+  the per-turn approval key); ``always`` additionally writes the tool name
+  to ``command_allowlist`` so it survives restarts. Surfaces that only
+  offer accept/decline behave as ``once``.
 * **Fails closed.** Decline, timeout, no registered approval channel, or an
   exception inside the approval machinery all block the call. The model gets
   a plain error telling it not to retry, and the tool never runs.
@@ -190,6 +193,25 @@ def _on_pre_tool_call(
         except Exception as exc:  # pragma: no cover -- defensive
             logger.warning("tool-approval: bypass check failed: %s", exc)
 
+    # Honor prior scope choices: a session approval for this chat session or
+    # a permanent "always" (command_allowlist) skips the prompt. The scope key
+    # is the stable chat session id where one exists — the per-turn approval
+    # key would die at the end of the turn.
+    scope_key = ""
+    try:
+        from gateway.session_context import get_session_env
+        from tools.approval import get_current_session_key, is_approved
+
+        scope_key = get_session_env("HERMES_SESSION_ID", "") or \
+            get_current_session_key(default="")
+        # is_approved() checks the permanent allowlist even when scope_key
+        # is empty, so an "always" still skips the prompt with no session.
+        if is_approved(scope_key, tool_name):
+            logger.info("tool-approval: %s already approved for %s", tool_name, scope_key)
+            return None
+    except Exception as exc:  # pragma: no cover -- defensive
+        logger.warning("tool-approval: approval-memory check failed: %s", exc)
+
     try:
         from tools.approval import request_elicitation_consent_detailed
     except Exception as exc:  # pragma: no cover -- defensive
@@ -208,6 +230,8 @@ def _on_pre_tool_call(
         f"Tool '{tool_name}' requires your approval before it runs (approvals.tools).",
         timeout_seconds=_timeout(cfg),
         surface="tool-approval",
+        persist_key=tool_name,
+        persist_session_key=scope_key or None,
     )
 
     if decision == "accept":
