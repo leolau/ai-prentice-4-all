@@ -335,10 +335,12 @@ def register_incomings_subparser(subparsers: argparse._SubParsersAction) -> None
     """Register ``hermes incomings`` and its sub-actions."""
     parser = subparsers.add_parser(
         "incomings",
-        help="Manage the unified inbox of arrivals (WhatsApp, email, calendar)",
+        help="Query and manage the unified inbox of arrivals (WhatsApp, email, calendar)",
         description=(
             "The registry behind /inbox. Arrivals are mirrored live by the "
-            "pipeline hooks; this command replays the ones that predate them."
+            "pipeline hooks; list/search/show query them, backfill replays "
+            "the ones that predate the hooks, and remember ingests one into "
+            "memory."
         ),
     )
     sub = parser.add_subparsers(dest="incomings_command", required=True)
@@ -389,3 +391,9 @@ def register_incomings_subparser(subparsers: argparse._SubParsersAction) -> None
         help="Principal to remember as (default: the enrolled owner)",
     )
     remember.set_defaults(func=incomings_remember_command)
+
+    # Read-only query verbs (list / search / show) live in their own module;
+    # they attach to the same `sub` so `hermes incomings` stays one surface.
+    from hermes_cli.incomings_query import register_incomings_query_verbs
+
+    register_incomings_query_verbs(sub)
