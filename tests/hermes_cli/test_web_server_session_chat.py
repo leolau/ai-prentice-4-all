@@ -450,3 +450,125 @@ def test_run_approval_rejects_invalid_choice(client, monkeypatch):
     monkeypatch.setattr(_ap, "resolve_gateway_approval", _boom)
     resp = client.post("/v1/runs/run_abc/approval", json={"choice": "maybe"})
     assert resp.status_code == 400
+
+
+def test_active_run_and_attach_replay_the_turn(monkeypatch):
+    """Reload mid-turn: ``active_run`` names the in-flight turn, and a
+    reloaded page re-attaches — the attach stream replays the buffered
+    events and carries the live tail, so content keeps flowing.
+
+    A real uvicorn server in a thread: the test client's primary stream,
+    active probe and attach are genuinely concurrent with the turn.
+    """
+    import asyncio
+    import socket
+    import threading
+    import time as _time
+    from types import SimpleNamespace
+
+    import httpx
+    import uvicorn
+
+    import hermes_state
+    import gateway.session_chat as session_chat
+    from hermes_cli import web_server
+    from hermes_cli.web_server import app, _SESSION_HEADER_NAME, _SESSION_TOKEN
+
+    owner = SimpleNamespace(user_id="root", display="Root", role="owner", is_owner=True)
+
+    async def _fake_principal(request, *, allow_as=False):
+        return owner
+
+    monkeypatch.setattr(web_server, "_comms_resolve_principal", _fake_principal)
+
+    db = hermes_state.SessionDB()
+    try:
+        db.ensure_session("s-attach", source="agent_home")
+    finally:
+        db.close()
+
+    def _slow_turn(*, session_db, user_message, conversation_history,
+                   session_id=None, stream_delta_callback=None, **kwargs):
+        if stream_delta_callback:
+            stream_delta_callback("part one ")
+        _time.sleep(1.5)
+        return (
+            {"final_response": "part one two", "session_id": session_id},
+            {"input_tokens": 1, "output_tokens": 2, "total_tokens": 3},
+        )
+
+    monkeypatch.setattr(session_chat, "run_session_turn_sync", _slow_turn)
+
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    port = sock.getsockname()[1]
+    sock.close()
+    server = uvicorn.Server(
+        uvicorn.Config(
+            app, host="127.0.0.1", port=port, log_level="error", lifespan="off"
+        )
+    )
+    thread = threading.Thread(target=server.run, daemon=True)
+    thread.start()
+    for _ in range(100):
+        if server.started:
+            break
+        _time.sleep(0.05)
+    assert server.started, "uvicorn did not start"
+
+    headers = {_SESSION_HEADER_NAME: _SESSION_TOKEN}
+    base = f"http://127.0.0.1:{port}"
+
+    async def _scenario():
+        async with httpx.AsyncClient(base_url=base, headers=headers) as ac:
+            async with ac.stream(
+                "POST", "/api/sessions/s-attach/chat/stream", json={"message": "hi"}
+            ) as primary:
+                # The in-flight turn is discoverable while it runs…
+                run_id = None
+                for _ in range(40):
+                    active = (await ac.get("/api/sessions/s-attach/active_run")).json()
+                    if active["run_id"]:
+                        run_id = active["run_id"]
+                        break
+                    await asyncio.sleep(0.05)
+                assert run_id, "the in-flight turn must be discoverable"
+
+                # …a reloaded page re-attaches and receives buffer plus tail.
+                async with ac.stream(
+                    "POST",
+                    "/api/sessions/s-attach/chat/stream/attach",
+                    json={"run_id": run_id},
+                ) as attach:
+                    assert attach.headers["content-type"].startswith(
+                        "text/event-stream"
+                    )
+                    attach_body = (await attach.aread()).decode()
+                primary_body = (await primary.aread()).decode()
+
+            assert "part one two" in primary_body
+            assert '"delta": "part one "' in attach_body
+            assert "event: assistant.completed" in attach_body
+            assert "event: done" in attach_body
+
+            # Once finished there is nothing active…
+            assert (await ac.get("/api/sessions/s-attach/active_run")).json() == {
+                "run_id": None
+            }
+            # …but the grace-window replay still serves a just-reloaded page.
+            again = await ac.post(
+                "/api/sessions/s-attach/chat/stream/attach", json={"run_id": run_id}
+            )
+            assert again.status_code == 200
+            assert "event: done" in again.text
+            # A run id from another session (or unknown) cannot be attached.
+            bad = await ac.post(
+                "/api/sessions/s-other/chat/stream/attach", json={"run_id": run_id}
+            )
+            assert bad.status_code == 404
+
+    try:
+        asyncio.run(_scenario())
+    finally:
+        server.should_exit = True
+        thread.join(5)

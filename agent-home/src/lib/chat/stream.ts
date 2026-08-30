@@ -109,11 +109,52 @@ export async function streamChatTurn(
   }
 
   const sessionId = res.headers.get("x-hermes-session-id") || params.sessionId || "";
-  const reader = res.body.getReader();
+  const { completedContent, landedSessionId } = await consumeStream(
+    res,
+    handlers,
+    sessionId,
+  );
+  handlers.onCompleted?.(completedContent, landedSessionId);
+  return { sessionId: landedSessionId };
+}
+
+/**
+ * Re-attach to an in-flight turn after a reload: the BFF replays the turn's
+ * buffered events and then tails it live, so the page resumes streaming
+ * instead of waiting for the transcript to catch up.
+ */
+export async function attachChatStream(
+  params: { sessionId: string; runId: string; signal?: AbortSignal },
+  handlers: ChatStreamHandlers,
+): Promise<void> {
+  const res = await fetch("/api/chat/attach", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ sessionId: params.sessionId, runId: params.runId }),
+    signal: params.signal,
+  });
+  if (!res.ok || !res.body) {
+    throw new Error("That run can no longer be attached.");
+  }
+  const { completedContent, landedSessionId } = await consumeStream(
+    res,
+    handlers,
+    params.sessionId,
+  );
+  handlers.onCompleted?.(completedContent, landedSessionId);
+}
+
+/** Read SSE frames off a proxied turn stream and dispatch them. */
+async function consumeStream(
+  res: Response,
+  handlers: ChatStreamHandlers,
+  initialSessionId: string,
+): Promise<{ completedContent: string; landedSessionId: string }> {
+  const reader = res.body!.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
   let completedContent = "";
-  let landedSessionId = sessionId;
+  let landedSessionId = initialSessionId;
 
   const dispatch = (frame: StreamFrame): void => {
     const { event, data } = frame;
@@ -169,6 +210,5 @@ export async function streamChatTurn(
     }
   }
 
-  handlers.onCompleted?.(completedContent, landedSessionId);
-  return { sessionId: landedSessionId };
+  return { completedContent, landedSessionId };
 }

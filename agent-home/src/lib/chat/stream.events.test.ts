@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { streamChatTurn, type ChatToolEvent } from "@/lib/chat/stream";
+import { attachChatStream, streamChatTurn, type ChatToolEvent } from "@/lib/chat/stream";
 
 function sseResponse(body: string): Response {
   return new Response(body, {
@@ -62,5 +62,50 @@ describe("streamChatTurn reasoning and tool events", () => {
       },
     );
     expect(order).toEqual(["reasoning", "completed"]);
+  });
+});
+
+describe("attachChatStream (reload mid-turn)", () => {
+  it("posts the run id and replays buffered frames through the handlers", async () => {
+    const body = [
+      "event: assistant.delta\ndata: {\"delta\":\"part one \"}",
+      "event: assistant.completed\ndata: {\"content\":\"part one two\"}",
+      "event: done\ndata: {}",
+    ].join("\n\n") + "\n\n";
+    const fetchMock = vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
+      expect(String(url)).toBe("/api/chat/attach");
+      expect(init?.method).toBe("POST");
+      expect(JSON.parse(String(init?.body))).toEqual({
+        sessionId: "sess_1",
+        runId: "run_9",
+      });
+      return sseResponse(body);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const deltas: string[] = [];
+    let completed: string | null = null;
+    await attachChatStream(
+      { sessionId: "sess_1", runId: "run_9" },
+      {
+        onDelta: (d) => deltas.push(d),
+        onCompleted: (content) => {
+          completed = content;
+        },
+      },
+    );
+
+    expect(deltas).toEqual(["part one "]);
+    expect(completed).toBe("part one two");
+  });
+
+  it("rejects when the run can no longer be attached", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response("gone", { status: 404 })),
+    );
+    await expect(
+      attachChatStream({ sessionId: "sess_1", runId: "run_9" }, {}),
+    ).rejects.toThrow();
   });
 });
