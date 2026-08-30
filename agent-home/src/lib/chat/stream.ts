@@ -15,12 +15,24 @@ import { formatUiContext, getUiContext } from "@/lib/app-mcp/state";
 export interface ChatStreamHandlers {
   /** Incremental assistant text. */
   onDelta?(delta: string): void;
+  /** Incremental model reasoning (extended thinking) text. */
+  onReasoning?(text: string): void;
+  /** A tool call started; `id` pairs it with its completion. */
+  onToolStart?(tool: ChatToolEvent): void;
+  /** A tool call finished. */
+  onToolComplete?(tool: ChatToolEvent): void;
   /** A tool is blocked awaiting the user's approval decision. */
   onApproval?(req: ChatApprovalRequest): void;
   /** The turn finished; `content` is the full assistant message. */
   onCompleted?(content: string, sessionId: string): void;
   /** A terminal, user-safe error message from the stream. */
   onError?(message: string): void;
+}
+
+/** A tool lifecycle event (id + name only — args/results stay server-side). */
+export interface ChatToolEvent {
+  id: string;
+  name: string;
 }
 
 export interface ChatStreamParams {
@@ -108,6 +120,19 @@ export async function streamChatTurn(
     if (event === "assistant.delta") {
       const delta = str(data.delta);
       if (delta) handlers.onDelta?.(delta);
+    } else if (event === "reasoning.delta") {
+      const text = str(data.text);
+      if (text) handlers.onReasoning?.(text);
+    } else if (event === "tool.start") {
+      handlers.onToolStart?.({
+        id: str(data.tool_id) ?? "",
+        name: str(data.name) ?? "tool",
+      });
+    } else if (event === "tool.complete") {
+      handlers.onToolComplete?.({
+        id: str(data.tool_id) ?? "",
+        name: str(data.name) ?? "tool",
+      });
     } else if (event === "approval.request") {
       handlers.onApproval?.({
         runId: str(data.run_id) ?? "",

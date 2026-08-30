@@ -4,13 +4,15 @@ import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } f
 import Link from "next/link";
 
 import { Composer } from "@/components/chat/Composer";
+import { LiveActivity } from "@/components/chat/LiveActivity";
 import { MessageBubble } from "@/components/chat/MessageBubble";
 import { StatusIndicator, type ChatActivity } from "@/components/chat/StatusIndicator";
 import {
   onLeadChatRequest,
   reportLeadChatOpen,
 } from "@/components/coral/coral-interlock";
-import { streamChatTurn } from "@/lib/chat/stream";
+import { streamChatTurn, type ChatToolEvent } from "@/lib/chat/stream";
+import { visibleTurns } from "@/lib/chat/transcript";
 import { usePersistentState } from "@/lib/use-persistent-state";
 import type { ChatApprovalRequest, ChatAttachment, ChatMessage } from "@/types";
 
@@ -59,6 +61,8 @@ export function LeadChatHost() {
   const [sending, setSending] = useState(false);
   const [activity, setActivity] = useState<ChatActivity>("idle");
   const [streamText, setStreamText] = useState("");
+  const [reasoningText, setReasoningText] = useState("");
+  const [toolChips, setToolChips] = useState<(ChatToolEvent & { done: boolean })[]>([]);
   const [approval, setApproval] = useState<ChatApprovalRequest | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const fabRef = useRef<HTMLButtonElement>(null);
@@ -73,7 +77,7 @@ export function LeadChatHost() {
     fetch(`/api/chat/messages?sessionId=${encodeURIComponent(leadSession)}`)
       .then((res) => (res.ok ? res.json() : { messages: [] }))
       .then((data: { messages?: ChatMessage[] }) => {
-        if (!cancelled) setMessages(data.messages ?? []);
+        if (!cancelled) setMessages(visibleTurns(data.messages ?? []));
       })
       .catch(() => {
         if (!cancelled) setMessages([]);
@@ -89,7 +93,7 @@ export function LeadChatHost() {
   useEffect(() => {
     const el = scrollRef.current;
     if (el) el.scrollTop = el.scrollHeight;
-  }, [messages, streamText, activity, open]);
+  }, [messages, streamText, reasoningText, toolChips, activity, open]);
 
   useEffect(() => {
     if (!open) return;
@@ -188,6 +192,8 @@ export function LeadChatHost() {
     setSending(true);
     setActivity("thinking");
     setStreamText("");
+    setReasoningText("");
+    setToolChips([]);
     setMessages((prev) => [...prev, { role: "user", content: text }]);
     try {
       await streamChatTurn(
@@ -197,6 +203,19 @@ export function LeadChatHost() {
             setActivity("streaming");
             setStreamText((prev) => prev + delta);
           },
+          onReasoning: (textDelta) => {
+            setActivity("thinking");
+            setReasoningText((prev) => prev + textDelta);
+          },
+          onToolStart: (tool) => {
+            setActivity("streaming");
+            setToolChips((prev) => [...prev, { ...tool, done: false }]);
+          },
+          onToolComplete: (tool) => {
+            setToolChips((prev) =>
+              prev.map((c) => (c.id === tool.id ? { ...c, done: true } : c)),
+            );
+          },
           onApproval: (req) => {
             setActivity("waiting_approval");
             setApproval(req);
@@ -205,11 +224,15 @@ export function LeadChatHost() {
             setMessages((prev) => [...prev, { role: "assistant", content }]);
             if (sessionId) setLeadSession(sessionId);
             setStreamText("");
+            setReasoningText("");
+            setToolChips([]);
             setApproval(null);
           },
           onError: (message) => {
             setMessages((prev) => [...prev, { role: "assistant", content: message }]);
             setStreamText("");
+            setReasoningText("");
+            setToolChips([]);
           },
         },
       );
@@ -224,6 +247,8 @@ export function LeadChatHost() {
     } finally {
       setSending(false);
       setActivity("idle");
+      setReasoningText("");
+      setToolChips([]);
     }
   }
 
@@ -309,6 +334,7 @@ export function LeadChatHost() {
                 {streamText}
               </div>
             ) : null}
+            <LiveActivity reasoning={reasoningText} tools={toolChips} />
             <StatusIndicator activity={activity} />
             {approval ? (
               <div className="mt-2 rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-2)] p-2 text-xs">

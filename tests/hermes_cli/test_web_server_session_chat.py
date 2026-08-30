@@ -365,6 +365,50 @@ def test_chat_stream_emits_every_delta_in_order(client, monkeypatch):
     assert body.index("event: assistant.completed") > positions[-1]
 
 
+def test_chat_stream_emits_reasoning_and_tool_activity(client, monkeypatch):
+    """Long turns must not look frozen: reasoning deltas and tool lifecycle
+    events reach the browser as SSE frames, without leaking tool args/results.
+    """
+    import hermes_state
+    import gateway.session_chat as session_chat
+
+    db = hermes_state.SessionDB()
+    try:
+        db.ensure_session("s-activity", source="agent_home")
+    finally:
+        db.close()
+
+    def _active_turn(*, session_db, user_message, conversation_history,
+                     session_id=None, reasoning_callback=None,
+                     tool_start_callback=None, tool_complete_callback=None,
+                     **kwargs):
+        assert reasoning_callback is not None
+        assert tool_start_callback is not None
+        assert tool_complete_callback is not None
+        reasoning_callback("checking the run…")
+        tool_start_callback("tc1", "execute_code", {"secret": "hunter2"})
+        tool_complete_callback("tc1", "execute_code", {"secret": "hunter2"}, "ok")
+        return (
+            {"final_response": "done", "session_id": session_id},
+            {"input_tokens": 1, "output_tokens": 2, "total_tokens": 3},
+        )
+
+    monkeypatch.setattr(session_chat, "run_session_turn_sync", _active_turn)
+
+    resp = client.post("/api/sessions/s-activity/chat/stream", json={"message": "hi"})
+    assert resp.status_code == 200
+    body = resp.text
+
+    assert "event: reasoning.delta" in body
+    assert "checking the run…" in body
+    assert "event: tool.start" in body
+    assert "event: tool.complete" in body
+    assert '"tool_id": "tc1"' in body
+    assert '"name": "execute_code"' in body
+    # Args/results never leave the server.
+    assert "hunter2" not in body
+
+
 def test_chat_stream_unknown_session_404(client, capture_turn):
     resp = client.post("/api/sessions/nope/chat/stream", json={"message": "hi"})
     assert resp.status_code == 404

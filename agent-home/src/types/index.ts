@@ -326,6 +326,8 @@ export interface ChatMessage {
   role: ChatRole;
   content: string;
   timestamp?: number | string | null;
+  /** Persisted extended-thinking text (SessionDB `reasoning` column). */
+  reasoning?: string | null;
 }
 
 /**

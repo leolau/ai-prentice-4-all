@@ -23,6 +23,7 @@ def build_session_agent(
     ephemeral_system_prompt: Optional[str] = None,
     session_id: Optional[str] = None,
     stream_delta_callback=None,
+    reasoning_callback=None,
     tool_progress_callback=None,
     tool_start_callback=None,
     tool_complete_callback=None,
@@ -76,6 +77,7 @@ def build_session_agent(
         session_id=session_id,
         platform=platform,
         stream_delta_callback=stream_delta_callback,
+        reasoning_callback=reasoning_callback,
         tool_progress_callback=tool_progress_callback,
         tool_start_callback=tool_start_callback,
         tool_complete_callback=tool_complete_callback,
@@ -95,7 +97,10 @@ def run_session_turn_sync(
     ephemeral_system_prompt: Optional[str] = None,
     gateway_session_key: Optional[str] = None,
     stream_delta_callback=None,
+    reasoning_callback=None,
     tool_progress_callback=None,
+    tool_start_callback=None,
+    tool_complete_callback=None,
     platform: str = "api_server",
 ) -> Tuple[dict, dict]:
     """Run one synchronous one-brain turn for a persisted session.
@@ -104,14 +109,18 @@ def run_session_turn_sync(
     (``await loop.run_in_executor(None, ...)``). Returns ``(result, usage)``
     where *result* is the ``AIAgent.run_conversation`` dict (``final_response``,
     ``session_id``) and *usage* holds token counts. Does not bind runtime
-    session-context — the caller sets/clears that around this call.
+    session-context — the caller sets/clears that around this call. Callbacks
+    fire on the caller's executor thread.
     """
     agent = build_session_agent(
         session_db=session_db,
         ephemeral_system_prompt=ephemeral_system_prompt,
         session_id=session_id,
         stream_delta_callback=stream_delta_callback,
+        reasoning_callback=reasoning_callback,
         tool_progress_callback=tool_progress_callback,
+        tool_start_callback=tool_start_callback,
+        tool_complete_callback=tool_complete_callback,
         gateway_session_key=gateway_session_key,
         platform=platform,
     )

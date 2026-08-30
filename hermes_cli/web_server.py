@@ -10665,6 +10665,23 @@ async def session_chat_stream(session_id: str, request: Request):
         if delta:
             _enqueue("assistant.delta", {"delta": delta, "run_id": run_id})
 
+    def _reasoning(text: str) -> None:
+        if text:
+            _enqueue("reasoning.delta", {"text": text, "run_id": run_id})
+
+    def _tool_start(tc_id: str, name: str, args: dict) -> None:
+        # id+name only: args/result can carry secrets and stay server-side.
+        _enqueue(
+            "tool.start",
+            {"tool_id": str(tc_id or ""), "name": str(name or "tool"), "run_id": run_id},
+        )
+
+    def _tool_complete(tc_id: str, name: str, args: dict, result) -> None:
+        _enqueue(
+            "tool.complete",
+            {"tool_id": str(tc_id or ""), "name": str(name or "tool"), "run_id": run_id},
+        )
+
     def _approval_notify(approval_data: dict) -> None:
         # A gated tool blocked the agent thread. Redact the command (it can
         # carry secrets) and forward the prompt to the browser; the user's
@@ -10718,6 +10735,9 @@ async def session_chat_stream(session_id: str, request: Request):
                         conversation_history=history,
                         session_id=sid,
                         stream_delta_callback=_delta,
+                        reasoning_callback=_reasoning,
+                        tool_start_callback=_tool_start,
+                        tool_complete_callback=_tool_complete,
                     )
             finally:
                 run_db.close()
