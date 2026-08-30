@@ -689,3 +689,103 @@ def test_archive_refuses_an_old_open_run_beyond_the_page_window(env):
             "SELECT archived FROM projects WHERE id = ?", (project["id"],)
         ).fetchone()
     assert row["archived"] == 0
+
+
+def test_run_detail_flags_stalled_run_and_lists_blocked_tree(env):
+    """A ``running`` run whose cards have no worker behind them is orphaned:
+    the detail read says ``stalled`` and lists the blocked tasks from the
+    run's dependency tree (with the failure that blocked them) so the run
+    page can offer stop / retry / repeat instead of a lying pill."""
+    project = _create_active_project(env)
+    client, _state = env
+    slug = project["slug"]
+
+    with projects_db.connect_closing() as conn:
+        run = projects_db.open_project_run(
+            conn,
+            project_id=project["id"],
+            trigger="manual",
+            triggered_by="leo",
+            profile="default",
+            playbook_rev=1,
+        )
+    with kanban_db.connect_closing() as bconn:
+        # The decomposed subtask is a prerequisite of the run's card — the
+        # card waits, todo, while the subtask blocks.
+        sub = kanban_db.create_task(
+            bconn,
+            title="Extract objectives",
+            project_id=project["id"],
+            owner_user_id="leo",
+            initial_status="running",
+        )
+        card = kanban_db.create_task(
+            bconn,
+            title="Draft the outline",
+            project_id=project["id"],
+            owner_user_id="leo",
+            initial_status="running",
+            parents=[sub],
+        )
+        assert kanban_db.block_task(bconn, sub, reason="worker died")
+        with kanban_db.write_txn(bconn):
+            bconn.execute(
+                "UPDATE tasks SET last_failure_error = ? WHERE id = ?",
+                ("worker exited cleanly (rc=0) — protocol violation", sub),
+            )
+            # The card waits on its blocked parent — todo, no worker.
+            bconn.execute(
+                "UPDATE tasks SET status = 'todo' WHERE id = ?", (card,)
+            )
+    with projects_db.connect_closing() as conn:
+        projects_db.link_run_card(conn, run["id"], card, "draft-outline")
+
+    resp = client.get(f"{PREFIX}/{slug}/runs/{run['run_no']}")
+    assert resp.status_code == 200, resp.text
+    payload = resp.json()
+    assert payload["stalled"] is True
+    assert [t["task_id"] for t in payload["blocked_tasks"]] == [sub]
+    assert "protocol violation" in payload["blocked_tasks"][0]["error"]
+    # The run's own card stays a card — not duplicated as blocked work.
+    assert [c["task_id"] for c in payload["cards"]] == [card]
+
+    # A worker picking the card up makes the run honest again.
+    with kanban_db.connect_closing() as bconn:
+        with kanban_db.write_txn(bconn):
+            bconn.execute(
+                "UPDATE tasks SET status = 'running' WHERE id = ?", (card,)
+            )
+    payload = client.get(f"{PREFIX}/{slug}/runs/{run['run_no']}").json()
+    assert payload["stalled"] is False
+
+
+def test_run_detail_not_stalled_while_fresh_and_unblocked(env):
+    """The stall flag must not cry wolf on a freshly opened run whose cards
+    simply have not been claimed yet (the dispatcher needs a tick)."""
+    project = _create_active_project(env)
+    client, _state = env
+    slug = project["slug"]
+
+    with projects_db.connect_closing() as conn:
+        run = projects_db.open_project_run(
+            conn, project_id=project["id"], trigger="manual",
+            triggered_by="leo", profile="default",
+        )
+    with kanban_db.connect_closing() as bconn:
+        card = kanban_db.create_task(
+            bconn,
+            title="Draft the outline",
+            project_id=project["id"],
+            owner_user_id="leo",
+            initial_status="running",
+        )
+        with kanban_db.write_txn(bconn):
+            bconn.execute(
+                "UPDATE tasks SET status = 'todo' WHERE id = ?", (card,)
+            )
+    with projects_db.connect_closing() as conn:
+        projects_db.link_run_card(conn, run["id"], card, "draft-outline")
+
+    payload = client.get(f"{PREFIX}/{slug}/runs/{run['run_no']}").json()
+    assert payload["stalled"] is False
+    assert payload["blocked_tasks"] == []
