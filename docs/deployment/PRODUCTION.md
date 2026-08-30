@@ -70,6 +70,16 @@ All units in `/etc/systemd/system/`, run as user `hermes` (uid 996 / gid 986 —
 | `hermes-drift-check`, `hermes-memory-projection`, `hermes-review-pass`, `hermes-secret-backup` | Aux jobs (installed, not active on source) | |
 | `caddy` | Reverse proxy + TLS | 80/443; config `/etc/caddy/Caddyfile` |
 
+**Caddy + SSE trap**: `encode zstd gzip` compresses `text/*`, which includes
+`text/event-stream` — gzip then holds every small event frame until the
+stream ends, so chat streaming arrives as one final burst. The Caddyfile
+therefore routes the SSE paths (`/api/chat/stream`, `/api/chat/attach` on
+`home.`, `/api/sessions/*/chat/stream*` on the dashboard host) through a
+separate `handle` block with **no** `encode` and `flush_interval -1`. If you
+add a new SSE endpoint, add its path to the `@sse` matcher or it will look
+"frozen until the answer lands". Reload with `caddy validate` +
+`caddy reload` (admin API on :2019, no root needed).
+
 **Side-effect rule**: pollers/bridges/batchers/escalation/digest act on the outside world. **Never run them simultaneously on more than one host** (double-processing + WA session fights).
 
 ### 4.3 Logs

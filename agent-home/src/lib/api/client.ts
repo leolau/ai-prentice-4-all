@@ -590,6 +590,47 @@ export class HermesApiClient {
   }
 
   /**
+   * The in-flight turn for a session, if any — a reloaded page asks this
+   * first, then re-attaches to the stream to resume live rendering.
+   */
+  async activeChatRun(sessionId: string): Promise<{ run_id: string | null }> {
+    return this.request<{ run_id: string | null }>(
+      `/api/sessions/${encodeURIComponent(sessionId)}/active_run`,
+    );
+  }
+
+  /**
+   * Re-attach to an in-flight (or grace-window) turn: the upstream replays
+   * the buffered events, then tails the run live. Returns the raw SSE
+   * `Response` for the BFF to pipe, like `openChatStream`.
+   */
+  async openAttachStream(sessionId: string, runId: string): Promise<Response> {
+    const headers = new Headers({ "content-type": "application/json" });
+    if (this.hermesToken) {
+      headers.set("cookie", `hermes_session_at=${this.hermesToken}`);
+      headers.set("authorization", `Bearer ${this.hermesToken}`);
+    }
+    const res = await fetch(
+      `${this.baseUrl}/api/sessions/${encodeURIComponent(sessionId)}/chat/stream/attach`,
+      {
+        method: "POST",
+        headers,
+        body: JSON.stringify(this.scopedJson({ run_id: runId })),
+        cache: "no-store",
+      },
+    );
+    if (!res.ok || !res.body) {
+      const text = res.body ? await res.text().catch(() => "") : "";
+      throw new HermesApiError(
+        res.status,
+        upstreamDetail(text ? safeJson(text) : undefined, "That run can no longer be attached."),
+        text,
+      );
+    }
+    return res;
+  }
+
+  /**
    * Resolve a pending tool approval for a streamed run. `choice` is one of
    * `once | session | always | deny` (or `approve`, aliased server-side).
    * Forwards to `POST /v1/runs/{run_id}/approval` → `resolve_gateway_approval`,
