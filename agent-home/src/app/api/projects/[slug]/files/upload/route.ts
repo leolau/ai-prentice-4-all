@@ -56,7 +56,8 @@ export async function POST(
     );
   }
 
-  const label = (form.get("label") as string | null)?.trim() || undefined;
+  const label =
+    (form.get("label") as string | null)?.trim() || file.name || undefined;
 
   try {
     const bytes = await file.arrayBuffer();
