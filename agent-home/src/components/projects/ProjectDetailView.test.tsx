@@ -187,6 +187,21 @@ describe("detail panels", () => {
     expect(html).toContain("Accept");
   });
 
+  it("OutputsPanel shows the add-output form when not archived", () => {
+    const html = renderToStaticMarkup(
+      <OutputsPanel slug="monday-digest" outputs={[]} />,
+    );
+    expect(html).toContain('data-component="AddOutputForm"');
+    expect(html).toContain("Add output");
+  });
+
+  it("OutputsPanel hides the add-output form when archived", () => {
+    const html = renderToStaticMarkup(
+      <OutputsPanel slug="monday-digest" outputs={[]} archived />,
+    );
+    expect(html).not.toContain('data-component="AddOutputForm"');
+  });
+
   it("ProgressPanel shows the ladder headline and blocked cards", () => {
     const html = renderToStaticMarkup(
       <ProgressPanel
@@ -302,9 +317,42 @@ describe("detail panels", () => {
     expect(html).toContain("leo");
   });
 
+  it("PeoplePanel shows add-member and add-contact forms with the distinction copy", () => {
+    const html = renderToStaticMarkup(<PeoplePanel project={PROJECT} />);
+    expect(html).toContain('data-component="AddMemberForm"');
+    expect(html).toContain('data-component="AddContactForm"');
+    expect(html).toContain("Add member");
+    expect(html).toContain("Add contact");
+    // The one-line distinction: members have a box account; contacts don't.
+    expect(html).toContain("box account");
+    expect(html).toContain("outside the box");
+  });
+
+  it("PeoplePanel hides writes when archived", () => {
+    const html = renderToStaticMarkup(
+      <PeoplePanel project={{ ...PROJECT, archived: true }} archived />,
+    );
+    expect(html).not.toContain('data-component="AddMemberForm"');
+    expect(html).not.toContain('data-component="AddContactForm"');
+  });
+
   it("FilesPanel collapses to the Add affordance when empty", () => {
     const html = renderToStaticMarkup(<FilesPanel project={PROJECT} />);
     expect(html).toContain("Add a file");
+  });
+
+  it("FilesPanel offers Add link and Upload file when not archived", () => {
+    const html = renderToStaticMarkup(<FilesPanel project={PROJECT} />);
+    expect(html).toContain("Add link");
+    expect(html).toContain("Upload file");
+  });
+
+  it("FilesPanel hides writes and shows archived copy when archived", () => {
+    const html = renderToStaticMarkup(
+      <FilesPanel project={{ ...PROJECT, archived: true }} archived />,
+    );
+    expect(html).toContain("archived");
+    expect(html).not.toContain("Upload file");
   });
 
   it("ReferencesPanel and MemoriesPanel hide entirely when empty", () => {
@@ -334,6 +382,19 @@ describe("detail panels", () => {
     expect(html).toContain("file");
     expect(html).toContain("digest-writer");
     expect(html).toContain("default");
+  });
+
+  it("ToolsPanel shows the edit form when not archived", () => {
+    const html = renderToStaticMarkup(<ToolsPanel project={PROJECT} />);
+    expect(html).toContain('data-component="ToolsEditForm"');
+    expect(html).toContain("Save");
+  });
+
+  it("ToolsPanel hides the edit form when archived", () => {
+    const html = renderToStaticMarkup(
+      <ToolsPanel project={{ ...PROJECT, archived: true }} archived />,
+    );
+    expect(html).not.toContain('data-component="ToolsEditForm"');
   });
 });
 

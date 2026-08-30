@@ -126,4 +126,66 @@ describe("MessageBubble", () => {
     expect(html).toContain("[docs](https://example.com)");
   });
 
+  it("hides the injected app-context line from user bubbles", () => {
+    const html = renderToStaticMarkup(
+      <MessageBubble
+        message={{
+          role: "user",
+          content:
+            "[app context: page /projects/x · last active: none]\nCan you check?",
+        }}
+      />,
+    );
+    expect(html).not.toContain("[app context:");
+    expect(html).toContain("Can you check?");
+  });
+
+  it("renders a compaction summary as a muted divider, never as a bubble", () => {
+    const html = renderToStaticMarkup(
+      <MessageBubble
+        message={{
+          role: "assistant",
+          content:
+            "[CONTEXT COMPACTION — REFERENCE ONLY] Model: GLM-5.2.\n" +
+            "--- END OF CONTEXT SUMMARY — respond to the message below, not the summary above ---",
+        }}
+      />,
+    );
+    expect(html).toContain('data-component="CompactionDivider"');
+    expect(html).not.toContain('data-component="MessageBubble"');
+    expect(html).not.toContain("GLM-5.2");
+  });
+
+  it("keeps the original reply readable when a summary is merged into it", () => {
+    const html = renderToStaticMarkup(
+      <MessageBubble
+        message={{
+          role: "assistant",
+          content:
+            "[PRIOR CONTEXT — for reference only; not a new message]\nThe run is healthy.\n\n" +
+            "[END OF PRIOR CONTEXT — COMPACTION SUMMARY BELOW]\n\n" +
+            "[CONTEXT COMPACTION — REFERENCE ONLY] Model: GLM-5.2.\n" +
+            "--- END OF CONTEXT SUMMARY — respond to the message below, not the summary above ---",
+        }}
+      />,
+    );
+    expect(html).toContain('data-component="CompactionDivider"');
+    expect(html).toContain("The run is healthy.");
+    expect(html).not.toContain("GLM-5.2");
+  });
+
+  it("shows persisted assistant reasoning collapsed", () => {
+    const html = renderToStaticMarkup(
+      <MessageBubble
+        message={{
+          role: "assistant",
+          content: "The run is healthy.",
+          reasoning: "Let me check the run state…",
+        }}
+      />,
+    );
+    expect(html).toContain("<details");
+    expect(html).toContain("Reasoning");
+    expect(html).toContain("Let me check the run state…");
+  });
 });

@@ -118,6 +118,29 @@ def test_run_session_turn_forwards_history_verbatim(stub_runtime):
     assert usage == {"input_tokens": 11, "output_tokens": 22, "total_tokens": 33}
 
 
+def test_run_session_turn_forwards_activity_callbacks(stub_runtime):
+    """Reasoning + tool lifecycle callbacks must reach the AIAgent kwargs."""
+    from gateway.session_chat import run_session_turn_sync
+
+    reasoning = lambda text: None
+    tool_start = lambda tc_id, name, args: None
+    tool_complete = lambda tc_id, name, args, result: None
+
+    run_session_turn_sync(
+        session_db=object(),
+        user_message="hi",
+        conversation_history=[],
+        reasoning_callback=reasoning,
+        tool_start_callback=tool_start,
+        tool_complete_callback=tool_complete,
+    )
+
+    kw = stub_runtime["_kwargs"]
+    assert kw["reasoning_callback"] is reasoning
+    assert kw["tool_start_callback"] is tool_start
+    assert kw["tool_complete_callback"] is tool_complete
+
+
 def test_api_server_create_agent_delegates_to_shared_builder(monkeypatch):
     """The api_server adapter must build via the shared helper (no drift)."""
     import gateway.session_chat as session_chat
