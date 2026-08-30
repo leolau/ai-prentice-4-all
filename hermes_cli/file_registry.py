@@ -472,6 +472,45 @@ class FileRegistry:
                 await conn.close()
         return _row_to_asset(row) if row else None
 
+    async def get_by_storage_path(
+        self,
+        principal: Principal,
+        storage_path: str,
+        *,
+        connection: Optional["asyncpg.Connection"] = None,
+    ) -> Optional[FileAsset]:
+        """The newest visible row stored at *storage_path*, or ``None``.
+
+        The same bytes can carry several provenance rows (dedup), so the
+        most recent visible one wins. Same visibility predicate as
+        :meth:`get` — invisible == absent.
+        """
+        predicate = scope_filter(
+            principal,
+            start_index=2,
+            grant_item_kind=GRANT_ITEM_KIND,
+            id_column=f"{FILE_ASSETS_TABLE}.id",
+            role_elevation=self.role_reads,
+            owner_column=f"{FILE_ASSETS_TABLE}.owner_user_id",
+        )
+        own = connection is None
+        conn = connection or await self._connect()
+        try:
+            async with conn.transaction():
+                await bind_principal(conn, principal)
+                await bind_elevated_reads(conn, self.role_reads)
+                row = await conn.fetchrow(
+                    f"""SELECT * FROM {FILE_ASSETS_TABLE}
+                        WHERE storage_path = $1 AND {predicate.sql}
+                        ORDER BY received_at DESC NULLS LAST, id DESC""",
+                    storage_path,
+                    *predicate.params,
+                )
+        finally:
+            if own:
+                await conn.close()
+        return _row_to_asset(row) if row else None
+
     async def list(
         self,
         principal: Principal,

@@ -3,9 +3,11 @@
 import { useRef, useState } from "react";
 
 import { AddToProjectSheet } from "@/components/projects/AddToProjectSheet";
-import { LinkRow } from "@/components/projects/panels/LinkRow";
+import { FileDetail } from "@/components/files/FilesView";
+import { LinkRow, friendlyFileName } from "@/components/projects/panels/LinkRow";
 import { BusyRegion } from "@/components/ui/BusyRegion";
-import type { ProjectDetail, ProjectLink } from "@/types";
+import { mediaContentRef } from "@/lib/chat/media-ref";
+import type { FileAsset, ProjectDetail, ProjectLink } from "@/types";
 
 /**
  * Linked /files assets (§11.1). Card attachments join this grid once the
@@ -30,10 +32,35 @@ export function FilesPanel({
   const [busyRef, setBusyRef] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [detail, setDetail] = useState<FileAsset | null>(null);
+  const [fallback, setFallback] = useState<ProjectLink | null>(null);
+  const [resolving, setResolving] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const slug = project.slug;
   const slugPath = `/api/projects/${encodeURIComponent(slug)}`;
+
+  /** Resolve the storage path to its registry row and open the detail. */
+  const open = async (link: ProjectLink) => {
+    const key = `${link.profile}:${link.ref}`;
+    setResolving(key);
+    setError(null);
+    try {
+      const res = await fetch(
+        `/api/files/by-path?path=${encodeURIComponent(link.ref)}`,
+      );
+      if (res.ok) {
+        setDetail((await res.json()) as FileAsset);
+      } else {
+        // No registry row (best-effort registration) — direct view/download.
+        setFallback(link);
+      }
+    } catch {
+      setFallback(link);
+    } finally {
+      setResolving(null);
+    }
+  };
 
   const remove = async (link: ProjectLink) => {
     const key = `${link.profile}:${link.ref}`;
@@ -134,9 +161,21 @@ export function FilesPanel({
             const key = `${link.profile}:${link.ref}`;
             return (
               <li key={key} className="flex items-center gap-2">
-                <div className="min-w-0 flex-1">
-                  <LinkRow link={link} />
-                </div>
+                {link.kind === "file" ? (
+                  <button
+                    type="button"
+                    onClick={() => void open(link)}
+                    disabled={resolving === key}
+                    aria-label={`Open ${link.label ?? friendlyFileName(link.ref) ?? link.ref}`}
+                    className="min-w-0 flex-1 text-left disabled:opacity-60"
+                  >
+                    <LinkRow link={link} />
+                  </button>
+                ) : (
+                  <div className="min-w-0 flex-1">
+                    <LinkRow link={link} />
+                  </div>
+                )}
                 {archived ? null : (
                   <BusyRegion busy={busyRef === key} label="Removing…">
                     <button
@@ -203,6 +242,58 @@ export function FilesPanel({
           fixedName={project.name}
           prefill={{ kind: "file" }}
         />
+      ) : null}
+
+      {detail ? <FileDetail file={detail} onClose={() => setDetail(null)} /> : null}
+
+      {fallback ? (
+        <div
+          data-component="FileFallbackDetail"
+          role="dialog"
+          aria-modal="true"
+          aria-label={fallback.label ?? fallback.ref}
+          className="fixed inset-0 z-30 flex items-end justify-center bg-black/40 p-0 sm:items-center sm:p-6"
+          onClick={() => setFallback(null)}
+        >
+          <div
+            className="w-full max-w-lg rounded-t-2xl border border-[var(--color-border)] bg-[var(--color-surface)] p-4 sm:rounded-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-start justify-between gap-3">
+              <h2 className="text-sm font-semibold break-all">
+                {fallback.label ?? friendlyFileName(fallback.ref) ?? fallback.ref}
+              </h2>
+              <button
+                type="button"
+                onClick={() => setFallback(null)}
+                aria-label="Close"
+                className="shrink-0 rounded-lg border border-[var(--color-border)] px-2 py-1 text-xs"
+              >
+                ✕
+              </button>
+            </div>
+            <p className="mt-2 text-xs text-[var(--color-muted)]">
+              No registry record for this file — opening it straight from
+              storage.
+            </p>
+            <div className="mt-4 flex flex-wrap gap-2 text-xs">
+              <a
+                href={mediaContentRef(fallback.ref)}
+                target="_blank"
+                rel="noreferrer"
+                className="rounded-lg border border-[var(--color-accent)] px-3 py-1.5 text-[var(--color-accent)]"
+              >
+                View
+              </a>
+              <a
+                href={`${mediaContentRef(fallback.ref)}&download=1`}
+                className="rounded-lg border border-[var(--color-border)] px-3 py-1.5"
+              >
+                Download
+              </a>
+            </div>
+          </div>
+        </div>
       ) : null}
     </section>
   );

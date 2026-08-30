@@ -973,6 +973,13 @@ export class HermesApiClient {
     );
   }
 
+  /** Resolve a bucket storage path to the newest visible registry row. */
+  async fileByPath(path: string): Promise<FileAsset> {
+    return this.request(
+      `/api/registry/files/by-path?path=${encodeURIComponent(path)}`,
+    );
+  }
+
   /**
    * Record a file agent-home has already written to Storage.
    *
@@ -1397,6 +1404,28 @@ export class HermesApiClient {
   ): Promise<ProjectCardDetail> {
     return this.request(
       `/api/registry/projects/${encodeURIComponent(slug)}/cards/${encodeURIComponent(taskId)}`,
+    );
+  }
+
+  /** Stop a stuck worker and re-queue the card (dispatcher respawns). */
+  async reclaimProjectCard(
+    slug: string,
+    taskId: string,
+  ): Promise<{ ok: boolean; task_id: string }> {
+    return this.request(
+      `/api/registry/projects/${encodeURIComponent(slug)}/cards/${encodeURIComponent(taskId)}/reclaim`,
+      { method: "POST" },
+    );
+  }
+
+  /** Halt the card without a re-run (parks it in blocked). */
+  async stopProjectCard(
+    slug: string,
+    taskId: string,
+  ): Promise<{ ok: boolean; task_id: string }> {
+    return this.request(
+      `/api/registry/projects/${encodeURIComponent(slug)}/cards/${encodeURIComponent(taskId)}/stop`,
+      { method: "POST" },
     );
   }
 
