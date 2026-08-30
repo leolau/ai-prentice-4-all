@@ -18,7 +18,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Optional
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 
 logger = logging.getLogger(__name__)
 
@@ -178,6 +178,26 @@ async def register_file(request: Request) -> dict[str, Any]:
         sender_name=principal.display or principal.user_id,
         message_id=str(body.get("message_id") or "") or None,
     )
+    return asset.as_dict()
+
+
+@router.get("/by-path")
+async def get_file_by_path(
+    request: Request, path: str = Query(min_length=1)
+) -> dict[str, Any]:
+    """Resolve a bucket storage path to the newest visible registry row.
+
+    Project ``file`` links store only the storage path; the Files panel
+    needs the registry id to open the shared view/download surface. Same
+    visibility predicate as ``GET /{asset_id}`` — invisible == absent == 404.
+    """
+    principal = await _resolve_principal(request)
+    registry = _registry()
+    if not await _ensure_table(registry):
+        raise HTTPException(status_code=404, detail="No such file")
+    asset = await registry.get_by_storage_path(principal, path)
+    if asset is None:
+        raise HTTPException(status_code=404, detail="No such file")
     return asset.as_dict()
 
 

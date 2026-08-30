@@ -8,6 +8,7 @@ vi.mock("next/navigation", () => ({
 }));
 
 import { AddToProjectSheet } from "@/components/projects/AddToProjectSheet";
+import { CardActions } from "@/components/projects/CardActions";
 import { CardDetailView } from "@/components/projects/CardDetailView";
 import { ProjectDetailView } from "@/components/projects/ProjectDetailView";
 import { RunView } from "@/components/projects/RunView";
@@ -499,6 +500,54 @@ describe("ProjectDetailView", () => {
     );
     expect(html).toContain("Activate");
     expect(html).not.toContain("Run now");
+  });
+});
+
+describe("CardActions", () => {
+  it("offers Stop and Re-run for a running card", () => {
+    const html = renderToStaticMarkup(
+      <CardActions slug="s" taskId="t_1" status="running" />,
+    );
+    expect(html).toContain("Stop");
+    expect(html).toContain("Re-run");
+  });
+
+  it("offers Retry without Stop for a blocked card", () => {
+    const html = renderToStaticMarkup(
+      <CardActions slug="s" taskId="t_1" status="blocked" />,
+    );
+    expect(html).toContain("Retry");
+    expect(html).not.toContain(">Stop<");
+  });
+
+  it("renders nothing for settled cards", () => {
+    const html = renderToStaticMarkup(
+      <CardActions slug="s" taskId="t_1" status="done" />,
+    );
+    expect(html).toBe("");
+  });
+});
+
+describe("FilesPanel", () => {
+  it("renders file rows as clickable open buttons", () => {
+    const html = renderToStaticMarkup(
+      <FilesPanel
+        project={{
+          ...PROJECT,
+          links: {
+            file: [
+              LINK({
+                kind: "file",
+                ref: "leo_owner/proj/fde2b2b6-2131-4abc-9def-0123456789ab-Lesson_Plan.pdf",
+                label: null,
+              }),
+            ],
+          },
+        }}
+      />,
+    );
+    expect(html).toContain('aria-label="Open Lesson Plan.pdf"');
+    expect(html).toContain("<button");
   });
 });
 

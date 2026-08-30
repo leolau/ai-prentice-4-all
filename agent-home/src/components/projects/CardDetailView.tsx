@@ -1,5 +1,6 @@
 import Link from "next/link";
 
+import { CardActions } from "@/components/projects/CardActions";
 import { dateTimeLabel, durationLabel } from "@/components/projects/format";
 import { Pill, type Tone } from "@/components/ui/Pill";
 import type { ProjectCardDetail } from "@/types";
@@ -60,6 +61,7 @@ export function CardDetailView({
         <p className="mt-1 text-xs text-[var(--color-muted)]">
           {timing.join(" · ")}
         </p>
+        <CardActions slug={slug} taskId={card.id} status={card.status} />
         <Link
           href={`/projects/${encodeURIComponent(slug)}`}
           className="mt-2 inline-block text-xs text-[var(--color-accent)]"
