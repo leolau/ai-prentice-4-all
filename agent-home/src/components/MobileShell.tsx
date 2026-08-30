@@ -6,6 +6,7 @@ import { LeadChatHost } from "@/components/coral/LeadChatHost";
 import { getPrincipal } from "@/lib/auth/principal";
 import { readSession } from "@/lib/auth/session";
 import { HermesApiClient } from "@/lib/api/client";
+import { storageConfigured } from "@/lib/env";
 import type { TodosFacets } from "@/types";
 
 // Cache the facets call for 30s so every page render doesn't hit the backend
@@ -112,7 +113,7 @@ export async function MobileShell({
           </div>
         </main>
         {showCoral ? <CoralHost badgeCounts={badgeCounts} /> : null}
-        {showCoral ? <LeadChatHost /> : null}
+        {showCoral ? <LeadChatHost storageEnabled={storageConfigured()} /> : null}
         {showCoral ? <AppMcpBridge /> : null}
       </div>
     </div>

@@ -16,9 +16,14 @@ if _SCRIPTS_DIR not in sys.path:
     sys.path.insert(0, _SCRIPTS_DIR)
 
 from _hermes_home import get_hermes_home
+import _store_bridge as bridge
 
 
 def get_token_path() -> Path:
+    if bridge.AVAILABLE:
+        materialized = bridge.materialized_token_file()
+        if materialized is not None:
+            return materialized
     return get_hermes_home() / "google_token.json"
 
 
@@ -31,6 +36,13 @@ def _normalize_authorized_user_payload(payload: dict) -> dict:
 
 def refresh_token(token_data: dict) -> dict:
     """Refresh the access token using the refresh token."""
+    if bridge.AVAILABLE and bridge.pick_entry() is not None:
+        # Store-managed: persist through the store's conditional update,
+        # never by rewriting a shared file.
+        return _normalize_authorized_user_payload(
+            bridge.refresh_entry(bridge.pick_entry())
+        )
+
     import urllib.error
     import urllib.parse
     import urllib.request

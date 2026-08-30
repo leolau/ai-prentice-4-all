@@ -358,13 +358,14 @@ export class HermesApiClient {
   }
 
   /**
-   * List the principal's conversations (read path). Defaults to the
-   * `agent_home` source ordered by most-recent activity so the mobile chat
-   * list surfaces the conversations started from this app first.
+   * List the principal's conversations (read path). Recent-first; callers
+   * scope via `source`/`excludeSources` (the chat pane lists everything
+   * except cron jobs).
    */
   async sessions(
     opts: {
       source?: string;
+      excludeSources?: string;
       limit?: number;
       order?: "created" | "recent";
       archived?: "exclude" | "only" | "include";
@@ -375,6 +376,7 @@ export class HermesApiClient {
   ): Promise<SessionsResponse> {
     const params = new URLSearchParams();
     if (opts.source) params.set("source", opts.source);
+    if (opts.excludeSources) params.set("exclude_sources", opts.excludeSources);
     params.set("limit", String(opts.limit ?? 30));
     params.set("order", opts.order ?? "recent");
     if (opts.archived) params.set("archived", opts.archived);

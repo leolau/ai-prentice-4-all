@@ -2,7 +2,8 @@
 
 > Status: **approved design, in implementation** (2026-08-25).
 > Implementation split: PR0 this doc → PR1 store+API → PR2 agent-home UI →
-> PR3 skill refactor+migration → PR4 pollers → PR5 cleanup.
+> PR3 skill refactor+migration → PR4 pollers → PR5 cleanup →
+> PR6 per-login/generic addendum (§A, §B) + WhatsApp reference adapter.
 
 ## 1. Problem
 
@@ -97,7 +98,7 @@ AES-GCM is a documented future option.
 |---|---|---|---|
 | `google-oauth2` | `client_id, client_secret, refresh_token, token_uri` (+ optional `token, expiry, scopes`) | client_secret, refresh_token, token | implemented |
 | `telegram-token` | `bot_token` | bot_token | reserved (validates by design) |
-| `whatsapp-session` | `session` | session | reserved |
+| `whatsapp-session` | `session` | session | implemented (reference session-directory adapter, §B) |
 | `password` | `username, password` | password | reserved |
 
 `validate_payload(kind, payload)` runs on every `put`, both backends. Adding a kind
@@ -241,3 +242,105 @@ verify health + 24h → PR5.
 | Skill portability | stdlib/file fallback kept and tested |
 | `DATABASE_URL` missing from poller env | runbook probe; file backend covers the gap |
 | Wrong Google account on a shared browser | `complete` displays granted email + scopes before saving |
+
+---
+
+## A. Addendum — per-login credentials
+
+Credentials are per **login (principal)**, exactly like todos/incomings. This is
+the shipped multi-user model (`MULTI_USER_HANDOFF.md`, FG-01) applied to the
+credential domain end to end:
+
+- **Identity.** C1 principals `{user_id, display, role, channels[], is_owner}`
+  gate everything. Every BFF route in agent-home resolves the session principal
+  (`getPrincipal()` → 401 when unauthenticated); the Python side resolves the
+  same way via `_comms_resolve_principal` (`hermes_cli/web_server.py`). There is
+  no loopback principal-header path: spoofable headers never name a principal.
+- **Ownership.** `put` attributes `owner_user_id` = the acting principal; new
+  entries default `visibility = private:<actor>`; `shared` is a deliberate
+  toggle. The owner role reads all rows (RLS policy + app-layer `scope_filter`);
+  members see own + shared only.
+- **Management per login.** Each login manages its own set through the
+  Connected accounts UI (agent-home Settings: create/consent, `services`
+  toggles, visibility, disconnect), backed by the session-gated
+  `/api/credentials/*` routes. The owner-operator CLI path has
+  `setup.py --account <name>` / `--list-accounts`.
+- **Service consumption.** Background consumers (pollers, skill mounts) read
+  through `resolve_for_service(service)` — an entry is consumed **only** when
+  its owner opted it in via the `services` flags — and the consumer then runs
+  owner-bound (the entry's owner, not a global account).
+- **Service-context reads.** Background processes have no logged-in user; they
+  act under the enrolled owner via
+  `credential_store.resolve_owner_principal()` (owner fallback, mirroring the
+  dashboard's no-session rule). Sandbox mounts materialize the *acting
+  principal's* readable entries (`materialize_for_mounts`) — never the store
+  tree itself.
+
+## B. Addendum — generic store & provider onboarding
+
+The store is provider-agnostic by construction; "supporting" a provider is
+layered:
+
+1. **Generic today (all kinds).** Per-principal storage, payload validation via
+   `KindSpec`, redaction, C2 visibility/RLS, management UI, safety denylists,
+   and sandbox mounts all work for **any** registered kind without extra code.
+2. **Per-provider work = the consumer seam.** Onboarding checklist for a new
+   kind:
+   1. `KindSpec` entry in `CREDENTIAL_KINDS` (payload schema + `secret_fields`)
+      — data change only;
+   2. one consumer seam that reads via the store with an env/legacy fallback;
+   3. optional write-back path honoring the single-writer rule;
+   4. tests (unit; RLS e2e where the seam writes);
+   5. a row in the kind table (§5).
+3. **Reference adapters.**
+   | provider/kind | shape | status |
+   |---|---|---|
+   | Google `google-oauth2` | OAuth2 token + client | implemented (skill + pollers) |
+   | WhatsApp `whatsapp-session` | Baileys session directory (`creds.json`) | implemented (this addendum) |
+   | Telegram `telegram-token` | env bot token | documented, deferred |
+
+### B.1 WhatsApp reference adapter (session-directory kind)
+
+Credential shape: the Baileys bridge's `creds.json` — a JSON document written by
+the Node bridge during QR pairing. Seam points in
+`plugins/platforms/whatsapp/adapter.py`: `self._session_path` (config
+`extra.session_path`), the creds preflight in `connect()`, and the scoped lock
+`_acquire_platform_lock('whatsapp-session', ...)`.
+
+- **Payload**: `{"session": <creds.json object>}` (kind `whatsapp-session`).
+- **Opt-in config**: `extra.session_credential: "<name>"` on the whatsapp
+  platform config names the store entry (provider `whatsapp`) this bridge
+  instance uses. Config is operator-owned; naming a member-owned entry there is
+  the operator's consent for the box gateway to run it. Unset → the seam is
+  entirely inert (legacy session-directory behavior, byte-identical).
+- **Materialize (read path)**: in `connect()`, before the creds preflight — if
+  `creds.json` is absent and the named entry resolves, write
+  `payload["session"]` to `session_path/creds.json` (0600). The Node bridge
+  needs zero changes: it keeps reading the session directory.
+- **Write-back (pairing path)**: the adapter process is the single writer for
+  its entry. After connect success and at the top of `disconnect()`, if the
+  file's sha256 differs from the last-seen hash, upsert via `store.put` —
+  preserving an existing entry's kind/services/visibility; a brand-new entry is
+  created under the enrolled owner, `visibility=private`. No polling watcher:
+  pairing happens while the bridge runs, creds land before first
+  `status:connected`, and disconnect catches the rest.
+- **Per-login management**: any login can paste/store their own `creds.json`
+  through Connected accounts (kind `whatsapp-session`); list/visibility/
+  disconnect behave like Google. Which entry a gateway instance runs is decided
+  by the operator's config name, not by who stored it.
+- **Locks**: `_acquire_platform_lock` already prevents two gateways sharing one
+  session directory. The store adds a second axis — two bridge instances must
+  not name the same entry (documented; the write-back upsert is
+  last-writer-wins by design).
+
+Box runbook delta (after PR6 deploys): optionally set
+`extra.session_credential: "<name>"` per bridge instance; pair as today
+(`hermes whatsapp`); restart the gateway — creds persist to the store, and a
+fresh session dir re-materializes from it.
+
+| Risk | Mitigation |
+|---|---|
+| creds.json write-back races bridge writes | write only on connect/disconnect hash-diff; bridge is sole writer while running |
+| Member session used by gateway without consent | entry named explicitly in operator-owned config; default visibility private |
+| Two instances, one entry | documented; platform lock already guards the directory axis |
+| Kind schema too thin for future providers | KindSpec is data; the onboarding checklist gates new kinds |

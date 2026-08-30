@@ -935,3 +935,75 @@ class TestPoisonClientRegistration:
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))
         storage = HermesTokenStorage("srv")
         assert storage.poison_client_registration() is False
+
+
+# ---------------------------------------------------------------------------
+# Headless drop-file completion (hermes mcp oauth-paste)
+# ---------------------------------------------------------------------------
+
+
+class TestDropFileCompletion:
+    """The redirect-URL drop file lets a second process complete a waiting
+    OAuth flow on hosts whose loopback callback a remote browser can't reach."""
+
+    def test_apply_redirect_line_parses_full_url(self):
+        from tools.mcp_oauth import _apply_redirect_line
+
+        result: dict = {"auth_code": None, "state": None, "error": None}
+        _apply_redirect_line(
+            "http://127.0.0.1:37949/callback?code=abc123&state=xyz", result
+        )
+        assert result["auth_code"] == "abc123"
+        assert result["state"] == "xyz"
+        assert result["error"] is None
+
+    def test_write_drop_redirect_is_0600_and_consumed_once(
+        self, tmp_path, monkeypatch
+    ):
+        from tools.mcp_oauth import (
+            _consume_drop_file,
+            drop_redirect_path,
+            write_drop_redirect,
+        )
+
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        monkeypatch.setattr("tools.mcp_oauth._oauth_server_name", "canva")
+
+        path = write_drop_redirect(
+            "canva", "http://127.0.0.1:1/callback?code=c1&state=s1"
+        )
+        assert path == drop_redirect_path("canva")
+        assert (path.stat().st_mode & 0o777) == 0o600
+        assert (path.parent.stat().st_mode & 0o777) == 0o700
+
+        result: dict = {"auth_code": None, "state": None, "error": None}
+        _consume_drop_file(result)
+        assert result["auth_code"] == "c1"
+        assert result["state"] == "s1"
+        # Single use: the file is gone after consumption.
+        assert not path.exists()
+        result2: dict = {"auth_code": None, "state": None, "error": None}
+        _consume_drop_file(result2)
+        assert result2["auth_code"] is None
+
+    @pytest.mark.asyncio
+    async def test_wait_for_callback_completes_via_drop_file(
+        self, tmp_path, monkeypatch
+    ):
+        import tools.mcp_oauth as mo
+
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        port = mo._find_free_port()
+        monkeypatch.setattr(mo, "_oauth_port", port)
+        monkeypatch.setattr(mo, "_oauth_server_name", "canva")
+
+        async def deliver():
+            await asyncio.sleep(0.7)
+            mo.write_drop_redirect(
+                "canva", "http://127.0.0.1:1/callback?code=dropcode&state=dropstate"
+            )
+
+        results = await asyncio.gather(mo._wait_for_callback(), deliver())
+        code, state = results[0]
+        assert code == "dropcode"
+        assert state == "dropstate"

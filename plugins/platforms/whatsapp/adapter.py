@@ -16,6 +16,8 @@ with different backends via a bridge pattern.
 """
 
 import asyncio
+import hashlib
+import json
 import logging
 import os
 import platform
@@ -404,6 +406,11 @@ class WhatsAppAdapter(WhatsAppBehaviorMixin, BasePlatformAdapter):
             "session_path",
             get_hermes_dir("platforms/whatsapp/session", "whatsapp/session")
         ))
+        # Unified credential store seam: when extra.session_credential names a
+        # store entry (provider "whatsapp", kind "whatsapp-session"), connect()
+        # materializes its payload into creds.json if absent, and write-back
+        # upserts the file content on connect/disconnect when it changed.
+        self._session_cred_hash: Optional[str] = None
         self._reply_prefix: Optional[str] = config.extra.get("reply_prefix")
         self._dm_policy = str(config.extra.get("dm_policy") or os.getenv("WHATSAPP_DM_POLICY", "pairing")).strip().lower()
         self._allow_from = self._coerce_allow_list(config.extra.get("allow_from") or config.extra.get("allowFrom"))
@@ -460,6 +467,123 @@ class WhatsAppAdapter(WhatsAppBehaviorMixin, BasePlatformAdapter):
             return float(default)
         return parsed
 
+    def _session_credential_name(self) -> Optional[str]:
+        """Name of the credential-store entry this bridge instance uses.
+
+        Set via ``extra.session_credential`` in the whatsapp platform config.
+        Unset → the store seam is entirely inert (legacy session-dir behavior).
+        """
+        extra = getattr(self.config, "extra", None) or {}
+        name = extra.get("session_credential")
+        if not name or not isinstance(name, str):
+            return None
+        return name.strip() or None
+
+    async def _materialize_session_credential(self) -> None:
+        """Write the store entry's Baileys creds payload to creds.json if absent.
+
+        Runs before the pairing preflight in connect(): a fresh session dir
+        plus a stored session means the bridge starts already paired. The
+        Node bridge reads the session directory as before — no bridge changes.
+        Never overwrites an existing creds.json (the running/paired session
+        is authoritative; write-back handles persistence).
+        """
+        name = self._session_credential_name()
+        if not name:
+            return
+        creds_path = self._session_path / "creds.json"
+        if creds_path.exists():
+            try:
+                self._session_cred_hash = hashlib.sha256(creds_path.read_bytes()).hexdigest()
+            except OSError:
+                self._session_cred_hash = None
+            return
+        try:
+            from hermes_cli import credential_store as _cs
+        except Exception:
+            logger.info("[%s] Credential store unavailable; skipping session materialize.", self.name)
+            return
+        try:
+            owner = await _cs.resolve_owner_principal()
+            store = _cs.default_credential_store()
+            entry = await store.get(owner, "whatsapp", name) if owner else None
+            if entry is None:
+                logger.info(
+                    "[%s] session_credential '%s' not found in credential store.",
+                    self.name, name,
+                )
+                return
+            session_payload = entry.payload.get("session")
+            if not isinstance(session_payload, dict):
+                logger.warning(
+                    "[%s] session_credential '%s' has no usable 'session' payload.",
+                    self.name, name,
+                )
+                return
+            self._session_path.mkdir(parents=True, exist_ok=True)
+            data = json.dumps(session_payload)
+            creds_path.write_text(data, encoding="utf-8")
+            creds_path.chmod(0o600)
+            self._session_cred_hash = hashlib.sha256(data.encode("utf-8")).hexdigest()
+            logger.info(
+                "[%s] Materialized WhatsApp session '%s' from credential store.",
+                self.name, name,
+            )
+        except Exception as e:
+            logger.warning("[%s] Failed to materialize session credential: %s", self.name, e)
+
+    async def _persist_session_credential(self) -> None:
+        """Write-back: upsert the creds.json content into the store on change.
+
+        This adapter process is the single writer for its entry: creds.json is
+        created by the bridge during pairing and mutated only while the bridge
+        runs. Hash-diff keeps this cheap; the upsert preserves an existing
+        entry's owner/visibility (a brand-new entry is created owner=box-owner,
+        visibility=private).
+        """
+        name = self._session_credential_name()
+        if not name:
+            return
+        creds_path = self._session_path / "creds.json"
+        if not creds_path.exists():
+            return
+        try:
+            data = creds_path.read_bytes()
+        except OSError as e:
+            logger.warning("[%s] Could not read creds.json for write-back: %s", self.name, e)
+            return
+        digest = hashlib.sha256(data).hexdigest()
+        if digest == self._session_cred_hash:
+            return
+        try:
+            session = json.loads(data.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError) as e:
+            logger.warning("[%s] creds.json is not valid JSON; skipping write-back: %s", self.name, e)
+            return
+        try:
+            from hermes_cli import credential_store as _cs
+        except Exception:
+            return
+        try:
+            owner = await _cs.resolve_owner_principal()
+            store = _cs.default_credential_store()
+            existing = await store.get(owner, "whatsapp", name) if owner else None
+            # Preserve the entry's kind/services/visibility across the upsert;
+            # a brand-new entry defaults to kind whatsapp-session, private.
+            await store.put(
+                owner,
+                provider="whatsapp",
+                name=name,
+                kind=existing.kind if existing else "whatsapp-session",
+                payload={"session": session},
+                services=list(existing.services) if existing else None,
+                visibility=existing.visibility if existing else "private",
+            )
+            self._session_cred_hash = digest
+            logger.info("[%s] Persisted WhatsApp session '%s' to credential store.", self.name, name)
+        except Exception as e:
+            logger.warning("[%s] Failed to persist session credential: %s", self.name, e)
+
     async def connect(self, *, is_reconnect: bool = False) -> bool:
         """
         Start the WhatsApp bridge.
@@ -484,6 +608,10 @@ class WhatsAppAdapter(WhatsAppBehaviorMixin, BasePlatformAdapter):
                 retryable=False,
             )
             return False
+
+        # Store seam: re-materialize a stored session into an empty session
+        # dir before the pairing check below (no-op when unset or present).
+        await self._materialize_session_credential()
 
         # Pre-flight: skip the 30s bridge bootstrap entirely if the user
         # never finished pairing.  Without creds.json the bridge prints
@@ -726,6 +854,10 @@ class WhatsAppAdapter(WhatsAppBehaviorMixin, BasePlatformAdapter):
             
             self._mark_connected()
             print(f"[{self.name}] Bridge started on port {self._bridge_port}")
+            # Store seam: pairing completes while the bridge runs; creds.json
+            # exists by now, so persist it (hash-diff keeps this a no-op when
+            # nothing changed since materialize).
+            await self._persist_session_credential()
             return True
             
         except Exception as e:
@@ -784,6 +916,9 @@ class WhatsAppAdapter(WhatsAppBehaviorMixin, BasePlatformAdapter):
         # path (which runs from other tasks like send() and the poll loop)
         # doesn't race us and report the intentional termination as fatal.
         self._shutting_down = True
+        # Store seam: capture the session state while the bridge still holds
+        # it on disk (hash-diff no-op when nothing changed since connect).
+        await self._persist_session_credential()
         if self._bridge_process:
             try:
                 try:

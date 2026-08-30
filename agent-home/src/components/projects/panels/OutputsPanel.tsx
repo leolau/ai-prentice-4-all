@@ -7,7 +7,11 @@ import { applyAcceptEnvelope } from "@/components/projects/envelopes";
 import { dateTimeLabel } from "@/components/projects/format";
 import { BusyRegion } from "@/components/ui/BusyRegion";
 import { Pill } from "@/components/ui/Pill";
-import type { ProjectOutputStatus, ProjectOutputWithDeliveries } from "@/types";
+import type {
+  ProjectOutputKind,
+  ProjectOutputStatus,
+  ProjectOutputWithDeliveries,
+} from "@/types";
 
 const STATUS_TONE: Record<
   ProjectOutputStatus,
@@ -41,6 +45,13 @@ export function OutputsPanel({
   const [error, setError] = useState<string | null>(null);
   const [offersClosure, setOffersClosure] = useState(false);
 
+  // Add-output form state
+  const [newTitle, setNewTitle] = useState("");
+  const [newSpec, setNewSpec] = useState("");
+  const [newKind, setNewKind] = useState<ProjectOutputKind>("artifact");
+  const [newRequired, setNewRequired] = useState(true);
+  const [adding, setAdding] = useState(false);
+
   const accept = async (outputId: string) => {
     setBusyId(outputId);
     setError(null);
@@ -61,6 +72,58 @@ export function OutputsPanel({
       if (payload.offers_closure === true) setOffersClosure(true);
     } catch {
       setError("That didn't stick — try again.");
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  const add = async () => {
+    const title = newTitle.trim();
+    if (!title) return;
+    setAdding(true);
+    setError(null);
+    try {
+      const res = await fetch(
+        `/api/projects/${encodeURIComponent(slug)}/outputs`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            title,
+            spec: newSpec.trim() || undefined,
+            kind: newKind,
+            required: newRequired,
+          }),
+        },
+      );
+      const data = (await res.json().catch(() => ({}))) as ProjectOutputWithDeliveries &
+        { detail?: string };
+      if (!res.ok) throw new Error(data.detail ?? "Could not add the output.");
+      setOutputs((prev) => [...prev, { ...data, deliveries: [] }]);
+      setNewTitle("");
+      setNewSpec("");
+      setNewKind("artifact");
+      setNewRequired(true);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "That didn't go through.");
+    } finally {
+      setAdding(false);
+    }
+  };
+
+  const remove = async (outputId: string) => {
+    setBusyId(`del:${outputId}`);
+    setError(null);
+    try {
+      const res = await fetch(
+        `/api/projects/${encodeURIComponent(slug)}/outputs/${encodeURIComponent(outputId)}`,
+        { method: "DELETE" },
+      );
+      const data = (await res.json().catch(() => ({}))) as { detail?: string };
+      if (!res.ok) throw new Error(data.detail ?? "Could not remove the output.");
+      setOutputs((prev) => prev.filter((o) => o.id !== outputId));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "That didn't go through.");
     } finally {
       setBusyId(null);
     }
@@ -163,10 +226,70 @@ export function OutputsPanel({
                   </button>
                 </BusyRegion>
               ) : null}
+              {output.status === "pending" && !archived ? (
+                <BusyRegion busy={busyId === `del:${output.id}`} label="Removing…">
+                  <button
+                    type="button"
+                    onClick={() => void remove(output.id)}
+                    className="mt-2 text-xs text-[var(--color-muted)] underline disabled:opacity-40"
+                  >
+                    Remove
+                  </button>
+                </BusyRegion>
+              ) : null}
             </li>
           ))}
         </ul>
       )}
+
+      {!archived ? (
+        <BusyRegion busy={adding} label="Adding output…" className="mt-3">
+          <div data-component="AddOutputForm" className="flex flex-col gap-1.5">
+            <input
+              value={newTitle}
+              onChange={(e) => setNewTitle(e.target.value)}
+              placeholder="Output title (e.g. Course handbook)"
+              className="w-full rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm outline-none focus:border-[var(--color-accent)]"
+            />
+            <input
+              value={newSpec}
+              onChange={(e) => setNewSpec(e.target.value)}
+              placeholder="Spec — what 'good' looks like (optional)"
+              className="w-full rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm outline-none focus:border-[var(--color-accent)]"
+            />
+            <div className="flex items-center gap-2">
+              <select
+                value={newKind}
+                onChange={(e) => setNewKind(e.target.value as ProjectOutputKind)}
+                className="rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-2)] px-3 py-2 text-sm"
+              >
+                <option value="artifact">artifact</option>
+                <option value="file">file</option>
+                <option value="message">message</option>
+                <option value="decision">decision</option>
+                <option value="report">report</option>
+                <option value="code">code</option>
+              </select>
+              <label className="flex items-center gap-1 text-xs text-[var(--color-muted)]">
+                <input
+                  type="checkbox"
+                  checked={newRequired}
+                  onChange={(e) => setNewRequired(e.target.checked)}
+                />
+                required
+              </label>
+              <button
+                type="button"
+                onClick={() => void add()}
+                disabled={!newTitle.trim()}
+                className="ml-auto rounded-lg border border-[var(--color-accent)] px-3 py-1.5 text-xs font-medium text-[var(--color-accent)] disabled:opacity-40"
+              >
+                Add output
+              </button>
+            </div>
+          </div>
+        </BusyRegion>
+      ) : null}
     </section>
   );
 }

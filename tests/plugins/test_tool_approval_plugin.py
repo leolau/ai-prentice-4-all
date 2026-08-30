@@ -182,6 +182,64 @@ class TestDecisions:
         assert seen["timeout"] is None
 
 
+class TestScopeMemory:
+    """Prior scope choices must skip the prompt (the "Always approve" fix)."""
+
+    @pytest.fixture(autouse=True)
+    def _configured(self, _hermes_home):
+        _write_config(_hermes_home, {"approvals": {"tools": ["mcp_aws_api_*"]}})
+
+    def test_session_approval_skips_the_prompt(self, plugin, monkeypatch):
+        from tools import approval as amod
+
+        monkeypatch.setenv("HERMES_SESSION_ID", "chat-1")
+        amod.approve_session("chat-1", "mcp_aws_api_call_aws")
+        try:
+            monkeypatch.setattr(
+                "tools.approval.request_elicitation_consent_detailed",
+                lambda *a, **k: pytest.fail("approved tool must not prompt"),
+            )
+            assert plugin._on_pre_tool_call("mcp_aws_api_call_aws", {}) is None
+        finally:
+            amod.clear_session("chat-1")
+            monkeypatch.delenv("HERMES_SESSION_ID", raising=False)
+
+    def test_permanent_approval_skips_the_prompt(self, plugin, monkeypatch):
+        from tools import approval as amod
+
+        amod.approve_permanent("mcp_aws_api_call_aws")
+        try:
+            monkeypatch.setattr(
+                "tools.approval.request_elicitation_consent_detailed",
+                lambda *a, **k: pytest.fail("always-approved tool must not prompt"),
+            )
+            assert plugin._on_pre_tool_call("mcp_aws_api_call_aws", {}) is None
+        finally:
+            with amod._lock:
+                amod._permanent_approved.discard("mcp_aws_api_call_aws")
+
+    def test_unapproved_tool_still_prompts(self, plugin, monkeypatch):
+        monkeypatch.setenv("HERMES_SESSION_ID", "chat-1")
+        seen = {}
+
+        def _consent(message, description, **kwargs):
+            seen["persist_key"] = kwargs.get("persist_key")
+            seen["persist_session_key"] = kwargs.get("persist_session_key")
+            return "accept", "approved"
+
+        monkeypatch.setattr(
+            "tools.approval.request_elicitation_consent_detailed", _consent
+        )
+        try:
+            assert plugin._on_pre_tool_call("mcp_aws_api_call_aws", {}) is None
+        finally:
+            monkeypatch.delenv("HERMES_SESSION_ID", raising=False)
+        # The scope the choice will be remembered under is the stable session
+        # id, and the pattern is the tool name.
+        assert seen["persist_key"] == "mcp_aws_api_call_aws"
+        assert seen["persist_session_key"] == "chat-1"
+
+
 class TestBypass:
     def test_yolo_does_not_skip_the_gate_by_default(self, plugin, _hermes_home, monkeypatch):
         _write_config(

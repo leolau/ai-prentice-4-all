@@ -1,24 +1,21 @@
 /**
- * POST /api/chat/upload — BFF chat-media upload (FG-20 Wave C1).
+ * POST /api/projects/:slug/files/upload — upload bytes, register, and link.
  *
- * Accepts a `multipart/form-data` file, uploads it to principal-scoped Supabase
- * Storage server-side (the browser never holds the storage key), and returns
- * the attachment reference the composer attaches to the outgoing message.
- * Responds 501 when Storage is not configured on the box.
- *
- * The upload is also recorded in the inbound file registry, so a file sent from
- * here shows up on `/files` beside the ones that arrived over Telegram or email.
- * Registration is best-effort: it must not be able to fail an upload the user
- * already watched succeed.
+ * One round-trip that does what the chat upload route does plus the project
+ * link: accepts a `multipart/form-data` file, uploads it to principal-scoped
+ * Supabase Storage (browser never holds the key), records it in the inbound
+ * file registry, and attaches a `file` link to the project. Responds 501 when
+ * Storage is not configured on the box.
  */
 import { NextResponse } from "next/server";
 
 import { apiClientForRequest, getPrincipal } from "@/lib/auth/principal";
-import { UPLOAD_MAX_BYTES } from "@/lib/chat/upload-limit";
 import { mediaBucket } from "@/lib/env";
 import { storageAvailable, uploadChatMedia } from "@/lib/supabase/storage";
+import { invalidRequest, withPrincipal } from "../../../hermes-bridge";
 
-/** SHA-256 of the bytes — the registry's identity for a file. */
+const MAX_BYTES = 10 * 1024 * 1024;
+
 async function digest(bytes: ArrayBuffer): Promise<string> {
   const hash = await crypto.subtle.digest("SHA-256", bytes);
   return Array.from(new Uint8Array(hash))
@@ -26,7 +23,11 @@ async function digest(bytes: ArrayBuffer): Promise<string> {
     .join("");
 }
 
-export async function POST(request: Request): Promise<NextResponse> {
+export async function POST(
+  request: Request,
+  { params }: { params: Promise<{ slug: string }> },
+): Promise<NextResponse> {
+  const { slug } = await params;
   const principal = await getPrincipal();
   if (!principal) {
     return NextResponse.json({ error: "unauthenticated" }, { status: 401 });
@@ -44,44 +45,53 @@ export async function POST(request: Request): Promise<NextResponse> {
   } catch {
     return NextResponse.json({ error: "invalid_form" }, { status: 400 });
   }
-  const sessionId = (form.get("sessionId") as string | null) ?? "";
   const file = form.get("file");
   if (!(file instanceof File)) {
-    return NextResponse.json(
-      { error: "missing_file", detail: "A file field is required." },
-      { status: 400 },
-    );
+    return invalidRequest("A file field is required.");
   }
-  if (file.size > UPLOAD_MAX_BYTES) {
+  if (file.size > MAX_BYTES) {
     return NextResponse.json(
-      { error: "too_large", detail: "File exceeds the 100 MB limit." },
+      { error: "too_large", detail: "File exceeds the 10 MB limit." },
       { status: 413 },
     );
   }
 
+  const label = (form.get("label") as string | null)?.trim() || undefined;
+
   try {
     const bytes = await file.arrayBuffer();
-    const attachment = await uploadChatMedia(principal, sessionId, {
+    const attachment = await uploadChatMedia(principal, slug, {
       name: file.name || "upload",
       contentType: file.type || "application/octet-stream",
       bytes,
     });
+    const sha256 = await digest(bytes);
+
+    // Register + link under the bridged principal — best-effort registration
+    // (the bytes are already in the bucket), but the link must succeed or the
+    // upload is orphaned, so it runs inside `withPrincipal` which surfaces
+    // upstream errors.
+    const client = await apiClientForRequest();
     try {
-      const client = await apiClientForRequest();
       await client.registerFile({
         filename: attachment.name,
         content_type: attachment.content_type,
         byte_size: attachment.size,
-        sha256: await digest(bytes),
+        sha256,
         storage_bucket: mediaBucket(),
         storage_path: attachment.path,
-        conversation: sessionId || undefined,
+        conversation: slug,
       });
     } catch {
-      // The bytes are safely in the bucket; a missing registry row is
-      // repairable by the backfill, so this never fails the upload.
+      // Registry row is repairable by the backfill; the link is not.
     }
-    return NextResponse.json(attachment);
+    return withPrincipal(async (linkClient) =>
+      linkClient.linkToProject(slug, {
+        kind: "file",
+        ref: attachment.path,
+        label,
+      }),
+    );
   } catch (err) {
     return NextResponse.json(
       {

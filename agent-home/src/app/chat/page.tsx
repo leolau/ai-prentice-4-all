@@ -14,10 +14,11 @@ export const dynamic = "force-dynamic";
 
 /**
  * FG-20 Wave C1 — the one-brain chat tab. BFF: the server resolves the
- * principal and loads the principal's `agent_home` conversations (and the most
- * recent one's transcript) from the Python API, then hands them to the
- * interactive {@link ChatPane}. Sending routes back through `/api/chat/*` to
- * the principal-scoped `POST /api/sessions/{id}/chat` endpoint.
+ * principal and loads the principal's conversations (all sources except
+ * cron, and the most recent one's transcript) from the Python API, then
+ * hands them to the interactive {@link ChatPane}. Sending routes back
+ * through `/api/chat/*` to the principal-scoped
+ * `POST /api/sessions/{id}/chat` endpoint.
  */
 export default async function Page({
   searchParams,
@@ -41,12 +42,16 @@ export default async function Page({
     // A profile that no longer exists must not silently answer as the default:
     // the list is what the picker offers, and an unknown name 404s upstream.
     profiles = (await client.profiles().catch(() => ({ profiles: [] }))).profiles;
-    const list = await client.sessions({ source: "agent_home", order: "recent" });
+    const list = await client.sessions({
+      excludeSources: "cron",
+      order: "recent",
+      // The picker offers every conversation, not a 30-row window.
+      limit: 200,
+    });
     sessions = list.sessions;
     if (requested && !sessions.some((s) => s.id === requested)) {
-      // A memory can be written by any surface (gateway, cron, the CLI), so
-      // the linked conversation is often outside the agent_home list: fetch
-      // it unfiltered and prepend it rather than silently opening another.
+      // A memory can cite a cron conversation or one past the first page:
+      // fetch wider and prepend it rather than silently opening another.
       const all = await client.sessions({ order: "recent", limit: 200 });
       const match = all.sessions.find((s) => s.id === requested);
       if (match) sessions = [match, ...sessions];

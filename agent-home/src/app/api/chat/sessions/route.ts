@@ -1,7 +1,8 @@
 /**
  * GET /api/chat/sessions — BFF conversation list (FG-20 Wave C1). Forwards to
- * the Python API `GET /api/sessions` (agent_home source, recent-first) under
- * the bridged C1 principal so the mobile chat list can refresh after a send.
+ * the Python API `GET /api/sessions` (recent-first, all sources except cron)
+ * under the bridged C1 principal so the mobile chat list can refresh after a
+ * send.
  */
 import { NextResponse } from "next/server";
 
@@ -18,14 +19,17 @@ export async function GET(request: Request): Promise<NextResponse> {
   const raw = url.searchParams.get("archived");
   const archived =
     raw === "only" || raw === "include" || raw === "exclude" ? raw : undefined;
-  const rawLimit = Number(url.searchParams.get("limit"));
-  const limit = Number.isFinite(rawLimit)
-    ? Math.min(200, Math.max(1, Math.floor(rawLimit)))
-    : undefined;
+  // `Number(null)` is 0, which would clamp to a one-session list — a refresh
+  // without an explicit limit must not truncate to the current session.
+  const rawLimit = url.searchParams.get("limit");
+  const limit =
+    rawLimit !== null && Number.isFinite(Number(rawLimit))
+      ? Math.min(200, Math.max(1, Math.floor(Number(rawLimit))))
+      : undefined;
   try {
     const client = await apiClientForRequest({ profile: profileFromUrl(request.url) });
     const data = await client.sessions({
-      source: "agent_home",
+      excludeSources: "cron",
       order: "recent",
       limit,
       archived,

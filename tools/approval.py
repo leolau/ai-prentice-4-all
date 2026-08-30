@@ -1603,6 +1603,21 @@ def load_permanent(patterns: set):
         _permanent_approved.update(patterns)
 
 
+def _persist_scope_choice(session_key: str, pattern_key: str, choice: str) -> None:
+    """Persist the scope of an approval choice, same semantics as the gates.
+
+    ``session`` remembers the pattern for this session key only; ``always``
+    additionally writes it to ``command_allowlist`` so it survives process
+    restarts. ``once`` (and anything else) persists nothing.
+    """
+    if choice == "session":
+        approve_session(session_key, pattern_key)
+    elif choice == "always":
+        approve_session(session_key, pattern_key)
+        approve_permanent(pattern_key)
+        save_permanent_allowlist(_permanent_approved)
+
+
 _ALLOWLIST_SHELL_OPERATOR_RE = re.compile(r"(?:\n|&&|\|\||[;&|<>`]|\$\()")
 
 
@@ -2931,8 +2946,18 @@ def request_elicitation_consent_detailed(
     *,
     timeout_seconds: int | None = None,
     surface: str = "mcp-elicitation",
+    persist_key: str | None = None,
+    persist_session_key: str | None = None,
 ) -> tuple[str, str]:
     """As :func:`request_elicitation_consent`, plus *why*.
+
+    *persist_key*, when given, names the pattern the user's scope choice
+    applies to: ``session`` approves it for this session and ``always``
+    additionally writes it to the permanent allowlist. Without it the call
+    stays a per-call confirmation (the historical elicitation semantics).
+    *persist_session_key* overrides which session the ``session`` scope is
+    remembered under — callers whose approval queue key is per-turn (e.g.
+    agent-home run ids) pass their stable chat-session id here.
 
     Returns ``(decision, reason)`` where reason is one of:
 
@@ -2987,6 +3012,10 @@ def request_elicitation_consent_detailed(
             return "cancel", "timeout"
         choice = decision.get("choice")
         if choice in ("once", "session", "always"):
+            if persist_key:
+                _persist_scope_choice(
+                    persist_session_key or session_key, persist_key, choice
+                )
             return "accept", "approved"
         logger.info(
             "Elicitation declined by the user on session %s (choice=%s)",
@@ -2994,8 +3023,8 @@ def request_elicitation_consent_detailed(
         )
         return "decline", "user_denied"
 
-    # CLI / TUI path. allow_permanent=False because elicitation is a
-    # per-call confirmation — there is no pattern to remember.
+    # CLI / TUI path. Without a persist_key, elicitation is a per-call
+    # confirmation — there is no pattern to remember, so hide [a]lways.
     if not _has_interactive_prompt_surface():
         # No gateway context and no interactive terminal: the prompt below
         # would hit EOF on stdin and return "deny" instantly and silently,
@@ -3018,7 +3047,7 @@ def request_elicitation_consent_detailed(
             message,
             description,
             timeout_seconds=timeout_seconds,
-            allow_permanent=False,
+            allow_permanent=persist_key is not None,
         )
     except Exception as exc:
         logger.error(
@@ -3027,6 +3056,10 @@ def request_elicitation_consent_detailed(
         return "decline", "error"
 
     if choice in ("once", "session", "always"):
+        if persist_key:
+            _persist_scope_choice(
+                persist_session_key or session_key, persist_key, choice
+            )
         return "accept", "approved"
     return "decline", "user_denied"
 

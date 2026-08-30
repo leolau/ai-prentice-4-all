@@ -2,6 +2,7 @@
 
 import { useLayoutEffect, useRef, useState } from "react";
 
+import { UPLOAD_MAX_BYTES } from "@/lib/chat/upload-limit";
 import type { ChatAttachment } from "@/types";
 
 /**
@@ -49,17 +50,26 @@ export function Composer({
     setAttachments([]);
   }
 
-  async function upload(file: File) {
+  async function upload(files: File[]) {
     setUploadError(null);
     setUploading(true);
     try {
-      const form = new FormData();
-      form.set("file", file);
-      if (sessionId) form.set("sessionId", sessionId);
-      const res = await fetch("/api/chat/upload", { method: "POST", body: form });
-      const body = (await res.json()) as (ChatAttachment & { detail?: string });
-      if (!res.ok) throw new Error(body.detail ?? "Upload failed.");
-      setAttachments((prev) => [...prev, body]);
+      for (const file of files) {
+        // Refuse oversize files before spending a long upload round-trip;
+        // the route enforces the same cap server-side.
+        if (file.size > UPLOAD_MAX_BYTES) {
+          throw new Error(`${file.name}: exceeds the 100 MB limit.`);
+        }
+        const form = new FormData();
+        form.set("file", file);
+        if (sessionId) form.set("sessionId", sessionId);
+        const res = await fetch("/api/chat/upload", { method: "POST", body: form });
+        const body = (await res.json()) as (ChatAttachment & { detail?: string });
+        if (!res.ok) {
+          throw new Error(`${file.name}: ${body.detail ?? "Upload failed."}`);
+        }
+        setAttachments((prev) => [...prev, body]);
+      }
     } catch (err) {
       setUploadError(err instanceof Error ? err.message : "Upload failed.");
     } finally {
@@ -108,10 +118,11 @@ export function Composer({
             <input
               ref={fileRef}
               type="file"
+              multiple
               className="hidden"
               onChange={(e) => {
-                const f = e.target.files?.[0];
-                if (f) void upload(f);
+                const files = Array.from(e.target.files ?? []);
+                if (files.length > 0) void upload(files);
               }}
             />
             <button
