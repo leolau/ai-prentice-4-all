@@ -1885,6 +1885,64 @@ async def get_card(request: Request, task_id: str) -> dict[str, Any]:
         raise HTTPException(status_code=404, detail="card not found")
 
 
+@router.post("/{slug}/cards/{task_id}/reclaim")
+async def reclaim_card(request: Request, task_id: str) -> dict[str, Any]:
+    """Stop a stuck worker and re-queue the card.
+
+    ``reclaim_task`` terminates the worker, releases the claim and resets
+    the card to ``ready`` (clearing the failure counter); the dispatcher
+    respawns on its next tick. Also the retry path for ``blocked`` cards.
+    """
+    project, _role, _profiles, _principal = await _require_write(request)
+
+    def _sync() -> bool:
+        with _board_conn(project) as bconn:
+            task = kanban_db.get_task(bconn, task_id)
+            if task is None or getattr(task, "project_id", None) != project.id:
+                raise KeyError(task_id)
+            return kanban_db.reclaim_task(
+                bconn, task_id, reason="agent-home operator re-run"
+            )
+
+    try:
+        ok = await asyncio.to_thread(_sync)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="card not found")
+    if not ok:
+        raise HTTPException(
+            status_code=409, detail="the card is not reclaimable right now"
+        )
+    return {"ok": True, "task_id": task_id}
+
+
+@router.post("/{slug}/cards/{task_id}/stop")
+async def stop_card(request: Request, task_id: str) -> dict[str, Any]:
+    """Halt the card without a re-run: kill any worker, park it in blocked."""
+    project, _role, _profiles, _principal = await _require_write(request)
+
+    def _sync() -> bool:
+        with _board_conn(project) as bconn:
+            task = kanban_db.get_task(bconn, task_id)
+            if task is None or getattr(task, "project_id", None) != project.id:
+                raise KeyError(task_id)
+            # reclaim first so a live worker is terminated; then block so the
+            # dispatcher does not respawn it.
+            kanban_db.reclaim_task(bconn, task_id, reason="agent-home operator stop")
+            return kanban_db.block_task(
+                bconn, task_id, reason="stopped from agent-home"
+            )
+
+    try:
+        ok = await asyncio.to_thread(_sync)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="card not found")
+    if not ok:
+        raise HTTPException(
+            status_code=409, detail="the card cannot be stopped right now"
+        )
+    return {"ok": True, "task_id": task_id}
+
+
 # ---------------------------------------------------------------------------
 # Step 4: playbook, directives (guidance), runs, tools/autonomy (§4/§5/§6/§7)
 # ---------------------------------------------------------------------------
