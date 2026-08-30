@@ -30,7 +30,11 @@ import {
   SESSION_ORDER_STORAGE_KEY,
 } from "@/lib/chat/session-order";
 import { withProfileBody, withProfileQuery } from "@/lib/chat/profile";
-import { streamChatTurn } from "@/lib/chat/stream";
+import {
+  attachChatStream,
+  streamChatTurn,
+  type ChatStreamHandlers,
+} from "@/lib/chat/stream";
 import { usePersistentState } from "@/lib/use-persistent-state";
 import type {
   ChatApprovalRequest,
@@ -176,6 +180,30 @@ export function ChatPane({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Reload mid-turn: re-attach to the in-flight turn of the session the page
+  // reopened on, so its content keeps flowing instead of freezing.
+  useEffect(() => {
+    if (!initialSessionId) return;
+    let cancelled = false;
+    fetch(
+      withProfileQuery(
+        `/api/chat/active?sessionId=${encodeURIComponent(initialSessionId)}`,
+        profile,
+      ),
+      { cache: "no-store" },
+    )
+      .then((res) => (res.ok ? res.json() : { runId: null }))
+      .then((data: { runId?: string | null }) => {
+        if (cancelled || !data.runId) return;
+        void resumeTurn(initialSessionId, data.runId);
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   // Register the chat header action callbacks (startNew / openArchived) into the
   // shared ref so the ChatHeaderActions component in the MobileShell header can
   // invoke them.  Runs on every render (no deps) so the ref always holds the
@@ -271,6 +299,93 @@ export function ChatPane({
     setError(null);
   }
 
+  function makeTurnHandlers(
+    turnKey: string,
+    setLive: (content: string) => void,
+  ): ChatStreamHandlers {
+    return {
+      onDelta: (delta) => {
+        const buf = liveRef.current.get(turnKey);
+        setLive((buf?.assistant ?? "") + delta);
+      },
+      onReasoning: (text) =>
+        setLiveActivity((prev) => ({
+          ...prev,
+          [turnKey]: {
+            reasoning: (prev[turnKey]?.reasoning ?? "") + text,
+            tools: prev[turnKey]?.tools ?? [],
+          },
+        })),
+      onToolStart: (tool) =>
+        setLiveActivity((prev) => ({
+          ...prev,
+          [turnKey]: {
+            reasoning: prev[turnKey]?.reasoning ?? "",
+            tools: [...(prev[turnKey]?.tools ?? []), { ...tool, done: false }],
+          },
+        })),
+      onToolComplete: (tool) =>
+        setLiveActivity((prev) => ({
+          ...prev,
+          [turnKey]: {
+            reasoning: prev[turnKey]?.reasoning ?? "",
+            tools: (prev[turnKey]?.tools ?? []).map((c) =>
+              c.id === tool.id ? { ...c, done: true } : c,
+            ),
+          },
+        })),
+      onApproval: (req) =>
+        setApprovals((prev) => ({ ...prev, [turnKey]: req })),
+      onCompleted: (content) => {
+        setApprovals((prev) => dropKey(prev, turnKey));
+        if (content) setLive(content);
+      },
+      onError: (message) => setError(message),
+    };
+  }
+
+  /**
+   * Reload mid-turn: the server-side turn outlives the page, so re-attach to
+   * its stream and keep the content flowing. The transcript already ends at
+   * the user message; a trailing assistant bubble is added only in that case.
+   */
+  async function resumeTurn(sid: string, runId: string) {
+    const turnKey = keyOf(sid);
+    setError(null);
+    setSendingKeys((prev) =>
+      prev.includes(turnKey) ? prev : [...prev, turnKey],
+    );
+    liveRef.current.set(turnKey, { user: "", assistant: "" });
+    setMessages((prev) => {
+      const last = prev[prev.length - 1];
+      return last && last.role === "user"
+        ? [...prev, { role: "assistant", content: "" }]
+        : prev;
+    });
+    const setLive = (content: string) => {
+      const buf = liveRef.current.get(turnKey);
+      if (buf) buf.assistant = content;
+      if (selectedRef.current === sid) {
+        setMessages((prev) => setLastAssistantContent(prev, content));
+      }
+    };
+    try {
+      await attachChatStream(
+        { sessionId: sid, runId },
+        makeTurnHandlers(turnKey, setLive),
+      );
+      void refreshSessions();
+    } catch {
+      // The grace window may have passed; the next transcript load shows the
+      // finished turn.
+    } finally {
+      removeSending(turnKey);
+      liveRef.current.delete(turnKey);
+      setApprovals((prev) => dropKey(prev, turnKey));
+      setLiveActivity((prev) => dropKey(prev, turnKey));
+    }
+  }
+
   async function send(text: string, attachments: ChatAttachment[]) {
     // The session this turn belongs to, captured up-front so late-arriving
     // events are attributed to their origin, not to whatever is selected later.
@@ -313,45 +428,7 @@ export function ChatPane({
           signal: controller.signal,
           profile,
         },
-        {
-          onDelta: (delta) => {
-            const buf = liveRef.current.get(turnKey);
-            setLive((buf?.assistant ?? "") + delta);
-          },
-          onReasoning: (text) =>
-            setLiveActivity((prev) => ({
-              ...prev,
-              [turnKey]: {
-                reasoning: (prev[turnKey]?.reasoning ?? "") + text,
-                tools: prev[turnKey]?.tools ?? [],
-              },
-            })),
-          onToolStart: (tool) =>
-            setLiveActivity((prev) => ({
-              ...prev,
-              [turnKey]: {
-                reasoning: prev[turnKey]?.reasoning ?? "",
-                tools: [...(prev[turnKey]?.tools ?? []), { ...tool, done: false }],
-              },
-            })),
-          onToolComplete: (tool) =>
-            setLiveActivity((prev) => ({
-              ...prev,
-              [turnKey]: {
-                reasoning: prev[turnKey]?.reasoning ?? "",
-                tools: (prev[turnKey]?.tools ?? []).map((c) =>
-                  c.id === tool.id ? { ...c, done: true } : c,
-                ),
-              },
-            })),
-          onApproval: (req) =>
-            setApprovals((prev) => ({ ...prev, [turnKey]: req })),
-          onCompleted: (content) => {
-            setApprovals((prev) => dropKey(prev, turnKey));
-            if (content) setLive(content);
-          },
-          onError: (message) => setError(message),
-        },
+        makeTurnHandlers(turnKey, setLive),
       );
       // A brand-new session lands an id only at completion; you cannot have
       // navigated to it mid-stream, so adopt it only if still on this turn.

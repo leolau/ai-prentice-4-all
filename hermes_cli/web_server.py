@@ -10603,6 +10603,30 @@ async def _materialize_agent_home_attachments(
     return "\n\n".join(notes) + ("\n\n" + user_message if user_message else "")
 
 
+# ---------------------------------------------------------------------------
+# Live turn registry — a reloaded page re-attaches to an in-flight turn
+# ---------------------------------------------------------------------------
+# ``session_chat_stream`` publishes every event of a turn here (replay
+# buffer + live subscriber fan-out) so a browser that reloads mid-turn can
+# resume the stream instead of staring at a transcript that ends at the
+# user message. The agent turn itself already outlives a disconnected
+# client; this keeps its EVENTS recoverable too. Entries drop a grace
+# period after the turn ends.
+
+_CHAT_RUNS: "dict[str, dict]" = {}
+_CHAT_RUN_GRACE_SECONDS = 120.0
+
+
+def _chat_run_publish(entry: dict, item) -> None:
+    # Runs on the event loop only (see _enqueue below) — no locking needed.
+    if item is not None:
+        entry["buffer"].append(item)
+    else:
+        entry["done"] = True
+    for sub in list(entry["subs"]):
+        sub.put_nowait(item)
+
+
 @app.post("/api/sessions/{session_id}/chat/stream")
 async def session_chat_stream(session_id: str, request: Request):
     """POST /api/sessions/{session_id}/chat/stream — SSE one-brain turn with an
@@ -10655,11 +10679,17 @@ async def session_chat_stream(session_id: str, request: Request):
     run_id = f"run_{uuid.uuid4().hex}"
     loop = asyncio.get_running_loop()
     queue: "asyncio.Queue" = asyncio.Queue()
+    run_entry = {"session_id": sid, "buffer": [], "subs": [], "done": False}
+    _CHAT_RUNS[run_id] = run_entry
     trace, ledger = _agent_home_trace(principal, sid)
     _trace_emit(trace, "inbound", sid, "agent-home chat message")
 
+    def _publish(item) -> None:
+        queue.put_nowait(item)
+        _chat_run_publish(run_entry, item)
+
     def _enqueue(name: str, payload: dict) -> None:
-        loop.call_soon_threadsafe(queue.put_nowait, (name, payload))
+        loop.call_soon_threadsafe(_publish, (name, payload))
 
     def _delta(delta: str) -> None:
         if delta:
@@ -10768,32 +10798,101 @@ async def session_chat_stream(session_id: str, request: Request):
             )
         finally:
             _enqueue("done", {"run_id": run_id})
-            loop.call_soon_threadsafe(queue.put_nowait, None)
+            loop.call_soon_threadsafe(_publish, None)
+
+            async def _drop_later() -> None:
+                await asyncio.sleep(_CHAT_RUN_GRACE_SECONDS)
+                entry = _CHAT_RUNS.get(run_id)
+                if entry is not None and entry["done"] and not entry["subs"]:
+                    _CHAT_RUNS.pop(run_id, None)
+
+            loop.create_task(_drop_later())
             await _flush_agent_home_trace(trace, ledger)
 
     task = asyncio.create_task(_driver())
 
     async def _events():
+        # No cancellation of the driver on client disconnect: the turn (and
+        # its registry entry) outlives this client so a reloaded page can
+        # attach and receive the tail.
+        while True:
+            try:
+                item = await asyncio.wait_for(queue.get(), timeout=15.0)
+            except asyncio.TimeoutError:
+                yield b": keepalive\n\n"
+                continue
+            if item is None:
+                break
+            name, payload = item
+            data = json.dumps(payload, ensure_ascii=False)
+            yield f"event: {name}\ndata: {data}\n\n".encode("utf-8")
+
+    headers = {
+        "Cache-Control": "no-cache, no-transform",
+        "X-Accel-Buffering": "no",
+        "X-Hermes-Session-Id": sid,
+    }
+    return StreamingResponse(_events(), media_type="text/event-stream", headers=headers)
+
+
+@app.get("/api/sessions/{session_id}/active_run")
+async def active_chat_run(session_id: str, request: Request):
+    """The in-flight turn for this session, if any — a reloaded page asks
+    this first and then attaches to the stream to resume live rendering."""
+    await _comms_resolve_principal(request)
+    for run_id, entry in _CHAT_RUNS.items():
+        if not entry["done"] and entry["session_id"] == session_id:
+            return {"run_id": run_id}
+    return {"run_id": None}
+
+
+@app.post("/api/sessions/{session_id}/chat/stream/attach")
+async def session_chat_stream_attach(session_id: str, request: Request):
+    """Re-attach to an in-flight (or just-finished, grace-window) turn.
+
+    Replays the turn's buffered events, then tails it live. Subscribing
+    before snapshotting the buffer happens on the same loop that publishes
+    (``_chat_run_publish``), so the snapshot index and the queue hand off
+    without a gap or a duplicate.
+    """
+    await _comms_resolve_principal(request)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    run_id = str((body or {}).get("run_id", "")).strip()
+    entry = _CHAT_RUNS.get(run_id)
+    if entry is None or entry["session_id"] != session_id:
+        raise HTTPException(status_code=404, detail="no re-attachable run")
+
+    queue: "asyncio.Queue" = asyncio.Queue()
+
+    async def _events():
+        entry["subs"].append(queue)
         try:
+            snapshot = list(entry["buffer"])
+            for name, payload in snapshot:
+                data = json.dumps(payload, ensure_ascii=False)
+                yield f"event: {name}\ndata: {data}\n\n".encode("utf-8")
+            if entry["done"]:
+                return
             while True:
-                try:
-                    item = await asyncio.wait_for(queue.get(), timeout=15.0)
-                except asyncio.TimeoutError:
-                    yield b": keepalive\n\n"
-                    continue
+                item = await queue.get()
                 if item is None:
                     break
                 name, payload = item
                 data = json.dumps(payload, ensure_ascii=False)
                 yield f"event: {name}\ndata: {data}\n\n".encode("utf-8")
         finally:
-            if not task.done():
-                task.cancel()
+            try:
+                entry["subs"].remove(queue)
+            except ValueError:
+                pass
 
     headers = {
         "Cache-Control": "no-cache, no-transform",
         "X-Accel-Buffering": "no",
-        "X-Hermes-Session-Id": sid,
+        "X-Hermes-Session-Id": session_id,
     }
     return StreamingResponse(_events(), media_type="text/event-stream", headers=headers)
 

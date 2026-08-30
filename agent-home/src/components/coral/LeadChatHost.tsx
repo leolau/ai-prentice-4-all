@@ -11,7 +11,12 @@ import {
   onLeadChatRequest,
   reportLeadChatOpen,
 } from "@/components/coral/coral-interlock";
-import { streamChatTurn, type ChatToolEvent } from "@/lib/chat/stream";
+import {
+  attachChatStream,
+  streamChatTurn,
+  type ChatStreamHandlers,
+  type ChatToolEvent,
+} from "@/lib/chat/stream";
 import { visibleTurns } from "@/lib/chat/transcript";
 import { usePersistentState } from "@/lib/use-persistent-state";
 import type { ChatApprovalRequest, ChatAttachment, ChatMessage } from "@/types";
@@ -94,6 +99,38 @@ export function LeadChatHost({
       cancelled = true;
     };
   }, [open, leadSession]);
+
+  // Reload mid-turn: the server-side turn outlives the page, so re-attach
+  // to its stream and keep the content flowing instead of staring at a
+  // transcript that ends at the user message.
+  useEffect(() => {
+    if (!open || !leadSession || sending) return;
+    let cancelled = false;
+    fetch(`/api/chat/active?sessionId=${encodeURIComponent(leadSession)}`)
+      .then((res) => (res.ok ? res.json() : { runId: null }))
+      .then((data: { runId?: string | null }) => {
+        if (cancelled || !data.runId) return;
+        const runId = data.runId;
+        setSending(true);
+        setActivity("thinking");
+        setStreamText("");
+        setReasoningText("");
+        setToolChips([]);
+        attachChatStream({ sessionId: leadSession, runId }, makeHandlers())
+          .catch(() => undefined)
+          .finally(() => {
+            setSending(false);
+            setActivity("idle");
+            setReasoningText("");
+            setToolChips([]);
+          });
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, leadSession, sending]);
 
   useEffect(() => {
     const el = scrollRef.current;
@@ -192,6 +229,46 @@ export function LeadChatHost({
     };
   }
 
+  function makeHandlers(): ChatStreamHandlers {
+    return {
+      onDelta: (delta) => {
+        setActivity("streaming");
+        setStreamText((prev) => prev + delta);
+      },
+      onReasoning: (textDelta) => {
+        setActivity("thinking");
+        setReasoningText((prev) => prev + textDelta);
+      },
+      onToolStart: (tool) => {
+        setActivity("streaming");
+        setToolChips((prev) => [...prev, { ...tool, done: false }]);
+      },
+      onToolComplete: (tool) => {
+        setToolChips((prev) =>
+          prev.map((c) => (c.id === tool.id ? { ...c, done: true } : c)),
+        );
+      },
+      onApproval: (req) => {
+        setActivity("waiting_approval");
+        setApproval(req);
+      },
+      onCompleted: (content, sessionId) => {
+        setMessages((prev) => [...prev, { role: "assistant", content }]);
+        if (sessionId) setLeadSession(sessionId);
+        setStreamText("");
+        setReasoningText("");
+        setToolChips([]);
+        setApproval(null);
+      },
+      onError: (message) => {
+        setMessages((prev) => [...prev, { role: "assistant", content: message }]);
+        setStreamText("");
+        setReasoningText("");
+        setToolChips([]);
+      },
+    };
+  }
+
   async function send(text: string, attachments: ChatAttachment[]) {
     if (sending) return;
     setSending(true);
@@ -203,43 +280,7 @@ export function LeadChatHost({
     try {
       await streamChatTurn(
         { sessionId: leadSession, message: text, attachments },
-        {
-          onDelta: (delta) => {
-            setActivity("streaming");
-            setStreamText((prev) => prev + delta);
-          },
-          onReasoning: (textDelta) => {
-            setActivity("thinking");
-            setReasoningText((prev) => prev + textDelta);
-          },
-          onToolStart: (tool) => {
-            setActivity("streaming");
-            setToolChips((prev) => [...prev, { ...tool, done: false }]);
-          },
-          onToolComplete: (tool) => {
-            setToolChips((prev) =>
-              prev.map((c) => (c.id === tool.id ? { ...c, done: true } : c)),
-            );
-          },
-          onApproval: (req) => {
-            setActivity("waiting_approval");
-            setApproval(req);
-          },
-          onCompleted: (content, sessionId) => {
-            setMessages((prev) => [...prev, { role: "assistant", content }]);
-            if (sessionId) setLeadSession(sessionId);
-            setStreamText("");
-            setReasoningText("");
-            setToolChips([]);
-            setApproval(null);
-          },
-          onError: (message) => {
-            setMessages((prev) => [...prev, { role: "assistant", content: message }]);
-            setStreamText("");
-            setReasoningText("");
-            setToolChips([]);
-          },
-        },
+        makeHandlers(),
       );
     } catch (err) {
       setMessages((prev) => [
