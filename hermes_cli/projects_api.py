@@ -2176,6 +2176,67 @@ async def activate_directive_route(
 # ---------------------------------------------------------------------------
 
 
+_RUN_STALL_SECONDS = 10 * 60
+
+
+def _run_stalled(
+    run: dict, cards: list[dict], blocked_tasks: list[dict]
+) -> bool:
+    """A ``running`` run with no claimable card has no worker behind it.
+
+    The dispatcher promotes ready cards within a tick (~60s), so a run
+    whose cards sit todo for over ten minutes is orphaned, not busy; a
+    blocked task anywhere in the tree (the cards then wait on it
+    forever) means it right now.
+    """
+    if run.get("status") != "running" or not cards:
+        return False
+    statuses = {c.get("status") for c in cards}
+    if statuses & {"running", "ready"}:
+        return False
+    if blocked_tasks:
+        return True
+    started = run.get("started_at")
+    return (
+        started is not None
+        and int(time.time()) - int(started) > _RUN_STALL_SECONDS
+    )
+
+
+def _run_blocked_tasks(bconn, cards: list[dict]) -> list[dict]:
+    """Blocked tasks anywhere in the run's dependency tree.
+
+    A decomposed run stalls when a subtask blocks: the run's own cards
+    then wait, ``todo``, forever. Listing them (with the failure that
+    blocked them) puts the retry one tap away on the run page.
+    """
+    seeds = [c["task_id"] for c in cards]
+    if not seeds:
+        return []
+    seen: set[str] = set()
+    stack = list(seeds)
+    while stack:
+        node = stack.pop()
+        if node in seen:
+            continue
+        seen.add(node)
+        stack.extend(kanban_db.parent_ids(bconn, node))
+        stack.extend(kanban_db.child_ids(bconn, node))
+    blocked = []
+    for task_id in sorted(seen - set(seeds)):
+        task = kanban_db.get_task(bconn, task_id)
+        if task is not None and task.status == "blocked":
+            blocked.append(
+                {
+                    "task_id": task_id,
+                    "title": task.title,
+                    "status": task.status,
+                    "error": task.last_failure_error,
+                }
+            )
+    return blocked
+
+
 def _run_payload(conn, bconn, run: dict, *, principal) -> dict:
     """One run row joined with its cards' live board state."""
     cards = []
@@ -2191,6 +2252,9 @@ def _run_payload(conn, bconn, run: dict, *, principal) -> dict:
         )
     payload = dict(run)
     payload["cards"] = cards
+    blocked = _run_blocked_tasks(bconn, cards)
+    payload["blocked_tasks"] = blocked
+    payload["stalled"] = _run_stalled(run, cards, blocked)
     payload["cost"] = projects_run.run_cost(
         run.get("trace_id"), principal=principal
     )
