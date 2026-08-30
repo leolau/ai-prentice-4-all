@@ -2,6 +2,22 @@ import Link from "next/link";
 
 import type { ProjectLink } from "@/types";
 
+const UUID_PREFIX =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}-/i;
+const DIGEST_PREFIX = /^[0-9a-f]{16}-/i;
+
+/**
+ * A readable file name from a storage ref's tail
+ * (`<user>/<project>/<uuid>-Lesson_Plan.pdf` → `Lesson Plan.pdf`). Uploads
+ * slug the original name with `_`, so un-slug it for display.
+ */
+export function friendlyFileName(ref: string): string | null {
+  const tail = ref.split("/").pop() ?? "";
+  const name = tail.replace(UUID_PREFIX, "").replace(DIGEST_PREFIX, "");
+  if (!name) return null;
+  return name.replace(/_/g, " ");
+}
+
 /**
  * One pointer row. A link is never an authority (§11 rule 5): until the
  * owning store resolves it under the caller's principal, the row renders
@@ -9,6 +25,9 @@ import type { ProjectLink } from "@/types";
  */
 export function LinkRow({ link }: { link: ProjectLink }) {
   const unresolved = link.resolved === null;
+  const label =
+    link.label ??
+    (link.kind === "file" ? (friendlyFileName(link.ref) ?? link.ref) : link.ref);
   const body = (
     <>
       <span
@@ -16,7 +35,7 @@ export function LinkRow({ link }: { link: ProjectLink }) {
           unresolved ? "text-[var(--color-muted)]" : ""
         }`}
       >
-        {link.label ?? link.ref}
+        {label}
       </span>
       <span className="block text-xs text-[var(--color-muted)]">
         {link.profile}

@@ -110,6 +110,8 @@ export function ProjectDetailView({
       (anchor.id !== "panel-memories" || hasMemories),
   );
 
+  const slugPath = `/api/projects/${encodeURIComponent(project.slug)}`;
+
   const post = async (path: string) => {
     setBusy(true);
     setError(null);
@@ -128,8 +130,33 @@ export function ProjectDetailView({
     }
   };
 
-  const slugPath = `/api/projects/${encodeURIComponent(project.slug)}`;
+  // Runs require status=active; the backend gate names whatever is missing
+  // (outputs / members / profiles) in its 409 detail, shown in the header
+  // error paragraph.
+  const activate = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await fetch(slugPath, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ status: "active" }),
+      });
+      const data = (await res.json().catch(() => ({}))) as { detail?: string };
+      if (!res.ok) {
+        setError(data.detail ?? "That did not go through.");
+        return;
+      }
+      router.refresh();
+    } catch {
+      setError("Could not reach the server.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const meta = [
+    project.status,
     CADENCE_LABEL[project.cadence],
     project.schedule ?? undefined,
     project.next_run_at != null
@@ -184,14 +211,25 @@ export function ProjectDetailView({
                 </p>
               ) : (
               <>
-              <button
-                type="button"
-                onClick={() => void post(`${slugPath}/runs`)}
-                disabled={busy}
-                className="rounded-xl bg-[var(--color-accent)] px-4 py-2 text-sm font-medium text-[var(--color-accent-fg)] disabled:opacity-50"
-              >
-                Run now
-              </button>
+              {project.status === "active" ? (
+                <button
+                  type="button"
+                  onClick={() => void post(`${slugPath}/runs`)}
+                  disabled={busy}
+                  className="rounded-xl bg-[var(--color-accent)] px-4 py-2 text-sm font-medium text-[var(--color-accent-fg)] disabled:opacity-50"
+                >
+                  Run now
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => void activate()}
+                  disabled={busy}
+                  className="rounded-xl bg-[var(--color-accent)] px-4 py-2 text-sm font-medium text-[var(--color-accent-fg)] disabled:opacity-50"
+                >
+                  Activate
+                </button>
+              )}
               {waitingRun ? (
                 <button
                   type="button"

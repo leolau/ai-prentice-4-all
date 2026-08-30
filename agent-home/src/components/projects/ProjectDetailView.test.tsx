@@ -427,6 +427,36 @@ describe("LinkRow", () => {
     );
     expect(html).toContain("text-[var(--color-muted)]");
   });
+
+  it("shows a readable file name instead of the raw storage path", () => {
+    const html = renderToStaticMarkup(
+      <LinkRow
+        link={LINK({
+          kind: "file",
+          ref: "leo_owner/ai-i-train/fde2b2b6-2131-4abc-9def-0123456789ab-Lesson_Plan.pdf",
+          label: null,
+          resolved: true,
+        })}
+      />,
+    );
+    expect(html).not.toContain("leo_owner/");
+    expect(html).not.toContain("fde2b2b6");
+    expect(html).toContain("Lesson Plan.pdf");
+
+    // An explicit label always wins over the derived name.
+    const labelled = renderToStaticMarkup(
+      <LinkRow
+        link={LINK({
+          kind: "file",
+          ref: "leo_owner/ai-i-train/fde2b2b6-2131-4abc-9def-0123456789ab-Lesson_Plan.pdf",
+          label: "The plan",
+          resolved: true,
+        })}
+      />,
+    );
+    expect(labelled).toContain("The plan");
+    expect(labelled).not.toContain("Lesson Plan.pdf");
+  });
 });
 
 describe("ProjectDetailView", () => {
@@ -454,6 +484,21 @@ describe("ProjectDetailView", () => {
     // Empty References/Memories hide — anchors included.
     expect(html).not.toContain('href="#panel-references"');
     expect(html).not.toContain('href="#panel-memories"');
+  });
+
+  it("offers Activate instead of Run now until the project is active", () => {
+    const html = renderToStaticMarkup(
+      <ProjectDetailView
+        project={{ ...PROJECT, status: "planning" }}
+        board={BOARD}
+        playbook={null}
+        directives={null}
+        callerUserId="leo"
+        isInstanceAdmin={false}
+      />,
+    );
+    expect(html).toContain("Activate");
+    expect(html).not.toContain("Run now");
   });
 });
 
