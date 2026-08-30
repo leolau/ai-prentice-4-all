@@ -1479,6 +1479,14 @@ export interface ProjectRunCard {
   title: string | null;
 }
 
+/** A blocked task in the run's dependency tree — why a run stalls. */
+export interface ProjectRunBlockedTask {
+  task_id: string;
+  title: string | null;
+  status: string;
+  error: string | null;
+}
+
 /** The full run row (§6) as the detail/list reads return it. */
 export interface ProjectRun {
   id: string;
@@ -1505,10 +1513,17 @@ export interface ProjectRun {
   error: string | null;
   /** Joined fields — present on the detail read. */
   cards?: ProjectRunCard[];
+  blocked_tasks?: ProjectRunBlockedTask[];
   cost?: number | null;
   cost_recorded?: boolean;
   duration_seconds?: number;
   deliveries?: ProjectDelivery[] | number;
+  /**
+   * Server-derived: the row says "running" but no worker is active on it
+   * (no running/ready card, and a blocked card or a long silence) — the
+   * run is orphaned, not busy.
+   */
+  stalled?: boolean;
 }
 
 /** The method, one revision (§7). `steps` is parsed JSON on the detail read. */

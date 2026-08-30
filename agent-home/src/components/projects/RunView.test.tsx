@@ -93,3 +93,55 @@ describe("RunView on an archived project", () => {
     ).toBeTruthy();
   });
 });
+
+describe("RunView stall truth", () => {
+  it("flags a stalled running run and offers stop + restart + retry", () => {
+    const stalledRun = RUN({
+      status: "running",
+      stalled: true,
+      cards: [
+        { task_id: "t_1", step_key: "draft", status: "todo", title: "Draft" },
+      ],
+      blocked_tasks: [
+        {
+          task_id: "t_9",
+          title: "Extract objectives",
+          status: "blocked",
+          error: "worker exited cleanly (rc=0) — protocol violation",
+        },
+      ],
+    });
+    const { getByText, getByRole } = render(
+      <RunView slug="monday-digest" run={stalledRun} />,
+    );
+    expect(getByText("stalled")).toBeTruthy();
+    expect(getByText(/no worker is active/)).toBeTruthy();
+    // Stop and restart offered together on a stalled run.
+    expect(getByRole("button", { name: "Cancel" })).toBeTruthy();
+    expect(getByRole("button", { name: "Repeat this run" })).toBeTruthy();
+    // The blocked work is listed with why it stopped.
+    expect(getByText("Extract objectives")).toBeTruthy();
+    expect(getByText(/protocol violation/)).toBeTruthy();
+  });
+
+  it("shows no stall UI on a healthy running run", () => {
+    const healthy = RUN({
+      status: "running",
+      stalled: false,
+      cards: [
+        {
+          task_id: "t_1",
+          step_key: "draft",
+          status: "running",
+          title: "Draft",
+        },
+      ],
+    });
+    const { queryByText, queryByRole } = render(
+      <RunView slug="monday-digest" run={healthy} />,
+    );
+    expect(queryByText("stalled")).toBeNull();
+    expect(queryByText(/no worker is active/)).toBeNull();
+    expect(queryByRole("button", { name: "Repeat this run" })).toBeNull();
+  });
+});

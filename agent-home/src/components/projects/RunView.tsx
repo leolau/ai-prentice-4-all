@@ -130,10 +130,13 @@ export function RunView({
 
   const deliveries = Array.isArray(run.deliveries) ? run.deliveries : [];
   const cards = run.cards ?? [];
+  const blockedTasks = run.blocked_tasks ?? [];
   const live =
     run.status === "running" ||
     run.status === "waiting" ||
     run.status === "blocked";
+  // The row says running but the server saw no worker behind it — say so.
+  const stalled = run.status === "running" && run.stalled === true;
 
   return (
     <div data-component="RunView" className="flex flex-col gap-4">
@@ -148,6 +151,7 @@ export function RunView({
               <h1 className="min-w-0 flex-1 truncate text-lg font-semibold">
                 Run #{run.run_no}
               </h1>
+              {stalled ? <Pill tone="danger">stalled</Pill> : null}
               <Pill tone={RUN_TONE[run.status]}>{run.status}</Pill>
             </div>
             <p className="mt-1 text-xs text-[var(--color-muted)]">
@@ -204,7 +208,8 @@ export function RunView({
                 >
                   Cancel
                 </button>
-              ) : !archived ? (
+              ) : null}
+              {(!live || stalled) && !archived ? (
                 <button
                   type="button"
                   onClick={() =>
@@ -224,6 +229,18 @@ export function RunView({
                 </button>
               ) : null}
             </div>
+
+            {stalled ? (
+              <p
+                data-component="StallBanner"
+                role="status"
+                className="mt-2 rounded-lg border border-yellow-500/40 bg-yellow-500/10 px-3 py-2 text-sm text-yellow-300"
+              >
+                Marked running, but no worker is active on this run — it is
+                stalled. Cancel stops it; retry the blocked work below;
+                Repeat starts a fresh run on the same method.
+              </p>
+            ) : null}
 
             {archived ? (
               <p className="mt-3 text-xs text-[var(--color-muted)]">
@@ -280,6 +297,40 @@ export function RunView({
               </ul>
             )}
           </section>
+
+          {/* ── Blocked work ──────────────────────────────────────── */}
+          {blockedTasks.length > 0 ? (
+            <section
+              data-component="RunBlocked"
+              className="rounded-2xl border border-red-500/30 bg-[var(--color-surface)] p-4"
+            >
+              <h2 className="text-xs uppercase tracking-wide text-red-400">
+                Blocked work
+              </h2>
+              <p className="mt-1 text-xs text-[var(--color-muted)]">
+                These stopped the run. Open one to retry or stop it.
+              </p>
+              <ul className="mt-2 flex flex-col gap-1.5">
+                {blockedTasks.map((task) => (
+                  <li key={task.task_id}>
+                    <Link
+                      href={`/projects/${encodeURIComponent(slug)}/cards/${encodeURIComponent(task.task_id)}`}
+                      className="block rounded-lg bg-[var(--color-surface-2)] px-3 py-2 text-sm active:opacity-70"
+                    >
+                      <span className="block truncate">
+                        {task.title ?? task.task_id}
+                      </span>
+                      {task.error ? (
+                        <span className="block truncate text-xs text-red-400">
+                          {task.error}
+                        </span>
+                      ) : null}
+                    </Link>
+                  </li>
+                ))}
+              </ul>
+            </section>
+          ) : null}
 
           {/* ── Deliveries ────────────────────────────────────────── */}
           <section
