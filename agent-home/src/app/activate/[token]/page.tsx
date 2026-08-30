@@ -20,7 +20,7 @@ export const dynamic = "force-dynamic";
 /**
  * FG-26 activation. **Unauthenticated on purpose**: somebody setting their
  * first password has no session yet, and the invitation is what authorises
- * them. The nav is hidden (`showNav={false}`) because there is nothing else
+ * them. The Coral launcher is hidden (`showCoral={false}`) because there is nothing else
  * they can reach yet.
  *
  * The page renders the form without asking the server whether the token is
@@ -35,7 +35,7 @@ export default async function Page({
 }) {
   const { token } = await params;
   return (
-    <MobileShell title="Activate your account" showNav={false}>
+    <MobileShell title="Activate your account" showCoral={false}>
       <ActivateForm token={token} />
     </MobileShell>
   );

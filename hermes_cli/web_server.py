@@ -275,6 +275,7 @@ from hermes_cli.memory_explorer import router as _memory_explorer_router  # noqa
 from hermes_cli.files_api import router as _files_router  # noqa: E402
 from hermes_cli.incomings_api import router as _incomings_router  # noqa: E402
 from hermes_cli.todos_api import router as _todos_router  # noqa: E402
+from hermes_cli.credentials_api import router as _credentials_router  # noqa: E402
 from hermes_cli.goals_api import router as _goals_router  # noqa: E402
 from hermes_cli.projects_api import router as _projects_router  # noqa: E402
 
@@ -283,6 +284,7 @@ app.include_router(_memory_explorer_router)
 app.include_router(_files_router)
 app.include_router(_incomings_router)
 app.include_router(_todos_router)
+app.include_router(_credentials_router)
 app.include_router(_goals_router)
 app.include_router(_projects_router)
 
@@ -10663,6 +10665,23 @@ async def session_chat_stream(session_id: str, request: Request):
         if delta:
             _enqueue("assistant.delta", {"delta": delta, "run_id": run_id})
 
+    def _reasoning(text: str) -> None:
+        if text:
+            _enqueue("reasoning.delta", {"text": text, "run_id": run_id})
+
+    def _tool_start(tc_id: str, name: str, args: dict) -> None:
+        # id+name only: args/result can carry secrets and stay server-side.
+        _enqueue(
+            "tool.start",
+            {"tool_id": str(tc_id or ""), "name": str(name or "tool"), "run_id": run_id},
+        )
+
+    def _tool_complete(tc_id: str, name: str, args: dict, result) -> None:
+        _enqueue(
+            "tool.complete",
+            {"tool_id": str(tc_id or ""), "name": str(name or "tool"), "run_id": run_id},
+        )
+
     def _approval_notify(approval_data: dict) -> None:
         # A gated tool blocked the agent thread. Redact the command (it can
         # carry secrets) and forward the prompt to the browser; the user's
@@ -10716,6 +10735,9 @@ async def session_chat_stream(session_id: str, request: Request):
                         conversation_history=history,
                         session_id=sid,
                         stream_delta_callback=_delta,
+                        reasoning_callback=_reasoning,
+                        tool_start_callback=_tool_start,
+                        tool_complete_callback=_tool_complete,
                     )
             finally:
                 run_db.close()

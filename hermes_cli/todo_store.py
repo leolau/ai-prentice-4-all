@@ -1086,27 +1086,36 @@ class TodoStore:
         own = connection is None
         conn = connection or await self._connect()
         try:
-            async def counts(column: str) -> list[dict[str, Any]]:
-                rows = await conn.fetch(
-                    f"""
-                    SELECT {column} AS value, COUNT(*) AS count
-                    FROM {TASKS_TABLE}
-                    WHERE {predicate.sql} AND {column} IS NOT NULL
-                    GROUP BY {column}
-                    ORDER BY COUNT(*) DESC
-                    """,
-                    *predicate.params,
-                )
-                return [
-                    {"value": str(row["value"]), "count": int(row["count"])}
-                    for row in rows
-                ]
-
-            return {
-                "stages": await counts("stage"),
-                "priorities": await counts("priority"),
-                "sources": await counts("source_kind"),
+            # One UNION ALL roundtrip instead of three sequential counts;
+            # Postgres reuses the $n placeholders across branches, so the
+            # scope params are passed once. ::text keeps the branches
+            # union-compatible regardless of column type.
+            facet_columns = {
+                "stages": "stage",
+                "priorities": "priority",
+                "sources": "source_kind",
             }
+            branches = [
+                f"""
+                SELECT '{facet}' AS facet, {column}::text AS value, COUNT(*) AS count
+                FROM {TASKS_TABLE}
+                WHERE {predicate.sql} AND {column} IS NOT NULL
+                GROUP BY {column}
+                """
+                for facet, column in facet_columns.items()
+            ]
+            rows = await conn.fetch(
+                " UNION ALL ".join(branches) + " ORDER BY facet, count DESC",
+                *predicate.params,
+            )
+            result: dict[str, List[dict[str, Any]]] = {
+                facet: [] for facet in facet_columns
+            }
+            for row in rows:
+                result[row["facet"]].append(
+                    {"value": str(row["value"]), "count": int(row["count"])}
+                )
+            return result
         finally:
             if own:
                 await conn.close()

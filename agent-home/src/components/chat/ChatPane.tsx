@@ -7,6 +7,7 @@ import { useRouter } from "next/navigation";
 import { ApprovalModal } from "@/components/chat/ApprovalModal";
 import { ArchivedModal } from "@/components/chat/ArchivedModal";
 import { InSessionSearch } from "@/components/chat/InSessionSearch";
+import { LiveActivity, type ToolChip } from "@/components/chat/LiveActivity";
 import { DEFAULT_PROFILE, ProfilePicker } from "@/components/chat/ProfilePicker";
 import { MessageBubble } from "@/components/chat/MessageBubble";
 import { Composer } from "@/components/chat/Composer";
@@ -16,6 +17,7 @@ import { SessionTabs } from "@/components/chat/SessionTabs";
 import { StatusIndicator } from "@/components/chat/StatusIndicator";
 import { TagFilterBar } from "@/components/chat/TagFilterBar";
 import { chatHeaderActionsRef } from "@/lib/chat/header-actions";
+import { markSessionRead } from "@/lib/chat/last-read";
 import {
   setLastAssistantContent,
   withLiveTurn,
@@ -129,6 +131,9 @@ export function ChatPane({
   const [error, setError] = useState<string | null>(null);
   const [approvals, setApprovals] = useState<Record<string, ChatApprovalRequest>>({});
   const [decisions, setDecisions] = useState<Record<string, string>>({});
+  const [liveActivity, setLiveActivity] = useState<
+    Record<string, { reasoning: string; tools: ToolChip[] }>
+  >({});
   const [resolvingApproval, setResolvingApproval] = useState(false);
   const threadRef = useRef<HTMLDivElement | null>(null);
   // Mirrors the selected session for use inside async stream callbacks, and
@@ -163,6 +168,13 @@ export function ChatPane({
   useEffect(() => {
     selectedRef.current = sessionId;
   }, [sessionId]);
+
+  // Deep-linked open (notification tap / ?session=…): the transcript is
+  // rendered server-side, so mark it read once on mount for the unread badge.
+  useEffect(() => {
+    if (initialSessionId) markSessionRead(initialSessionId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Register the chat header action callbacks (startNew / openArchived) into the
   // shared ref so the ChatHeaderActions component in the MobileShell header can
@@ -206,7 +218,7 @@ export function ChatPane({
       cancelAnimationFrame(raf1);
       cancelAnimationFrame(raf2);
     };
-  }, [messages, sendingKeys, selApproval, selDecision, loadingThread]);
+  }, [messages, sendingKeys, selApproval, selDecision, loadingThread, liveActivity]);
 
   const removeSending = (k: string) =>
     setSendingKeys((prev) => prev.filter((x) => x !== k));
@@ -243,6 +255,7 @@ export function ChatPane({
         setMessages(
           withLiveTurn(visible(body.messages ?? []), liveRef.current.get(keyOf(id))),
         );
+        markSessionRead(id);
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load conversation.");
@@ -305,6 +318,32 @@ export function ChatPane({
             const buf = liveRef.current.get(turnKey);
             setLive((buf?.assistant ?? "") + delta);
           },
+          onReasoning: (text) =>
+            setLiveActivity((prev) => ({
+              ...prev,
+              [turnKey]: {
+                reasoning: (prev[turnKey]?.reasoning ?? "") + text,
+                tools: prev[turnKey]?.tools ?? [],
+              },
+            })),
+          onToolStart: (tool) =>
+            setLiveActivity((prev) => ({
+              ...prev,
+              [turnKey]: {
+                reasoning: prev[turnKey]?.reasoning ?? "",
+                tools: [...(prev[turnKey]?.tools ?? []), { ...tool, done: false }],
+              },
+            })),
+          onToolComplete: (tool) =>
+            setLiveActivity((prev) => ({
+              ...prev,
+              [turnKey]: {
+                reasoning: prev[turnKey]?.reasoning ?? "",
+                tools: (prev[turnKey]?.tools ?? []).map((c) =>
+                  c.id === tool.id ? { ...c, done: true } : c,
+                ),
+              },
+            })),
           onApproval: (req) =>
             setApprovals((prev) => ({ ...prev, [turnKey]: req })),
           onCompleted: (content) => {
@@ -320,6 +359,7 @@ export function ChatPane({
         setSessionId(landed);
         selectedRef.current = landed;
       }
+      if (landed && onThisSession()) markSessionRead(landed);
       void refreshSessions();
     } catch (err) {
       const aborted = err instanceof DOMException && err.name === "AbortError";
@@ -347,6 +387,7 @@ export function ChatPane({
       liveRef.current.delete(turnKey);
       abortRef.current.delete(turnKey);
       setApprovals((prev) => dropKey(prev, turnKey));
+      setLiveActivity((prev) => dropKey(prev, turnKey));
     }
   }
 
@@ -777,6 +818,10 @@ export function ChatPane({
             </span>
           </div>
         ) : null}
+        <LiveActivity
+          reasoning={liveActivity[selKey]?.reasoning ?? ""}
+          tools={liveActivity[selKey]?.tools ?? []}
+        />
         <StatusIndicator
           activity={
             selApproval

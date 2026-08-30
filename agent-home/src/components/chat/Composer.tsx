@@ -72,7 +72,10 @@ export function Composer({
     <div
       data-component="Composer"
       className="sticky bottom-0 mt-3 bg-[var(--color-bg)] pt-2"
-      style={{ bottom: "calc(var(--bottom-nav-h) + var(--safe-bottom))" }}
+      style={{
+        bottom: "var(--safe-bottom)",
+        marginLeft: "calc(2.75rem + 0.75rem)",
+      }}
     >
       {attachments.length > 0 ? (
         <div className="mb-2 flex flex-wrap gap-2">

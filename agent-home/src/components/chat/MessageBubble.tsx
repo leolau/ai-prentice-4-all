@@ -4,6 +4,7 @@ import { ChatFile } from "@/components/chat/ChatFile";
 import { ChatMedia } from "@/components/chat/ChatMedia";
 import { RichText } from "@/components/chat/RichText";
 import { mediaRefPath } from "@/lib/chat/media-ref";
+import { splitCompactionContent, stripUiContextLine } from "@/lib/chat/transcript";
 import type { ChatMessage } from "@/types";
 
 interface Segment {
@@ -107,6 +108,16 @@ function highlightText(text: string, term: string): ReactNode {
   return parts.length > 1 ? parts : text;
 }
 
+function CompactionDivider() {
+  return (
+    <div data-component="CompactionDivider" className="flex justify-center">
+      <span className="text-xs italic text-[var(--color-muted)]">
+        Context compacted
+      </span>
+    </div>
+  );
+}
+
 export function MessageBubble({
   message,
   msgIndex,
@@ -117,26 +128,46 @@ export function MessageBubble({
   highlightTerm?: string;
 }) {
   const isUser = message.role === "user";
-  const content = message.content ?? "";
+  const split = splitCompactionContent(message.content ?? "");
+  const content = isUser ? stripUiContextLine(split.display) : split.display;
+  const reasoning = isUser ? "" : (message.reasoning ?? "").trim();
+
+  if (content === "" && reasoning === "") {
+    // Summary-only row (or a user turn that was just the context line): no
+    // bubble at all — at most the compaction divider.
+    return split.hadCompaction ? <CompactionDivider /> : null;
+  }
+
   return (
-    <div
-      data-component="MessageBubble"
-      data-msg-index={msgIndex}
-      className={`flex ${isUser ? "justify-end" : "justify-start"}`}
-    >
+    <>
+      {split.hadCompaction ? <CompactionDivider /> : null}
       <div
-        className={`max-w-[85%] break-words rounded-2xl px-3 py-2 text-sm ${
-          isUser
-            ? "whitespace-pre-wrap bg-[var(--color-accent)] text-[var(--color-accent-fg)]"
-            : "bg-[var(--color-surface-2)] text-[var(--color-fg)]"
-        }`}
+        data-component="MessageBubble"
+        data-msg-index={msgIndex}
+        className={`flex ${isUser ? "justify-end" : "justify-start"}`}
       >
-        {isUser ? (
-          <UserContent content={content} highlightTerm={highlightTerm} />
-        ) : (
-          <RichText content={content} />
-        )}
+        <div
+          className={`max-w-[85%] break-words rounded-2xl px-3 py-2 text-sm ${
+            isUser
+              ? "whitespace-pre-wrap bg-[var(--color-accent)] text-[var(--color-accent-fg)]"
+              : "bg-[var(--color-surface-2)] text-[var(--color-fg)]"
+          }`}
+        >
+          {isUser ? (
+            <UserContent content={content} highlightTerm={highlightTerm} />
+          ) : (
+            <>
+              {reasoning !== "" ? (
+                <details className="mb-2 text-xs text-[var(--color-muted)]">
+                  <summary className="cursor-pointer select-none">Reasoning</summary>
+                  <div className="mt-1 whitespace-pre-wrap">{reasoning}</div>
+                </details>
+              ) : null}
+              <RichText content={content} />
+            </>
+          )}
+        </div>
       </div>
-    </div>
+    </>
   );
 }

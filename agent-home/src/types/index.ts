@@ -326,6 +326,8 @@ export interface ChatMessage {
   role: ChatRole;
   content: string;
   timestamp?: number | string | null;
+  /** Persisted extended-thinking text (SessionDB `reasoning` column). */
+  reasoning?: string | null;
 }
 
 /**
@@ -1104,6 +1106,23 @@ export interface TodoDetail extends Todo {
 export interface TodosResponse {
   items: Todo[];
   next_cursor: string | null;
+}
+
+/**
+ * The redacted HTTP view of one unified-credential-store entry
+ * (docs/design/unified-credential-store.md). Secret payload fields are
+ * stripped server-side; what remains is safe to render in Settings.
+ */
+export interface CredentialEntry {
+  owner_user_id: string;
+  provider: string;
+  name: string;
+  kind: string;
+  visibility: string;
+  services: string[];
+  payload: Record<string, unknown>;
+  created_at: string | null;
+  updated_at: string | null;
 }
 
 /** What the to-do filter chips can offer without leading to an empty list. */

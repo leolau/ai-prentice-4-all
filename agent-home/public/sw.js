@@ -10,7 +10,7 @@
  *   - NEVER cache API/auth responses or cross-origin requests — those carry
  *     per-principal data and must always hit the network.
  */
-const VERSION = "agent-home-v1";
+const VERSION = "agent-home-v2";
 const SHELL_CACHE = `${VERSION}-shell`;
 const RUNTIME_CACHE = `${VERSION}-runtime`;
 const OFFLINE_URL = "/offline.html";
@@ -80,4 +80,45 @@ self.addEventListener("fetch", (event) => {
       }),
     );
   }
+});
+
+/*
+ * App-channel Web Push. The Python sender's payload is
+ * {title, body, url, icon, badge, tag} — `url` deep-links into the chat
+ * topic the delivery landed in (/chat?session=<id>).
+ */
+self.addEventListener("push", (event) => {
+  let data = {};
+  try {
+    data = event.data ? event.data.json() : {};
+  } catch {
+    data = { body: event.data ? event.data.text() : "" };
+  }
+  event.waitUntil(
+    self.registration.showNotification(data.title || "Hermes", {
+      body: data.body || "",
+      icon: data.icon || "/icons/icon-192.png",
+      badge: data.badge || "/icons/icon-192.png",
+      tag: data.tag || undefined,
+      data: { url: data.url || "/" },
+    }),
+  );
+});
+
+self.addEventListener("notificationclick", (event) => {
+  event.notification.close();
+  const target = (event.notification.data && event.notification.data.url) || "/";
+  event.waitUntil(
+    self.clients
+      .matchAll({ type: "window", includeUncontrolled: true })
+      .then((clients) => {
+        const existing = clients.find((c) => "focus" in c);
+        if (existing) {
+          existing.focus();
+          if ("navigate" in existing) return existing.navigate(target);
+          return undefined;
+        }
+        return self.clients.openWindow(target);
+      }),
+  );
 });

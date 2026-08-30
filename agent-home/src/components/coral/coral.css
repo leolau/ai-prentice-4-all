@@ -1,0 +1,163 @@
+/*
+ * Coral launcher — panel + tile motion (design: coral-app-framework.md).
+ * The launcher opens as a grid panel anchored above the floating button;
+ * tiles stagger in from a slight scale so the open still feels like a bloom.
+ * Keyframes animate FROM a reduced state TO the element's own styles, so
+ * `animation: none` (reduced motion) leaves everything in its final spot.
+ */
+
+.coral-panel {
+  position: fixed;
+  z-index: 50;
+  left: 0.75rem;
+  bottom: calc(var(--safe-bottom) + 4.5rem);
+  width: min(calc(100vw - 1.5rem), 26rem);
+  max-height: min(70dvh, 36rem);
+  overflow-y: auto;
+  border: 1px solid var(--color-border);
+  border-radius: 1.5rem;
+  background: var(--color-surface);
+  box-shadow: 0 12px 40px 0 rgb(0 0 0 / 0.45);
+  padding: 1rem;
+  transform-origin: bottom left;
+  animation: coral-panel-in 200ms cubic-bezier(0.2, 0.9, 0.3, 1.05) backwards;
+}
+
+@keyframes coral-panel-in {
+  from {
+    transform: scale(0.7);
+    opacity: 0;
+  }
+}
+
+/* Launcher panel groups — Main / Workspace / System each get their own tint
+   so the grouping reads at a glance. color-mix keeps all three themes valid:
+   every tint is anchored on the theme's own surface + accent. */
+.coral-section {
+  padding: 0.5rem;
+  border-radius: 1rem;
+}
+
+.coral-section--main {
+  background: color-mix(in srgb, var(--color-accent) 10%, var(--color-surface));
+}
+
+.coral-section--workspace {
+  background: color-mix(in srgb, #2dd4bf 13%, var(--color-surface));
+}
+
+.coral-section--system {
+  background: color-mix(in srgb, #a78bfa 13%, var(--color-surface));
+}
+
+.coral-tile {
+  animation: coral-tile-in 180ms ease-out backwards;
+  animation-delay: var(--coral-delay, 0ms);
+}
+
+@keyframes coral-tile-in {
+  from {
+    transform: scale(0.6);
+    opacity: 0;
+  }
+}
+
+.coral-backdrop {
+  animation: coral-fade-in 160ms ease-out backwards;
+}
+
+@keyframes coral-fade-in {
+  from {
+    opacity: 0;
+  }
+}
+
+/* The launcher's heartbeat — disabled for reduced motion below. */
+.coral-fab {
+  animation: coral-breathe 3.6s ease-in-out infinite;
+}
+
+@keyframes coral-breathe {
+  0%,
+  100% {
+    box-shadow: 0 4px 18px 0 color-mix(in srgb, var(--color-accent) 45%, transparent);
+  }
+  50% {
+    box-shadow: 0 4px 26px 4px color-mix(in srgb, var(--color-accent) 65%, transparent);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .coral-panel,
+  .coral-tile,
+  .coral-backdrop,
+  .coral-fab {
+    animation: none;
+  }
+}
+
+/* Lead chat — the second Coral button's floating panel (bottom-right). */
+.leadchat-panel {
+  position: fixed;
+  z-index: 50;
+  right: 0.75rem;
+  bottom: calc(var(--safe-bottom) + 5.5rem);
+  width: min(calc(100vw - 1.5rem), 24rem);
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--color-border);
+  border-radius: 1.5rem;
+  /* Accent-tinted on purpose: the panel must read as its own working area,
+     not as part of the page underneath it. */
+  background: color-mix(in srgb, var(--color-accent) 12%, var(--color-surface));
+  box-shadow: 0 12px 40px 0 rgb(0 0 0 / 0.45);
+  padding: 0.75rem;
+  transform-origin: bottom right;
+  animation: coral-panel-in 200ms cubic-bezier(0.2, 0.9, 0.3, 1.05) backwards;
+}
+
+.leadchat-scroll {
+  overflow-y: auto;
+  max-height: min(50dvh, 26rem);
+  padding: 0.25rem;
+}
+
+/* Drag grip — the header area moves the panel; resize grips — two corners:
+   bottom-right (.leadchat-resize) and upper-left (.leadchat-resize-tl).
+   touch-action: none lets pointer drags win over page scrolling on touch. */
+.leadchat-drag {
+  cursor: grab;
+  touch-action: none;
+}
+
+.leadchat-drag:active {
+  cursor: grabbing;
+}
+
+.leadchat-resize {
+  position: absolute;
+  right: 4px;
+  bottom: 4px;
+  width: 32px;
+  height: 32px;
+  cursor: nwse-resize;
+  touch-action: none;
+  border-right: 3px solid var(--color-border);
+  border-bottom: 3px solid var(--color-border);
+  border-bottom-right-radius: 10px;
+  opacity: 0.85;
+}
+
+.leadchat-resize-tl {
+  position: absolute;
+  left: 4px;
+  top: 4px;
+  width: 32px;
+  height: 32px;
+  cursor: nwse-resize;
+  touch-action: none;
+  border-left: 3px solid var(--color-border);
+  border-top: 3px solid var(--color-border);
+  border-top-left-radius: 10px;
+  opacity: 0.85;
+}

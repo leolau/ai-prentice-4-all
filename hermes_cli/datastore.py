@@ -589,6 +589,8 @@ async def initialize_supabase_app(connection: asyncpg.Connection) -> None:
             ADD COLUMN IF NOT EXISTS trace_id TEXT;
         CREATE INDEX IF NOT EXISTS changes_trace_id_idx
             ON {prod}.changes (trace_id);
+        CREATE INDEX IF NOT EXISTS changes_ts_idx
+            ON {prod}.changes (ts DESC);
 
         CREATE TABLE IF NOT EXISTS {prod}.promotions (
             id TEXT PRIMARY KEY,
