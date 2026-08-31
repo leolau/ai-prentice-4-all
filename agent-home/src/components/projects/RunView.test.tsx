@@ -170,18 +170,19 @@ describe("RunView Stop now", () => {
       <RunView slug="monday-digest" run={RUN({ status: "running" })} />,
     );
     const stop = getByRole("button", { name: "Stop now" });
+    const stopCalls = () =>
+      fetchMock.mock.calls.filter(
+        (call) => String(call[0]) === "/api/projects/monday-digest/runs/1/stop",
+      );
 
-    // Declined: nothing is sent. A kill must not happen on one stray tap.
+    // Declined: nothing is stopped. A kill must not happen on one stray tap.
     fireEvent.click(stop);
     expect(confirmMock).toHaveBeenCalled();
-    expect(fetchMock).not.toHaveBeenCalled();
+    expect(stopCalls()).toHaveLength(0);
 
     confirmMock.mockReturnValue(true);
     fireEvent.click(stop);
-    await waitFor(() => expect(fetchMock).toHaveBeenCalled());
-    expect(fetchMock.mock.calls[0]?.[0]).toBe(
-      "/api/projects/monday-digest/runs/1/stop",
-    );
+    await waitFor(() => expect(stopCalls()).toHaveLength(1));
   });
 
   it("is not offered once the run is over", () => {

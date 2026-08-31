@@ -35,11 +35,13 @@ const EDGE = 8;
 
 /**
  * Lead chat — the second Coral floating button (bottom-right). Opens a
- * floating panel bound to ONE long-running session: the id is pinned in
- * localStorage on first use and reused forever, so the conversation is the
- * same every time. The Python agent core compacts that session's context
- * automatically when it approaches the context window, which is what makes a
- * session long-running rather than long-forgotten.
+ * floating panel bound to ONE long-running session, resolved from the server
+ * (`GET /api/chat/lead`) rather than pinned in this browser: the id is derived
+ * from the signed-in principal, so a phone and a desktop open the *same*
+ * conversation and a turn still running when you put the phone down is there,
+ * mid-flight, when you sign in on the desktop. The Python agent core compacts
+ * that session's context automatically when it approaches the context window,
+ * which is what makes a session long-running rather than long-forgotten.
  *
  * The panel is a floating window, not a modal: drag the header to move it,
  * drag either corner grip (bottom-right or upper-left) to resize it. The
@@ -53,12 +55,7 @@ export function LeadChatHost({
   storageEnabled?: boolean;
 }) {
   const [open, setOpen] = useState(false);
-  const [leadSession, setLeadSession] = usePersistentState<string | null>(
-    "agent-home:lead-session",
-    null,
-    (raw) => JSON.parse(raw) as string | null,
-    (value) => JSON.stringify(value),
-  );
+  const [leadSession, setLeadSession] = useState<string | null>(null);
   const [rect, setRect] = usePersistentState<LeadChatRect | null>(
     "agent-home:leadchat-rect",
     null,
@@ -77,20 +74,39 @@ export function LeadChatHost({
   const scrollRef = useRef<HTMLDivElement>(null);
   const fabRef = useRef<HTMLButtonElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
+  /** Bumped on every turn started here, so a slow history load can tell it is stale. */
+  const turnsRef = useRef(0);
 
   const effectiveRect = dragRect ?? rect;
+
+  // Which conversation this panel is. Asked once the panel opens, so a
+  // signed-in page that never opens the lead chat creates no session.
+  useEffect(() => {
+    if (!open || leadSession) return;
+    let cancelled = false;
+    void resolveLeadSession().then((sid) => {
+      if (!cancelled && sid) setLeadSession(sid);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [open, leadSession]);
 
   useEffect(() => {
     if (!open || !leadSession) return;
     let cancelled = false;
+    // A turn begun while this load is in flight is newer than the transcript
+    // it answers with; applying it would erase what the user just sent.
+    const turnsAtStart = turnsRef.current;
+    const stale = () => cancelled || turnsRef.current !== turnsAtStart;
     setLoading(true);
     fetch(`/api/chat/messages?sessionId=${encodeURIComponent(leadSession)}`)
       .then((res) => (res.ok ? res.json() : { messages: [] }))
       .then((data: { messages?: ChatMessage[] }) => {
-        if (!cancelled) setMessages(visibleTurns(data.messages ?? []));
+        if (!stale()) setMessages(visibleTurns(data.messages ?? []));
       })
       .catch(() => {
-        if (!cancelled) setMessages([]);
+        if (!stale()) setMessages([]);
       })
       .finally(() => {
         if (!cancelled) setLoading(false);
@@ -129,7 +145,6 @@ export function LeadChatHost({
     return () => {
       cancelled = true;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, leadSession, sending]);
 
   useEffect(() => {
@@ -252,9 +267,12 @@ export function LeadChatHost({
         setActivity("waiting_approval");
         setApproval(req);
       },
-      onCompleted: (content, sessionId) => {
+      onCompleted: (content) => {
+        // Deliberately does NOT re-pin to the id the turn reports: a compacted
+        // conversation answers under a continuation id, and adopting it here
+        // would make this browser's lead chat diverge from every other one.
+        // Every read path resolves the chain from the root id.
         setMessages((prev) => [...prev, { role: "assistant", content }]);
-        if (sessionId) setLeadSession(sessionId);
         setStreamText("");
         setReasoningText("");
         setToolChips([]);
@@ -269,8 +287,37 @@ export function LeadChatHost({
     };
   }
 
+  /** The server's answer to "which conversation am I", or null if it can't say. */
+  async function resolveLeadSession(): Promise<string | null> {
+    try {
+      const res = await fetch("/api/chat/lead");
+      if (!res.ok) return null;
+      const data = (await res.json()) as { sessionId?: string | null };
+      return data.sessionId ?? null;
+    } catch {
+      return null;
+    }
+  }
+
   async function send(text: string, attachments: ChatAttachment[]) {
     if (sending) return;
+    // Sending with no session id would start a *new* conversation, which is
+    // the bug this panel used to have in a different shape: a lead chat that
+    // is only this browser's. Better to say so than to fork it silently.
+    const sessionId = leadSession ?? (await resolveLeadSession());
+    if (!sessionId) {
+      setMessages((prev) => [
+        ...prev,
+        {
+          role: "assistant",
+          content:
+            "The lead conversation could not be reached, so this message was not sent. Try again in a moment.",
+        },
+      ]);
+      return;
+    }
+    if (sessionId !== leadSession) setLeadSession(sessionId);
+    turnsRef.current += 1;
     setSending(true);
     setActivity("thinking");
     setStreamText("");
@@ -279,7 +326,7 @@ export function LeadChatHost({
     setMessages((prev) => [...prev, { role: "user", content: text }]);
     try {
       await streamChatTurn(
-        { sessionId: leadSession, message: text, attachments },
+        { sessionId, message: text, attachments },
         makeHandlers(),
       );
     } catch (err) {
@@ -339,7 +386,7 @@ export function LeadChatHost({
             >
               <h3 className="text-sm font-semibold">Lead chat</h3>
               <p className="text-[11px] text-[var(--color-muted)]">
-                One long-running session — context compacts when needed.
+                One long-running session, the same on every device.
               </p>
             </div>
             <div className="flex shrink-0 items-center gap-2 text-sm">

@@ -590,6 +590,22 @@ export class HermesApiClient {
   }
 
   /**
+   * The caller's lead conversation: one session per person, the same one on
+   * every device they sign in on. Created on the first ask.
+   */
+  async leadSession(): Promise<{
+    session_id: string;
+    resume_session_id: string;
+    created: boolean;
+  }> {
+    return this.request<{
+      session_id: string;
+      resume_session_id: string;
+      created: boolean;
+    }>(`/api/sessions/lead`);
+  }
+
+  /**
    * The in-flight turn for a session, if any — a reloaded page asks this
    * first, then re-attaches to the stream to resume live rendering.
    */
@@ -1773,6 +1789,39 @@ export class HermesApiClient {
       `/api/registry/projects/${encodeURIComponent(slug)}/runs/${encodeURIComponent(runNo)}/cancel`,
       { method: "POST", json: {} },
     );
+  }
+
+  /**
+   * The run's live reasoning and tool activity as raw SSE, for the BFF to
+   * pipe. `after` resumes from a sequence number so a reconnect replays what
+   * it missed. Like `openChatStream`, the body is NOT consumed here.
+   */
+  async openRunActivityStream(
+    slug: string,
+    runNo: number,
+    after: number,
+  ): Promise<Response> {
+    const headers = new Headers({ accept: "text/event-stream" });
+    if (this.hermesToken) {
+      headers.set("cookie", `hermes_session_at=${this.hermesToken}`);
+      headers.set("authorization", `Bearer ${this.hermesToken}`);
+    }
+    const res = await fetch(
+      `${this.baseUrl}/api/registry/projects/${encodeURIComponent(slug)}/runs/${encodeURIComponent(runNo)}/activity?after=${encodeURIComponent(after)}`,
+      { headers, cache: "no-store" },
+    );
+    if (!res.ok || !res.body) {
+      const text = res.body ? await res.text().catch(() => "") : "";
+      throw new HermesApiError(
+        res.status,
+        upstreamDetail(
+          text ? safeJson(text) : undefined,
+          "That run has no activity to show.",
+        ),
+        text,
+      );
+    }
+    return res;
   }
 
   /** Stop the run now: terminate live workers, then close it. */

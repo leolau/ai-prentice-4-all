@@ -10,6 +10,8 @@ import {
 } from "@/components/projects/format";
 import { unwrapRunEnvelope } from "@/components/projects/envelopes";
 import { useRunLive } from "@/components/projects/useRunLive";
+import { useRunActivity } from "@/components/projects/useRunActivity";
+import { LiveActivity } from "@/components/chat/LiveActivity";
 import { BusyRegion } from "@/components/ui/BusyRegion";
 import { Pill, type Tone } from "@/components/ui/Pill";
 import type { ProjectDelivery, ProjectRun, ProjectRunStatus } from "@/types";
@@ -40,6 +42,11 @@ function deliveryLabel(delivery: ProjectDelivery): string {
  * the score. Continue passes a checkpoint; Cancel stops promoting and lets a
  * running card finish; "Stop now" terminates the live workers and closes the
  * run; "Repeat this run" starts a new one on the same method.
+ *
+ * While the run is live it also shows what the run is *thinking* — the
+ * agent's reasoning and its tool calls, streamed — for the run's inline
+ * steps. A board-dispatched card runs in another process and is not visible
+ * that way; the panel says so rather than reading as an idle run.
  */
 export function RunView({
   slug,
@@ -146,6 +153,7 @@ export function RunView({
     run.status === "blocked";
   // The row says running but the server saw no worker behind it — say so.
   const stalled = run.status === "running" && run.stalled === true;
+  const activity = useRunActivity(slug, run.run_no, live);
 
   return (
     <div data-component="RunView" className="flex flex-col gap-4">
@@ -268,6 +276,31 @@ export function RunView({
                 stalled. Cancel stops it; retry the blocked work below;
                 Repeat starts a fresh run on the same method.
               </p>
+            ) : null}
+
+            {live ? (
+              <div data-component="RunActivity" className="mt-3">
+                <p className="text-xs font-medium text-[var(--color-muted)]">
+                  What this run is doing
+                </p>
+                {activity.unavailable ? (
+                  <p className="mt-1 text-xs text-[var(--color-muted)]">
+                    This run&rsquo;s work is running on the board, in its own
+                    worker — its reasoning is not streamed here. The cards
+                    below move as it progresses.
+                  </p>
+                ) : activity.reasoning === "" &&
+                  activity.tools.length === 0 ? (
+                  <p className="mt-1 text-xs text-[var(--color-muted)]">
+                    Waiting for the first thing it says&hellip;
+                  </p>
+                ) : (
+                  <LiveActivity
+                    reasoning={activity.reasoning}
+                    tools={activity.tools}
+                  />
+                )}
+              </div>
             ) : null}
 
             {archived ? (
