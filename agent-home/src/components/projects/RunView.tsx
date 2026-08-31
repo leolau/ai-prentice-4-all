@@ -37,8 +37,9 @@ function deliveryLabel(delivery: ProjectDelivery): string {
 /**
  * One run's page (§7): what it did — cards, deliveries, cost, outcome — and
  * the two things a human writes about it afterwards, the retro and (step 9b)
- * the score. Continue passes a checkpoint; Cancel stops promoting without
- * killing a worker; "Repeat this run" starts a new one on the same method.
+ * the score. Continue passes a checkpoint; Cancel stops promoting and lets a
+ * running card finish; "Stop now" terminates the live workers and closes the
+ * run; "Repeat this run" starts a new one on the same method.
  */
 export function RunView({
   slug,
@@ -215,6 +216,25 @@ export function RunView({
                   className="rounded-xl border border-red-500/50 px-4 py-2 text-sm text-red-400 disabled:opacity-50"
                 >
                   Cancel
+                </button>
+              ) : null}
+              {live ? (
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (
+                      !window.confirm(
+                        "Stop this run now? Work in progress is terminated where it stands — Cancel instead lets a running card finish.",
+                      )
+                    ) {
+                      return;
+                    }
+                    void post(`${runPath}/stop`, undefined, true);
+                  }}
+                  disabled={busy}
+                  className="rounded-xl bg-red-500/90 px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
+                >
+                  Stop now
                 </button>
               ) : null}
               {(!live || stalled) && !archived ? (

@@ -2409,6 +2409,33 @@ async def cancel_run_route(request: Request, run_no: int) -> dict[str, Any]:
         raise HTTPException(status_code=404, detail="run not found")
 
 
+@router.post("/{slug}/runs/{run_no}/stop")
+async def stop_run_route(request: Request, run_no: int) -> dict[str, Any]:
+    """Stop the run now: terminate every live worker, archive what has not
+    started, close the run. The verb Cancel deliberately is not (§12)."""
+    project, _role, _profiles, _principal = await _require_write(
+        request, judgement=True
+    )
+
+    def _stop_sync() -> dict:
+        with projects_db.connect_closing() as conn:
+            run = projects_db.get_project_run(conn, project.id, run_no)
+            if run is None:
+                raise KeyError(run_no)
+            with _board_conn(project) as bconn:
+                try:
+                    return projects_run.stop_run(
+                        conn, bconn, project=project, run=run
+                    )
+                except ValueError as exc:
+                    raise HTTPException(status_code=409, detail=str(exc))
+
+    try:
+        return await asyncio.to_thread(_stop_sync)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="run not found")
+
+
 VALID_PROPOSAL_KINDS = ("playbook", "directive", "skill")
 
 
