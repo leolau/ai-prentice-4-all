@@ -32,7 +32,7 @@ import re
 import uuid
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
-from hermes_cli import kanban_db, projects_db
+from hermes_cli import kanban_db, projects_db, run_activity
 
 log = logging.getLogger(__name__)
 
@@ -1044,7 +1044,14 @@ def _default_spawn_inline(
     inline_steps: Sequence[dict],
     enabled_toolsets: Optional[Sequence[str]] = None,
 ) -> Dict[str, Any]:
-    """The ONLY session-spawn path this feature may use (§6)."""
+    """The ONLY session-spawn path this feature may use (§6).
+
+    The session's reasoning and tool calls are published to
+    :mod:`hermes_cli.run_activity` as they happen, so the run page can show
+    what the run is doing rather than only that it is running. Only the
+    reasoning text and a tool's id and name are published — arguments and
+    results stay in this process.
+    """
     try:
         from agent.seeded_session import spawn_seeded_session
     except Exception as exc:  # noqa: BLE001
@@ -1062,18 +1069,38 @@ def _default_spawn_inline(
     from hermes_cli import profiles
 
     host_profile = run.get("profile")
-    result = spawn_seeded_session(
-        prompt,
-        origin=f"projects:{project.slug}:run-{run.get('run_no')}",
-        session_id=session_id,
-        # The run executes in the HOST profile's home — its memory, secrets
-        # and soul, matching the profile the run row records (§6).
-        profile_home=(
-            str(profiles.get_profile_dir(host_profile)) if host_profile else None
-        ),
-        enabled_toolsets=list(enabled_toolsets) if enabled_toolsets else None,
-        context=contextvars.copy_context(),
+    key = run_activity.run_key(project.id, int(run.get("run_no") or 0))
+    run_activity.begin(key)
+    run_activity.publish_reasoning(
+        key,
+        f"Starting {len(inline_steps)} inline step(s): "
+        + ", ".join(s["key"] for s in inline_steps),
     )
+    try:
+        result = spawn_seeded_session(
+            prompt,
+            origin=f"projects:{project.slug}:run-{run.get('run_no')}",
+            session_id=session_id,
+            # The run executes in the HOST profile's home — its memory,
+            # secrets and soul, matching the profile the run row records
+            # (§6).
+            profile_home=(
+                str(profiles.get_profile_dir(host_profile)) if host_profile else None
+            ),
+            enabled_toolsets=list(enabled_toolsets) if enabled_toolsets else None,
+            context=contextvars.copy_context(),
+            reasoning_callback=lambda text: run_activity.publish_reasoning(key, text),
+            tool_start_callback=lambda tc_id, name, args: run_activity.publish_tool(
+                key, "start", tc_id, name
+            ),
+            tool_complete_callback=(
+                lambda tc_id, name, args, res: run_activity.publish_tool(
+                    key, "complete", tc_id, name
+                )
+            ),
+        )
+    finally:
+        run_activity.finish(key, "Inline steps finished.")
     return {
         "session_id": session_id,
         "error": result.error,

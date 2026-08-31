@@ -44,14 +44,22 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 import logging
 import re
 import time
 from typing import Any, Optional
 
 from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import StreamingResponse
 
-from hermes_cli import kanban_db, kanban_view, projects_db, projects_schedule
+from hermes_cli import (
+    kanban_db,
+    kanban_view,
+    projects_db,
+    projects_schedule,
+    run_activity,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -2407,6 +2415,89 @@ async def cancel_run_route(request: Request, run_no: int) -> dict[str, Any]:
         return await asyncio.to_thread(_cancel_sync)
     except KeyError:
         raise HTTPException(status_code=404, detail="run not found")
+
+
+#: How often the activity stream looks for new events. Reasoning arrives in
+#: bursts, so a short poll of an in-memory buffer reads as live without
+#: coupling the agent thread to this request's event loop.
+_ACTIVITY_TICK_SECONDS = 0.4
+
+
+@router.get("/{slug}/runs/{run_no}/activity")
+async def run_activity_route(request: Request, run_no: int) -> StreamingResponse:
+    """What the run is thinking, as it thinks it (§12).
+
+    Server-sent events: ``reasoning`` for the agent's own words, ``tool``
+    for a tool's id and name, ``status`` for start/end. A tool's arguments
+    and results are never sent — they carry file contents and credentials,
+    and this stream is read by a browser.
+
+    ``?after=`` resumes from a sequence number, so a reconnect (or a second
+    device) replays what it missed rather than starting blank. Only the
+    run's **inline** steps are visible here: a board-dispatched card runs in
+    another process, and the stream says ``unavailable`` rather than
+    implying an empty buffer means an idle run.
+    """
+    project, _role, _profiles, _principal = await _require_read(request)
+    raw_after = request.query_params.get("after")
+    after = 0
+    if raw_after is not None:
+        try:
+            after = int(raw_after)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="after must be an integer")
+        if after < 0:
+            raise HTTPException(status_code=400, detail="after must be >= 0")
+
+    def _run_sync() -> Optional[dict]:
+        with projects_db.connect_closing() as conn:
+            return projects_db.get_project_run(conn, project.id, run_no)
+
+    run = await asyncio.to_thread(_run_sync)
+    if run is None:
+        raise HTTPException(status_code=404, detail="run not found")
+
+    key = run_activity.run_key(project.id, run_no)
+
+    async def _events():
+        cursor = after
+        while True:
+            events, done, known = run_activity.read(key, cursor)
+            if not known:
+                yield _sse(
+                    "unavailable",
+                    {
+                        "reason": (
+                            "This run's steps are not running in this process, "
+                            "so there is no live reasoning to show."
+                        )
+                    },
+                )
+                return
+            for event in events:
+                cursor = event["seq"]
+                yield _sse(event["kind"], event)
+            if done:
+                yield _sse("end", {"cursor": cursor})
+                return
+            if await request.is_disconnected():
+                return
+            await asyncio.sleep(_ACTIVITY_TICK_SECONDS)
+
+    return StreamingResponse(
+        _events(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+def _sse(event: str, payload: dict) -> bytes:
+    return f"event: {event}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n".encode(
+        "utf-8"
+    )
 
 
 VALID_PROPOSAL_KINDS = ("playbook", "directive", "skill")

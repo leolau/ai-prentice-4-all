@@ -49,7 +49,9 @@ export interface ChatStreamParams {
   profile?: string;
 }
 
-interface StreamFrame {
+/** One parsed SSE frame. Exported: the projects run activity stream is the
+ * same wire format read by a different consumer. */
+export interface StreamFrame {
   event: string;
   data: Record<string, unknown>;
 }
@@ -150,9 +152,6 @@ async function consumeStream(
   handlers: ChatStreamHandlers,
   initialSessionId: string,
 ): Promise<{ completedContent: string; landedSessionId: string }> {
-  const reader = res.body!.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
   let completedContent = "";
   let landedSessionId = initialSessionId;
 
@@ -194,6 +193,23 @@ async function consumeStream(
     }
   };
 
+  await readSseFrames(res, dispatch);
+
+  return { completedContent, landedSessionId };
+}
+
+/**
+ * Read an SSE response frame by frame until the stream ends. Shared by the
+ * chat turn reader and the projects run activity reader — one parser, so a
+ * keepalive comment or a split frame is handled the same way on both.
+ */
+export async function readSseFrames(
+  res: Response,
+  onFrame: (frame: StreamFrame) => void,
+): Promise<void> {
+  const reader = res.body!.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
   for (;;) {
     const { done, value } = await reader.read();
     if (done) break;
@@ -204,11 +220,9 @@ async function consumeStream(
       buffer = buffer.slice(sep + 2);
       if (block.trim() && !block.startsWith(":")) {
         const frame = parseFrame(block);
-        if (frame) dispatch(frame);
+        if (frame) onFrame(frame);
       }
       sep = buffer.indexOf("\n\n");
     }
   }
-
-  return { completedContent, landedSessionId };
 }

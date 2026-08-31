@@ -914,3 +914,46 @@ def test_default_spawn_runs_in_the_host_profile_home(stores, monkeypatch):
     assert calls, "the default spawn must go through spawn_seeded_session"
     assert calls[0]["profile_home"] == str(profiles.get_profile_dir("default"))
     assert calls[0]["context"] is not None
+
+
+def test_default_spawn_publishes_the_run_s_reasoning_and_tool_names(
+    stores, monkeypatch
+):
+    """The run page's activity comes from the seeded session's own
+    callbacks: what the agent reasons and which tools it calls are
+    published as they happen, and a tool's arguments and result are not."""
+    from types import SimpleNamespace
+
+    from agent import seeded_session
+    from hermes_cli import run_activity
+
+    def fake_spawn(prompt, **kwargs):
+        kwargs["reasoning_callback"]("Reading last week's digest")
+        kwargs["tool_start_callback"]("tc-1", "read_file", {"path": "/etc/secret"})
+        kwargs["tool_complete_callback"](
+            "tc-1", "read_file", {"path": "/etc/secret"}, "s3cr3t contents"
+        )
+        return SimpleNamespace(
+            session_id=kwargs["session_id"], result=None,
+            timed_out=False, error=None,
+        )
+
+    monkeypatch.setattr(seeded_session, "spawn_seeded_session", fake_spawn)
+    project, _ = _make_project()
+    _save_playbook(
+        project.id, [{"key": "read", "title": "Read", "mode": "inline"}]
+    )
+    with projects_db.connect_closing() as conn:
+        projects_db.activate_playbook_rev(conn, project.id, 1)
+    result = _start(project.id)
+
+    key = run_activity.run_key(project.id, result["run"]["run_no"])
+    events, done, known = run_activity.read(key)
+    assert known and done, "the run's activity must be readable after it ends"
+    kinds = [e["kind"] for e in events]
+    assert kinds == ["reasoning", "reasoning", "tool.start", "tool.complete", "status"]
+    assert events[1]["text"] == "Reading last week's digest"
+    assert events[2]["name"] == "read_file"
+    # The tool's path argument and its result stayed in this process.
+    blob = repr(events)
+    assert "/etc/secret" not in blob and "s3cr3t" not in blob
