@@ -590,6 +590,22 @@ export class HermesApiClient {
   }
 
   /**
+   * The caller's lead conversation: one session per person, the same one on
+   * every device they sign in on. Created on the first ask.
+   */
+  async leadSession(): Promise<{
+    session_id: string;
+    resume_session_id: string;
+    created: boolean;
+  }> {
+    return this.request<{
+      session_id: string;
+      resume_session_id: string;
+      created: boolean;
+    }>(`/api/sessions/lead`);
+  }
+
+  /**
    * The in-flight turn for a session, if any — a reloaded page asks this
    * first, then re-attaches to the stream to resume live rendering.
    */

@@ -16,6 +16,7 @@ import base64
 import binascii
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import hashlib
 import hmac
 import importlib.util
 import json
@@ -9993,10 +9994,49 @@ def _chat_turn_profile_scope(profile: Optional[str]):
 
 
 # ---------------------------------------------------------------------------
-# Session tag endpoints — literal paths registered *before* the
-# parameterized ``/api/sessions/{session_id}`` routes so ``tags`` is not
-# captured as a session id.
+# Literal ``/api/sessions/<word>`` paths — registered *before* the
+# parameterized ``/api/sessions/{session_id}`` routes so ``tags`` and ``lead``
+# are not captured as session ids.
 # ---------------------------------------------------------------------------
+def lead_session_id(user_id: str) -> str:
+    """The id of *user_id*'s lead conversation, derived rather than stored.
+
+    The lead chat is one conversation per person that never ends. Deriving its
+    id from the principal means every device the person signs in on names the
+    same session without any pinning: a phone and a desktop are the same chat
+    because they compute the same id, not because they agreed on one earlier.
+
+    Hashed rather than embedded: a ``user_id`` is an email or an auth subject,
+    and a session id reaches the filesystem (transcript exports, log lines).
+    """
+    digest = hashlib.sha256(f"agent-home:lead:{user_id}".encode("utf-8")).hexdigest()
+    return f"lead_{digest[:24]}"
+
+
+@app.get("/api/sessions/lead")
+async def get_lead_session(request: Request, profile: Optional[str] = None):
+    """The caller's lead conversation — created on first ask, then forever.
+
+    Returns the *root* id. A long conversation compacts into a continuation
+    session with a new id, and every read path resolves the chain from the
+    root, so the root stays the name of the conversation for its whole life.
+    """
+    principal = await _comms_resolve_principal(request)
+    db = _open_session_db_for_profile(profile)
+    try:
+        sid = lead_session_id(principal.user_id)
+        created = db.get_session(sid) is None
+        if created:
+            db.ensure_session(sid, source="agent_home")
+        return {
+            "session_id": sid,
+            "resume_session_id": db.resolve_resume_session_id(sid),
+            "created": created,
+        }
+    finally:
+        db.close()
+
+
 @app.get("/api/sessions/tags")
 async def list_session_tags(profile: Optional[str] = None):
     """List all tags with session counts."""
@@ -10835,13 +10875,36 @@ async def session_chat_stream(session_id: str, request: Request):
     return StreamingResponse(_events(), media_type="text/event-stream", headers=headers)
 
 
+def _resolved_chat_session_id(session_id: str, profile: Optional[str] = None) -> str:
+    """The id a turn actually runs under, given any id in its chain.
+
+    A run is registered under the *resume* id, while a caller naming a
+    long-lived conversation (the lead chat) holds its root id. Comparing the
+    two directly reports "nothing is running" for a conversation that has
+    compacted at least once, which is precisely the conversation old enough
+    to be worth resuming from another device.
+    """
+    db = _open_session_db_for_profile(profile)
+    try:
+        sid = db.resolve_session_id(session_id)
+        return db.resolve_resume_session_id(sid) if sid else session_id
+    except Exception:
+        return session_id
+    finally:
+        db.close()
+
+
 @app.get("/api/sessions/{session_id}/active_run")
-async def active_chat_run(session_id: str, request: Request):
-    """The in-flight turn for this session, if any — a reloaded page asks
-    this first and then attaches to the stream to resume live rendering."""
+async def active_chat_run(
+    session_id: str, request: Request, profile: Optional[str] = None
+):
+    """The in-flight turn for this session, if any — a reloaded page (or a
+    second device) asks this first and then attaches to the stream to resume
+    live rendering."""
     await _comms_resolve_principal(request)
+    resolved = _resolved_chat_session_id(session_id, profile)
     for run_id, entry in _CHAT_RUNS.items():
-        if not entry["done"] and entry["session_id"] == session_id:
+        if not entry["done"] and entry["session_id"] in (session_id, resolved):
             return {"run_id": run_id}
     return {"run_id": None}
 
@@ -10862,7 +10925,13 @@ async def session_chat_stream_attach(session_id: str, request: Request):
         body = {}
     run_id = str((body or {}).get("run_id", "")).strip()
     entry = _CHAT_RUNS.get(run_id)
-    if entry is None or entry["session_id"] != session_id:
+    if entry is not None and entry["session_id"] != session_id:
+        # Same chain check as active_run: the caller may hold the root id of a
+        # conversation whose turn runs under a continuation id.
+        resolved = _resolved_chat_session_id(session_id, (body or {}).get("profile"))
+        if entry["session_id"] != resolved:
+            entry = None
+    if entry is None:
         raise HTTPException(status_code=404, detail="no re-attachable run")
 
     queue: "asyncio.Queue" = asyncio.Queue()
