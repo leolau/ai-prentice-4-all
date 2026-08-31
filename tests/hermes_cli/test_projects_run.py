@@ -631,6 +631,61 @@ def test_cancel_archives_unstarted_cards_and_never_kills_running(stores):
     assert "1 card(s) left running" in closed["outcome"]
 
 
+def test_stop_terminates_the_running_card_and_archives_the_rest(stores):
+    """Stop is the verb cancel is not: the live card is reclaimed (which
+    signals its worker) and then blocked so the dispatcher cannot respawn
+    it, and the outcome counts both halves."""
+    project, _ = _make_project(autonomy="autonomous")
+    steps = [{"key": "a", "title": "A"}, {"key": "b", "title": "B"}]
+    _save_playbook(project.id, steps)
+    with projects_db.connect_closing() as conn:
+        projects_db.activate_playbook_rev(conn, project.id, 1)
+    result = _start(project.id)
+    run = result["run"]
+    with kanban_db.connect_closing() as bconn:
+        bconn.execute(
+            "UPDATE tasks SET status = 'running' WHERE id = ?",
+            (result["cards"]["a"],),
+        )
+    with projects_db.connect_closing() as conn:
+        with kanban_db.connect_closing() as bconn:
+            fresh = projects_db.get_project(conn, project.id)
+            closed = projects_run.stop_run(
+                conn, bconn, project=fresh, run=run
+            )
+    with kanban_db.connect_closing() as bconn:
+        a = kanban_db.get_task(bconn, result["cards"]["a"])
+        b = kanban_db.get_task(bconn, result["cards"]["b"])
+    assert closed["status"] == "cancelled"
+    assert closed["ended_at"] is not None
+    # Reclaimed then blocked — NOT left running, and not left ready where
+    # the dispatcher would immediately claim it again.
+    assert a.status == "blocked"
+    assert b.status == "archived"
+    assert "1 worker(s) terminated" in closed["outcome"]
+    assert "1 card(s) archived" in closed["outcome"]
+
+
+def test_stop_refuses_a_run_that_is_already_closed(stores):
+    project, _ = _make_project(autonomy="autonomous")
+    _save_playbook(project.id, [{"key": "a", "title": "A"}])
+    with projects_db.connect_closing() as conn:
+        projects_db.activate_playbook_rev(conn, project.id, 1)
+    run = _start(project.id)["run"]
+    with projects_db.connect_closing() as conn:
+        with kanban_db.connect_closing() as bconn:
+            fresh = projects_db.get_project(conn, project.id)
+            projects_run.stop_run(conn, bconn, project=fresh, run=run)
+        with kanban_db.connect_closing() as bconn:
+            with pytest.raises(ValueError, match="already cancelled"):
+                projects_run.stop_run(
+                    conn,
+                    bconn,
+                    project=fresh,
+                    run=projects_db.get_project_run_by_id(conn, run["id"]),
+                )
+
+
 def test_run_cost_is_fail_open(stores):
     assert projects_run.run_cost(None) is None
     assert projects_run.run_cost("t-1") is None  # no ledger configured
