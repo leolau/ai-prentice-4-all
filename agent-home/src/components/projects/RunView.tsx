@@ -9,6 +9,7 @@ import {
   durationLabel,
 } from "@/components/projects/format";
 import { unwrapRunEnvelope } from "@/components/projects/envelopes";
+import { useRunLive } from "@/components/projects/useRunLive";
 import { BusyRegion } from "@/components/ui/BusyRegion";
 import { Pill, type Tone } from "@/components/ui/Pill";
 import type { ProjectDelivery, ProjectRun, ProjectRunStatus } from "@/types";
@@ -63,6 +64,13 @@ export function RunView({
 
   const slugPath = `/api/projects/${encodeURIComponent(slug)}`;
   const runPath = `${slugPath}/runs/${run.run_no}`;
+
+  // While the run is still moving, re-read it: the server derives the cards'
+  // board state, the blocked set, `stalled`, cost and duration on read, so a
+  // person watching the page sees the run move without reloading it.
+  useRunLive(slug, run.run_no, run.status, (fresh) =>
+    setRun((prev) => ({ ...prev, ...fresh })),
+  );
 
   const post = async (
     path: string,
