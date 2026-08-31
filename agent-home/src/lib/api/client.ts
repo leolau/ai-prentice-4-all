@@ -1824,6 +1824,14 @@ export class HermesApiClient {
     return res;
   }
 
+  /** Stop the run now: terminate live workers, then close it. */
+  async stopProjectRun(slug: string, runNo: number): Promise<ProjectRun> {
+    return this.request(
+      `/api/registry/projects/${encodeURIComponent(slug)}/runs/${encodeURIComponent(runNo)}/stop`,
+      { method: "POST", json: {} },
+    );
+  }
+
   /** Write or edit the retrospective. */
   async writeProjectRetro(
     slug: string,

@@ -391,6 +391,41 @@ def test_continue_releases_the_checkpoint_and_cancel_never_kills(env):
     assert resp.status_code == 409
 
 
+def test_stop_kills_the_live_card_and_is_refused_twice(env):
+    """The stop verb over HTTP: a running card ends blocked (reclaimed,
+    then blocked so the dispatcher cannot respawn it), an unknown run is
+    404, and a closed run is 409 rather than a silent second close."""
+    project = _active_project(env)
+    client, _state = env
+    _save_and_activate_playbook(env, project)
+    resp = client.post(f"/api/registry/projects/{project['slug']}/runs", json={})
+    started = resp.json()
+    first = next(iter(started["cards"].values()))
+    with kanban_db.connect_closing() as bconn:
+        bconn.execute(
+            "UPDATE tasks SET status = 'running' WHERE id = ?", (first,)
+        )
+
+    resp = client.post(
+        f"/api/registry/projects/{project['slug']}/runs/99/stop", json={}
+    )
+    assert resp.status_code == 404
+
+    resp = client.post(
+        f"/api/registry/projects/{project['slug']}/runs/1/stop", json={}
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["status"] == "cancelled"
+    assert "worker(s) terminated" in resp.json()["outcome"]
+    with kanban_db.connect_closing() as bconn:
+        assert kanban_db.get_task(bconn, first).status == "blocked"
+
+    resp = client.post(
+        f"/api/registry/projects/{project['slug']}/runs/1/stop", json={}
+    )
+    assert resp.status_code == 409
+
+
 def test_retro_writes_the_record(env):
     project = _active_project(env)
     client, _state = env

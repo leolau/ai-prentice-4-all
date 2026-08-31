@@ -965,6 +965,67 @@ def cancel_run(pconn, bconn, *, project: projects_db.Project, run: dict) -> dict
     )
 
 
+def stop_run(pconn, bconn, *, project: projects_db.Project, run: dict) -> dict:
+    """Stop the run *now*: terminate every live worker, then close it.
+
+    The louder sibling of :func:`cancel_run`. Cancel is the polite exit —
+    it stops promoting and lets a card that is already running finish,
+    which is right when a person is closing a record. It is the wrong
+    answer to "stop it, it is doing the wrong thing": the worker keeps
+    going and the person is told the run is cancelled.
+
+    So this one reclaims each running card — which terminates the worker
+    process — and then blocks it, so the dispatcher does not simply
+    respawn what was just killed. Un-started cards are archived exactly as
+    cancel archives them. The outcome names both halves, because "stopped"
+    without a count is the kind of sentence that gets believed.
+
+    An *inline* run has no card to reclaim: the step runs inside the web
+    server's own process. It is closed here and its late completion cannot
+    reopen it (``close_project_run`` is terminal), but the turn itself
+    finishes on its own — the outcome says so rather than implying a kill
+    that did not happen.
+    """
+    if run["status"] in ("done", "failed", "cancelled"):
+        raise ValueError(f"run {run['run_no']} is already {run['status']}")
+    stopped: List[str] = []
+    archived: List[str] = []
+    for rc in projects_db.get_run_cards(pconn, run["id"]):
+        row = bconn.execute(
+            "SELECT status FROM tasks WHERE id = ?", (rc["task_id"],)
+        ).fetchone()
+        if row is None:
+            continue
+        if row["status"] == "running":
+            # Reclaim first so the live worker is signalled, then block so
+            # the dispatcher does not pick the card straight back up.
+            # ``reclaim_task`` returns False when the card finished between
+            # the read above and this line — a card that ended on its own
+            # is not a worker this stop terminated, and is not counted as
+            # one. It is still blocked, so nothing respawns it.
+            if kanban_db.reclaim_task(
+                bconn, rc["task_id"], reason="run stopped from agent-home"
+            ):
+                stopped.append(rc["task_id"])
+            kanban_db.block_task(
+                bconn, rc["task_id"], reason="run stopped from agent-home"
+            )
+            continue
+        if row["status"] in ("triage", "todo", "ready"):
+            kanban_db.archive_task(bconn, rc["task_id"])
+            archived.append(rc["task_id"])
+    parts = ["stopped"]
+    if stopped:
+        parts.append(f"{len(stopped)} worker(s) terminated")
+    if archived:
+        parts.append(f"{len(archived)} card(s) archived")
+    if not stopped and not archived and run.get("session_id"):
+        parts.append("the in-process step finishes on its own")
+    return projects_db_close_and_fetch(
+        pconn, run, status="cancelled", outcome="; ".join(parts)
+    )
+
+
 def projects_db_close_and_fetch(
     pconn, run: dict, *, status: str, outcome: str
 ) -> dict:
