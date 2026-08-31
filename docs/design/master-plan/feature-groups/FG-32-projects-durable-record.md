@@ -1059,6 +1059,7 @@ auth and is not reachable from `agent-home`).
 | `POST /{slug}/runs` | start a run now (`trigger='manual'`, optional `playbook_rev` to repeat an old method) |
 | `POST /{slug}/runs/{n}/continue` | pass a checkpoint / answer a budget stop |
 | `POST /{slug}/runs/{n}/cancel` | stop promoting; archive this run's un-started cards; never kills a running worker |
+| `POST /{slug}/runs/{n}/stop` | stop the run now: reclaim every running card (which terminates its worker) and block it so the dispatcher cannot respawn it, archive what has not started, close the run `cancelled`. The verb `cancel` deliberately is not this one |
 | `POST /{slug}/runs/{n}/retro` | write or edit the retrospective |
 | `GET /{slug}/board` | the project's columns — `list_tasks(project_id=…, principal=…)` plus the same rollups the dashboard computes, **through the shared helper** |
 | `POST /{slug}/cards` | create a card carrying `project_id` (optionally `from_todo`, §10) |

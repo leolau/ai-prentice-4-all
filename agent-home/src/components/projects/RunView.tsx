@@ -9,6 +9,9 @@ import {
   durationLabel,
 } from "@/components/projects/format";
 import { unwrapRunEnvelope } from "@/components/projects/envelopes";
+import { useRunLive } from "@/components/projects/useRunLive";
+import { useRunActivity } from "@/components/projects/useRunActivity";
+import { LiveActivity } from "@/components/chat/LiveActivity";
 import { BusyRegion } from "@/components/ui/BusyRegion";
 import { Pill, type Tone } from "@/components/ui/Pill";
 import type { ProjectDelivery, ProjectRun, ProjectRunStatus } from "@/types";
@@ -36,8 +39,14 @@ function deliveryLabel(delivery: ProjectDelivery): string {
 /**
  * One run's page (§7): what it did — cards, deliveries, cost, outcome — and
  * the two things a human writes about it afterwards, the retro and (step 9b)
- * the score. Continue passes a checkpoint; Cancel stops promoting without
- * killing a worker; "Repeat this run" starts a new one on the same method.
+ * the score. Continue passes a checkpoint; Cancel stops promoting and lets a
+ * running card finish; "Stop now" terminates the live workers and closes the
+ * run; "Repeat this run" starts a new one on the same method.
+ *
+ * While the run is live it also shows what the run is *thinking* — the
+ * agent's reasoning and its tool calls, streamed — for the run's inline
+ * steps. A board-dispatched card runs in another process and is not visible
+ * that way; the panel says so rather than reading as an idle run.
  */
 export function RunView({
   slug,
@@ -63,6 +72,13 @@ export function RunView({
 
   const slugPath = `/api/projects/${encodeURIComponent(slug)}`;
   const runPath = `${slugPath}/runs/${run.run_no}`;
+
+  // While the run is still moving, re-read it: the server derives the cards'
+  // board state, the blocked set, `stalled`, cost and duration on read, so a
+  // person watching the page sees the run move without reloading it.
+  useRunLive(slug, run.run_no, run.status, (fresh) =>
+    setRun((prev) => ({ ...prev, ...fresh })),
+  );
 
   const post = async (
     path: string,
@@ -137,6 +153,7 @@ export function RunView({
     run.status === "blocked";
   // The row says running but the server saw no worker behind it — say so.
   const stalled = run.status === "running" && run.stalled === true;
+  const activity = useRunActivity(slug, run.run_no, live);
 
   return (
     <div data-component="RunView" className="flex flex-col gap-4">
@@ -209,6 +226,25 @@ export function RunView({
                   Cancel
                 </button>
               ) : null}
+              {live ? (
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (
+                      !window.confirm(
+                        "Stop this run now? Work in progress is terminated where it stands — Cancel instead lets a running card finish.",
+                      )
+                    ) {
+                      return;
+                    }
+                    void post(`${runPath}/stop`, undefined, true);
+                  }}
+                  disabled={busy}
+                  className="rounded-xl bg-red-500/90 px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
+                >
+                  Stop now
+                </button>
+              ) : null}
               {(!live || stalled) && !archived ? (
                 <button
                   type="button"
@@ -240,6 +276,31 @@ export function RunView({
                 stalled. Cancel stops it; retry the blocked work below;
                 Repeat starts a fresh run on the same method.
               </p>
+            ) : null}
+
+            {live ? (
+              <div data-component="RunActivity" className="mt-3">
+                <p className="text-xs font-medium text-[var(--color-muted)]">
+                  What this run is doing
+                </p>
+                {activity.unavailable ? (
+                  <p className="mt-1 text-xs text-[var(--color-muted)]">
+                    This run&rsquo;s work is running on the board, in its own
+                    worker — its reasoning is not streamed here. The cards
+                    below move as it progresses.
+                  </p>
+                ) : activity.reasoning === "" &&
+                  activity.tools.length === 0 ? (
+                  <p className="mt-1 text-xs text-[var(--color-muted)]">
+                    Waiting for the first thing it says&hellip;
+                  </p>
+                ) : (
+                  <LiveActivity
+                    reasoning={activity.reasoning}
+                    tools={activity.tools}
+                  />
+                )}
+              </div>
             ) : null}
 
             {archived ? (

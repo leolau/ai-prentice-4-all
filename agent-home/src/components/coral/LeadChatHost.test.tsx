@@ -7,6 +7,7 @@ import type { ChatStreamHandlers } from "@/lib/chat/stream";
 
 vi.mock("@/lib/chat/stream", () => ({
   streamChatTurn: vi.fn(),
+  attachChatStream: vi.fn(),
 }));
 // Link's useLinkStatus only works inside the App Router's link context.
 vi.mock("next/link", async (importOriginal) => {
@@ -17,7 +18,7 @@ vi.mock("next/link", async (importOriginal) => {
   };
 });
 
-import { streamChatTurn } from "@/lib/chat/stream";
+import { attachChatStream, streamChatTurn } from "@/lib/chat/stream";
 import { LeadChatHost } from "@/components/coral/LeadChatHost";
 
 // jsdom has no PointerEvent constructor; RTL builds one for pointer* events.
@@ -29,8 +30,37 @@ class FakePointerEvent extends MouseEvent {
 const openLeadChat = () =>
   fireEvent.click(screen.getByRole("button", { name: /open lead chat/i }));
 
+async function sendMessage(text: string) {
+  fireEvent.input(screen.getByPlaceholderText(/message your agent/i), {
+    target: { value: text },
+  });
+  fireEvent.click(screen.getByRole("button", { name: /^send$/i }));
+}
+
+/**
+ * A fetch stub answering the panel's three reads: which conversation it is,
+ * its history, and whether a turn is already in flight. `overrides` replaces
+ * the body for a path prefix.
+ */
+function leadFetch(overrides: Record<string, unknown> = {}) {
+  const bodies: Record<string, unknown> = {
+    "/api/chat/lead": { sessionId: "lead-abc" },
+    "/api/chat/messages": { messages: [] },
+    "/api/chat/active": { runId: null },
+    ...overrides,
+  };
+  const fetchMock = vi.fn(async (url: string) => {
+    const key = Object.keys(bodies).find((k) => url.startsWith(k));
+    return { ok: true, json: async () => (key ? bodies[key] : {}) };
+  });
+  vi.stubGlobal("fetch", fetchMock);
+  return fetchMock;
+}
+
 beforeEach(() => {
   vi.mocked(streamChatTurn).mockReset();
+  vi.mocked(attachChatStream).mockReset();
+  vi.mocked(attachChatStream).mockResolvedValue(undefined);
 });
 
 afterEach(() => {
@@ -95,57 +125,12 @@ describe("LeadChatHost panel", () => {
     expect(screen.getByRole("button", { name: /open lead chat/i })).toBeTruthy();
   });
 
-  it("pins the session id returned by the first turn", async () => {
-    // Pinning the session re-runs the history-load effect; stub fetch so it
-    // resolves to the just-finished exchange instead of failing and wiping
-    // the rendered messages.
-    vi.stubGlobal(
-      "fetch",
-      vi.fn().mockResolvedValue({
-        ok: true,
-        json: async () => ({
-          messages: [{ role: "assistant", content: "Hi there" }],
-        }),
-      }),
-    );
-    const mocked = vi.mocked(streamChatTurn);
-    mocked.mockImplementation(async (_params, handlers: ChatStreamHandlers) => {
-      handlers.onDelta?.("Hi ");
-      handlers.onCompleted?.("Hi there", "sess-42");
-      return { sessionId: "sess-42" };
-    });
-
-    render(<LeadChatHost />);
-    openLeadChat();
-    await waitFor(() => {
-      expect(screen.getByPlaceholderText(/message your agent/i)).toBeTruthy();
-    });
-    fireEvent.input(screen.getByPlaceholderText(/message your agent/i), {
-      target: { value: "Hello" },
-    });
-    fireEvent.click(screen.getByRole("button", { name: /^send$/i }));
-
-    await waitFor(() => {
-      expect(screen.getByRole("dialog").textContent).toContain("Hi there");
-    });
-    expect(mocked).toHaveBeenCalledTimes(1);
-    // First turn starts with no session; the returned id is pinned for reuse.
-    expect(mocked.mock.calls[0][0].sessionId).toBeNull();
-    expect(JSON.parse(localStorage.getItem("agent-home:lead-session") ?? "null")).toBe(
-      "sess-42",
-    );
-  });
-
-  it("loads the pinned session's history when reopened", async () => {
-    localStorage.setItem("agent-home:lead-session", JSON.stringify("sess-42"));
-    const fetchMock = vi.fn().mockResolvedValue({
-      ok: true,
-      json: async () => ({
-        session_id: "sess-42",
+  it("loads the server's lead session, and its history, on open", async () => {
+    const fetchMock = leadFetch({
+      "/api/chat/messages": {
         messages: [{ role: "assistant", content: "Earlier answer" }],
-      }),
+      },
     });
-    vi.stubGlobal("fetch", fetchMock);
 
     render(<LeadChatHost />);
     openLeadChat();
@@ -153,38 +138,75 @@ describe("LeadChatHost panel", () => {
     await waitFor(() => {
       expect(screen.getByRole("dialog").textContent).toContain("Earlier answer");
     });
-    expect(fetchMock).toHaveBeenCalledWith(
-      "/api/chat/messages?sessionId=sess-42",
+    expect(fetchMock.mock.calls.map((c) => c[0])).toContain("/api/chat/lead");
+    expect(fetchMock.mock.calls.map((c) => c[0])).toContain(
+      "/api/chat/messages?sessionId=lead-abc",
     );
-    vi.unstubAllGlobals();
   });
 
-  it("reuses the pinned session on later turns", async () => {
-    localStorage.setItem("agent-home:lead-session", JSON.stringify("sess-42"));
-    vi.stubGlobal(
-      "fetch",
-      vi.fn().mockResolvedValue({ ok: true, json: async () => ({ messages: [] }) }),
-    );
+  it("sends every turn on the server's lead session, never a fresh one", async () => {
+    leadFetch();
     const mocked = vi.mocked(streamChatTurn);
     mocked.mockImplementation(async (_params, handlers: ChatStreamHandlers) => {
-      handlers.onCompleted?.("Again", "sess-42");
-      return { sessionId: "sess-42" };
+      // A compacted conversation answers under a continuation id; adopting
+      // it here would fork this browser off the shared lead session.
+      handlers.onCompleted?.("Hi there", "resume-99");
+      return { sessionId: "resume-99" };
     });
 
     render(<LeadChatHost />);
     openLeadChat();
-    // Wait out the history-load effect before typing.
     await waitFor(() => {
       expect(screen.getByPlaceholderText(/message your agent/i)).toBeTruthy();
     });
-    fireEvent.input(screen.getByPlaceholderText(/message your agent/i), {
-      target: { value: "More" },
-    });
-    fireEvent.click(screen.getByRole("button", { name: /^send$/i }));
+    await sendMessage("Hello");
     await waitFor(() => {
-      expect(mocked).toHaveBeenCalledTimes(1);
+      expect(screen.getByRole("dialog").textContent).toContain("Hi there");
     });
-    expect(mocked.mock.calls[0][0].sessionId).toBe("sess-42");
+    expect(mocked.mock.calls[0][0].sessionId).toBe("lead-abc");
+
+    await sendMessage("More");
+    await waitFor(() => {
+      expect(mocked).toHaveBeenCalledTimes(2);
+    });
+    expect(mocked.mock.calls[1][0].sessionId).toBe("lead-abc");
+  });
+
+  it("re-attaches to a turn another device left running", async () => {
+    leadFetch({ "/api/chat/active": { runId: "run-7" } });
+    vi.mocked(attachChatStream).mockImplementation(async (_params, handlers) => {
+      handlers.onDelta?.("…still going");
+    });
+
+    render(<LeadChatHost />);
+    openLeadChat();
+
+    await waitFor(() => {
+      expect(vi.mocked(attachChatStream)).toHaveBeenCalledTimes(1);
+    });
+    expect(vi.mocked(attachChatStream).mock.calls[0][0]).toEqual({
+      sessionId: "lead-abc",
+      runId: "run-7",
+    });
+  });
+
+  it("refuses to send rather than fork a private conversation", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({ ok: false, json: async () => ({}) }),
+    );
+    const mocked = vi.mocked(streamChatTurn);
+
+    render(<LeadChatHost />);
+    openLeadChat();
+    await sendMessage("Hello");
+
+    await waitFor(() => {
+      expect(screen.getByRole("dialog").textContent).toContain(
+        "could not be reached",
+      );
+    });
+    expect(mocked).not.toHaveBeenCalled();
   });
 });
 

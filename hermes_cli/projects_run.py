@@ -32,7 +32,7 @@ import re
 import uuid
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
-from hermes_cli import kanban_db, projects_db
+from hermes_cli import kanban_db, projects_db, run_activity
 
 log = logging.getLogger(__name__)
 
@@ -965,6 +965,67 @@ def cancel_run(pconn, bconn, *, project: projects_db.Project, run: dict) -> dict
     )
 
 
+def stop_run(pconn, bconn, *, project: projects_db.Project, run: dict) -> dict:
+    """Stop the run *now*: terminate every live worker, then close it.
+
+    The louder sibling of :func:`cancel_run`. Cancel is the polite exit —
+    it stops promoting and lets a card that is already running finish,
+    which is right when a person is closing a record. It is the wrong
+    answer to "stop it, it is doing the wrong thing": the worker keeps
+    going and the person is told the run is cancelled.
+
+    So this one reclaims each running card — which terminates the worker
+    process — and then blocks it, so the dispatcher does not simply
+    respawn what was just killed. Un-started cards are archived exactly as
+    cancel archives them. The outcome names both halves, because "stopped"
+    without a count is the kind of sentence that gets believed.
+
+    An *inline* run has no card to reclaim: the step runs inside the web
+    server's own process. It is closed here and its late completion cannot
+    reopen it (``close_project_run`` is terminal), but the turn itself
+    finishes on its own — the outcome says so rather than implying a kill
+    that did not happen.
+    """
+    if run["status"] in ("done", "failed", "cancelled"):
+        raise ValueError(f"run {run['run_no']} is already {run['status']}")
+    stopped: List[str] = []
+    archived: List[str] = []
+    for rc in projects_db.get_run_cards(pconn, run["id"]):
+        row = bconn.execute(
+            "SELECT status FROM tasks WHERE id = ?", (rc["task_id"],)
+        ).fetchone()
+        if row is None:
+            continue
+        if row["status"] == "running":
+            # Reclaim first so the live worker is signalled, then block so
+            # the dispatcher does not pick the card straight back up.
+            # ``reclaim_task`` returns False when the card finished between
+            # the read above and this line — a card that ended on its own
+            # is not a worker this stop terminated, and is not counted as
+            # one. It is still blocked, so nothing respawns it.
+            if kanban_db.reclaim_task(
+                bconn, rc["task_id"], reason="run stopped from agent-home"
+            ):
+                stopped.append(rc["task_id"])
+            kanban_db.block_task(
+                bconn, rc["task_id"], reason="run stopped from agent-home"
+            )
+            continue
+        if row["status"] in ("triage", "todo", "ready"):
+            kanban_db.archive_task(bconn, rc["task_id"])
+            archived.append(rc["task_id"])
+    parts = ["stopped"]
+    if stopped:
+        parts.append(f"{len(stopped)} worker(s) terminated")
+    if archived:
+        parts.append(f"{len(archived)} card(s) archived")
+    if not stopped and not archived and run.get("session_id"):
+        parts.append("the in-process step finishes on its own")
+    return projects_db_close_and_fetch(
+        pconn, run, status="cancelled", outcome="; ".join(parts)
+    )
+
+
 def projects_db_close_and_fetch(
     pconn, run: dict, *, status: str, outcome: str
 ) -> dict:
@@ -1044,7 +1105,14 @@ def _default_spawn_inline(
     inline_steps: Sequence[dict],
     enabled_toolsets: Optional[Sequence[str]] = None,
 ) -> Dict[str, Any]:
-    """The ONLY session-spawn path this feature may use (§6)."""
+    """The ONLY session-spawn path this feature may use (§6).
+
+    The session's reasoning and tool calls are published to
+    :mod:`hermes_cli.run_activity` as they happen, so the run page can show
+    what the run is doing rather than only that it is running. Only the
+    reasoning text and a tool's id and name are published — arguments and
+    results stay in this process.
+    """
     try:
         from agent.seeded_session import spawn_seeded_session
     except Exception as exc:  # noqa: BLE001
@@ -1062,18 +1130,38 @@ def _default_spawn_inline(
     from hermes_cli import profiles
 
     host_profile = run.get("profile")
-    result = spawn_seeded_session(
-        prompt,
-        origin=f"projects:{project.slug}:run-{run.get('run_no')}",
-        session_id=session_id,
-        # The run executes in the HOST profile's home — its memory, secrets
-        # and soul, matching the profile the run row records (§6).
-        profile_home=(
-            str(profiles.get_profile_dir(host_profile)) if host_profile else None
-        ),
-        enabled_toolsets=list(enabled_toolsets) if enabled_toolsets else None,
-        context=contextvars.copy_context(),
+    key = run_activity.run_key(project.id, int(run.get("run_no") or 0))
+    run_activity.begin(key)
+    run_activity.publish_reasoning(
+        key,
+        f"Starting {len(inline_steps)} inline step(s): "
+        + ", ".join(s["key"] for s in inline_steps),
     )
+    try:
+        result = spawn_seeded_session(
+            prompt,
+            origin=f"projects:{project.slug}:run-{run.get('run_no')}",
+            session_id=session_id,
+            # The run executes in the HOST profile's home — its memory,
+            # secrets and soul, matching the profile the run row records
+            # (§6).
+            profile_home=(
+                str(profiles.get_profile_dir(host_profile)) if host_profile else None
+            ),
+            enabled_toolsets=list(enabled_toolsets) if enabled_toolsets else None,
+            context=contextvars.copy_context(),
+            reasoning_callback=lambda text: run_activity.publish_reasoning(key, text),
+            tool_start_callback=lambda tc_id, name, args: run_activity.publish_tool(
+                key, "start", tc_id, name
+            ),
+            tool_complete_callback=(
+                lambda tc_id, name, args, res: run_activity.publish_tool(
+                    key, "complete", tc_id, name
+                )
+            ),
+        )
+    finally:
+        run_activity.finish(key, "Inline steps finished.")
     return {
         "session_id": session_id,
         "error": result.error,

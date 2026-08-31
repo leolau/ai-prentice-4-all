@@ -5,7 +5,12 @@
  * this run, Save retro, the score control — while Cancel (a reducing act)
  * stays, matching what the router refuses and permits.
  */
-import { cleanup, render } from "@testing-library/react";
+import {
+  cleanup,
+  fireEvent,
+  render,
+  waitFor,
+} from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 const router = vi.hoisted(() => ({ push: vi.fn(), refresh: vi.fn() }));
@@ -50,6 +55,7 @@ const RUN = (over: Partial<ProjectRun>): ProjectRun => ({
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
 });
 
 describe("RunView on an archived project", () => {
@@ -143,5 +149,46 @@ describe("RunView stall truth", () => {
     expect(queryByText("stalled")).toBeNull();
     expect(queryByText(/no worker is active/)).toBeNull();
     expect(queryByRole("button", { name: "Repeat this run" })).toBeNull();
+  });
+});
+
+describe("RunView Stop now", () => {
+  it("asks first, then posts to the stop verb — not cancel", async () => {
+    const fetchMock = vi.fn(
+      async (url: string) =>
+        ({
+          ok: true,
+          json: async () => ({ status: "cancelled", outcome: "stopped" }),
+          url,
+        }) as unknown as Response,
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const confirmMock = vi.fn(() => false);
+    vi.stubGlobal("confirm", confirmMock);
+
+    const { getByRole } = render(
+      <RunView slug="monday-digest" run={RUN({ status: "running" })} />,
+    );
+    const stop = getByRole("button", { name: "Stop now" });
+    const stopCalls = () =>
+      fetchMock.mock.calls.filter(
+        (call) => String(call[0]) === "/api/projects/monday-digest/runs/1/stop",
+      );
+
+    // Declined: nothing is stopped. A kill must not happen on one stray tap.
+    fireEvent.click(stop);
+    expect(confirmMock).toHaveBeenCalled();
+    expect(stopCalls()).toHaveLength(0);
+
+    confirmMock.mockReturnValue(true);
+    fireEvent.click(stop);
+    await waitFor(() => expect(stopCalls()).toHaveLength(1));
+  });
+
+  it("is not offered once the run is over", () => {
+    const { queryByRole } = render(
+      <RunView slug="monday-digest" run={RUN({ status: "done" })} />,
+    );
+    expect(queryByRole("button", { name: "Stop now" })).toBeNull();
   });
 });

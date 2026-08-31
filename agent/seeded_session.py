@@ -28,9 +28,16 @@ import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping, Optional, Sequence, Union
+from typing import Any, Callable, Mapping, Optional, Sequence, Union
 
 log = logging.getLogger(__name__)
+
+#: The agent's own callbacks, named here so a passthrough is typed rather
+#: than ``Any``. Tool args/results are part of the agent's signature; a
+#: consumer that forwards them anywhere public must drop them itself.
+ReasoningCallback = Callable[[str], None]
+ToolStartCallback = Callable[[str, str, Mapping[str, Any]], None]
+ToolCompleteCallback = Callable[[str, str, Mapping[str, Any], Any], None]
 
 #: How often the inactivity loop polls the future (seconds).
 _POLL_INTERVAL = 5.0
@@ -80,12 +87,20 @@ def spawn_seeded_session(
     quiet_mode: bool = True,
     inactivity_limit: float | None = _DEFAULT_INACTIVITY_LIMIT,
     context: contextvars.Context | None = None,
+    reasoning_callback: ReasoningCallback | None = None,
+    tool_start_callback: ToolStartCallback | None = None,
+    tool_complete_callback: ToolCompleteCallback | None = None,
 ) -> SeededSession:
     """Spawn a seeded agent session and run it to completion (or timeout).
 
     Returns a :class:`SeededSession`.  Never raises — failures are reported
     through ``error`` so the caller's state machine is never corrupted by an
     unexpected exception.
+
+    The three callbacks are the same ones ``agent_init`` already accepts and
+    the chat stream already uses; they are passed through so a caller that
+    runs a session in-process (a project run's inline step) can show what the
+    agent is doing while it does it, instead of only afterwards.
     """
     try:
         return _run(
@@ -108,6 +123,9 @@ def spawn_seeded_session(
             quiet_mode=quiet_mode,
             inactivity_limit=inactivity_limit,
             context=context,
+            reasoning_callback=reasoning_callback,
+            tool_start_callback=tool_start_callback,
+            tool_complete_callback=tool_complete_callback,
         )
     except Exception as exc:
         log.warning("seeded_session[%s]: failed (%s)", session_id, exc)
@@ -140,6 +158,9 @@ def _run(
     quiet_mode: bool,
     inactivity_limit: float | None,
     context: contextvars.Context | None,
+    reasoning_callback: ReasoningCallback | None = None,
+    tool_start_callback: ToolStartCallback | None = None,
+    tool_complete_callback: ToolCompleteCallback | None = None,
 ) -> SeededSession:
     # -- profile scope (the drift guard) --------------------------------
     #
@@ -168,6 +189,9 @@ def _run(
             quiet_mode=quiet_mode,
             inactivity_limit=inactivity_limit,
             context=context,
+            reasoning_callback=reasoning_callback,
+            tool_start_callback=tool_start_callback,
+            tool_complete_callback=tool_complete_callback,
         )
 
     if cm is not None:
@@ -204,6 +228,9 @@ def _body_inner(
     quiet_mode: bool,
     inactivity_limit: float | None,
     context: contextvars.Context | None,
+    reasoning_callback: ReasoningCallback | None = None,
+    tool_start_callback: ToolStartCallback | None = None,
+    tool_complete_callback: ToolCompleteCallback | None = None,
 ) -> SeededSession:
     import yaml
 
@@ -358,6 +385,9 @@ def _body_inner(
         platform=origin,
         session_id=session_id,
         session_db=_session_db,
+        reasoning_callback=reasoning_callback,
+        tool_start_callback=tool_start_callback,
+        tool_complete_callback=tool_complete_callback,
     )
 
     _ctx = context or contextvars.copy_context()

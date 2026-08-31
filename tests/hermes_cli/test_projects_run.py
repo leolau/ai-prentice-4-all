@@ -631,6 +631,61 @@ def test_cancel_archives_unstarted_cards_and_never_kills_running(stores):
     assert "1 card(s) left running" in closed["outcome"]
 
 
+def test_stop_terminates_the_running_card_and_archives_the_rest(stores):
+    """Stop is the verb cancel is not: the live card is reclaimed (which
+    signals its worker) and then blocked so the dispatcher cannot respawn
+    it, and the outcome counts both halves."""
+    project, _ = _make_project(autonomy="autonomous")
+    steps = [{"key": "a", "title": "A"}, {"key": "b", "title": "B"}]
+    _save_playbook(project.id, steps)
+    with projects_db.connect_closing() as conn:
+        projects_db.activate_playbook_rev(conn, project.id, 1)
+    result = _start(project.id)
+    run = result["run"]
+    with kanban_db.connect_closing() as bconn:
+        bconn.execute(
+            "UPDATE tasks SET status = 'running' WHERE id = ?",
+            (result["cards"]["a"],),
+        )
+    with projects_db.connect_closing() as conn:
+        with kanban_db.connect_closing() as bconn:
+            fresh = projects_db.get_project(conn, project.id)
+            closed = projects_run.stop_run(
+                conn, bconn, project=fresh, run=run
+            )
+    with kanban_db.connect_closing() as bconn:
+        a = kanban_db.get_task(bconn, result["cards"]["a"])
+        b = kanban_db.get_task(bconn, result["cards"]["b"])
+    assert closed["status"] == "cancelled"
+    assert closed["ended_at"] is not None
+    # Reclaimed then blocked — NOT left running, and not left ready where
+    # the dispatcher would immediately claim it again.
+    assert a.status == "blocked"
+    assert b.status == "archived"
+    assert "1 worker(s) terminated" in closed["outcome"]
+    assert "1 card(s) archived" in closed["outcome"]
+
+
+def test_stop_refuses_a_run_that_is_already_closed(stores):
+    project, _ = _make_project(autonomy="autonomous")
+    _save_playbook(project.id, [{"key": "a", "title": "A"}])
+    with projects_db.connect_closing() as conn:
+        projects_db.activate_playbook_rev(conn, project.id, 1)
+    run = _start(project.id)["run"]
+    with projects_db.connect_closing() as conn:
+        with kanban_db.connect_closing() as bconn:
+            fresh = projects_db.get_project(conn, project.id)
+            projects_run.stop_run(conn, bconn, project=fresh, run=run)
+        with kanban_db.connect_closing() as bconn:
+            with pytest.raises(ValueError, match="already cancelled"):
+                projects_run.stop_run(
+                    conn,
+                    bconn,
+                    project=fresh,
+                    run=projects_db.get_project_run_by_id(conn, run["id"]),
+                )
+
+
 def test_run_cost_is_fail_open(stores):
     assert projects_run.run_cost(None) is None
     assert projects_run.run_cost("t-1") is None  # no ledger configured
@@ -914,3 +969,46 @@ def test_default_spawn_runs_in_the_host_profile_home(stores, monkeypatch):
     assert calls, "the default spawn must go through spawn_seeded_session"
     assert calls[0]["profile_home"] == str(profiles.get_profile_dir("default"))
     assert calls[0]["context"] is not None
+
+
+def test_default_spawn_publishes_the_run_s_reasoning_and_tool_names(
+    stores, monkeypatch
+):
+    """The run page's activity comes from the seeded session's own
+    callbacks: what the agent reasons and which tools it calls are
+    published as they happen, and a tool's arguments and result are not."""
+    from types import SimpleNamespace
+
+    from agent import seeded_session
+    from hermes_cli import run_activity
+
+    def fake_spawn(prompt, **kwargs):
+        kwargs["reasoning_callback"]("Reading last week's digest")
+        kwargs["tool_start_callback"]("tc-1", "read_file", {"path": "/etc/secret"})
+        kwargs["tool_complete_callback"](
+            "tc-1", "read_file", {"path": "/etc/secret"}, "s3cr3t contents"
+        )
+        return SimpleNamespace(
+            session_id=kwargs["session_id"], result=None,
+            timed_out=False, error=None,
+        )
+
+    monkeypatch.setattr(seeded_session, "spawn_seeded_session", fake_spawn)
+    project, _ = _make_project()
+    _save_playbook(
+        project.id, [{"key": "read", "title": "Read", "mode": "inline"}]
+    )
+    with projects_db.connect_closing() as conn:
+        projects_db.activate_playbook_rev(conn, project.id, 1)
+    result = _start(project.id)
+
+    key = run_activity.run_key(project.id, result["run"]["run_no"])
+    events, done, known = run_activity.read(key)
+    assert known and done, "the run's activity must be readable after it ends"
+    kinds = [e["kind"] for e in events]
+    assert kinds == ["reasoning", "reasoning", "tool.start", "tool.complete", "status"]
+    assert events[1]["text"] == "Reading last week's digest"
+    assert events[2]["name"] == "read_file"
+    # The tool's path argument and its result stayed in this process.
+    blob = repr(events)
+    assert "/etc/secret" not in blob and "s3cr3t" not in blob
