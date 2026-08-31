@@ -167,20 +167,70 @@ def _sentences(paragraph: str) -> List[str]:
     return [part for part in parts if part]
 
 
+def _split_sentence(sentence: str, target: int) -> List[str]:
+    """Cut one over-budget sentence into pieces of at most ``target`` tokens.
+
+    Not every text has sentences. A CSV row, a minified JSON blob, a table
+    exported as one line or a base64 attachment is a single "sentence"
+    thousands of tokens long, and leaving it whole produced a chunk past the
+    embedding service's per-text ceiling — which answers 413 and, before the
+    ingest loop learned to carry on, ended the whole nightly Drive pass on one
+    such document.
+
+    Word boundaries are preferred so ordinary prose still reads as prose; a
+    single token longer than the budget (that base64 blob, or CJK, which has no
+    spaces to cut on) is cut by characters, because a piece nobody can embed
+    retrieves as nothing at all.
+    """
+    if estimate_tokens(sentence) <= target:
+        return [sentence]
+    pieces: List[str] = []
+    current: List[str] = []
+    used = 0
+    for word in re.split(r"(\s+)", sentence):
+        if not word:
+            continue
+        tokens = estimate_tokens(word)
+        if tokens > target:
+            if current:
+                pieces.append("".join(current).strip())
+                current = []
+                used = 0
+            step = max(1, target)
+            for start in range(0, len(word), step):
+                pieces.append(word[start : start + step])
+            continue
+        if current and used + tokens > target:
+            pieces.append("".join(current).strip())
+            current = []
+            used = 0
+        current.append(word)
+        used += tokens
+    if current:
+        pieces.append("".join(current).strip())
+    return [piece for piece in pieces if piece]
+
+
 def _split_oversized(block: _Block, target: int) -> List[_Block]:
     """Break one over-long paragraph on sentence boundaries.
 
     A single paragraph can exceed the budget on its own (a table, a wall of
     contract text). Splitting on sentences keeps each piece readable; a sentence
-    that is itself over budget is kept whole rather than cut mid-word, because a
-    truncated sentence retrieves as a fragment nobody can verify.
+    that is itself over budget is cut on word boundaries by ``_split_sentence``
+    rather than kept whole — a fragment is imperfect, but a chunk the embedding
+    service refuses is not retrievable at all.
     """
     if block.tokens <= target:
         return [block]
     pieces: List[_Block] = []
     current: List[str] = []
     used = 0
-    for sentence in _sentences(block.text) or [block.text]:
+    sentences = [
+        piece
+        for sentence in (_sentences(block.text) or [block.text])
+        for piece in _split_sentence(sentence, target)
+    ]
+    for sentence in sentences:
         tokens = estimate_tokens(sentence)
         if current and used + tokens > target:
             pieces.append(
@@ -205,6 +255,13 @@ def _overlap_text(text: str, overlap_tokens: int) -> str:
         tokens = estimate_tokens(sentence)
         if tail and used + tokens > overlap_tokens:
             break
+        if not tail and tokens > overlap_tokens:
+            # A "sentence" with no boundaries in it (a CSV row, a wall of CJK)
+            # is longer than the whole overlap budget, and carrying it whole
+            # carried the entire previous chunk forward — every chunk then
+            # contained all of its predecessors and the last one was the size
+            # of the document.
+            return _split_sentence(sentence, overlap_tokens)[-1]
         tail.insert(0, sentence)
         used += tokens
     return " ".join(tail)

@@ -13,6 +13,7 @@ import argparse
 import asyncio
 import sys
 from pathlib import Path
+from typing import Sequence
 
 from hermes_cli.access import PrincipalStore
 from hermes_cli.config import load_config
@@ -82,6 +83,26 @@ def _report(summary: IngestSummary) -> None:
     print()
 
 
+def total_failure(summaries: Sequence[IngestSummary]) -> str:
+    """Why the run failed outright, or ``""`` when it accomplished something.
+
+    Ingestion carries on past a document it cannot store, which is right — one
+    bad export must not strip the rest of Drive out of recall. But it runs from
+    a timer, where the exit code is the only thing anyone reads, and "ingested
+    0, failed 120" then looks exactly like "nothing new to do".
+    """
+    failed = sum(len(summary.failures) for summary in summaries)
+    if not failed:
+        return ""
+    stored = sum(summary.ingested + summary.unchanged for summary in summaries)
+    if stored:
+        return ""
+    return (
+        f"every document attempted failed ({failed}) — nothing was ingested; "
+        "the failures above name the cause"
+    )
+
+
 def cmd_rag_ingest_drive(args: argparse.Namespace) -> None:
     rag, principals = _stores(args)
     directory = _credentials_dir(args)
@@ -112,8 +133,12 @@ def cmd_rag_ingest_drive(args: argparse.Namespace) -> None:
             )
         return summaries
 
-    for summary in asyncio.run(run()):
+    summaries = asyncio.run(run())
+    for summary in summaries:
         _report(summary)
+    verdict = total_failure(summaries)
+    if verdict:
+        raise SystemExit(verdict)
 
 
 def _progress(file, outcome: str) -> None:
