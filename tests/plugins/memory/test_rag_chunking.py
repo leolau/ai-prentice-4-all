@@ -113,3 +113,40 @@ def test_chinese_document_chunks_on_its_own_budget() -> None:
 
 def test_empty_input_produces_no_chunks() -> None:
     assert chunk_document("   \n\n  ", title="Empty") == []
+
+
+def test_a_single_unsplittable_line_is_cut_to_the_budget() -> None:
+    """The case that broke nightly ingestion: no sentence boundaries at all.
+
+    A CSV row, a minified JSON export or a base64 attachment is one "sentence"
+    thousands of tokens long. Keeping it whole produced a chunk past the
+    embedding service's 8,192-char ceiling, which answers 413 — an unembeddable
+    chunk is not retrievable, so a cut piece is strictly better.
+    """
+    blob = "A" * 40000
+    chunks = chunk_document(blob, title="Export", target_tokens=512)
+    assert len(chunks) > 1
+    assert all(len(chunk.text) <= 8192 for chunk in chunks)
+    # Nothing is lost by the cut, and the overlap does not compound: carrying
+    # an unsplittable "sentence" whole once made every chunk contain all of its
+    # predecessors, so the document came back many times its own size.
+    total = sum(chunk.text.count("A") for chunk in chunks)
+    assert 40000 <= total < 60000
+
+
+def test_a_wall_of_long_words_still_breaks_on_whitespace() -> None:
+    """Prose must keep reading as prose: cut between words, not inside them."""
+    words = [f"token{n:04d}" for n in range(4000)]
+    chunks = chunk_document(" ".join(words), title="Log", target_tokens=64)
+    assert len(chunks) > 1
+    assert all(len(chunk.text) <= 8192 for chunk in chunks)
+    for chunk in chunks:
+        for word in chunk.text.split():
+            assert word in words, f"{word!r} was cut mid-word"
+
+
+def test_chinese_without_punctuation_is_cut_by_character() -> None:
+    """CJK has no spaces to cut on, and one character is about one token."""
+    chunks = chunk_document("務" * 20000, title="長文", target_tokens=256)
+    assert len(chunks) > 1
+    assert all(len(chunk.text) <= 8192 for chunk in chunks)

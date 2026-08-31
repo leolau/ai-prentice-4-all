@@ -190,3 +190,21 @@ def test_a_non_json_error_body_is_reported_as_a_service_error() -> None:
         embedder = LocalHttpEmbedder(endpoint=server.endpoint, model="m", dim=8)
         with pytest.raises(EmbeddingServiceError):
             embedder.embed("hello")
+
+
+def test_a_refusal_reports_the_status_and_the_services_own_reason() -> None:
+    """The 413 that ended a nightly Drive ingestion read as "unreachable".
+
+    The service *answered*, and its body named the problem exactly ("texts at
+    [0] exceed 8192 chars"). Reporting that as an unreachable service sent the
+    operator looking for a dead process instead of at the oversized document.
+    """
+    body = {"error": "texts at [0] exceed 8192 chars; chunk before embedding"}
+    with _StubEmbedServer(dim=8, status=413, body=body) as server:
+        embedder = LocalHttpEmbedder(endpoint=server.endpoint, model="m", dim=8)
+        with pytest.raises(EmbeddingServiceError) as caught:
+            embedder.embed("x" * 9000)
+    message = str(caught.value)
+    assert "HTTP 413" in message
+    assert "exceed 8192 chars" in message
+    assert "unreachable" not in message
