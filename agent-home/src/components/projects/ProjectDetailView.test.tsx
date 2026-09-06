@@ -233,6 +233,48 @@ describe("detail panels", () => {
     expect(html).toContain("waiting");
   });
 
+  it("RunsPanel puts Continue / Cancel / Stop inline on a live run only", () => {
+    const live = renderToStaticMarkup(<RunsPanel slug="monday-digest" runs={PROJECT.runs} />);
+    expect(live).toContain('data-component="RunRowActions"');
+    expect(live).toContain(">Continue<");
+    expect(live).toContain(">Cancel<");
+    expect(live).toContain("Stop now");
+    expect(live).toContain("waiting for you");
+
+    const settled = renderToStaticMarkup(
+      <RunsPanel
+        slug="monday-digest"
+        runs={[{ ...PROJECT.runs[0], status: "done", duration_seconds: 120, ended_at: NOW }]}
+      />,
+    );
+    expect(settled).not.toContain('data-component="RunRowActions"');
+
+    const archived = renderToStaticMarkup(
+      <RunsPanel slug="monday-digest" runs={PROJECT.runs} archived />,
+    );
+    expect(archived).not.toContain('data-component="RunRowActions"');
+  });
+
+  it("BoardPanel offers New card in startable columns and a move per card", () => {
+    const html = renderToStaticMarkup(
+      <BoardPanel
+        slug="monday-digest"
+        board={{ columns: [{ name: "triage", tasks: [] }, { name: "ready", tasks: [] }, ...BOARD.columns] }}
+      />,
+    );
+    // triage / ready are startable; todo / running / blocked are not.
+    expect(html.match(/\+ New card/g)?.length).toBe(2);
+    expect(html).toContain('aria-label="Move Draft the digest"');
+    expect(html).toContain("Approve — make ready");
+    expect(html).toContain("Unblock — make ready");
+
+    const archived = renderToStaticMarkup(
+      <BoardPanel slug="monday-digest" board={BOARD} archived />,
+    );
+    expect(archived).not.toContain("New card");
+    expect(archived).not.toContain("Move to");
+  });
+
   const PLAN_PROPS = {
     slug: "monday-digest",
     profiles: ["default"],
@@ -511,8 +553,11 @@ describe("ProjectDetailView", () => {
     expect(html).toContain("Run now");
     // A waiting run earns the Continue button.
     expect(html).toContain("Continue run 14");
-    // The agent's standing line rides under the header.
+    // The agent's standing line rides under the header, with its freshness
+    // and the door to rewrite it.
     expect(html).toContain("Where this stands");
+    expect(html).toContain("Summarised");
+    expect(html).toContain("Update summary");
     for (const label of ["Brief", "Outputs", "Progress", "Board", "Runs", "Plan", "Guidance", "People", "Files", "Tools"]) {
       expect(html).toContain(label);
     }
@@ -616,6 +661,28 @@ describe("ProjectDetailView", () => {
     );
     expect(html).not.toContain(">Edit<");
     expect(html).not.toContain("Save schedule");
+  });
+});
+
+describe("CardDetailView", () => {
+  const DETAIL = { ...CARD({ status: "todo", body: "Pull the week's threads." }), age: null };
+
+  it("offers the editor with the project's profiles and the column moves", () => {
+    const html = renderToStaticMarkup(
+      <CardDetailView slug="s" card={DETAIL} profiles={["default", "worker"]} />,
+    );
+    expect(html).toContain('data-component="CardEditor"');
+    expect(html).toContain("Edit card");
+    expect(html).toContain("Approve — make ready");
+    expect(html).toContain("Pull the week&#x27;s threads.");
+  });
+
+  it("is read-only when the project is archived", () => {
+    const html = renderToStaticMarkup(
+      <CardDetailView slug="s" card={DETAIL} profiles={[]} archived />,
+    );
+    expect(html).not.toContain('data-component="CardEditor"');
+    expect(html).not.toContain('data-component="CardActions"');
   });
 });
 

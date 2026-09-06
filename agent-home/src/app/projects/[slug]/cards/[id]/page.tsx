@@ -4,14 +4,14 @@ import { MobileShell } from "@/components/MobileShell";
 import { CardDetailView } from "@/components/projects/CardDetailView";
 import { HermesApiError } from "@/lib/api/client";
 import { apiClientForRequest, requirePrincipal } from "@/lib/auth/principal";
-import type { ProjectCardDetail } from "@/types";
+import type { ProjectCardDetail, ProjectDetail } from "@/types";
 
 // Reads the live principal + the card row per request — never at build time.
 export const dynamic = "force-dynamic";
 
 /**
- * **One card on a project board** (§13): a read-only look at what the card
- * knows — the board remains the surface that mutates it.
+ * **One card on a project board** (§13): what the card knows, plus the
+ * hand edits a member may make (title, brief, assignee, column).
  */
 export default async function Page({
   params,
@@ -32,6 +32,12 @@ export default async function Page({
     if (err instanceof HermesApiError && err.status === 404) notFound();
   }
 
+  // The project is only needed for the assignee choices and the archived
+  // gate — its absence degrades the editor, never the page.
+  const project: ProjectDetail | null = card
+    ? await client.project(slug).catch((): ProjectDetail | null => null)
+    : null;
+
   if (!card) {
     return (
       <MobileShell title="Card">
@@ -47,7 +53,12 @@ export default async function Page({
 
   return (
     <MobileShell title={card.title}>
-      <CardDetailView slug={slug} card={card} />
+      <CardDetailView
+        slug={slug}
+        card={card}
+        profiles={project?.profiles.map((row) => row.profile) ?? []}
+        archived={project?.archived ?? false}
+      />
     </MobileShell>
   );
 }
