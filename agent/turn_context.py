@@ -411,6 +411,12 @@ def build_turn_context(
                     messages, system_message, approx_tokens=_preflight_tokens,
                     task_id=effective_task_id,
                 )
+                # Re-baseline before the progress check: the compressor
+                # returns copies, and an in-place pass has already written
+                # them to state.db even when it made no progress.
+                conversation_history = conversation_history_after_compression(
+                    agent, messages
+                )
                 # Re-estimate now so size-only compression (same row count,
                 # lower token count — e.g. summarising tool outputs) is
                 # recognised as progress instead of being misread as
@@ -424,9 +430,6 @@ def build_turn_context(
                     _orig_len, len(messages), _orig_tokens, _preflight_tokens
                 ):
                     break  # Cannot compress further: neither rows nor tokens moved
-                conversation_history = conversation_history_after_compression(
-                    agent, messages
-                )
                 agent._empty_content_retries = 0
                 agent._thinking_prefill_retries = 0
                 agent._last_content_with_tools = None
