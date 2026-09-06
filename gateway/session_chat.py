@@ -14,7 +14,11 @@ session-context binding (:mod:`gateway.session_context`). It only assembles the
 agent and (optionally) runs one turn in a worker thread.
 """
 
+import logging
+import time
 from typing import Any, List, Optional, Tuple
+
+_log = logging.getLogger(__name__)
 
 
 def build_session_agent(
@@ -112,6 +116,7 @@ def run_session_turn_sync(
     session-context — the caller sets/clears that around this call. Callbacks
     fire on the caller's executor thread.
     """
+    t0 = time.monotonic()
     agent = build_session_agent(
         session_db=session_db,
         ephemeral_system_prompt=ephemeral_system_prompt,
@@ -124,10 +129,18 @@ def run_session_turn_sync(
         gateway_session_key=gateway_session_key,
         platform=platform,
     )
+    t1 = time.monotonic()
     result = agent.run_conversation(
         user_message=user_message,
         conversation_history=conversation_history,
         task_id=session_id or "",
+    )
+    _log.info(
+        "session-turn-timing session=%s build_agent_ms=%d run_ms=%d history=%d",
+        session_id or "",
+        int((t1 - t0) * 1000),
+        int((time.monotonic() - t1) * 1000),
+        len(conversation_history or []),
     )
     usage = {
         "input_tokens": getattr(agent, "session_prompt_tokens", 0) or 0,

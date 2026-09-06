@@ -13,6 +13,8 @@ import type { ChatApprovalRequest, ChatAttachment } from "@/types";
 import { formatUiContext, getUiContext } from "@/lib/app-mcp/state";
 
 export interface ChatStreamHandlers {
+  /** The server registered the turn (first frame, before the model runs). */
+  onAccepted?(runId: string): void;
   /** Incremental assistant text. */
   onDelta?(delta: string): void;
   /** Incremental model reasoning (extended thinking) text. */
@@ -157,7 +159,9 @@ async function consumeStream(
 
   const dispatch = (frame: StreamFrame): void => {
     const { event, data } = frame;
-    if (event === "assistant.delta") {
+    if (event === "run.accepted") {
+      handlers.onAccepted?.(str(data.run_id) ?? "");
+    } else if (event === "assistant.delta") {
       const delta = str(data.delta);
       if (delta) handlers.onDelta?.(delta);
     } else if (event === "reasoning.delta") {
