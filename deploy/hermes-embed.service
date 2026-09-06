@@ -26,6 +26,11 @@ ExecStart=/opt/data/hermes-embed/venv/bin/python \
     --revision 5617a9f61b028005a4858fdac845db406aefb181 \
     --cache-dir /opt/data/hermes-embed/models \
     --host 127.0.0.1 --port 8791 --batch-size 16 --offline
+# torch defaults to one thread per core; uncapped, a nightly ingestion pass
+# pins every core for hours and starves the gateway/dashboard/agent-home.
+Environment=OMP_NUM_THREADS=3
+Environment=MKL_NUM_THREADS=3
+Environment=TOKENIZERS_PARALLELISM=false
 Restart=on-failure
 RestartSec=5
 
@@ -44,6 +49,8 @@ RestrictRealtime=yes
 RestrictAddressFamilies=AF_INET AF_UNIX
 MemoryMax=3G
 CPUWeight=50
+CPUQuota=300%
+Nice=10
 
 [Install]
 WantedBy=multi-user.target

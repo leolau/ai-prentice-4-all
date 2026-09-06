@@ -17,7 +17,7 @@ from pathlib import Path
 import pytest
 
 from hermes_cli.access import Principal
-from hermes_cli.rag_cmd import register_rag_subparser
+from hermes_cli.rag_cmd import register_rag_subparser, total_failure
 from hermes_cli.rag_drive import (
     SOURCE_KIND,
     DriveError,
@@ -135,6 +135,28 @@ async def test_one_unreadable_file_does_not_end_the_run() -> None:
 
     assert summary.ingested == 1
     assert summary.failures and "Locked" in summary.failures[0]
+
+
+@pytest.mark.asyncio
+async def test_one_document_the_embedder_refuses_does_not_end_the_run() -> None:
+    """The failure that actually happened: a chunk past the embedding
+    service's per-text ceiling raised out of ``rag.ingest``, and every newer
+    document behind it went un-ingested on every nightly pass."""
+    files = [_file("doc-1", "Huge export"), _file("doc-2", "Tender B")]
+    reader = FakeReader(files, {"doc-1": "text", "doc-2": "text"})
+
+    class RefusingRag(FakeRag):
+        async def ingest(self, principal, **kwargs):
+            if kwargs["source_ref"] == "doc-1":
+                raise RuntimeError("texts at [0] exceed 8192 chars")
+            return await super().ingest(principal, **kwargs)
+
+    rag = RefusingRag()
+    summary = await ingest_drive(rag, PRINCIPAL, reader, limit=10)
+
+    assert summary.ingested == 1
+    assert [call["source_ref"] for call in rag.calls] == ["doc-2"]
+    assert summary.failures and "8192" in summary.failures[0]
 
 
 @pytest.mark.asyncio
@@ -456,3 +478,29 @@ def test_accounts_are_repeatable_on_the_command_line() -> None:
 
     assert args.account == ["a@x.com", "b@y.com"]
     assert args.limit == 5
+
+
+def _summary(*, ingested: int = 0, unchanged: int = 0, failures: int = 0):
+    from hermes_cli.rag_drive import IngestSummary
+
+    return IngestSummary(
+        account="leo@example.com",
+        seen=ingested + unchanged + failures,
+        ingested=ingested,
+        unchanged=unchanged,
+        failures=[f"doc {n}: HTTP 413" for n in range(failures)],
+    )
+
+
+def test_a_run_that_stored_nothing_and_failed_everything_is_not_a_success() -> None:
+    """It runs from a timer, where exit 0 is all anyone reads."""
+    assert total_failure([_summary(failures=3)])
+    assert total_failure([_summary(failures=2), _summary(failures=1)])
+
+
+def test_a_partial_failure_still_succeeds_and_a_clean_run_is_silent() -> None:
+    """One unstorable export must not fail a pass that ingested the rest."""
+    assert total_failure([_summary(ingested=9, failures=1)]) == ""
+    assert total_failure([_summary(unchanged=40, failures=1)]) == ""
+    assert total_failure([_summary(ingested=3)]) == ""
+    assert total_failure([]) == ""

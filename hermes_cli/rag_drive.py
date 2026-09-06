@@ -342,14 +342,24 @@ async def ingest_drive(
             if progress:
                 progress(file, "skipped (no extractable text)")
             continue
-        result = await rag.ingest(
-            principal,
-            source_kind=SOURCE_KIND,
-            source_ref=file.id,
-            title=file.name,
-            text=text,
-            source_modified_at=_parse_timestamp(file.modified_time),
-        )
+        try:
+            result = await rag.ingest(
+                principal,
+                source_kind=SOURCE_KIND,
+                source_ref=file.id,
+                title=file.name,
+                text=text,
+                source_modified_at=_parse_timestamp(file.modified_time),
+            )
+        except Exception as exc:
+            # Extraction failures were carried; ingestion failures were not, so
+            # one document the embedder refused ended the whole nightly pass
+            # and every newer document behind it went un-ingested — for weeks,
+            # because the timer's next run hit the same document first.
+            summary.failures.append(f"{file.name}: {exc}")
+            if progress:
+                progress(file, f"failed: {exc}")
+            continue
         if result.skipped and result.reason == "unchanged":
             summary.unchanged += 1
             if progress:

@@ -120,6 +120,21 @@ class HashingEmbedder:
         return vec
 
 
+def _http_error_detail(exc: urllib.error.HTTPError) -> str:
+    """The service's own explanation for a refusal, or its status line."""
+    try:
+        raw = exc.read().decode("utf-8", errors="replace")
+    except Exception:  # pragma: no cover - stream already consumed/closed
+        return str(exc.reason or exc)
+    try:
+        parsed = json.loads(raw)
+    except ValueError:
+        return raw.strip()[:500] or str(exc.reason or exc)
+    if isinstance(parsed, dict) and parsed.get("error"):
+        return str(parsed["error"])
+    return raw.strip()[:500]
+
+
 class EmbeddingServiceError(RuntimeError):
     """The configured embedding service could not produce a vector.
 
@@ -192,6 +207,15 @@ class LocalHttpEmbedder:
         try:
             with urllib.request.urlopen(request, timeout=self._timeout) as response:
                 body = json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            # The service answered, and its body says exactly what it refused
+            # and why ("texts at [0] exceed 8192 chars"). Reporting that as
+            # "unreachable or returned a non-JSON body" sent the operator
+            # looking for a dead service instead of at the oversized text.
+            raise EmbeddingServiceError(
+                f"embedding service at {self._endpoint} refused the request "
+                f"with HTTP {exc.code}: {_http_error_detail(exc)}"
+            ) from exc
         except (urllib.error.URLError, OSError, ValueError) as exc:
             raise EmbeddingServiceError(
                 f"embedding service at {self._endpoint} is unreachable or "
