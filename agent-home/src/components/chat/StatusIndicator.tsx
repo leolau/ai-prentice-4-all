@@ -120,6 +120,14 @@ export function StatusIndicator({
           No activity for {formatElapsed(quietMs ?? 0)}. The agent may be waiting
           on a slow step — you can Stop and try again if it looks stuck.
         </p>
+      ) : stopping ? (
+        <p
+          data-component="StatusStoppingHint"
+          className="max-w-prose px-1 text-xs text-[var(--color-muted)]"
+        >
+          The agent stops at the next safe point — if it is mid-step (a tool
+          call or context compaction) this can take a minute or two.
+        </p>
       ) : longTask ? (
         <p
           data-component="StatusLongTaskHint"

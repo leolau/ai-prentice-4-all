@@ -364,3 +364,34 @@ def test_expired_cooldown_allows_preflight(tmp_path):
     agent._emit_status.assert_called_once()
     agent._compress_context.assert_called()
 
+
+
+def test_preflight_stops_between_passes_when_interrupted(tmp_path):
+    """An explicit Stop during preflight compaction must not run further
+    (multi-minute) summariser passes before the turn loop can observe the
+    interrupt."""
+    agent = _make_agent_with_cooldown(tmp_path / "state.db", "sess-1")
+
+    def _compress_then_interrupt(messages, *_a, **_k):
+        agent._interrupt_requested = True
+        return messages[:-1], "SYSTEM"
+
+    agent._compress_context = MagicMock(side_effect=_compress_then_interrupt)
+
+    with patch("agent.turn_context._should_run_preflight_estimate", return_value=True), \
+         patch("agent.turn_context.estimate_request_tokens_rough", return_value=999_999):
+        ctx = _build(agent)
+
+    assert isinstance(ctx, TurnContext)
+    assert agent._compress_context.call_count == 1
+
+
+def test_preflight_skipped_entirely_when_interrupt_already_pending(tmp_path):
+    agent = _make_agent_with_cooldown(tmp_path / "state.db", "sess-1")
+    agent._interrupt_requested = True
+
+    with patch("agent.turn_context._should_run_preflight_estimate", return_value=True), \
+         patch("agent.turn_context.estimate_request_tokens_rough", return_value=999_999):
+        _build(agent)
+
+    agent._compress_context.assert_not_called()

@@ -398,6 +398,13 @@ def build_turn_context(
                 "This may take a moment."
             )
             for _pass in range(3):
+                if agent._interrupt_requested:
+                    logger.info(
+                        "Preflight compression: interrupt requested, "
+                        "skipping remaining passes (session %s)",
+                        agent.session_id or "none",
+                    )
+                    break
                 _orig_len = len(messages)
                 _orig_tokens = _preflight_tokens
                 messages, active_system_prompt = agent._compress_context(
