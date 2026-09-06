@@ -417,6 +417,30 @@ def _derive_progress(
     }
 
 
+def _output_rollup(outputs: list[dict]) -> dict:
+    """Per-status counts of the declared outputs, so a list row or the
+    progress panel can say "2 delivered, 1 accepted of 3" without
+    re-deriving it from the rows (§9.1)."""
+    rollup = {
+        "total": len(outputs),
+        "required": 0,
+        "delivered": 0,
+        "accepted": 0,
+        "awaiting_acceptance": 0,
+    }
+    for o in outputs:
+        if o.get("required"):
+            rollup["required"] += 1
+        status = o.get("status")
+        if status == "delivered":
+            rollup["delivered"] += 1
+            rollup["awaiting_acceptance"] += 1
+        elif status == "accepted":
+            rollup["delivered"] += 1
+            rollup["accepted"] += 1
+    return rollup
+
+
 def _full_health(conn, project, card_rollup: dict, profiles: list) -> str:
     """The complete §9.2 ladder, computed on read from runs + the cron
     store. The cron round-trip only happens for scheduled projects — a
@@ -634,6 +658,7 @@ def _list_sync(
                     p,
                     extra={
                         "progress": progress,
+                        "output_rollup": _output_rollup(outputs),
                         "member_count": len(members),
                         "health": item_health,
                     },
@@ -902,6 +927,7 @@ def _detail_sync(project, principal, *, include_address: bool) -> dict:
             "contacts": _contacts_payload(contacts, include_address=include_address),
             "links": links_by_kind,
             "progress": progress,
+            "output_rollup": _output_rollup(outputs),
             "score": score,
             "health": health,
             "next_run_at": next_run_at,

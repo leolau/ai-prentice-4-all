@@ -134,7 +134,10 @@ describe("RunsPanel controls", () => {
     );
     fireEvent.click(getByText("Cancel"));
 
-    expect((await findByRole("alert")).textContent).toContain("run 14 is not waiting");
+    // The 409 is translated into what to do, not echoed verbatim.
+    expect((await findByRole("alert")).textContent).toContain(
+      "not waiting for you any more",
+    );
     expect(router.refresh).not.toHaveBeenCalled();
   });
 });

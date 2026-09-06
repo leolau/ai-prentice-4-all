@@ -1,6 +1,7 @@
 "use client";
 
 import { useRef, useState } from "react";
+import { friendlyError } from "@/components/projects/errors";
 
 import { AddToProjectSheet } from "@/components/projects/AddToProjectSheet";
 import { FileDetail } from "@/components/files/FilesView";
@@ -78,7 +79,7 @@ export function FilesPanel({
       });
       if (!res.ok) {
         const data = (await res.json().catch(() => ({}))) as { detail?: string };
-        throw new Error(data.detail ?? "Could not remove the link.");
+        throw new Error(friendlyError({ status: res.status, detail: data.detail }, "Could not remove the link."));
       }
       setFiles((prev) =>
         prev.filter(
@@ -114,7 +115,7 @@ export function FilesPanel({
         resolved?: boolean | null;
       };
       if (!res.ok) {
-        throw new Error(data.detail ?? "Could not upload the file.");
+        throw new Error(friendlyError({ status: res.status, detail: data.detail }, "Could not upload the file."));
       }
       const link: ProjectLink = {
         project_id: data.project_id ?? project.id,
@@ -153,7 +154,8 @@ export function FilesPanel({
 
       {files.length === 0 ? (
         <p className="mt-2 text-sm text-[var(--color-muted)]">
-          Add a file — anything the project reads or produced belongs here.
+          No files yet. Attach anything the project should read, or that a
+          run produced, with the form below — runs can also add their own.
         </p>
       ) : (
         <ul className="mt-2 flex flex-col gap-1.5">

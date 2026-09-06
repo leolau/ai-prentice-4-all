@@ -2,6 +2,7 @@
 
 import { useRouter } from "next/navigation";
 import { useState } from "react";
+import { friendlyError } from "@/components/projects/errors";
 
 import { BusyRegion } from "@/components/ui/BusyRegion";
 
@@ -38,7 +39,7 @@ export function CardActions({
       );
       const data = (await res.json().catch(() => ({}))) as { detail?: string };
       if (!res.ok) {
-        setError(data.detail ?? "That didn't go through.");
+        setError(friendlyError({ status: res.status, detail: data.detail }, "That didn't go through."));
         return;
       }
       router.refresh();

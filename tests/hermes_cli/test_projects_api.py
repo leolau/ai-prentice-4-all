@@ -129,6 +129,33 @@ def test_create_defaults_name_from_goal_and_writes_membership(env):
     assert outputs[0]["required"] == 1
 
 
+def test_output_rollup_counts_delivered_and_accepted():
+    rollup = projects_api._output_rollup(
+        [
+            {"required": 1, "status": "declared"},
+            {"required": 1, "status": "delivered"},
+            {"required": 0, "status": "accepted"},
+        ]
+    )
+    assert rollup == {
+        "total": 3,
+        "required": 2,
+        "delivered": 2,
+        "accepted": 1,
+        "awaiting_acceptance": 1,
+    }
+
+
+def test_detail_and_list_carry_the_output_rollup(env):
+    client, _state = env
+    project = _create(env)
+    detail = client.get(f"/api/registry/projects/{project['slug']}").json()
+    assert detail["output_rollup"]["total"] == 1
+    assert detail["output_rollup"]["awaiting_acceptance"] == 0
+    listed = client.get("/api/registry/projects").json()["items"]
+    assert listed[0]["output_rollup"]["total"] == 1
+
+
 def test_create_refuses_goal_over_160_chars(env):
     client, _state = env
     resp = client.post(

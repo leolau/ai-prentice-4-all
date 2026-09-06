@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { friendlyError } from "@/components/projects/errors";
 
 import { BusyRegion } from "@/components/ui/BusyRegion";
 import type { ProjectDetail, ProjectStatus } from "@/types";
@@ -67,7 +68,7 @@ export function EditBriefSheet({
       });
       const data = (await res.json().catch(() => ({}))) as { detail?: string };
       if (!res.ok) {
-        setError(data.detail ?? "The change was not saved.");
+        setError(friendlyError({ status: res.status, detail: data.detail }, "The change was not saved."));
         return false;
       }
       return true;

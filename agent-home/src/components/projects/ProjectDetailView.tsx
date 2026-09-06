@@ -2,6 +2,7 @@
 
 import { useRouter } from "next/navigation";
 import { useState } from "react";
+import { friendlyError } from "@/components/projects/errors";
 
 import {
   AddToProjectSheet,
@@ -16,6 +17,7 @@ import {
 } from "@/components/projects/readiness";
 import { agoLabel, dayDistance } from "@/components/projects/format";
 import { SummariseSheet } from "@/components/projects/SummariseSheet";
+import { CollapsedPanel } from "@/components/projects/panels/CollapsedPanel";
 import { BoardPanel } from "@/components/projects/panels/BoardPanel";
 import { BriefPanel } from "@/components/projects/panels/BriefPanel";
 import { FilesPanel } from "@/components/projects/panels/FilesPanel";
@@ -53,11 +55,15 @@ const HEALTH_TONE: Record<ProjectHealth, Tone> = {
   stalled: "danger",
 };
 
-/** The sticky anchor strip, in §13 panel order. */
+/**
+ * The sticky anchor strip, in panel order: Progress (what is next for you)
+ * leads, then the deliverables and the work, then the record. Collapsed
+ * panels keep their anchor — the wrapper carries the id.
+ */
 const PANEL_ANCHORS: { id: string; label: string }[] = [
-  { id: "panel-brief", label: "Brief" },
-  { id: "panel-outputs", label: "Outputs" },
   { id: "panel-progress", label: "Progress" },
+  { id: "panel-outputs", label: "Outputs" },
+  { id: "panel-brief", label: "Brief" },
   { id: "panel-board", label: "Board" },
   { id: "panel-runs", label: "Runs" },
   { id: "panel-plan", label: "Plan" },
@@ -132,6 +138,13 @@ export function ProjectDetailView({
     (project.links.reference ?? []).length > 0 ||
     (project.links.url ?? []).length > 0;
   const hasMemories = (project.links.memory ?? []).length > 0;
+  const hasFiles = (project.links.file ?? []).length > 0;
+  // The owner is a member by construction; People is empty until a second
+  // person or a contact is on it.
+  const hasPeople =
+    project.members.some((m) => m.user_id !== project.owner_user_id) ||
+    project.contacts.length > 0;
+  const hasTools = Boolean(project.toolsets?.trim() || project.skills?.trim());
   const anchors = PANEL_ANCHORS.filter(
     (anchor) =>
       (anchor.id !== "panel-references" || hasReferences) &&
@@ -147,7 +160,7 @@ export function ProjectDetailView({
       const res = await fetch(path, { method: "POST" });
       const data = (await res.json().catch(() => ({}))) as { detail?: string };
       if (!res.ok) {
-        setError(data.detail ?? "That did not go through.");
+        setError(friendlyError({ status: res.status, detail: data.detail }, "That did not go through."));
         return;
       }
       router.refresh();
@@ -171,7 +184,7 @@ export function ProjectDetailView({
         run_no?: number;
       };
       if (!res.ok) {
-        setError(data.detail ?? "That did not go through.");
+        setError(friendlyError({ status: res.status, detail: data.detail }, "That did not go through."));
         return;
       }
       const runNo = data.run?.run_no ?? data.run_no;
@@ -203,7 +216,7 @@ export function ProjectDetailView({
       });
       const data = (await res.json().catch(() => ({}))) as { detail?: string };
       if (!res.ok) {
-        setError(data.detail ?? "That did not go through.");
+        setError(friendlyError({ status: res.status, detail: data.detail }, "That did not go through."));
         return;
       }
       router.refresh();
@@ -375,17 +388,18 @@ export function ProjectDetailView({
 
           {/* ── Panels — stacked on a phone, two columns from md: ── */}
           <div className="flex flex-col gap-4 md:grid md:grid-cols-2 md:items-start">
-            <BriefPanel project={project} />
+            <ProgressPanel
+              slug={project.slug}
+              project={project}
+              blockedCards={blockedCards}
+              runnable={runnable}
+            />
             <OutputsPanel
               slug={project.slug}
               outputs={project.outputs}
               archived={project.archived}
             />
-            <ProgressPanel
-              slug={project.slug}
-              project={project}
-              blockedCards={blockedCards}
-            />
+            <BriefPanel project={project} />
             <BoardPanel
               slug={project.slug}
               board={board}
@@ -415,11 +429,37 @@ export function ProjectDetailView({
               initial={directives}
               archived={project.archived}
             />
-            <PeoplePanel project={project} archived={project.archived} />
-            <FilesPanel project={project} archived={project.archived} />
+            {hasPeople ? (
+              <PeoplePanel project={project} archived={project.archived} />
+            ) : (
+              <CollapsedPanel
+                anchor="panel-people"
+                label="People"
+                hint="just you — add someone"
+              >
+                <PeoplePanel project={project} archived={project.archived} />
+              </CollapsedPanel>
+            )}
+            {hasFiles ? (
+              <FilesPanel project={project} archived={project.archived} />
+            ) : (
+              <CollapsedPanel anchor="panel-files" label="Files" hint="none yet — add one">
+                <FilesPanel project={project} archived={project.archived} />
+              </CollapsedPanel>
+            )}
             <ReferencesPanel project={project} />
             <MemoriesPanel project={project} />
-            <ToolsPanel project={project} archived={project.archived} />
+            {hasTools ? (
+              <ToolsPanel project={project} archived={project.archived} />
+            ) : (
+              <CollapsedPanel
+                anchor="panel-tools"
+                label="Tools"
+                hint="full host toolset — narrow it"
+              >
+                <ToolsPanel project={project} archived={project.archived} />
+              </CollapsedPanel>
+            )}
           </div>
         </div>
       </BusyRegion>

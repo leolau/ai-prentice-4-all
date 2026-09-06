@@ -138,7 +138,7 @@ export function ProjectsList({ initial }: { initial: ProjectsResponse }) {
           <p>
             {narrowed || filters.q
               ? "Nothing matches that view."
-              : "No active projects. Anything the agent works on over time — a deliverable, a recurring job, a standing duty — lives here."}
+              : "No projects yet. Anything the agent works on over time — a deliverable, a recurring job, a standing duty — lives here. Create one, let the agent draft its plan, and run it from this app."}
           </p>
           {!narrowed && !filters.q ? (
             <Link

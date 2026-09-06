@@ -2,6 +2,7 @@
 
 import { useRouter } from "next/navigation";
 import { useState } from "react";
+import { friendlyError } from "@/components/projects/errors";
 
 import { dateTimeLabel } from "@/components/projects/format";
 import { BusyRegion } from "@/components/ui/BusyRegion";
@@ -135,7 +136,7 @@ export function PlanPanel({
       });
       const data = (await res.json().catch(() => ({}))) as { detail?: string };
       if (!res.ok) {
-        setError(data.detail ?? "The plan was not saved.");
+        setError(friendlyError({ status: res.status, detail: data.detail }, "The plan was not saved."));
         return;
       }
       setEditing(false);
@@ -158,7 +159,7 @@ export function PlanPanel({
       });
       const data = (await res.json().catch(() => ({}))) as { detail?: string };
       if (!res.ok) {
-        setError(data.detail ?? "Activation was refused.");
+        setError(friendlyError({ status: res.status, detail: data.detail }, "Activation was refused."));
         return;
       }
       router.refresh();

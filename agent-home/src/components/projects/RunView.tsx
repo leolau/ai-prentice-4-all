@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
+import { friendlyError } from "@/components/projects/errors";
 
 import {
   dateTimeLabel,
@@ -98,7 +99,7 @@ export function RunView({
         detail?: string;
       };
       if (!res.ok) {
-        setError(data.detail ?? "That did not go through.");
+        setError(friendlyError({ status: res.status, detail: data.detail }, "That did not go through."));
         return false;
       }
       if (mergeUpdatedRun) {

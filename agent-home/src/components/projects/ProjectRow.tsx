@@ -1,6 +1,7 @@
 import Link from "next/link";
 
 import { dayDistance } from "@/components/projects/format";
+import { outputsLabel } from "@/components/projects/outputsLabel";
 import { Pill, type Tone } from "@/components/ui/Pill";
 import type { ProjectCadence, ProjectHealth, ProjectListItem } from "@/types";
 
@@ -50,10 +51,15 @@ export function ProjectRow({ project }: { project: ProjectListItem }) {
       : project.next_run_at != null
         ? `next ${dayDistance(project.next_run_at)}`
         : null;
+  // The outputs line repeats the headline when the outputs rung won.
+  const outputs =
+    project.progress.rung === "outputs" ? null : outputsLabel(project.output_rollup);
+  const awaiting = project.output_rollup?.awaiting_acceptance ?? 0;
   const meta = [
     CADENCE_LABEL[project.cadence],
     when,
     project.progress.headline,
+    outputs,
     project.member_count > 0
       ? `${project.member_count} ${project.member_count === 1 ? "member" : "members"}`
       : null,
@@ -74,6 +80,9 @@ export function ProjectRow({ project }: { project: ProjectListItem }) {
         >
           {project.name}
         </Link>
+        {awaiting > 0 ? (
+          <Pill tone="warning">{awaiting} to accept</Pill>
+        ) : null}
         <Pill tone={HEALTH_TONE[project.health]}>
           {HEALTH_LABEL[project.health]}
         </Pill>

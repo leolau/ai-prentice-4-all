@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { friendlyError } from "@/components/projects/errors";
 
 import { BusyRegion } from "@/components/ui/BusyRegion";
 
@@ -50,7 +51,7 @@ export function SummariseSheet({
       );
       const data = (await res.json().catch(() => ({}))) as { detail?: string };
       if (!res.ok) {
-        setError(data.detail ?? "The summary was not saved.");
+        setError(friendlyError({ status: res.status, detail: data.detail }, "The summary was not saved."));
         return;
       }
       onClose();

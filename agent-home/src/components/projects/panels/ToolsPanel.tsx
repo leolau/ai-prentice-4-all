@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { friendlyError } from "@/components/projects/errors";
 
 import { BusyRegion } from "@/components/ui/BusyRegion";
 import type { ProjectDetail, ProjectToolsResolution } from "@/types";
@@ -86,7 +87,7 @@ export function ToolsPanel({
       );
       const data = (await res.json().catch(() => ({}))) as ProjectToolsResolution &
         { detail?: string };
-      if (!res.ok) throw new Error(data.detail ?? "Could not set tools.");
+      if (!res.ok) throw new Error(friendlyError({ status: res.status, detail: data.detail }, "Could not set tools."));
       setToolsets(data.toolsets ?? []);
       setSkills(data.skills ?? []);
       setResolution(data);

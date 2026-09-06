@@ -52,10 +52,11 @@ describe("NewProjectForm handlers", () => {
     );
     fillStep1(getByPlaceholderText);
     fireEvent.click(getByText("Next"));
+    fireEvent.click(getByText("I’ll write it myself"));
     fireEvent.click(getByText("Create project"));
 
     await waitFor(() =>
-      expect(router.push).toHaveBeenCalledWith("/projects/monday-digest"),
+      expect(router.push).toHaveBeenCalledWith("/projects/monday-digest#panel-plan"),
     );
     const call = fetchMock.mock.calls[0];
     expect(call[0]).toBe("/api/projects");
@@ -67,6 +68,31 @@ describe("NewProjectForm handlers", () => {
     expect(body.goal).toBe("The team starts Monday already briefed");
     expect(body.host_profile).toBe("default");
     expect(body.outputs).toEqual([{ title: "The Monday digest email" }]);
+  });
+
+  it("hands the brief to the agent when the plan choice is 'agent' (the default)", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(jsonResponse(200, { slug: "monday-digest" })),
+    );
+
+    const { getByPlaceholderText, getByText } = render(
+      <NewProjectForm servingProfile="default" />,
+    );
+    fillStep1(getByPlaceholderText);
+    fireEvent.click(getByText("Next"));
+    // Each cadence/autonomy choice explains itself in user terms.
+    expect(getByText(/You start each run yourself/)).toBeTruthy();
+    expect(getByText(/pauses at checkpoints/)).toBeTruthy();
+    fireEvent.click(getByText("Create and draft the plan"));
+
+    await waitFor(() => expect(router.push).toHaveBeenCalled());
+    const href = router.push.mock.calls[0][0] as string;
+    expect(href.startsWith("/chat?")).toBe(true);
+    const params = new URLSearchParams(href.slice("/chat?".length));
+    expect(params.get("profile")).toBe("default");
+    expect(params.get("draft")).toContain("slug: monday-digest");
+    expect(params.get("draft")).toContain("Do not activate it");
   });
 
   it("maps a 422's missing list onto the blank field and keeps what was typed", async () => {
@@ -84,7 +110,7 @@ describe("NewProjectForm handlers", () => {
     );
     fillStep1(getByPlaceholderText);
     fireEvent.click(getByText("Next"));
-    fireEvent.click(getByText("Create project"));
+    fireEvent.click(getByText("Create and draft the plan"));
 
     // The refusal names the field — never a bare toast…
     await findByText("This field is mandatory.");
