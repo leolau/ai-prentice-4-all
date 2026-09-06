@@ -3,23 +3,58 @@
 import { useRouter } from "next/navigation";
 import { useState } from "react";
 
+import { friendlyError } from "@/components/projects/errors";
+import { draftPlanPrompt } from "@/components/projects/panels/PlanPanel";
 import { BusyRegion } from "@/components/ui/BusyRegion";
 import type { ProjectAutonomy, ProjectCadence } from "@/types";
 
 /** The §2.2 mandatory fields a 422's `missing` list can name. */
 type MandatoryField = "goal" | "description" | "outputs" | "host_profile";
 
-const CADENCES: { value: ProjectCadence; label: string }[] = [
-  { value: "one_off", label: "One-off — finish it once" },
-  { value: "repeatable", label: "Repeatable — runs on a schedule" },
-  { value: "standing", label: "Standing — an ongoing duty" },
+/** Each choice says what the user will see happen, not what the enum means. */
+export const CADENCES: { value: ProjectCadence; label: string; explain: string }[] = [
+  {
+    value: "one_off",
+    label: "One-off — finish it once",
+    explain:
+      "You start each run yourself. Once every required output is accepted the project offers to close.",
+  },
+  {
+    value: "repeatable",
+    label: "Repeatable — runs on a schedule",
+    explain:
+      "Runs fire on a schedule you set in Settings after creating (nothing fires until you do); each run delivers the outputs again.",
+  },
+  {
+    value: "standing",
+    label: "Standing — an ongoing duty",
+    explain:
+      "Never “done”: cards keep arriving and progress is measured by recent deliveries, not a finish line.",
+  },
 ];
 
-const AUTONOMIES: { value: ProjectAutonomy; label: string }[] = [
-  { value: "manual", label: "Manual — never runs itself" },
-  { value: "supervised", label: "Supervised — runs, then reports" },
-  { value: "autonomous", label: "Autonomous — runs and decides" },
+export const AUTONOMIES: { value: ProjectAutonomy; label: string; explain: string }[] = [
+  {
+    value: "manual",
+    label: "Manual — never runs itself",
+    explain:
+      "Nothing happens without you: every step waits in triage until you make it ready, a schedule never fires, and only Run now starts a run.",
+  },
+  {
+    value: "supervised",
+    label: "Supervised — runs, then reports",
+    explain:
+      "The agent works through the plan and pauses at checkpoints for you; you accept the outputs.",
+  },
+  {
+    value: "autonomous",
+    label: "Autonomous — runs and decides",
+    explain:
+      "The agent promotes its own steps and runs to the end without stopping; irreversible acts still ask for approval and you still accept the outputs.",
+  },
 ];
+
+type PlanChoice = "agent" | "self";
 
 /**
  * The two-step create form (§13): step 1 is *what* — goal, description and
@@ -40,6 +75,7 @@ export function NewProjectForm({ servingProfile }: { servingProfile: string }) {
   const [outputs, setOutputs] = useState<string[]>([""]);
   const [cadence, setCadence] = useState<ProjectCadence>("one_off");
   const [autonomy, setAutonomy] = useState<ProjectAutonomy>("supervised");
+  const [plan, setPlan] = useState<PlanChoice>("agent");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [fieldErrors, setFieldErrors] = useState<Partial<Record<MandatoryField, string>>>({});
@@ -85,7 +121,18 @@ export function NewProjectForm({ servingProfile }: { servingProfile: string }) {
         missing?: unknown;
       };
       if (res.ok && data.slug) {
-        router.push(`/projects/${data.slug}`);
+        // The project exists but cannot run until a plan is active. Either
+        // hand the brief to the agent now, or land on the detail page where
+        // the readiness checklist points at the Plan panel.
+        if (plan === "agent") {
+          const params = new URLSearchParams({
+            profile: servingProfile,
+            draft: draftPlanPrompt(data.slug, name.trim() || goal.trim()),
+          });
+          router.push(`/chat?${params.toString()}`);
+          return;
+        }
+        router.push(`/projects/${data.slug}#panel-plan`);
         return;
       }
       // The 422 names the blank field(s) — the BFF pre-check and the
@@ -109,9 +156,10 @@ export function NewProjectForm({ servingProfile }: { servingProfile: string }) {
         return;
       }
       setError(
-        typeof data.detail === "string" && data.detail
-          ? data.detail
-          : "That didn't go through — check the fields and try again.",
+        friendlyError(
+          { status: res.status, detail: data.detail },
+          "That didn't go through — check the fields and try again.",
+        ),
       );
     } catch {
       setError("Could not reach the server.");
@@ -241,6 +289,7 @@ export function NewProjectForm({ servingProfile }: { servingProfile: string }) {
               <select
                 value={cadence}
                 onChange={(e) => setCadence(e.target.value as ProjectCadence)}
+                aria-describedby="new-project-cadence-help"
                 className={inputClass(false)}
               >
                 {CADENCES.map((option) => (
@@ -249,6 +298,12 @@ export function NewProjectForm({ servingProfile }: { servingProfile: string }) {
                   </option>
                 ))}
               </select>
+              <span
+                id="new-project-cadence-help"
+                className="text-xs text-[var(--color-muted)]"
+              >
+                {CADENCES.find((option) => option.value === cadence)?.explain}
+              </span>
             </label>
 
             <label className="flex flex-col gap-1 text-sm">
@@ -256,6 +311,7 @@ export function NewProjectForm({ servingProfile }: { servingProfile: string }) {
               <select
                 value={autonomy}
                 onChange={(e) => setAutonomy(e.target.value as ProjectAutonomy)}
+                aria-describedby="new-project-autonomy-help"
                 className={inputClass(false)}
               >
                 {AUTONOMIES.map((option) => (
@@ -264,7 +320,54 @@ export function NewProjectForm({ servingProfile }: { servingProfile: string }) {
                   </option>
                 ))}
               </select>
+              <span
+                id="new-project-autonomy-help"
+                className="text-xs text-[var(--color-muted)]"
+              >
+                {AUTONOMIES.find((option) => option.value === autonomy)?.explain}
+              </span>
             </label>
+
+            <fieldset
+              data-component="PlanChoice"
+              className="flex flex-col gap-2 rounded-xl border border-[var(--color-border)] p-3 text-sm"
+            >
+              <legend className="px-1 text-sm">Plan — a run needs one</legend>
+              <label className="flex items-start gap-2">
+                <input
+                  type="radio"
+                  name="plan"
+                  value="agent"
+                  checked={plan === "agent"}
+                  onChange={() => setPlan("agent")}
+                  className="mt-1"
+                />
+                <span>
+                  Ask the agent to draft it
+                  <span className="block text-xs text-[var(--color-muted)]">
+                    Opens a chat with the brief; the agent proposes steps and
+                    you activate the plan when it looks right.
+                  </span>
+                </span>
+              </label>
+              <label className="flex items-start gap-2">
+                <input
+                  type="radio"
+                  name="plan"
+                  value="self"
+                  checked={plan === "self"}
+                  onChange={() => setPlan("self")}
+                  className="mt-1"
+                />
+                <span>
+                  I&rsquo;ll write it myself
+                  <span className="block text-xs text-[var(--color-muted)]">
+                    Lands on the project page with the readiness checklist and
+                    the Plan editor.
+                  </span>
+                </span>
+              </label>
+            </fieldset>
 
             <label className="flex flex-col gap-1 text-sm">
               <span>Host profile</span>
@@ -305,7 +408,11 @@ export function NewProjectForm({ servingProfile }: { servingProfile: string }) {
             disabled={busy}
             className="rounded-xl bg-[var(--color-accent)] px-4 py-2 text-sm font-medium text-[var(--color-accent-fg)] disabled:opacity-50"
           >
-            {step === 1 ? "Next" : "Create project"}
+            {step === 1
+              ? "Next"
+              : plan === "agent"
+                ? "Create and draft the plan"
+                : "Create project"}
           </button>
         </div>
       </form>

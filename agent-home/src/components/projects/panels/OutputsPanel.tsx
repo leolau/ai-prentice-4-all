@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useState } from "react";
+import { friendlyError } from "@/components/projects/errors";
 
 import { applyAcceptEnvelope } from "@/components/projects/envelopes";
 import { dateTimeLabel } from "@/components/projects/format";
@@ -60,7 +61,15 @@ export function OutputsPanel({
         `/api/projects/${encodeURIComponent(slug)}/outputs/${encodeURIComponent(outputId)}/accept`,
         { method: "POST" },
       );
-      if (!res.ok) throw new Error("accept");
+      if (!res.ok) {
+        const data = (await res.json().catch(() => ({}))) as { detail?: string };
+        throw new Error(
+          friendlyError(
+            { status: res.status, detail: data.detail },
+            "That didn't stick — try again.",
+          ),
+        );
+      }
       // The accept route answers with the updated row + the closure offer;
       // merge the row (the joined deliveries survive the spread) so the
       // Accept button disappears without a reload.
@@ -70,8 +79,8 @@ export function OutputsPanel({
       };
       setOutputs((prev) => applyAcceptEnvelope(prev, outputId, payload).outputs);
       if (payload.offers_closure === true) setOffersClosure(true);
-    } catch {
-      setError("That didn't stick — try again.");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "That didn't stick — try again.");
     } finally {
       setBusyId(null);
     }
@@ -98,7 +107,7 @@ export function OutputsPanel({
       );
       const data = (await res.json().catch(() => ({}))) as ProjectOutputWithDeliveries &
         { detail?: string };
-      if (!res.ok) throw new Error(data.detail ?? "Could not add the output.");
+      if (!res.ok) throw new Error(friendlyError({ status: res.status, detail: data.detail }, "Could not add the output."));
       setOutputs((prev) => [...prev, { ...data, deliveries: [] }]);
       setNewTitle("");
       setNewSpec("");
@@ -120,7 +129,7 @@ export function OutputsPanel({
         { method: "DELETE" },
       );
       const data = (await res.json().catch(() => ({}))) as { detail?: string };
-      if (!res.ok) throw new Error(data.detail ?? "Could not remove the output.");
+      if (!res.ok) throw new Error(friendlyError({ status: res.status, detail: data.detail }, "Could not remove the output."));
       setOutputs((prev) => prev.filter((o) => o.id !== outputId));
     } catch (err) {
       setError(err instanceof Error ? err.message : "That didn't go through.");
@@ -176,8 +185,8 @@ export function OutputsPanel({
 
       {sorted.length === 0 ? (
         <p className="mt-2 text-sm text-[var(--color-muted)]">
-          Add an output — declaring the deliverable is what makes a run
-          accountable to something.
+          No outputs yet. Add one below — the deliverable is what a run is
+          accountable to, and what you accept when it is done.
         </p>
       ) : (
         <ul className="mt-2 flex flex-col gap-3">
@@ -217,14 +226,26 @@ export function OutputsPanel({
               ) : null}
               {output.status === "delivered" && !archived ? (
                 <BusyRegion busy={busyId === output.id} label="Accepting…">
-                  <button
-                    type="button"
-                    onClick={() => void accept(output.id)}
-                    className="mt-2 rounded-lg border border-[var(--color-accent)] px-3 py-1.5 text-xs font-medium text-[var(--color-accent)]"
-                  >
-                    Accept
-                  </button>
+                  <div className="mt-2 flex flex-wrap items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => void accept(output.id)}
+                      className="rounded-lg border border-[var(--color-accent)] px-3 py-1.5 text-xs font-medium text-[var(--color-accent)]"
+                    >
+                      Accept
+                    </button>
+                    <span className="text-xs text-[var(--color-muted)]">
+                      Delivered — waiting for you to judge it met the spec. Accepting is
+                      a human act; the agent cannot do it for you.
+                    </span>
+                  </div>
                 </BusyRegion>
+              ) : null}
+              {output.status === "accepted" && output.accepted_at != null ? (
+                <p className="mt-1 text-xs text-[var(--color-muted)]">
+                  accepted {dateTimeLabel(output.accepted_at)}
+                  {output.accepted_by ? ` by ${output.accepted_by}` : ""}
+                </p>
               ) : null}
               {output.status === "pending" && !archived ? (
                 <BusyRegion busy={busyId === `del:${output.id}`} label="Removing…">

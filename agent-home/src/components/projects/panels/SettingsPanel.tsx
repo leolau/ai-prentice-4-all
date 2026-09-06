@@ -2,6 +2,7 @@
 
 import { useRouter } from "next/navigation";
 import { useState } from "react";
+import { friendlyError } from "@/components/projects/errors";
 
 import { dateTimeLabel } from "@/components/projects/format";
 import type { ProjectAutonomy, ProjectDetail } from "@/types";
@@ -66,7 +67,7 @@ export function SettingsPanel({
       const res = await fetch(path, init);
       const data = (await res.json().catch(() => ({}))) as { detail?: string };
       if (!res.ok) {
-        setError(data.detail ?? "That did not go through.");
+        setError(friendlyError({ status: res.status, detail: data.detail }, "That did not go through."));
         return;
       }
       setSaved(okMessage);

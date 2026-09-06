@@ -1357,9 +1357,22 @@ export type ProjectProgress =
       cards: ProjectCardRollup;
     };
 
+/** Per-status counts of the declared outputs (§9.1). */
+export interface ProjectOutputRollup {
+  total: number;
+  required: number;
+  /** delivered or accepted */
+  delivered: number;
+  accepted: number;
+  /** delivered but not yet accepted — waiting on a human judgement */
+  awaiting_acceptance: number;
+}
+
 /** One row of `GET /api/registry/projects`. */
 export type ProjectListItem = Project & {
   progress: ProjectProgress;
+  /** Optional: older BFF/API builds omit it. */
+  output_rollup?: ProjectOutputRollup;
   member_count: number;
   health: ProjectHealth;
 };
@@ -1597,6 +1610,7 @@ export interface ProjectDetail extends Project {
   contacts: ProjectContact[];
   links: Partial<Record<ProjectLinkKind, ProjectLink[]>>;
   progress: ProjectProgress;
+  output_rollup?: ProjectOutputRollup;
   /**
    * §8.1 derived score — the mean of the last five `score_user` values,
    * never an all-time number; null until somebody scores a run.

@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
+import { friendlyError } from "@/components/projects/errors";
 
 import {
   agoLabel,
@@ -64,7 +65,7 @@ export function RunsPanel({
       );
       const data = (await res.json().catch(() => ({}))) as { detail?: string };
       if (!res.ok) {
-        setError(data.detail ?? "That did not go through.");
+        setError(friendlyError({ status: res.status, detail: data.detail }, "That did not go through."));
         return;
       }
       router.refresh();
@@ -90,8 +91,9 @@ export function RunsPanel({
 
       {runs.length === 0 ? (
         <p className="mt-2 text-sm text-[var(--color-muted)]">
-          No runs yet — the first schedule fire or a manual run will appear
-          here with its outcome.
+          No runs yet. When the readiness checklist at the top is all green,
+          press <strong>Run now</strong> in the header (or set a schedule in
+          Settings) — each run lands here with its outcome.
         </p>
       ) : (
         <ul className="mt-2 flex flex-col gap-1.5">

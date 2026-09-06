@@ -130,8 +130,9 @@ export function BoardPanel({
         <>
           {board.columns.every((column) => column.tasks.length === 0) ? (
             <p className="mt-2 text-sm text-[var(--color-muted)]">
-              No cards yet — start one in a column below, add work from the
-              header&rsquo;s Add sheet, or promote a to-do into this project.
+              No cards yet. The first run creates one card per plan step;
+              you can also start one with <strong>+ New card</strong> in a
+              column below or add work from the header&rsquo;s Add sheet.
             </p>
           ) : null}
           <div className="mt-2 flex snap-x snap-mandatory gap-3 overflow-x-auto pb-1 md:grid md:grid-cols-3 md:overflow-visible">

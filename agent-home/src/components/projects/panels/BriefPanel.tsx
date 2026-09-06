@@ -25,8 +25,9 @@ export function BriefPanel({ project }: { project: ProjectDetail }) {
         </details>
       ) : (
         <p className="mt-2 text-sm text-[var(--color-muted)]">
-          No requirements yet — the lead can write what &ldquo;done&rdquo;
-          should look like.
+          No requirements yet — use <strong>Edit brief</strong> in the header
+          to write what &ldquo;done&rdquo; should look like; runs are judged
+          against it.
         </p>
       )}
       {project.target_audience ? (

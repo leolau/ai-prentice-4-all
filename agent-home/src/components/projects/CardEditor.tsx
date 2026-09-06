@@ -2,6 +2,7 @@
 
 import { useRouter } from "next/navigation";
 import { useState } from "react";
+import { friendlyError } from "@/components/projects/errors";
 
 import { cardMoves, cardPatch } from "@/components/projects/cardMoves";
 import { BusyRegion } from "@/components/ui/BusyRegion";
@@ -48,7 +49,7 @@ export function CardEditor({
       );
       const data = (await res.json().catch(() => ({}))) as { detail?: string };
       if (!res.ok) {
-        setError(data.detail ?? "The change was not saved.");
+        setError(friendlyError({ status: res.status, detail: data.detail }, "The change was not saved."));
         return false;
       }
       router.refresh();
