@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { friendlyError } from "@/components/projects/errors";
 
 import { BusyRegion } from "@/components/ui/BusyRegion";
 import type {
@@ -60,7 +61,7 @@ export function PeoplePanel({
         body: JSON.stringify({ user_id: id, role: memberRole }),
       });
       const data = (await res.json().catch(() => ({}))) as { detail?: string };
-      if (!res.ok) throw new Error(data.detail ?? "Could not add the member.");
+      if (!res.ok) throw new Error(friendlyError({ status: res.status, detail: data.detail }, "Could not add the member."));
       setMembers((prev) => [
         ...prev,
         {
@@ -88,7 +89,7 @@ export function PeoplePanel({
         { method: "DELETE" },
       );
       const data = (await res.json().catch(() => ({}))) as { detail?: string };
-      if (!res.ok) throw new Error(data.detail ?? "Could not remove the member.");
+      if (!res.ok) throw new Error(friendlyError({ status: res.status, detail: data.detail }, "Could not remove the member."));
       setMembers((prev) => prev.filter((m) => m.user_id !== userId));
     } catch (err) {
       setError(err instanceof Error ? err.message : "That didn't go through.");
@@ -115,7 +116,7 @@ export function PeoplePanel({
       });
       const data = (await res.json().catch(() => ({}))) as ProjectContact &
         { detail?: string };
-      if (!res.ok) throw new Error(data.detail ?? "Could not add the contact.");
+      if (!res.ok) throw new Error(friendlyError({ status: res.status, detail: data.detail }, "Could not add the contact."));
       setContacts((prev) => [...prev, data]);
       setContactName("");
       setContactRole("");
@@ -137,7 +138,7 @@ export function PeoplePanel({
         { method: "DELETE" },
       );
       const data = (await res.json().catch(() => ({}))) as { detail?: string };
-      if (!res.ok) throw new Error(data.detail ?? "Could not remove the contact.");
+      if (!res.ok) throw new Error(friendlyError({ status: res.status, detail: data.detail }, "Could not remove the contact."));
       setContacts((prev) => prev.filter((c) => c.id !== contactId));
     } catch (err) {
       setError(err instanceof Error ? err.message : "That didn't go through.");

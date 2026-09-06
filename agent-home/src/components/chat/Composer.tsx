@@ -17,15 +17,21 @@ export function Composer({
   sessionId,
   onSend,
   onStop,
+  stopping = false,
+  initialText = "",
 }: {
   sending: boolean;
+  /** A Stop was requested and the server is winding the turn down. */
+  stopping?: boolean;
   storageEnabled: boolean;
   sessionId: string | null;
+  /** Pre-filled text (a deep link's `?draft=`); the user still presses send. */
+  initialText?: string;
   onSend: (text: string, attachments: ChatAttachment[]) => void | Promise<void>;
   /** Cancel the in-flight turn for the conversation on screen. */
   onStop?: () => void;
 }) {
-  const [text, setText] = useState("");
+  const [text, setText] = useState(initialText);
   const [attachments, setAttachments] = useState<ChatAttachment[]>([]);
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
@@ -155,12 +161,13 @@ export function Composer({
           <button
             type="button"
             onClick={() => onStop?.()}
-            aria-label="Stop the agent"
-            title="Stop the agent"
-            className="flex items-center gap-1.5 rounded-xl bg-red-600 px-4 py-3 text-sm font-semibold text-white"
+            disabled={stopping}
+            aria-label={stopping ? "Stopping the agent" : "Stop the agent"}
+            title={stopping ? "Stopping the agent" : "Stop the agent"}
+            className="flex items-center gap-1.5 rounded-xl bg-red-600 px-4 py-3 text-sm font-semibold text-white disabled:opacity-60"
           >
             <span aria-hidden="true" className="h-3 w-3 rounded-[3px] bg-white" />
-            Stop
+            {stopping ? "Stopping…" : "Stop"}
           </button>
         ) : (
           <button

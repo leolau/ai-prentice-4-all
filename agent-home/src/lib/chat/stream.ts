@@ -14,7 +14,7 @@ import { formatUiContext, getUiContext } from "@/lib/app-mcp/state";
 
 export interface ChatStreamHandlers {
   /** The server registered the turn (first frame, before the model runs). */
-  onAccepted?(runId: string): void;
+  onAccepted?(runId: string, sessionId: string): void;
   /** Incremental assistant text. */
   onDelta?(delta: string): void;
   /** Incremental model reasoning (extended thinking) text. */
@@ -25,6 +25,8 @@ export interface ChatStreamHandlers {
   onToolComplete?(tool: ChatToolEvent): void;
   /** A tool is blocked awaiting the user's approval decision. */
   onApproval?(req: ChatApprovalRequest): void;
+  /** The turn was stopped at the user's request; completion frames follow. */
+  onCancelled?(): void;
   /** The turn finished; `content` is the full assistant message. */
   onCompleted?(content: string, sessionId: string): void;
   /** A terminal, user-safe error message from the stream. */
@@ -160,7 +162,7 @@ async function consumeStream(
   const dispatch = (frame: StreamFrame): void => {
     const { event, data } = frame;
     if (event === "run.accepted") {
-      handlers.onAccepted?.(str(data.run_id) ?? "");
+      handlers.onAccepted?.(str(data.run_id) ?? "", str(data.session_id) ?? "");
     } else if (event === "assistant.delta") {
       const delta = str(data.delta);
       if (delta) handlers.onDelta?.(delta);
@@ -188,6 +190,8 @@ async function consumeStream(
           ? (data.choices.filter((c) => typeof c === "string") as string[])
           : ["once", "deny"],
       });
+    } else if (event === "run.cancelled") {
+      handlers.onCancelled?.();
     } else if (event === "assistant.completed") {
       completedContent = str(data.content) ?? completedContent;
     } else if (event === "run.completed") {
@@ -200,6 +204,39 @@ async function consumeStream(
   await readSseFrames(res, dispatch);
 
   return { completedContent, landedSessionId };
+}
+
+/**
+ * Stop an in-flight turn. Aborting the fetch only detaches this browser —
+ * the server-side turn keeps running (by design, so a closed tab does not
+ * lose work) — so Stop asks the server to interrupt the agent. The open
+ * stream then receives `run.cancelled` and the normal completion frames with
+ * whatever was produced so far. Rejects when the run is unknown/unreachable.
+ */
+export async function cancelChatTurn(params: {
+  sessionId: string;
+  runId: string;
+  profile?: string;
+}): Promise<void> {
+  const res = await fetch("/api/chat/cancel", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      sessionId: params.sessionId,
+      runId: params.runId,
+      profile: params.profile,
+    }),
+  });
+  if (!res.ok) {
+    let detail = "The agent could not be stopped.";
+    try {
+      const body = (await res.json()) as { detail?: string };
+      if (body.detail) detail = body.detail;
+    } catch {
+      // Non-JSON error body — keep the generic message.
+    }
+    throw new Error(detail);
+  }
 }
 
 /**

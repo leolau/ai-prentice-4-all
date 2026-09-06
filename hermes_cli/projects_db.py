@@ -2115,12 +2115,20 @@ def get_playbook(
 
 def list_playbook_revs(conn: sqlite3.Connection, project_id: str) -> List[dict]:
     rows = conn.execute(
-        "SELECT project_id, rev, body, active, created_by, created_at, "
+        "SELECT project_id, rev, body, steps, active, created_by, created_at, "
         "activated_at, note FROM project_playbook WHERE project_id = ? "
         "ORDER BY rev DESC",
         (project_id,),
     ).fetchall()
-    return [dict(r) for r in rows]
+    out = []
+    for r in rows:
+        d = dict(r)
+        try:
+            d["steps"] = json.loads(d.get("steps") or "[]")
+        except (TypeError, ValueError):
+            d["steps"] = []
+        out.append(d)
+    return out
 
 
 # ---------------------------------------------------------------------------

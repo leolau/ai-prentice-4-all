@@ -8,6 +8,7 @@ import type { ChatStreamHandlers } from "@/lib/chat/stream";
 vi.mock("@/lib/chat/stream", () => ({
   streamChatTurn: vi.fn(),
   attachChatStream: vi.fn(),
+  cancelChatTurn: vi.fn(),
 }));
 // Link's useLinkStatus only works inside the App Router's link context.
 vi.mock("next/link", async (importOriginal) => {
@@ -18,7 +19,7 @@ vi.mock("next/link", async (importOriginal) => {
   };
 });
 
-import { attachChatStream, streamChatTurn } from "@/lib/chat/stream";
+import { attachChatStream, cancelChatTurn, streamChatTurn } from "@/lib/chat/stream";
 import { LeadChatHost } from "@/components/coral/LeadChatHost";
 
 // jsdom has no PointerEvent constructor; RTL builds one for pointer* events.
@@ -61,6 +62,8 @@ beforeEach(() => {
   vi.mocked(streamChatTurn).mockReset();
   vi.mocked(attachChatStream).mockReset();
   vi.mocked(attachChatStream).mockResolvedValue(undefined);
+  vi.mocked(cancelChatTurn).mockReset();
+  vi.mocked(cancelChatTurn).mockResolvedValue(undefined);
 });
 
 afterEach(() => {
@@ -184,9 +187,114 @@ describe("LeadChatHost panel", () => {
     await waitFor(() => {
       expect(vi.mocked(attachChatStream)).toHaveBeenCalledTimes(1);
     });
-    expect(vi.mocked(attachChatStream).mock.calls[0][0]).toEqual({
+    expect(vi.mocked(attachChatStream).mock.calls[0][0]).toMatchObject({
       sessionId: "lead-abc",
       runId: "run-7",
+    });
+    expect(vi.mocked(attachChatStream).mock.calls[0][0].signal).toBeInstanceOf(
+      AbortSignal,
+    );
+  });
+
+  it("shows the shared phase indicator: sending until the server ack, then thinking with a clock", async () => {
+    leadFetch();
+    let handlers: ChatStreamHandlers | null = null;
+    vi.mocked(streamChatTurn).mockImplementation(
+      (_params, h) =>
+        new Promise(() => {
+          handlers = h;
+        }),
+    );
+
+    render(<LeadChatHost />);
+    openLeadChat();
+    await waitFor(() => {
+      expect(screen.getByPlaceholderText(/message your agent/i)).toBeTruthy();
+    });
+    await sendMessage("Long task");
+
+    const status = () => screen.getByRole("status");
+    await waitFor(() => {
+      expect(status().getAttribute("data-activity")).toBe("sending");
+    });
+    handlers!.onAccepted?.("run-1", "lead-abc");
+    await waitFor(() => {
+      expect(status().getAttribute("data-activity")).toBe("thinking");
+    });
+    handlers!.onToolStart?.({ id: "t1", name: "web_search" });
+    await waitFor(() => {
+      expect(status().getAttribute("data-activity")).toBe("tool");
+      expect(status().textContent).toContain("web_search");
+    });
+    expect(screen.getByRole("button", { name: /stop the agent/i })).toBeTruthy();
+  });
+
+  it("Stop asks the server to cancel the run instead of only closing the stream", async () => {
+    leadFetch();
+    let handlers: ChatStreamHandlers | null = null;
+    let receivedSignal: AbortSignal | undefined;
+    vi.mocked(streamChatTurn).mockImplementation(
+      (params, h) =>
+        new Promise(() => {
+          handlers = h;
+          receivedSignal = params.signal;
+        }),
+    );
+
+    render(<LeadChatHost />);
+    openLeadChat();
+    await waitFor(() => {
+      expect(screen.getByPlaceholderText(/message your agent/i)).toBeTruthy();
+    });
+    await sendMessage("Long task");
+    await waitFor(() => expect(handlers).not.toBeNull());
+    handlers!.onAccepted?.("run-1", "lead-abc");
+    await waitFor(() => {
+      expect(screen.getByRole("status").getAttribute("data-activity")).toBe("thinking");
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /stop the agent/i }));
+    await waitFor(() => {
+      expect(vi.mocked(cancelChatTurn)).toHaveBeenCalledWith({
+        sessionId: "lead-abc",
+        runId: "run-1",
+      });
+    });
+    // The stream stays open so the partial reply still lands.
+    expect(receivedSignal?.aborted).toBe(false);
+    expect(screen.getByRole("button", { name: /stopping the agent/i })).toBeTruthy();
+    handlers!.onCancelled?.();
+    await waitFor(() => {
+      expect(screen.getByRole("dialog").textContent).toContain("Stopped");
+    });
+  });
+
+  it("Stop before the server ack aborts the request", async () => {
+    leadFetch();
+    let receivedSignal: AbortSignal | undefined;
+    vi.mocked(streamChatTurn).mockImplementation(
+      (params) =>
+        new Promise((_resolve, reject) => {
+          receivedSignal = params.signal;
+          params.signal?.addEventListener("abort", () =>
+            reject(new DOMException("aborted", "AbortError")),
+          );
+        }),
+    );
+
+    render(<LeadChatHost />);
+    openLeadChat();
+    await waitFor(() => {
+      expect(screen.getByPlaceholderText(/message your agent/i)).toBeTruthy();
+    });
+    await sendMessage("Long task");
+    await waitFor(() => expect(receivedSignal).toBeDefined());
+
+    fireEvent.click(screen.getByRole("button", { name: /stop the agent/i }));
+    expect(receivedSignal?.aborted).toBe(true);
+    expect(vi.mocked(cancelChatTurn)).not.toHaveBeenCalled();
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: /^send$/i })).toBeTruthy();
     });
   });
 

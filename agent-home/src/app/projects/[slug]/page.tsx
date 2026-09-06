@@ -8,6 +8,7 @@ import type {
   ProjectBoardView,
   ProjectDetail,
   ProjectDirectivesResponse,
+  ProjectDoctorDetail,
   ProjectPlaybookResponse,
 } from "@/types";
 
@@ -55,7 +56,7 @@ export default async function Page({
     );
   }
 
-  const [board, playbook, directives] = await Promise.all([
+  const [board, playbook, directives, doctor] = await Promise.all([
     client.projectBoard(slug).catch((): ProjectBoardView | null => null),
     client.projectPlaybook(slug).catch(
       (): ProjectPlaybookResponse | null => null,
@@ -63,6 +64,7 @@ export default async function Page({
     client.projectDirectives(slug).catch(
       (): ProjectDirectivesResponse | null => null,
     ),
+    client.projectDoctor(slug).catch((): ProjectDoctorDetail | null => null),
   ]);
 
   return (
@@ -72,6 +74,7 @@ export default async function Page({
         board={board}
         playbook={playbook}
         directives={directives}
+        doctor={doctor}
         callerUserId={principal.user_id}
         isInstanceAdmin={principal.role === "owner" || principal.role === "admin"}
       />

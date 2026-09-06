@@ -417,6 +417,30 @@ def _derive_progress(
     }
 
 
+def _output_rollup(outputs: list[dict]) -> dict:
+    """Per-status counts of the declared outputs, so a list row or the
+    progress panel can say "2 delivered, 1 accepted of 3" without
+    re-deriving it from the rows (§9.1)."""
+    rollup = {
+        "total": len(outputs),
+        "required": 0,
+        "delivered": 0,
+        "accepted": 0,
+        "awaiting_acceptance": 0,
+    }
+    for o in outputs:
+        if o.get("required"):
+            rollup["required"] += 1
+        status = o.get("status")
+        if status == "delivered":
+            rollup["delivered"] += 1
+            rollup["awaiting_acceptance"] += 1
+        elif status == "accepted":
+            rollup["delivered"] += 1
+            rollup["accepted"] += 1
+    return rollup
+
+
 def _full_health(conn, project, card_rollup: dict, profiles: list) -> str:
     """The complete §9.2 ladder, computed on read from runs + the cron
     store. The cron round-trip only happens for scheduled projects — a
@@ -634,6 +658,7 @@ def _list_sync(
                     p,
                     extra={
                         "progress": progress,
+                        "output_rollup": _output_rollup(outputs),
                         "member_count": len(members),
                         "health": item_health,
                     },
@@ -902,6 +927,7 @@ def _detail_sync(project, principal, *, include_address: bool) -> dict:
             "contacts": _contacts_payload(contacts, include_address=include_address),
             "links": links_by_kind,
             "progress": progress,
+            "output_rollup": _output_rollup(outputs),
             "score": score,
             "health": health,
             "next_run_at": next_run_at,
@@ -1893,6 +1919,135 @@ async def get_card(request: Request, task_id: str) -> dict[str, Any]:
         raise HTTPException(status_code=404, detail="card not found")
 
 
+_CARD_STATUS_MOVES = ("ready", "blocked", "done", "archived")
+
+
+def _move_card_sync(bconn, task, new_status: str, actor: str) -> tuple[bool, str]:
+    """Route a human column move to the structured kanban verb that owns
+    the transition. ``running``/``review``/``scheduled`` are the
+    dispatcher's and a worker's to set, never a drag; returns
+    ``(ok, reason)`` so the caller can name what refused."""
+    cur = task.status
+    if cur == new_status:
+        return True, ""
+    if new_status == "done":
+        return kanban_db.complete_task(bconn, task.id), (
+            "only a ready or running card can be marked done"
+        )
+    if new_status == "blocked":
+        return kanban_db.block_task(bconn, task.id, reason=f"blocked by {actor}"), (
+            "only a ready or running card can be blocked"
+        )
+    if new_status == "archived":
+        return kanban_db.archive_task(bconn, task.id), "the card is already archived"
+    if new_status == "ready":
+        if cur in ("blocked", "scheduled"):
+            return kanban_db.unblock_task(bconn, task.id), "the card is not blocked"
+        if cur == "triage":
+            # Specify promotes to todo and runs the ready pass itself; a
+            # parent-gated card legitimately stays in todo.
+            if not kanban_db.specify_triage_task(bconn, task.id):
+                return False, "the card left triage already"
+            after = kanban_db.get_task(bconn, task.id)
+            if after is not None and after.status == "ready":
+                return True, ""
+        ok, reason = kanban_db.promote_task(bconn, task.id, actor=actor)
+        return ok, reason or "the card cannot be made ready from here"
+    return False, f"unknown status {new_status!r}"
+
+
+@router.patch("/{slug}/cards/{task_id}")
+async def update_card(request: Request, task_id: str) -> dict[str, Any]:
+    """Edit a card by hand: ``title`` / ``body`` / ``assignee`` (a project
+    profile, or ``null`` to unassign) / ``status`` (a column move).
+
+    A judgement act (§10): moving a card to ``ready`` is the human
+    approval the dispatcher waits for, so the plain ``member`` role may do
+    it; a viewer never writes. ``running``, ``review`` and ``scheduled``
+    are not settable — the worker and the dispatcher own those.
+    """
+    project, _role, profiles, principal = await _require_write(
+        request, judgement=True
+    )
+    _refuse_if_archived(project, "editing a card")
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="invalid JSON body")
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="expected a JSON object")
+
+    title = body.get("title")
+    if title is not None:
+        title = str(title).strip()
+        if not title:
+            raise HTTPException(status_code=422, detail="title must not be empty")
+    card_body = body.get("body")
+    if card_body is not None:
+        card_body = str(card_body)
+    has_assignee = "assignee" in body
+    assignee = body.get("assignee")
+    if has_assignee and assignee is not None:
+        assignee = str(assignee).strip() or None
+        if assignee is not None and assignee not in {
+            row["profile"] for row in profiles
+        }:
+            raise HTTPException(
+                status_code=422,
+                detail=f"{assignee!r} is not one of this project's profiles",
+            )
+    status = body.get("status")
+    if status is not None:
+        status = str(status)
+        if status not in _CARD_STATUS_MOVES:
+            raise HTTPException(
+                status_code=422,
+                detail="status must be one of " + ", ".join(_CARD_STATUS_MOVES),
+            )
+    if title is None and card_body is None and not has_assignee and status is None:
+        raise HTTPException(status_code=422, detail="nothing to change")
+
+    actor = f"user:{principal.user_id}"
+
+    def _sync() -> dict:
+        with _board_conn(project) as bconn:
+            task = kanban_db.get_task(bconn, task_id)
+            if task is None or getattr(task, "project_id", None) != project.id:
+                raise KeyError(task_id)
+            if title is not None or card_body is not None:
+                sets, vals = [], []
+                if title is not None:
+                    sets.append("title = ?")
+                    vals.append(title)
+                if card_body is not None:
+                    sets.append("body = ?")
+                    vals.append(card_body)
+                vals.append(task_id)
+                with kanban_db.write_txn(bconn):
+                    bconn.execute(
+                        f"UPDATE tasks SET {', '.join(sets)} WHERE id = ?", vals
+                    )
+                    kanban_db._append_event(bconn, task_id, "edited", {"actor": actor})
+            if has_assignee:
+                try:
+                    kanban_db.assign_task(bconn, task_id, assignee)
+                except RuntimeError as exc:
+                    raise ValueError(str(exc))
+            if status is not None:
+                ok, reason = _move_card_sync(bconn, task, status, actor)
+                if not ok:
+                    raise ValueError(reason)
+            updated = kanban_db.get_task(bconn, task_id)
+            return kanban_view.task_dict(updated)
+
+    try:
+        return await asyncio.to_thread(_sync)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="card not found")
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+
+
 @router.post("/{slug}/cards/{task_id}/reclaim")
 async def reclaim_card(request: Request, task_id: str) -> dict[str, Any]:
     """Stop a stuck worker and re-queue the card.
@@ -2245,7 +2400,37 @@ def _run_blocked_tasks(bconn, cards: list[dict]) -> list[dict]:
     return blocked
 
 
-def _run_payload(conn, bconn, run: dict, *, principal) -> dict:
+def _run_awaits_continue(
+    conn, project: projects_db.Project, run: dict, cards: list[dict]
+) -> bool:
+    """A supervised run whose checkpoint step(s) are done while their
+    successors still sit in triage is held on the human's continue (§7.1).
+
+    The row keeps saying ``running`` (nothing turns it to ``waiting`` when a
+    checkpoint card finishes), so the hold is derived here from the
+    playbook + board state; the run page turns it into a Continue button.
+    """
+    if run.get("status") not in ("running", "waiting") or not cards:
+        return False
+    if (getattr(project, "autonomy", None) or "supervised") != "supervised":
+        return False
+    playbook = projects_db.get_playbook(
+        conn, project.id, rev=run.get("playbook_rev")
+    )
+    steps = (playbook or {}).get("steps") or []
+    held = projects_run.held_step_keys(steps)
+    if not held:
+        return False
+    checkpoints = {s["key"] for s in steps if s.get("checkpoint")}
+    status_of = {c.get("step_key"): c.get("status") for c in cards}
+    if any(status_of.get(k) != "done" for k in checkpoints if k in status_of):
+        return False
+    return any(status_of.get(k) == "triage" for k in held)
+
+
+def _run_payload(
+    conn, bconn, run: dict, *, principal, project: projects_db.Project
+) -> dict:
     """One run row joined with its cards' live board state."""
     cards = []
     for rc in projects_db.get_run_cards(conn, run["id"]):
@@ -2263,6 +2448,7 @@ def _run_payload(conn, bconn, run: dict, *, principal) -> dict:
     blocked = _run_blocked_tasks(bconn, cards)
     payload["blocked_tasks"] = blocked
     payload["stalled"] = _run_stalled(run, cards, blocked)
+    payload["awaiting_continue"] = _run_awaits_continue(conn, project, run, cards)
     payload["cost"] = projects_run.run_cost(
         run.get("trace_id"), principal=principal
     )
@@ -2313,7 +2499,9 @@ async def get_run_route(request: Request, run_no: int) -> dict[str, Any]:
                 raise KeyError(run_no)
             deliveries = projects_db.get_output_deliveries(conn, run_id=run["id"])
             with _board_conn(project) as bconn:
-                payload = _run_payload(conn, bconn, run, principal=principal)
+                payload = _run_payload(
+                    conn, bconn, run, principal=principal, project=project
+                )
         payload["deliveries"] = deliveries
         return payload
 

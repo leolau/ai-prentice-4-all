@@ -184,8 +184,11 @@ describe("detail panels", () => {
     expect(pending).toBeGreaterThan(-1);
     expect(pending).toBeLessThan(delivered);
     expect(delivered).toBeLessThan(optional);
-    // Accept lives in the Outputs panel and only for delivered rows.
+    // Accept lives in the Outputs panel and only for delivered rows, and the
+    // row says why it is waiting on a person.
     expect(html).toContain("Accept");
+    expect(html).toContain("Accepting is");
+    expect(html).toContain("a human act");
   });
 
   it("OutputsPanel shows the add-output form when not archived", () => {
@@ -233,9 +236,73 @@ describe("detail panels", () => {
     expect(html).toContain("waiting");
   });
 
+  it("RunsPanel puts Continue / Cancel / Stop inline on a live run only", () => {
+    const live = renderToStaticMarkup(<RunsPanel slug="monday-digest" runs={PROJECT.runs} />);
+    expect(live).toContain('data-component="RunRowActions"');
+    expect(live).toContain(">Continue<");
+    expect(live).toContain(">Cancel<");
+    expect(live).toContain("Stop now");
+    expect(live).toContain("waiting for you");
+
+    const settled = renderToStaticMarkup(
+      <RunsPanel
+        slug="monday-digest"
+        runs={[{ ...PROJECT.runs[0], status: "done", duration_seconds: 120, ended_at: NOW }]}
+      />,
+    );
+    expect(settled).not.toContain('data-component="RunRowActions"');
+
+    const archived = renderToStaticMarkup(
+      <RunsPanel slug="monday-digest" runs={PROJECT.runs} archived />,
+    );
+    expect(archived).not.toContain('data-component="RunRowActions"');
+  });
+
+  it("BoardPanel offers New card in startable columns and a move per card", () => {
+    const html = renderToStaticMarkup(
+      <BoardPanel
+        slug="monday-digest"
+        board={{ columns: [{ name: "triage", tasks: [] }, { name: "ready", tasks: [] }, ...BOARD.columns] }}
+      />,
+    );
+    // triage / ready are startable; todo / running / blocked are not.
+    expect(html.match(/\+ New card/g)?.length).toBe(2);
+    expect(html).toContain('aria-label="Move Draft the digest"');
+    expect(html).toContain("Approve — make ready");
+    expect(html).toContain("Unblock — make ready");
+
+    const archived = renderToStaticMarkup(
+      <BoardPanel slug="monday-digest" board={BOARD} archived />,
+    );
+    expect(archived).not.toContain("New card");
+    expect(archived).not.toContain("Move to");
+  });
+
+  const PLAN_PROPS = {
+    slug: "monday-digest",
+    profiles: ["default"],
+    hostProfile: "default",
+    projectName: "Monday digest",
+    canActivate: true,
+    archived: false,
+  };
+
   it("PlanPanel covers the no-plan state", () => {
-    const html = renderToStaticMarkup(<PlanPanel playbook={null} />);
+    const html = renderToStaticMarkup(
+      <PlanPanel {...PLAN_PROPS} playbook={null} />,
+    );
     expect(html).toContain("Plan");
+    expect(html).toContain("unavailable");
+  });
+
+  it("PlanPanel offers Write plan and the agent-draft door when no plan is active", () => {
+    const html = renderToStaticMarkup(
+      <PlanPanel {...PLAN_PROPS} playbook={{ active: null, revisions: [] }} />,
+    );
+    expect(html).toContain("Write plan");
+    expect(html).toContain('data-component="AskAgentToDraft"');
+    expect(html).toContain("/chat?profile=default&amp;draft=");
+    expect(html).toContain("monday-digest");
   });
 
   it("PlanPanel renders the active revision's steps and provenance", () => {
@@ -256,10 +323,13 @@ describe("detail panels", () => {
       },
       revisions: [],
     };
-    const html = renderToStaticMarkup(<PlanPanel playbook={playbook} />);
+    const html = renderToStaticMarkup(
+      <PlanPanel {...PLAN_PROPS} playbook={playbook} />,
+    );
     expect(html).toContain("Draft it");
     expect(html).toContain("Send it");
     expect(html).toContain("revision 3");
+    expect(html).toContain("Revise");
   });
 
   it("PlanPanel shows a retro's proposed revision awaiting activation", () => {
@@ -279,10 +349,19 @@ describe("detail panels", () => {
         },
       ],
     };
-    const html = renderToStaticMarkup(<PlanPanel playbook={playbook} />);
+    const html = renderToStaticMarkup(
+      <PlanPanel {...PLAN_PROPS} playbook={playbook} />,
+    );
     expect(html).toContain('data-component="ProposedRevisions"');
     expect(html).toContain("awaiting activation");
     expect(html).toContain("proposed by run 14");
+    expect(html).toContain(">Activate<");
+
+    const member = renderToStaticMarkup(
+      <PlanPanel {...PLAN_PROPS} canActivate={false} playbook={playbook} />,
+    );
+    expect(member).not.toContain(">Activate<");
+    expect(member).toContain("a lead activates");
   });
 
   it("GuidancePanel shows proposed directives with the member's Activate", () => {
@@ -339,7 +418,7 @@ describe("detail panels", () => {
 
   it("FilesPanel collapses to the Add affordance when empty", () => {
     const html = renderToStaticMarkup(<FilesPanel project={PROJECT} />);
-    expect(html).toContain("Add a file");
+    expect(html).toContain("No files yet");
   });
 
   it("FilesPanel offers Add link and Upload file when not archived", () => {
@@ -477,14 +556,56 @@ describe("ProjectDetailView", () => {
     expect(html).toContain("Run now");
     // A waiting run earns the Continue button.
     expect(html).toContain("Continue run 14");
-    // The agent's standing line rides under the header.
+    // The agent's standing line rides under the header, with its freshness
+    // and the door to rewrite it.
     expect(html).toContain("Where this stands");
+    expect(html).toContain("Summarised");
+    expect(html).toContain("Update summary");
     for (const label of ["Brief", "Outputs", "Progress", "Board", "Runs", "Plan", "Guidance", "People", "Files", "Tools"]) {
       expect(html).toContain(label);
     }
     // Empty References/Memories hide — anchors included.
     expect(html).not.toContain('href="#panel-references"');
     expect(html).not.toContain('href="#panel-memories"');
+  });
+
+  it("puts Progress first and folds empty People/Files behind a disclosure", () => {
+    const html = renderToStaticMarkup(
+      <ProjectDetailView
+        project={{
+          ...PROJECT,
+          members: [],
+          output_rollup: {
+            total: 2,
+            required: 2,
+            delivered: 2,
+            accepted: 1,
+            awaiting_acceptance: 1,
+          },
+        }}
+        board={BOARD}
+        playbook={null}
+        directives={null}
+        callerUserId="leo"
+        isInstanceAdmin={false}
+      />,
+    );
+    // Progress leads the page, ahead of Outputs and the Brief.
+    const progressAt = html.indexOf('id="panel-progress"');
+    expect(progressAt).toBeGreaterThan(-1);
+    expect(progressAt).toBeLessThan(html.indexOf('id="panel-outputs"'));
+    expect(progressAt).toBeLessThan(html.indexOf('id="panel-brief"'));
+    // The next actionable state rides inside Progress: run 14 is waiting.
+    expect(html).toContain('data-component="NextAction"');
+    expect(html).toContain("Continue run 14");
+    expect(html).toContain("1 of 2 outputs accepted");
+    // No members and no files → collapsed, but still reachable by anchor.
+    expect(html).toContain('data-component="CollapsedPanel"');
+    expect(html).toContain('id="panel-people"');
+    expect(html).toContain('id="panel-files"');
+    expect(html).not.toContain('data-component="AddMemberForm"');
+    // Tools has a toolset configured, so it stays open.
+    expect(html).toContain('data-component="ToolsPanel"');
   });
 
   it("offers Activate instead of Run now until the project is active", () => {
@@ -501,6 +622,110 @@ describe("ProjectDetailView", () => {
     expect(html).toContain("Activate");
     expect(html).not.toContain("Run now");
   });
+
+  it("explains what blocks a run and disables Run now until it is ready", () => {
+    const html = renderToStaticMarkup(
+      <ProjectDetailView
+        project={PROJECT}
+        board={BOARD}
+        playbook={{ active: null, revisions: [] }}
+        directives={null}
+        doctor={{
+          slug: PROJECT.slug,
+          health: "attention",
+          findings: [
+            { code: "no_active_playbook", severity: "attention", detail: "no plan" },
+            { code: "cron_job_missing", severity: "attention", detail: "The cron job is gone." },
+          ],
+          clean: false,
+        }}
+        callerUserId="leo"
+        isInstanceAdmin={false}
+      />,
+    );
+    expect(html).toContain('data-component="ReadinessChecklist"');
+    expect(html).toContain("Before it can run");
+    // Missing outputs + plan link to their panels; the doctor's extra finding rides along.
+    expect(html).toContain('href="#panel-outputs"');
+    expect(html).toContain('href="#panel-plan"');
+    expect(html).toContain("The cron job is gone.");
+    expect(html).not.toContain("no plan");
+    expect(html).toMatch(/<button[^>]*disabled=""[^>]*>Run now<\/button>/);
+    // Lead-only edit + settings panel are present.
+    expect(html).toContain(">Edit<");
+    expect(html).toContain('data-component="SettingsPanel"');
+    expect(html).toContain("every monday 09:00");
+    expect(html).toContain('data-component="AutonomyControl"');
+  });
+
+  it("hides the checklist once every precondition holds", () => {
+    const html = renderToStaticMarkup(
+      <ProjectDetailView
+        project={{
+          ...PROJECT,
+          outputs: [OUTPUT({ id: "out_1" })],
+        }}
+        board={BOARD}
+        playbook={{
+          active: {
+            project_id: "prj_1",
+            rev: 1,
+            body: "",
+            steps: [{ key: "a", title: "A" }],
+            active: 1,
+            created_by: "leo",
+            created_at: NOW,
+            activated_at: NOW,
+            note: null,
+          },
+          revisions: [],
+        }}
+        directives={null}
+        doctor={{ slug: PROJECT.slug, health: "ok", findings: [], clean: true }}
+        callerUserId="leo"
+        isInstanceAdmin={false}
+      />,
+    );
+    expect(html).not.toContain('data-component="ReadinessChecklist"');
+    expect(html).not.toMatch(/<button[^>]*disabled=""[^>]*>Run now<\/button>/);
+  });
+
+  it("hides Edit and the settings controls from a plain member", () => {
+    const html = renderToStaticMarkup(
+      <ProjectDetailView
+        project={{ ...PROJECT, owner_user_id: "someone-else", members: [{ ...PROJECT.members[0], user_id: "leo", role: "member" }] }}
+        board={BOARD}
+        playbook={null}
+        directives={null}
+        callerUserId="leo"
+        isInstanceAdmin={false}
+      />,
+    );
+    expect(html).not.toContain(">Edit<");
+    expect(html).not.toContain("Save schedule");
+  });
+});
+
+describe("CardDetailView", () => {
+  const DETAIL = { ...CARD({ status: "todo", body: "Pull the week's threads." }), age: null };
+
+  it("offers the editor with the project's profiles and the column moves", () => {
+    const html = renderToStaticMarkup(
+      <CardDetailView slug="s" card={DETAIL} profiles={["default", "worker"]} />,
+    );
+    expect(html).toContain('data-component="CardEditor"');
+    expect(html).toContain("Edit card");
+    expect(html).toContain("Approve — make ready");
+    expect(html).toContain("Pull the week&#x27;s threads.");
+  });
+
+  it("is read-only when the project is archived", () => {
+    const html = renderToStaticMarkup(
+      <CardDetailView slug="s" card={DETAIL} profiles={[]} archived />,
+    );
+    expect(html).not.toContain('data-component="CardEditor"');
+    expect(html).not.toContain('data-component="CardActions"');
+  });
 });
 
 describe("CardActions", () => {
@@ -512,12 +737,22 @@ describe("CardActions", () => {
     expect(html).toContain("Re-run");
   });
 
-  it("offers Retry without Stop for a blocked card", () => {
+  it("offers Make ready (not a reclaim) and no Stop for a blocked card", () => {
     const html = renderToStaticMarkup(
       <CardActions slug="s" taskId="t_1" status="blocked" />,
     );
-    expect(html).toContain("Retry");
+    expect(html).toContain("Make ready");
+    expect(html).not.toContain("Retry");
+    expect(html).not.toContain("Re-run");
     expect(html).not.toContain(">Stop<");
+  });
+
+  it("offers Stop but no Re-run for an unclaimed ready card", () => {
+    const html = renderToStaticMarkup(
+      <CardActions slug="s" taskId="t_1" status="ready" />,
+    );
+    expect(html).toContain("Stop");
+    expect(html).not.toContain("Re-run");
   });
 
   it("renders nothing for settled cards", () => {

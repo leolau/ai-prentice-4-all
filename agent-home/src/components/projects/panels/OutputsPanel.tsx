@@ -1,7 +1,8 @@
 "use client";
 
-import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useState } from "react";
+import { friendlyError } from "@/components/projects/errors";
 
 import { applyAcceptEnvelope } from "@/components/projects/envelopes";
 import { dateTimeLabel } from "@/components/projects/format";
@@ -40,10 +41,13 @@ export function OutputsPanel({
   /** §13: a shelved project offers restore as the only write. */
   archived?: boolean;
 }) {
+  const router = useRouter();
   const [outputs, setOutputs] = useState(initial);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [offersClosure, setOffersClosure] = useState(false);
+  const [closing, setClosing] = useState(false);
+  const [closed, setClosed] = useState(false);
 
   // Add-output form state
   const [newTitle, setNewTitle] = useState("");
@@ -60,7 +64,15 @@ export function OutputsPanel({
         `/api/projects/${encodeURIComponent(slug)}/outputs/${encodeURIComponent(outputId)}/accept`,
         { method: "POST" },
       );
-      if (!res.ok) throw new Error("accept");
+      if (!res.ok) {
+        const data = (await res.json().catch(() => ({}))) as { detail?: string };
+        throw new Error(
+          friendlyError(
+            { status: res.status, detail: data.detail },
+            "That didn't stick — try again.",
+          ),
+        );
+      }
       // The accept route answers with the updated row + the closure offer;
       // merge the row (the joined deliveries survive the spread) so the
       // Accept button disappears without a reload.
@@ -70,10 +82,40 @@ export function OutputsPanel({
       };
       setOutputs((prev) => applyAcceptEnvelope(prev, outputId, payload).outputs);
       if (payload.offers_closure === true) setOffersClosure(true);
-    } catch {
-      setError("That didn't stick — try again.");
+      // Progress, health and the header rollup are derived on the server
+      // read; revalidate so they move with the row.
+      router.refresh();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "That didn't stick — try again.");
     } finally {
       setBusyId(null);
+    }
+  };
+
+  const markDone = async () => {
+    setClosing(true);
+    setError(null);
+    try {
+      const res = await fetch(`/api/projects/${encodeURIComponent(slug)}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ status: "done" }),
+      });
+      const data = (await res.json().catch(() => ({}))) as { detail?: string };
+      if (!res.ok) {
+        throw new Error(
+          friendlyError(
+            { status: res.status, detail: data.detail },
+            "The project could not be marked done.",
+          ),
+        );
+      }
+      setClosed(true);
+      router.refresh();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "The project could not be marked done.");
+    } finally {
+      setClosing(false);
     }
   };
 
@@ -98,7 +140,7 @@ export function OutputsPanel({
       );
       const data = (await res.json().catch(() => ({}))) as ProjectOutputWithDeliveries &
         { detail?: string };
-      if (!res.ok) throw new Error(data.detail ?? "Could not add the output.");
+      if (!res.ok) throw new Error(friendlyError({ status: res.status, detail: data.detail }, "Could not add the output."));
       setOutputs((prev) => [...prev, { ...data, deliveries: [] }]);
       setNewTitle("");
       setNewSpec("");
@@ -120,7 +162,7 @@ export function OutputsPanel({
         { method: "DELETE" },
       );
       const data = (await res.json().catch(() => ({}))) as { detail?: string };
-      if (!res.ok) throw new Error(data.detail ?? "Could not remove the output.");
+      if (!res.ok) throw new Error(friendlyError({ status: res.status, detail: data.detail }, "Could not remove the output."));
       setOutputs((prev) => prev.filter((o) => o.id !== outputId));
     } catch (err) {
       setError(err instanceof Error ? err.message : "That didn't go through.");
@@ -165,19 +207,39 @@ export function OutputsPanel({
           data-component="ClosureOffer"
           className="mt-2 rounded-lg border border-[var(--color-accent)]/40 bg-[var(--color-surface-2)] px-3 py-2 text-sm"
         >
-          Every required output is now accepted — this project offers
-          closure. Decide it on{" "}
-          <Link href="/projects" className="text-[var(--color-accent)] underline">
-            /projects
-          </Link>
-          .
+          {closed ? (
+            "This project is marked done. It stays on the record; archive it from the ⋯ menu when you want it off the list."
+          ) : (
+            <>
+              Every required output is now accepted — this project can be
+              closed. Mark it done here, or keep it open for another run.
+              <span className="mt-2 flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  onClick={() => void markDone()}
+                  disabled={closing}
+                  className="rounded-lg bg-[var(--color-accent)] px-3 py-1.5 text-xs font-medium text-[var(--color-accent-fg)] disabled:opacity-50"
+                >
+                  {closing ? "Marking done…" : "Mark project done"}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setOffersClosure(false)}
+                  disabled={closing}
+                  className="rounded-lg border border-[var(--color-border)] px-3 py-1.5 text-xs disabled:opacity-50"
+                >
+                  Keep open
+                </button>
+              </span>
+            </>
+          )}
         </p>
       ) : null}
 
       {sorted.length === 0 ? (
         <p className="mt-2 text-sm text-[var(--color-muted)]">
-          Add an output — declaring the deliverable is what makes a run
-          accountable to something.
+          No outputs yet. Add one below — the deliverable is what a run is
+          accountable to, and what you accept when it is done.
         </p>
       ) : (
         <ul className="mt-2 flex flex-col gap-3">
@@ -217,14 +279,26 @@ export function OutputsPanel({
               ) : null}
               {output.status === "delivered" && !archived ? (
                 <BusyRegion busy={busyId === output.id} label="Accepting…">
-                  <button
-                    type="button"
-                    onClick={() => void accept(output.id)}
-                    className="mt-2 rounded-lg border border-[var(--color-accent)] px-3 py-1.5 text-xs font-medium text-[var(--color-accent)]"
-                  >
-                    Accept
-                  </button>
+                  <div className="mt-2 flex flex-wrap items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => void accept(output.id)}
+                      className="rounded-lg border border-[var(--color-accent)] px-3 py-1.5 text-xs font-medium text-[var(--color-accent)]"
+                    >
+                      Accept
+                    </button>
+                    <span className="text-xs text-[var(--color-muted)]">
+                      Delivered — waiting for you to judge it met the spec. Accepting is
+                      a human act; the agent cannot do it for you.
+                    </span>
+                  </div>
                 </BusyRegion>
+              ) : null}
+              {output.status === "accepted" && output.accepted_at != null ? (
+                <p className="mt-1 text-xs text-[var(--color-muted)]">
+                  accepted {dateTimeLabel(output.accepted_at)}
+                  {output.accepted_by ? ` by ${output.accepted_by}` : ""}
+                </p>
               ) : null}
               {output.status === "pending" && !archived ? (
                 <BusyRegion busy={busyId === `del:${output.id}`} label="Removing…">

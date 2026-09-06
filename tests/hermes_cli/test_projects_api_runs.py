@@ -575,3 +575,38 @@ def test_autonomy_is_a_lead_route_not_a_judgement_act(env):
     with kanban_db.connect_closing() as bconn:
         for tid in body["cards"].values():
             assert kanban_db.get_task(bconn, tid).status == "triage"
+
+
+def test_run_reports_awaiting_continue_once_checkpoint_is_done(env):
+    """The run row stays ``running`` after a checkpoint card finishes; the
+    read derives ``awaiting_continue`` so the page can offer Continue, and
+    drops it once the successor has been released."""
+    project = _active_project(env)
+    client, _state = env
+    client.patch(
+        f"/api/registry/projects/{project['slug']}", json={"max_in_progress": 3}
+    )
+    _save_and_activate_playbook(env, project)
+    started = client.post(
+        f"/api/registry/projects/{project['slug']}/runs", json={}
+    ).json()
+    gather_id, approve_id = started["cards"]["gather"], started["cards"]["approve"]
+
+    resp = client.get(f"/api/registry/projects/{project['slug']}/runs/1")
+    assert resp.json()["awaiting_continue"] is False  # checkpoint not done yet
+
+    with kanban_db.connect_closing() as bconn:
+        assert kanban_db.complete_task(bconn, gather_id, result="ok")
+        assert kanban_db.complete_task(bconn, approve_id, result="looks good")
+
+    resp = client.get(f"/api/registry/projects/{project['slug']}/runs/1")
+    body = resp.json()
+    assert body["status"] == "running"
+    assert body["awaiting_continue"] is True
+
+    resp = client.post(
+        f"/api/registry/projects/{project['slug']}/runs/1/continue", json={}
+    )
+    assert resp.status_code == 200, resp.text
+    resp = client.get(f"/api/registry/projects/{project['slug']}/runs/1")
+    assert resp.json()["awaiting_continue"] is False

@@ -106,6 +106,7 @@ def run_session_turn_sync(
     tool_start_callback=None,
     tool_complete_callback=None,
     platform: str = "api_server",
+    on_agent_ready=None,
 ) -> Tuple[dict, dict]:
     """Run one synchronous one-brain turn for a persisted session.
 
@@ -114,7 +115,9 @@ def run_session_turn_sync(
     where *result* is the ``AIAgent.run_conversation`` dict (``final_response``,
     ``session_id``) and *usage* holds token counts. Does not bind runtime
     session-context — the caller sets/clears that around this call. Callbacks
-    fire on the caller's executor thread.
+    fire on the caller's executor thread. ``on_agent_ready(agent)`` is called
+    once the agent is built, before the turn runs, so the caller can hold a
+    handle for ``agent.interrupt()`` (user-initiated stop from another thread).
     """
     t0 = time.monotonic()
     agent = build_session_agent(
@@ -130,6 +133,8 @@ def run_session_turn_sync(
         platform=platform,
     )
     t1 = time.monotonic()
+    if on_agent_ready is not None:
+        on_agent_ready(agent)
     result = agent.run_conversation(
         user_message=user_message,
         conversation_history=conversation_history,

@@ -1,6 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { attachChatStream, streamChatTurn, type ChatToolEvent } from "@/lib/chat/stream";
+import {
+  attachChatStream,
+  cancelChatTurn,
+  streamChatTurn,
+  type ChatToolEvent,
+} from "@/lib/chat/stream";
 
 function sseResponse(body: string): Response {
   return new Response(body, {
@@ -28,7 +33,7 @@ describe("streamChatTurn reasoning and tool events", () => {
     ].join("\n\n") + "\n\n";
     vi.stubGlobal("fetch", vi.fn(async () => sseResponse(body)));
 
-    const accepted: string[] = [];
+    const accepted: [string, string][] = [];
     const reasoning: string[] = [];
     const starts: ChatToolEvent[] = [];
     const completes: ChatToolEvent[] = [];
@@ -36,7 +41,7 @@ describe("streamChatTurn reasoning and tool events", () => {
     await streamChatTurn(
       { sessionId: "sess_1", message: "hi", attachments: [] },
       {
-        onAccepted: (id) => accepted.push(id),
+        onAccepted: (id, sid) => accepted.push([id, sid]),
         onReasoning: (t) => reasoning.push(t),
         onToolStart: (t) => starts.push(t),
         onToolComplete: (t) => completes.push(t),
@@ -44,11 +49,33 @@ describe("streamChatTurn reasoning and tool events", () => {
       },
     );
 
-    expect(accepted).toEqual(["run_1"]);
+    expect(accepted).toEqual([["run_1", "sess_1"]]);
     expect(reasoning).toEqual(["checking the run…"]);
     expect(starts).toEqual([{ id: "tc1", name: "execute_code" }]);
     expect(completes).toEqual([{ id: "tc1", name: "execute_code" }]);
     expect(deltas).toEqual(["The run "]);
+  });
+
+  it("dispatches run.cancelled before the completion frames of a stopped turn", async () => {
+    const body = [
+      "event: assistant.delta\ndata: {\"delta\":\"partial\"}",
+      "event: run.cancelled\ndata: {\"run_id\":\"run_1\",\"session_id\":\"sess_1\"}",
+      "event: assistant.completed\ndata: {\"content\":\"partial\"}",
+      "event: run.completed\ndata: {\"session_id\":\"sess_1\"}",
+      "event: done\ndata: {}",
+    ].join("\n\n") + "\n\n";
+    vi.stubGlobal("fetch", vi.fn(async () => sseResponse(body)));
+
+    const order: string[] = [];
+    await streamChatTurn(
+      { sessionId: "sess_1", message: "hi", attachments: [] },
+      {
+        onDelta: () => order.push("delta"),
+        onCancelled: () => order.push("cancelled"),
+        onCompleted: (content) => order.push(`completed:${content}`),
+      },
+    );
+    expect(order).toEqual(["delta", "cancelled", "completed:partial"]);
   });
 
   it("delivers reasoning before completion and completes once", async () => {
@@ -66,6 +93,40 @@ describe("streamChatTurn reasoning and tool events", () => {
       },
     );
     expect(order).toEqual(["reasoning", "completed"]);
+  });
+});
+
+describe("cancelChatTurn (explicit Stop)", () => {
+  it("posts the session and run ids to the cancel route", async () => {
+    const fetchMock = vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
+      expect(String(url)).toBe("/api/chat/cancel");
+      expect(init?.method).toBe("POST");
+      expect(JSON.parse(String(init?.body))).toEqual({
+        sessionId: "sess_1",
+        runId: "run_9",
+      });
+      return new Response(JSON.stringify({ run_id: "run_9", cancelled: true }), {
+        status: 200,
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(
+      cancelChatTurn({ sessionId: "sess_1", runId: "run_9" }),
+    ).resolves.toBeUndefined();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("surfaces the server's detail when the run cannot be stopped", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(JSON.stringify({ detail: "no such run" }), { status: 404 }),
+      ),
+    );
+    await expect(
+      cancelChatTurn({ sessionId: "sess_1", runId: "run_9" }),
+    ).rejects.toThrow("no such run");
   });
 });
 

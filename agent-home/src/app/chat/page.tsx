@@ -23,13 +23,19 @@ export const dynamic = "force-dynamic";
 export default async function Page({
   searchParams,
 }: {
-  searchParams: Promise<{ session?: string; profile?: string }>;
+  searchParams: Promise<{ session?: string; profile?: string; draft?: string }>;
 }) {
   await requirePrincipal();
   // `?session=<id>` is where a memory's citation link lands. `?profile=<name>`
   // is which profile the chat addresses (FG-28) — a whole HERMES_HOME, so it
   // selects the brain that answers *and* the conversations shown.
-  const { session: requested, profile: requestedProfile } = await searchParams;
+  // `?draft=<text>` pre-fills the composer (a project's "ask the agent to
+  // draft a plan" door) — nothing is sent until the user presses send.
+  const {
+    session: requested,
+    profile: requestedProfile,
+    draft,
+  } = await searchParams;
   const profile = (requestedProfile ?? "").trim() || DEFAULT_PROFILE;
 
   let sessions: SessionSummary[] = [];
@@ -86,6 +92,7 @@ export default async function Page({
           storageEnabled={storageConfigured()}
           profiles={profiles}
           profile={profile}
+          initialDraft={(draft ?? "").trim() || undefined}
         />
       )}
     </MobileShell>

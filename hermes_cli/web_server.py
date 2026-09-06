@@ -10719,7 +10719,17 @@ async def session_chat_stream(session_id: str, request: Request):
     run_id = f"run_{uuid.uuid4().hex}"
     loop = asyncio.get_running_loop()
     queue: "asyncio.Queue" = asyncio.Queue()
-    run_entry = {"session_id": sid, "buffer": [], "subs": [], "done": False}
+    run_entry = {
+        "session_id": sid,
+        "buffer": [],
+        "subs": [],
+        "done": False,
+        # Set from the executor thread once the AIAgent exists; the cancel
+        # endpoint calls ``agent.interrupt()`` on it. ``cancel_requested``
+        # covers a stop that lands before the agent is built.
+        "agent": None,
+        "cancel_requested": False,
+    }
     _CHAT_RUNS[run_id] = run_entry
     trace, ledger = _agent_home_trace(principal, sid)
     _trace_emit(trace, "inbound", sid, "agent-home chat message")
@@ -10777,6 +10787,11 @@ async def session_chat_stream(session_id: str, request: Request):
         event.setdefault("choices", ["once", "session", "always", "deny"])
         _enqueue("approval.request", event)
 
+    def _agent_ready(agent) -> None:
+        run_entry["agent"] = agent
+        if run_entry["cancel_requested"]:
+            agent.interrupt()
+
     def _run():
         # Mirrors the non-streaming session_chat worker, plus the per-run
         # approval surface. set_current_session_key + register_gateway_notify
@@ -10820,6 +10835,7 @@ async def session_chat_stream(session_id: str, request: Request):
                         reasoning_callback=_reasoning,
                         tool_start_callback=_tool_start,
                         tool_complete_callback=_tool_complete,
+                        on_agent_ready=_agent_ready,
                     )
             finally:
                 run_db.close()
@@ -10833,6 +10849,8 @@ async def session_chat_stream(session_id: str, request: Request):
             result, usage = await loop.run_in_executor(None, _run)
             final_response = result.get("final_response", "") if isinstance(result, dict) else ""
             eff_sid = result.get("session_id", sid) if isinstance(result, dict) else sid
+            if run_entry["cancel_requested"]:
+                _enqueue("run.cancelled", {"run_id": run_id, "session_id": eff_sid})
             _enqueue("assistant.completed", {"content": final_response, "run_id": run_id})
             _enqueue("run.completed", {"session_id": eff_sid, "usage": usage, "run_id": run_id})
             now = time.monotonic()
@@ -10991,6 +11009,43 @@ async def session_chat_stream_attach(session_id: str, request: Request):
         "X-Hermes-Session-Id": session_id,
     }
     return StreamingResponse(_events(), media_type="text/event-stream", headers=headers)
+
+
+@app.post("/api/sessions/{session_id}/chat/stream/cancel")
+async def session_chat_stream_cancel(session_id: str, request: Request):
+    """Stop an in-flight turn at the user's request.
+
+    Closing the browser's SSE connection deliberately does NOT stop a turn
+    (that is what lets it survive a closed tab), so an explicit Stop needs an
+    explicit verb. Interrupts the run's agent (aborting the in-flight model
+    call and any running tool, same as a gateway interrupt); the turn then
+    winds down and persists whatever it produced, and every attached stream
+    receives ``run.cancelled`` followed by the normal completion frames.
+    """
+    await _comms_resolve_principal(request)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    run_id = str((body or {}).get("run_id", "")).strip()
+    entry = _CHAT_RUNS.get(run_id)
+    if entry is not None and entry["session_id"] != session_id:
+        resolved = _resolved_chat_session_id(session_id, (body or {}).get("profile"))
+        if entry["session_id"] != resolved:
+            entry = None
+    if entry is None:
+        raise HTTPException(status_code=404, detail="no such run")
+    if entry["done"]:
+        return {"run_id": run_id, "cancelled": False, "done": True}
+    entry["cancel_requested"] = True
+    agent = entry.get("agent")
+    if agent is not None:
+        try:
+            agent.interrupt()
+        except Exception:
+            _log.exception("[agent-home] interrupt failed run=%s", run_id)
+    _log.info("[agent-home] turn cancel requested run=%s session=%s", run_id, session_id)
+    return {"run_id": run_id, "cancelled": True, "done": False}
 
 
 @app.post("/v1/runs/{run_id}/approval")

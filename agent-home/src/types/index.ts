@@ -1357,9 +1357,22 @@ export type ProjectProgress =
       cards: ProjectCardRollup;
     };
 
+/** Per-status counts of the declared outputs (§9.1). */
+export interface ProjectOutputRollup {
+  total: number;
+  required: number;
+  /** delivered or accepted */
+  delivered: number;
+  accepted: number;
+  /** delivered but not yet accepted — waiting on a human judgement */
+  awaiting_acceptance: number;
+}
+
 /** One row of `GET /api/registry/projects`. */
 export type ProjectListItem = Project & {
   progress: ProjectProgress;
+  /** Optional: older BFF/API builds omit it. */
+  output_rollup?: ProjectOutputRollup;
   member_count: number;
   health: ProjectHealth;
 };
@@ -1524,6 +1537,11 @@ export interface ProjectRun {
    * run is orphaned, not busy.
    */
   stalled?: boolean;
+  /**
+   * Server-derived: a supervised run whose checkpoint step(s) are done while
+   * their successors still wait in triage — held on the human's Continue.
+   */
+  awaiting_continue?: boolean;
 }
 
 /** The method, one revision (§7). `steps` is parsed JSON on the detail read. */
@@ -1532,7 +1550,10 @@ export interface PlaybookStep {
   title: string;
   body?: string | null;
   assignee?: string | null;
+  /** Step keys this one waits on (the stored name; `needs` is a legacy alias). */
+  depends_on?: string[];
   needs?: string[];
+  mode?: "card" | "inline";
   checkpoint?: boolean;
   [extra: string]: unknown;
 }
@@ -1594,6 +1615,7 @@ export interface ProjectDetail extends Project {
   contacts: ProjectContact[];
   links: Partial<Record<ProjectLinkKind, ProjectLink[]>>;
   progress: ProjectProgress;
+  output_rollup?: ProjectOutputRollup;
   /**
    * §8.1 derived score — the mean of the last five `score_user` values,
    * never an all-time number; null until somebody scores a run.
@@ -1637,7 +1659,9 @@ export interface ProjectEventsResponse {
 export interface ProjectDoctorFinding {
   code: string;
   severity: "info" | "attention" | "stalled";
-  message: string;
+  /** The Python payload names the text `detail`; older callers read `message`. */
+  detail?: string;
+  message?: string;
 }
 
 export interface ProjectsDoctorItem {

@@ -167,7 +167,8 @@ export function GuidancePanel({
             ))}
             {directives.length === 0 ? (
               <li className="text-sm text-[var(--color-muted)]">
-                No standing instructions yet.
+                No standing instructions yet — add one below and every run
+                reads it before it starts.
               </li>
             ) : null}
           </ul>

@@ -2,6 +2,7 @@
 
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
+import { friendlyError } from "@/components/projects/errors";
 
 import { Spinner } from "@/components/ui/Spinner";
 import type { ProjectLinkKind, ProjectsResponse } from "@/types";
@@ -113,7 +114,7 @@ export function AddToProjectSheet({
         detail?: string;
       };
       if (!res.ok) {
-        setError(data.detail ?? "Could not add the link.");
+        setError(friendlyError({ status: res.status, detail: data.detail }, "Could not add the link."));
         return;
       }
       onClose();
@@ -146,7 +147,7 @@ export function AddToProjectSheet({
         detail?: string;
       };
       if (!res.ok) {
-        setError(data.detail ?? "Could not promote the to-do.");
+        setError(friendlyError({ status: res.status, detail: data.detail }, "Could not promote the to-do."));
         return;
       }
       onClose();

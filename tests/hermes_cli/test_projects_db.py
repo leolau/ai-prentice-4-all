@@ -311,3 +311,19 @@ def test_member_roles_validated_and_deduplicated(conn):
 
     assert pdb.remove_project_member(conn, pid, "u1") is True
     assert pdb.get_project_members(conn, pid) == []
+
+
+def test_list_playbook_revs_carries_decoded_steps(conn):
+    """A proposed (not yet active) revision must list its saved steps —
+    the plan panel renders them before activation."""
+    pid = pdb.create_project(conn, name="Steps Listed", folders=["/tmp/steps"])
+    steps = [
+        {"key": "draft", "title": "Draft it"},
+        {"key": "review", "title": "Review it", "depends_on": ["draft"], "checkpoint": True},
+    ]
+    rev = pdb.save_playbook_rev(conn, project_id=pid, body="two steps", steps=steps)
+    revs = pdb.list_playbook_revs(conn, pid)
+    assert [r["rev"] for r in revs] == [rev]
+    assert revs[0]["active"] in (0, False)
+    assert [s["key"] for s in revs[0]["steps"]] == ["draft", "review"]
+    assert revs[0]["steps"][1]["checkpoint"] is True

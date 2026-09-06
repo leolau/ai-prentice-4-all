@@ -2,12 +2,22 @@
 
 import { useRouter } from "next/navigation";
 import { useState } from "react";
+import { friendlyError } from "@/components/projects/errors";
 
 import {
   AddToProjectSheet,
 } from "@/components/projects/AddToProjectSheet";
+import { EditBriefSheet } from "@/components/projects/EditBriefSheet";
 import { ProjectLifecycleMenu } from "@/components/projects/ProjectLifecycleMenu";
-import { dayDistance } from "@/components/projects/format";
+import { ReadinessChecklist } from "@/components/projects/ReadinessChecklist";
+import {
+  extraFindings,
+  isRunnable,
+  readinessItems,
+} from "@/components/projects/readiness";
+import { agoLabel, dayDistance } from "@/components/projects/format";
+import { SummariseSheet } from "@/components/projects/SummariseSheet";
+import { CollapsedPanel } from "@/components/projects/panels/CollapsedPanel";
 import { BoardPanel } from "@/components/projects/panels/BoardPanel";
 import { BriefPanel } from "@/components/projects/panels/BriefPanel";
 import { FilesPanel } from "@/components/projects/panels/FilesPanel";
@@ -19,6 +29,7 @@ import { PlanPanel } from "@/components/projects/panels/PlanPanel";
 import { ProgressPanel } from "@/components/projects/panels/ProgressPanel";
 import { ReferencesPanel } from "@/components/projects/panels/ReferencesPanel";
 import { RunsPanel } from "@/components/projects/panels/RunsPanel";
+import { SettingsPanel } from "@/components/projects/panels/SettingsPanel";
 import { ToolsPanel } from "@/components/projects/panels/ToolsPanel";
 import {
   CADENCE_GLYPH,
@@ -33,6 +44,7 @@ import type {
   ProjectBoardView,
   ProjectDetail,
   ProjectDirectivesResponse,
+  ProjectDoctorDetail,
   ProjectHealth,
   ProjectPlaybookResponse,
 } from "@/types";
@@ -43,14 +55,19 @@ const HEALTH_TONE: Record<ProjectHealth, Tone> = {
   stalled: "danger",
 };
 
-/** The sticky anchor strip, in §13 panel order. */
+/**
+ * The sticky anchor strip, in panel order: Progress (what is next for you)
+ * leads, then the deliverables and the work, then the record. Collapsed
+ * panels keep their anchor — the wrapper carries the id.
+ */
 const PANEL_ANCHORS: { id: string; label: string }[] = [
-  { id: "panel-brief", label: "Brief" },
-  { id: "panel-outputs", label: "Outputs" },
   { id: "panel-progress", label: "Progress" },
+  { id: "panel-outputs", label: "Outputs" },
+  { id: "panel-brief", label: "Brief" },
   { id: "panel-board", label: "Board" },
   { id: "panel-runs", label: "Runs" },
   { id: "panel-plan", label: "Plan" },
+  { id: "panel-settings", label: "Settings" },
   { id: "panel-guidance", label: "Guidance" },
   { id: "panel-people", label: "People" },
   { id: "panel-files", label: "Files" },
@@ -71,6 +88,7 @@ export function ProjectDetailView({
   board,
   playbook,
   directives,
+  doctor = null,
   callerUserId,
   isInstanceAdmin,
 }: {
@@ -78,6 +96,8 @@ export function ProjectDetailView({
   board: ProjectBoardView | null;
   playbook: ProjectPlaybookResponse | null;
   directives: ProjectDirectivesResponse | null;
+  /** Server-side findings the local checklist cannot see (§9.2). */
+  doctor?: ProjectDoctorDetail | null;
   /** The signed-in principal's user id — the lifecycle gate (§13). */
   callerUserId: string;
   /** Box-wide owner/admin outranks the per-project matrix (§11). */
@@ -87,6 +107,20 @@ export function ProjectDetailView({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [addOpen, setAddOpen] = useState(false);
+  const [editOpen, setEditOpen] = useState(false);
+  const [summariseOpen, setSummariseOpen] = useState(false);
+
+  const callerRole =
+    project.members.find((member) => member.user_id === callerUserId)?.role ??
+    null;
+  const canLead =
+    isInstanceAdmin ||
+    project.owner_user_id === callerUserId ||
+    callerRole === "lead";
+
+  const readiness = readinessItems(project, playbook);
+  const runnable = isRunnable(readiness);
+  const findings = extraFindings(doctor, readiness);
 
   // §12 live updates: a run promoted in the background becomes visible
   // without a manual reload — the poller refreshes when the event head
@@ -104,6 +138,13 @@ export function ProjectDetailView({
     (project.links.reference ?? []).length > 0 ||
     (project.links.url ?? []).length > 0;
   const hasMemories = (project.links.memory ?? []).length > 0;
+  const hasFiles = (project.links.file ?? []).length > 0;
+  // The owner is a member by construction; People is empty until a second
+  // person or a contact is on it.
+  const hasPeople =
+    project.members.some((m) => m.user_id !== project.owner_user_id) ||
+    project.contacts.length > 0;
+  const hasTools = Boolean(project.toolsets?.trim() || project.skills?.trim());
   const anchors = PANEL_ANCHORS.filter(
     (anchor) =>
       (anchor.id !== "panel-references" || hasReferences) &&
@@ -119,7 +160,38 @@ export function ProjectDetailView({
       const res = await fetch(path, { method: "POST" });
       const data = (await res.json().catch(() => ({}))) as { detail?: string };
       if (!res.ok) {
-        setError(data.detail ?? "That did not go through.");
+        setError(friendlyError({ status: res.status, detail: data.detail }, "That did not go through."));
+        return;
+      }
+      router.refresh();
+    } catch {
+      setError("Could not reach the server.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // Run now lands on the run page so the live activity stream is the first
+  // thing the user sees; the backend answers `{run: {run_no, …}, …}`.
+  const runNow = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await fetch(`${slugPath}/runs`, { method: "POST" });
+      const data = (await res.json().catch(() => ({}))) as {
+        detail?: string;
+        run?: { run_no?: number };
+        run_no?: number;
+      };
+      if (!res.ok) {
+        setError(friendlyError({ status: res.status, detail: data.detail }, "That did not go through."));
+        return;
+      }
+      const runNo = data.run?.run_no ?? data.run_no;
+      if (typeof runNo === "number") {
+        router.push(
+          `/projects/${encodeURIComponent(project.slug)}/runs/${runNo}`,
+        );
         return;
       }
       router.refresh();
@@ -144,7 +216,7 @@ export function ProjectDetailView({
       });
       const data = (await res.json().catch(() => ({}))) as { detail?: string };
       if (!res.ok) {
-        setError(data.detail ?? "That did not go through.");
+        setError(friendlyError({ status: res.status, detail: data.detail }, "That did not go through."));
         return;
       }
       router.refresh();
@@ -199,9 +271,17 @@ export function ProjectDetailView({
             ) : null}
             <p className="mt-1 text-xs text-[var(--color-muted)]">{meta}</p>
             {project.summary ? (
-              <p className="mt-2 rounded-xl bg-[var(--color-surface-2)] px-3 py-2 text-sm italic">
-                {project.summary}
-              </p>
+              <div
+                data-component="ProjectSummary"
+                className="mt-2 rounded-xl bg-[var(--color-surface-2)] px-3 py-2 text-sm"
+              >
+                <p className="italic">{project.summary}</p>
+                {project.summary_at != null ? (
+                  <p className="mt-1 text-xs text-[var(--color-muted)]">
+                    Summarised {agoLabel(project.summary_at)}
+                  </p>
+                ) : null}
+              </div>
             ) : null}
 
             <div className="mt-3 flex flex-wrap gap-2">
@@ -214,8 +294,13 @@ export function ProjectDetailView({
               {project.status === "active" ? (
                 <button
                   type="button"
-                  onClick={() => void post(`${slugPath}/runs`)}
-                  disabled={busy}
+                  onClick={() => void runNow()}
+                  disabled={busy || !runnable}
+                  title={
+                    runnable
+                      ? undefined
+                      : "Finish the checklist below before running."
+                  }
                   className="rounded-xl bg-[var(--color-accent)] px-4 py-2 text-sm font-medium text-[var(--color-accent-fg)] disabled:opacity-50"
                 >
                   Run now
@@ -251,9 +336,29 @@ export function ProjectDetailView({
               >
                 Add
               </button>
+              {canLead ? (
+                <button
+                  type="button"
+                  onClick={() => setEditOpen(true)}
+                  className="rounded-xl border border-[var(--color-border)] px-4 py-2 text-sm disabled:opacity-50"
+                >
+                  Edit
+                </button>
+              ) : null}
+              <button
+                type="button"
+                onClick={() => setSummariseOpen(true)}
+                className="rounded-xl border border-[var(--color-border)] px-4 py-2 text-sm disabled:opacity-50"
+              >
+                {project.summary ? "Update summary" : "Summarise"}
+              </button>
               </>
               )}
             </div>
+
+            {!project.archived ? (
+              <ReadinessChecklist items={readiness} findings={findings} />
+            ) : null}
 
             {error ? (
               <p className="mt-2 text-sm text-red-400" role="alert">
@@ -283,30 +388,78 @@ export function ProjectDetailView({
 
           {/* ── Panels — stacked on a phone, two columns from md: ── */}
           <div className="flex flex-col gap-4 md:grid md:grid-cols-2 md:items-start">
-            <BriefPanel project={project} />
+            <ProgressPanel
+              slug={project.slug}
+              project={project}
+              blockedCards={blockedCards}
+              runnable={runnable}
+            />
             <OutputsPanel
               slug={project.slug}
               outputs={project.outputs}
               archived={project.archived}
             />
-            <ProgressPanel
+            <BriefPanel project={project} />
+            <BoardPanel
               slug={project.slug}
-              project={project}
-              blockedCards={blockedCards}
+              board={board}
+              archived={project.archived}
             />
-            <BoardPanel slug={project.slug} board={board} />
-            <RunsPanel slug={project.slug} runs={project.runs} />
-            <PlanPanel playbook={playbook} />
+            <RunsPanel
+              slug={project.slug}
+              runs={project.runs}
+              archived={project.archived}
+            />
+            <PlanPanel
+              slug={project.slug}
+              playbook={playbook}
+              profiles={project.profiles.map((row) => row.profile)}
+              hostProfile={project.host_profile}
+              projectName={project.name}
+              canActivate={canLead}
+              archived={project.archived}
+            />
+            <SettingsPanel
+              project={project}
+              canLead={canLead}
+              hasActivePlan={Boolean(playbook?.active)}
+            />
             <GuidancePanel
               slug={project.slug}
               initial={directives}
               archived={project.archived}
             />
-            <PeoplePanel project={project} archived={project.archived} />
-            <FilesPanel project={project} archived={project.archived} />
+            {hasPeople ? (
+              <PeoplePanel project={project} archived={project.archived} />
+            ) : (
+              <CollapsedPanel
+                anchor="panel-people"
+                label="People"
+                hint="just you — add someone"
+              >
+                <PeoplePanel project={project} archived={project.archived} />
+              </CollapsedPanel>
+            )}
+            {hasFiles ? (
+              <FilesPanel project={project} archived={project.archived} />
+            ) : (
+              <CollapsedPanel anchor="panel-files" label="Files" hint="none yet — add one">
+                <FilesPanel project={project} archived={project.archived} />
+              </CollapsedPanel>
+            )}
             <ReferencesPanel project={project} />
             <MemoriesPanel project={project} />
-            <ToolsPanel project={project} archived={project.archived} />
+            {hasTools ? (
+              <ToolsPanel project={project} archived={project.archived} />
+            ) : (
+              <CollapsedPanel
+                anchor="panel-tools"
+                label="Tools"
+                hint="full host toolset — narrow it"
+              >
+                <ToolsPanel project={project} archived={project.archived} />
+              </CollapsedPanel>
+            )}
           </div>
         </div>
       </BusyRegion>
@@ -319,6 +472,27 @@ export function ProjectDetailView({
           }}
           fixedSlug={project.slug}
           fixedName={project.name}
+        />
+      ) : null}
+
+      {summariseOpen ? (
+        <SummariseSheet
+          slug={project.slug}
+          initial={project.summary ?? ""}
+          onClose={() => {
+            setSummariseOpen(false);
+            router.refresh();
+          }}
+        />
+      ) : null}
+
+      {editOpen ? (
+        <EditBriefSheet
+          project={project}
+          onClose={() => {
+            setEditOpen(false);
+            router.refresh();
+          }}
         />
       ) : null}
     </div>

@@ -192,3 +192,23 @@ describe("RunView Stop now", () => {
     expect(queryByRole("button", { name: "Stop now" })).toBeNull();
   });
 });
+
+describe("RunView on a supervised checkpoint hold", () => {
+  it("offers Continue (with the checkpoint note) while the row still says running", () => {
+    const { getByRole, getByText } = render(
+      <RunView
+        slug="monday-digest"
+        run={RUN({ status: "running", awaiting_continue: true })}
+      />,
+    );
+    expect(getByRole("button", { name: "Continue" })).toBeTruthy();
+    expect(getByText(/checkpoint step is done/i)).toBeTruthy();
+  });
+
+  it("keeps Continue away from a running run without a hold", () => {
+    const { queryByRole } = render(
+      <RunView slug="monday-digest" run={RUN({ status: "running" })} />,
+    );
+    expect(queryByRole("button", { name: "Continue" })).toBeNull();
+  });
+});
