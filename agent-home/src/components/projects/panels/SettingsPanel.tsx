@@ -53,6 +53,16 @@ export function SettingsPanel({
   const [busy, setBusy] = useState<"schedule" | "autonomy" | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState<string | null>(null);
+  // The write answers with the new schedule (or its removal); showing it
+  // straight away means the summary never contradicts the "saved" note
+  // while the server read catches up.
+  const [current, setCurrent] = useState<{
+    schedule: string | null;
+    next_run_at: number | null;
+  }>({
+    schedule: project.schedule ?? null,
+    next_run_at: project.next_run_at ?? null,
+  });
 
   const call = async (
     which: "schedule" | "autonomy",
@@ -65,10 +75,25 @@ export function SettingsPanel({
     setSaved(null);
     try {
       const res = await fetch(path, init);
-      const data = (await res.json().catch(() => ({}))) as { detail?: string };
+      const data = (await res.json().catch(() => ({}))) as {
+        detail?: string;
+        schedule?: string | null;
+        next_run_at?: number | null;
+        scheduled?: boolean;
+      };
       if (!res.ok) {
         setError(friendlyError({ status: res.status, detail: data.detail }, "That did not go through."));
         return;
+      }
+      if (which === "schedule") {
+        setCurrent(
+          data.scheduled === false
+            ? { schedule: null, next_run_at: null }
+            : {
+                schedule: typeof data.schedule === "string" ? data.schedule : current.schedule,
+                next_run_at: typeof data.next_run_at === "number" ? data.next_run_at : null,
+              },
+        );
       }
       setSaved(okMessage);
       router.refresh();
@@ -137,12 +162,12 @@ export function SettingsPanel({
         {repeatable ? (
           <>
             <p className="text-xs text-[var(--color-muted)]">
-              {project.schedule
-                ? project.next_run_at != null
-                  ? `Runs ${project.schedule} · next ${dateTimeLabel(project.next_run_at)}`
-                  : `Runs ${project.schedule}`
+              {current.schedule
+                ? current.next_run_at != null
+                  ? `Runs ${current.schedule} · next ${dateTimeLabel(current.next_run_at)}`
+                  : `Runs ${current.schedule}`
                 : "No schedule yet — a repeatable project needs one to fire on its own."}
-              {project.schedule && !hasActivePlan
+              {current.schedule && !hasActivePlan
                 ? " Scheduled runs will fail until a plan is active."
                 : ""}
             </p>
@@ -179,7 +204,7 @@ export function SettingsPanel({
                   >
                     {busy === "schedule" ? "Saving…" : "Save schedule"}
                   </button>
-                  {project.schedule ? (
+                  {current.schedule ? (
                     <button
                       type="button"
                       onClick={() => void clearSchedule()}

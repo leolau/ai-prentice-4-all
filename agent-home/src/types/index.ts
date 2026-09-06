@@ -1537,6 +1537,11 @@ export interface ProjectRun {
    * run is orphaned, not busy.
    */
   stalled?: boolean;
+  /**
+   * Server-derived: a supervised run whose checkpoint step(s) are done while
+   * their successors still wait in triage — held on the human's Continue.
+   */
+  awaiting_continue?: boolean;
 }
 
 /** The method, one revision (§7). `steps` is parsed JSON on the detail read. */

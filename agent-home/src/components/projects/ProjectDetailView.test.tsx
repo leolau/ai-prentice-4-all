@@ -737,12 +737,22 @@ describe("CardActions", () => {
     expect(html).toContain("Re-run");
   });
 
-  it("offers Retry without Stop for a blocked card", () => {
+  it("offers Make ready (not a reclaim) and no Stop for a blocked card", () => {
     const html = renderToStaticMarkup(
       <CardActions slug="s" taskId="t_1" status="blocked" />,
     );
-    expect(html).toContain("Retry");
+    expect(html).toContain("Make ready");
+    expect(html).not.toContain("Retry");
+    expect(html).not.toContain("Re-run");
     expect(html).not.toContain(">Stop<");
+  });
+
+  it("offers Stop but no Re-run for an unclaimed ready card", () => {
+    const html = renderToStaticMarkup(
+      <CardActions slug="s" taskId="t_1" status="ready" />,
+    );
+    expect(html).toContain("Stop");
+    expect(html).not.toContain("Re-run");
   });
 
   it("renders nothing for settled cards", () => {
