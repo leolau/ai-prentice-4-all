@@ -78,6 +78,8 @@ export interface ChatPaneProps {
   profiles: ProfileSummary[];
   /** The profile this pane is showing — its sessions, and its brain. */
   profile: string;
+  /** Text the composer opens with (`?draft=`); never sent on its own. */
+  initialDraft?: string;
 }
 
 /** Only user/assistant turns are shown in the visible thread. */
@@ -125,6 +127,7 @@ export function ChatPane({
   storageEnabled,
   profiles,
   profile,
+  initialDraft,
 }: ChatPaneProps) {
   const router = useRouter();
   const [switchingProfile, startProfileSwitch] = useTransition();
@@ -984,6 +987,7 @@ export function ChatPane({
         sending={selBusy}
         storageEnabled={storageEnabled}
         sessionId={sessionId}
+        initialText={initialDraft}
         onSend={send}
         onStop={stopTurn}
       />
