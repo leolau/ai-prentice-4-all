@@ -3,21 +3,30 @@
 import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import Link from "next/link";
 
+import { ApprovalModal } from "@/components/chat/ApprovalModal";
 import { Composer } from "@/components/chat/Composer";
 import { LiveActivity } from "@/components/chat/LiveActivity";
 import { MessageBubble } from "@/components/chat/MessageBubble";
-import { StatusIndicator, type ChatActivity } from "@/components/chat/StatusIndicator";
+import { StatusIndicator } from "@/components/chat/StatusIndicator";
 import {
   onLeadChatRequest,
   reportLeadChatOpen,
 } from "@/components/coral/coral-interlock";
 import {
   attachChatStream,
+  cancelChatTurn,
   streamChatTurn,
   type ChatStreamHandlers,
-  type ChatToolEvent,
 } from "@/lib/chat/stream";
 import { visibleTurns } from "@/lib/chat/transcript";
+import {
+  decisionText,
+  deriveActivity,
+  emptyActivity,
+  runningTool,
+  STOPPED_NOTE,
+  type TurnActivity,
+} from "@/lib/chat/turn-activity";
 import { usePersistentState } from "@/lib/use-persistent-state";
 import type { ChatApprovalRequest, ChatAttachment, ChatMessage } from "@/types";
 
@@ -66,11 +75,17 @@ export function LeadChatHost({
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [loading, setLoading] = useState(false);
   const [sending, setSending] = useState(false);
-  const [activity, setActivity] = useState<ChatActivity>("idle");
+  // The same per-turn activity record as the main chat pane drives the same
+  // phase/elapsed indicator, long-task hint, stall warning and Stop here.
+  const [turn, setTurn] = useState<TurnActivity | null>(null);
+  const [now, setNow] = useState(() => Date.now());
   const [streamText, setStreamText] = useState("");
-  const [reasoningText, setReasoningText] = useState("");
-  const [toolChips, setToolChips] = useState<(ChatToolEvent & { done: boolean })[]>([]);
   const [approval, setApproval] = useState<ChatApprovalRequest | null>(null);
+  const [resolvingApproval, setResolvingApproval] = useState(false);
+  /** Inline note after an approval decision or a Stop, like the main chat. */
+  const [note, setNote] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const abortRef = useRef<AbortController | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const fabRef = useRef<HTMLButtonElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
@@ -127,19 +142,15 @@ export function LeadChatHost({
       .then((data: { runId?: string | null }) => {
         if (cancelled || !data.runId) return;
         const runId = data.runId;
-        setSending(true);
-        setActivity("thinking");
-        setStreamText("");
-        setReasoningText("");
-        setToolChips([]);
-        attachChatStream({ sessionId: leadSession, runId }, makeHandlers())
+        beginTurn(runId, leadSession);
+        const controller = new AbortController();
+        abortRef.current = controller;
+        attachChatStream(
+          { sessionId: leadSession, runId, signal: controller.signal },
+          makeHandlers(),
+        )
           .catch(() => undefined)
-          .finally(() => {
-            setSending(false);
-            setActivity("idle");
-            setReasoningText("");
-            setToolChips([]);
-          });
+          .finally(endTurn);
       })
       .catch(() => undefined);
     return () => {
@@ -150,7 +161,15 @@ export function LeadChatHost({
   useEffect(() => {
     const el = scrollRef.current;
     if (el) el.scrollTop = el.scrollHeight;
-  }, [messages, streamText, reasoningText, toolChips, activity, open]);
+  }, [messages, streamText, turn, approval, note, error, open]);
+
+  // Wall clock, ticked only while a turn is in flight, so the elapsed counter,
+  // long-task hint and stall warning advance.
+  useEffect(() => {
+    if (!sending) return;
+    const id = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(id);
+  }, [sending]);
 
   useEffect(() => {
     if (!open) return;
@@ -244,46 +263,71 @@ export function LeadChatHost({
     };
   }
 
+  function beginTurn(runId: string | null, sessionId: string) {
+    setSending(true);
+    setTurn({ ...emptyActivity(runId), sessionId });
+    setStreamText("");
+    setNote(null);
+    setError(null);
+  }
+
+  function endTurn() {
+    setSending(false);
+    setTurn(null);
+    setApproval(null);
+    abortRef.current = null;
+  }
+
   function makeHandlers(): ChatStreamHandlers {
+    // Every stream event bumps lastEventAt so the stall detector only fires
+    // on genuine silence, not on a long but visibly active step.
+    const touch = (update: (cur: TurnActivity) => Partial<TurnActivity>) =>
+      setTurn((prev) => {
+        const cur = prev ?? emptyActivity();
+        return { ...cur, ...update(cur), lastEventAt: Date.now() };
+      });
     return {
+      onAccepted: (runId, sid) =>
+        touch((cur) => ({
+          accepted: true,
+          runId: runId || cur.runId,
+          sessionId: sid || cur.sessionId,
+        })),
+      onCancelled: () => {
+        touch(() => ({ stopping: true }));
+        setNote(STOPPED_NOTE);
+      },
       onDelta: (delta) => {
-        setActivity("streaming");
         setStreamText((prev) => prev + delta);
+        touch(() => ({ accepted: true }));
       },
-      onReasoning: (textDelta) => {
-        setActivity("thinking");
-        setReasoningText((prev) => prev + textDelta);
-      },
-      onToolStart: (tool) => {
-        setActivity("streaming");
-        setToolChips((prev) => [...prev, { ...tool, done: false }]);
-      },
-      onToolComplete: (tool) => {
-        setToolChips((prev) =>
-          prev.map((c) => (c.id === tool.id ? { ...c, done: true } : c)),
-        );
-      },
+      onReasoning: (textDelta) =>
+        touch((cur) => ({ reasoning: cur.reasoning + textDelta, accepted: true })),
+      onToolStart: (tool) =>
+        touch((cur) => ({
+          tools: [...cur.tools, { ...tool, done: false }],
+          accepted: true,
+        })),
+      onToolComplete: (tool) =>
+        touch((cur) => ({
+          tools: cur.tools.map((c) => (c.id === tool.id ? { ...c, done: true } : c)),
+        })),
       onApproval: (req) => {
-        setActivity("waiting_approval");
         setApproval(req);
+        touch(() => ({}));
       },
       onCompleted: (content) => {
         // Deliberately does NOT re-pin to the id the turn reports: a compacted
         // conversation answers under a continuation id, and adopting it here
         // would make this browser's lead chat diverge from every other one.
         // Every read path resolves the chain from the root id.
-        setMessages((prev) => [...prev, { role: "assistant", content }]);
+        if (content) {
+          setMessages((prev) => [...prev, { role: "assistant", content }]);
+        }
         setStreamText("");
-        setReasoningText("");
-        setToolChips([]);
         setApproval(null);
       },
-      onError: (message) => {
-        setMessages((prev) => [...prev, { role: "assistant", content: message }]);
-        setStreamText("");
-        setReasoningText("");
-        setToolChips([]);
-      },
+      onError: (message) => setError(message),
     };
   }
 
@@ -318,44 +362,76 @@ export function LeadChatHost({
     }
     if (sessionId !== leadSession) setLeadSession(sessionId);
     turnsRef.current += 1;
-    setSending(true);
-    setActivity("thinking");
-    setStreamText("");
-    setReasoningText("");
-    setToolChips([]);
+    beginTurn(null, sessionId);
+    const controller = new AbortController();
+    abortRef.current = controller;
     setMessages((prev) => [...prev, { role: "user", content: text }]);
     try {
       await streamChatTurn(
-        { sessionId, message: text, attachments },
+        { sessionId, message: text, attachments, signal: controller.signal },
         makeHandlers(),
       );
     } catch (err) {
-      setMessages((prev) => [
-        ...prev,
-        {
-          role: "assistant",
-          content: err instanceof Error ? err.message : "The turn failed.",
-        },
-      ]);
+      const aborted = err instanceof DOMException && err.name === "AbortError";
+      if (!aborted) {
+        setError(err instanceof Error ? err.message : "The turn failed.");
+      }
     } finally {
-      setSending(false);
-      setActivity("idle");
-      setReasoningText("");
-      setToolChips([]);
+      endTurn();
     }
   }
 
-  async function resolveApproval(choice: "once" | "deny") {
-    if (!approval) return;
-    const runId = approval.runId;
-    setApproval(null);
-    setActivity("streaming");
-    await fetch("/api/chat/approval", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ runId, choice }),
-    }).catch(() => undefined);
+  async function resolveApproval(choice: string) {
+    const req = approval;
+    if (!req || resolvingApproval) return;
+    setResolvingApproval(true);
+    setError(null);
+    try {
+      const res = await fetch("/api/chat/approval", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ runId: req.runId, choice }),
+      });
+      if (!res.ok) {
+        const body = (await res.json().catch(() => ({}))) as { detail?: string };
+        throw new Error(body.detail ?? "Your decision could not be submitted.");
+      }
+      setApproval(null);
+      setNote(decisionText(choice, req));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Your decision could not be submitted.");
+    } finally {
+      setResolvingApproval(false);
+    }
   }
+
+  // Stop the in-flight turn. Closing the connection alone would NOT stop the
+  // server-side turn (it survives a closed tab by design), so ask the server
+  // to interrupt the agent and keep the stream open for the partial reply.
+  // Before the server has acknowledged the turn there is no run to cancel.
+  async function stopTurn() {
+    const runId = turn?.runId ?? null;
+    const sid = turn?.sessionId ?? leadSession;
+    if (!runId || !sid || turn?.stopping) {
+      abortRef.current?.abort();
+      return;
+    }
+    setTurn((prev) => (prev ? { ...prev, stopping: true } : prev));
+    try {
+      await cancelChatTurn({ sessionId: sid, runId });
+    } catch (err) {
+      abortRef.current?.abort();
+      setError(err instanceof Error ? err.message : "The agent could not be stopped.");
+    }
+  }
+
+  const activity = deriveActivity({
+    busy: sending,
+    turn,
+    approval: approval !== null,
+    hasOutput: streamText !== "",
+  });
+  const tool = runningTool(turn);
 
   return (
     <div data-component="LeadChatHost">
@@ -427,38 +503,35 @@ export function LeadChatHost({
                 {streamText}
               </div>
             ) : null}
-            <LiveActivity reasoning={reasoningText} tools={toolChips} />
-            <StatusIndicator activity={activity} />
-            {approval ? (
-              <div className="mt-2 rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-2)] p-2 text-xs">
-                <p className="mb-1">
-                  Approve <code>{approval.toolName ?? "tool"}</code>
-                  {approval.description ? ` — ${approval.description}` : ""}
-                </p>
-                <div className="flex gap-2">
-                  <button
-                    type="button"
-                    onClick={() => void resolveApproval("once")}
-                    className="rounded-lg bg-[var(--color-accent)] px-2 py-1 text-[var(--color-accent-fg)]"
-                  >
-                    Approve
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => void resolveApproval("deny")}
-                    className="rounded-lg border border-[var(--color-border)] px-2 py-1"
-                  >
-                    Deny
-                  </button>
-                </div>
-              </div>
+            <LiveActivity reasoning={turn?.reasoning ?? ""} tools={turn?.tools ?? []} />
+            <StatusIndicator
+              activity={activity}
+              detail={tool?.name}
+              elapsedMs={turn ? now - turn.startedAt : undefined}
+              quietMs={turn ? now - turn.lastEventAt : undefined}
+              hasOutput={streamText !== ""}
+            />
+            {note ? (
+              <p
+                role="status"
+                className="mt-2 text-xs text-[var(--color-muted)]"
+              >
+                {note}
+              </p>
+            ) : null}
+            {error ? (
+              <p role="alert" className="mt-2 text-xs text-red-300">
+                {error}
+              </p>
             ) : null}
           </div>
           <Composer
             sending={sending}
+            stopping={turn?.stopping ?? false}
             storageEnabled={storageEnabled}
             sessionId={leadSession}
             onSend={(text, attachments) => void send(text, attachments)}
+            onStop={() => void stopTurn()}
           />
           <div
             className="leadchat-resize-tl"
@@ -491,6 +564,13 @@ export function LeadChatHost({
       >
         <span aria-hidden>✦</span>
       </button>
+      {approval ? (
+        <ApprovalModal
+          request={approval}
+          busy={resolvingApproval}
+          onResolve={(choice) => void resolveApproval(choice)}
+        />
+      ) : null}
     </div>
   );
 }

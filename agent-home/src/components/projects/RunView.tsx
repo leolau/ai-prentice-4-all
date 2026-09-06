@@ -108,7 +108,10 @@ export function RunView({
         const { run: updated, budgetGate } = unwrapRunEnvelope(
           data as Record<string, unknown>,
         );
-        if (updated) setRun((prev) => ({ ...prev, ...updated }));
+        // The bare row carries no derived flags; the hold is answered now.
+        if (updated) {
+          setRun((prev) => ({ ...prev, awaiting_continue: false, ...updated }));
+        }
         // The thing holding the run must be visible, not silent.
         setBudgetGate(budgetGate);
       }
@@ -154,6 +157,11 @@ export function RunView({
     run.status === "blocked";
   // The row says running but the server saw no worker behind it — say so.
   const stalled = run.status === "running" && run.stalled === true;
+  // Held on the human: a budget/checkpoint `waiting` row, or a supervised
+  // run whose checkpoint card finished while its successors wait in triage.
+  const canContinue =
+    !archived &&
+    (run.status === "waiting" || (live && run.awaiting_continue === true));
   const activity = useRunActivity(slug, run.run_no, live);
 
   return (
@@ -207,7 +215,7 @@ export function RunView({
             ) : null}
 
             <div className="mt-3 flex flex-wrap gap-2">
-              {run.status === "waiting" && !archived ? (
+              {canContinue ? (
                 <button
                   type="button"
                   onClick={() => void post(`${runPath}/continue`, undefined, true)}
@@ -266,6 +274,17 @@ export function RunView({
                 </button>
               ) : null}
             </div>
+
+            {canContinue && run.status !== "waiting" ? (
+              <p
+                data-component="CheckpointBanner"
+                role="status"
+                className="mt-2 rounded-lg border border-[var(--color-accent)]/40 bg-[var(--color-accent)]/10 px-3 py-2 text-sm"
+              >
+                The checkpoint step is done. Review its work, then Continue to
+                release the next step(s) to the board.
+              </p>
+            ) : null}
 
             {stalled ? (
               <p

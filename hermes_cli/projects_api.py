@@ -2400,7 +2400,37 @@ def _run_blocked_tasks(bconn, cards: list[dict]) -> list[dict]:
     return blocked
 
 
-def _run_payload(conn, bconn, run: dict, *, principal) -> dict:
+def _run_awaits_continue(
+    conn, project: projects_db.Project, run: dict, cards: list[dict]
+) -> bool:
+    """A supervised run whose checkpoint step(s) are done while their
+    successors still sit in triage is held on the human's continue (§7.1).
+
+    The row keeps saying ``running`` (nothing turns it to ``waiting`` when a
+    checkpoint card finishes), so the hold is derived here from the
+    playbook + board state; the run page turns it into a Continue button.
+    """
+    if run.get("status") not in ("running", "waiting") or not cards:
+        return False
+    if (getattr(project, "autonomy", None) or "supervised") != "supervised":
+        return False
+    playbook = projects_db.get_playbook(
+        conn, project.id, rev=run.get("playbook_rev")
+    )
+    steps = (playbook or {}).get("steps") or []
+    held = projects_run.held_step_keys(steps)
+    if not held:
+        return False
+    checkpoints = {s["key"] for s in steps if s.get("checkpoint")}
+    status_of = {c.get("step_key"): c.get("status") for c in cards}
+    if any(status_of.get(k) != "done" for k in checkpoints if k in status_of):
+        return False
+    return any(status_of.get(k) == "triage" for k in held)
+
+
+def _run_payload(
+    conn, bconn, run: dict, *, principal, project: projects_db.Project
+) -> dict:
     """One run row joined with its cards' live board state."""
     cards = []
     for rc in projects_db.get_run_cards(conn, run["id"]):
@@ -2418,6 +2448,7 @@ def _run_payload(conn, bconn, run: dict, *, principal) -> dict:
     blocked = _run_blocked_tasks(bconn, cards)
     payload["blocked_tasks"] = blocked
     payload["stalled"] = _run_stalled(run, cards, blocked)
+    payload["awaiting_continue"] = _run_awaits_continue(conn, project, run, cards)
     payload["cost"] = projects_run.run_cost(
         run.get("trace_id"), principal=principal
     )
@@ -2468,7 +2499,9 @@ async def get_run_route(request: Request, run_no: int) -> dict[str, Any]:
                 raise KeyError(run_no)
             deliveries = projects_db.get_output_deliveries(conn, run_id=run["id"])
             with _board_conn(project) as bconn:
-                payload = _run_payload(conn, bconn, run, principal=principal)
+                payload = _run_payload(
+                    conn, bconn, run, principal=principal, project=project
+                )
         payload["deliveries"] = deliveries
         return payload
 

@@ -7,7 +7,7 @@ import { useRouter } from "next/navigation";
 import { ApprovalModal } from "@/components/chat/ApprovalModal";
 import { ArchivedModal } from "@/components/chat/ArchivedModal";
 import { InSessionSearch } from "@/components/chat/InSessionSearch";
-import { LiveActivity, type ToolChip } from "@/components/chat/LiveActivity";
+import { LiveActivity } from "@/components/chat/LiveActivity";
 import { DEFAULT_PROFILE, ProfilePicker } from "@/components/chat/ProfilePicker";
 import { MessageBubble } from "@/components/chat/MessageBubble";
 import { Composer } from "@/components/chat/Composer";
@@ -35,9 +35,18 @@ import {
 import { withProfileBody, withProfileQuery } from "@/lib/chat/profile";
 import {
   attachChatStream,
+  cancelChatTurn,
   streamChatTurn,
   type ChatStreamHandlers,
 } from "@/lib/chat/stream";
+import {
+  decisionText,
+  deriveActivity,
+  emptyActivity,
+  runningTool,
+  STOPPED_NOTE,
+  type TurnActivity,
+} from "@/lib/chat/turn-activity";
 import { usePersistentState } from "@/lib/use-persistent-state";
 import type {
   ChatApprovalRequest,
@@ -52,22 +61,6 @@ import type {
 /** Map key for a not-yet-created ("New conversation") session. */
 const NEW_KEY = "__new__";
 const keyOf = (id: string | null): string => id ?? NEW_KEY;
-
-/**
- * The inline confirmation shown after the user answers an approval card, so it
- * is clear what the agent is about to do (or that it was blocked).
- */
-function decisionText(choice: string, req: ChatApprovalRequest): string {
-  const label = req.command || req.toolName || req.patternKey || "the tool";
-  if (choice === "deny") return `Denied — the agent will not run ${label}.`;
-  const scope =
-    choice === "always"
-      ? " (always allowed)"
-      : choice === "session"
-        ? " (allowed for this chat)"
-        : "";
-  return `Approved${scope} — running ${label}…`;
-}
 
 export interface ChatPaneProps {
   initialSessions: SessionSummary[];
@@ -87,25 +80,11 @@ function visible(messages: ChatMessage[]): ChatMessage[] {
   return messages.filter((m) => m.role === "user" || m.role === "assistant");
 }
 
-/**
- * Live "what is happening" state of one in-flight turn, keyed like the turn
- * buffers. Drives the activity surface and the status indicator's phase,
- * elapsed clock, long-task hint and stall warning.
- */
-interface TurnActivity {
-  reasoning: string;
-  tools: ToolChip[];
-  /** When the user hit send (or the page re-attached). */
-  startedAt: number;
-  /** Last stream event of any kind — silence beyond a threshold reads as a stall. */
-  lastEventAt: number;
-  /** Server confirmed it registered the turn (`run.accepted` or any later event). */
-  accepted: boolean;
-}
-
-function emptyActivity(): TurnActivity {
-  const t = Date.now();
-  return { reasoning: "", tools: [], startedAt: t, lastEventAt: t, accepted: false };
+function dropTrailingEmptyAssistant(prev: ChatMessage[]): ChatMessage[] {
+  const last = prev[prev.length - 1];
+  return last && last.role === "assistant" && last.content === ""
+    ? prev.slice(0, -1)
+    : prev;
 }
 
 /** True while the latest assistant turn has streamed no text yet. */
@@ -262,18 +241,13 @@ export function ChatPane({
   const selApproval = approvals[selKey] ?? null;
   const selDecision = decisions[selKey] ?? null;
   const selTurn = selBusy ? (liveActivity[selKey] ?? null) : null;
-  const selRunningTool = selTurn?.tools.find((t) => !t.done) ?? null;
-  const selActivity: ChatActivity = selApproval
-    ? "waiting_approval"
-    : !selBusy
-      ? "idle"
-      : selRunningTool
-        ? "tool"
-        : !assistantIsEmpty(messages)
-          ? "streaming"
-          : selTurn && !selTurn.accepted
-            ? "sending"
-            : "thinking";
+  const selRunningTool = runningTool(selTurn);
+  const selActivity: ChatActivity = deriveActivity({
+    busy: selBusy,
+    turn: selTurn,
+    approval: selApproval !== null,
+    hasOutput: !assistantIsEmpty(messages),
+  });
 
   // Keep the thread pinned to the bottom as content grows: streamed text, the
   // status indicator, an approval card, or the decision note. A double rAF lets
@@ -348,18 +322,8 @@ export function ChatPane({
   }
 
   /** Start (or reset) the activity record for a turn, stamping its clock. */
-  function beginActivity(turnKey: string) {
-    const t = Date.now();
-    setLiveActivity((prev) => ({
-      ...prev,
-      [turnKey]: {
-        reasoning: "",
-        tools: [],
-        startedAt: t,
-        lastEventAt: t,
-        accepted: false,
-      },
-    }));
+  function beginActivity(turnKey: string, runId: string | null = null) {
+    setLiveActivity((prev) => ({ ...prev, [turnKey]: emptyActivity(runId) }));
   }
 
   function makeTurnHandlers(
@@ -379,7 +343,12 @@ export function ChatPane({
         };
       });
     return {
-      onAccepted: () => touch(() => ({ accepted: true })),
+      onAccepted: (runId, sid) =>
+        touch(() => ({ accepted: true, runId, sessionId: sid })),
+      onCancelled: () => {
+        touch(() => ({ stopping: true }));
+        setDecisions((prev) => ({ ...prev, [turnKey]: STOPPED_NOTE }));
+      },
       onDelta: (delta) => {
         const buf = liveRef.current.get(turnKey);
         setLive((buf?.assistant ?? "") + delta);
@@ -420,7 +389,7 @@ export function ChatPane({
       prev.includes(turnKey) ? prev : [...prev, turnKey],
     );
     liveRef.current.set(turnKey, { user: "", assistant: "" });
-    beginActivity(turnKey);
+    beginActivity(turnKey, runId);
     setMessages((prev) => {
       const last = prev[prev.length - 1];
       return last && last.role === "user"
@@ -503,20 +472,16 @@ export function ChatPane({
         selectedRef.current = landed;
       }
       if (landed && onThisSession()) markSessionRead(landed);
+      // A turn stopped before its first token completes with no text; never
+      // leave a blank reply bubble behind.
+      if (onThisSession()) setMessages(dropTrailingEmptyAssistant);
       void refreshSessions();
     } catch (err) {
       const aborted = err instanceof DOMException && err.name === "AbortError";
       if (aborted) {
         // The user stopped the turn. Keep whatever streamed so far; only drop a
         // trailing empty assistant bubble so we never leave a blank reply.
-        if (onThisSession()) {
-          setMessages((prev) => {
-            const last = prev[prev.length - 1];
-            return last && last.role === "assistant" && last.content === ""
-              ? prev.slice(0, -1)
-              : prev;
-          });
-        }
+        if (onThisSession()) setMessages(dropTrailingEmptyAssistant);
       } else {
         if (onThisSession()) {
           setMessages((prev) => prev.slice(0, Math.max(0, prev.length - 2)));
@@ -561,10 +526,31 @@ export function ChatPane({
     }
   }
 
-  // Stop the in-flight turn for the conversation currently on screen. Aborting
-  // the stream closes the connection, which cancels the server-side driver.
-  function stopTurn() {
-    abortRef.current.get(selKey)?.abort();
+  // Stop the in-flight turn for the conversation currently on screen. Closing
+  // the connection alone would NOT stop the server-side turn (it survives a
+  // closed tab by design), so ask the server to interrupt the agent and keep
+  // the stream open to receive the partial reply. Before the server has
+  // acknowledged the turn there is no run to cancel; aborting the request is
+  // the only option then.
+  async function stopTurn() {
+    const targetKey = selKey;
+    const turn = liveActivity[targetKey];
+    const runId = turn?.runId ?? null;
+    const sid = turn?.sessionId ?? sessionId;
+    if (!runId || !sid || turn?.stopping) {
+      abortRef.current.get(targetKey)?.abort();
+      return;
+    }
+    setLiveActivity((prev) => {
+      const cur = prev[targetKey];
+      return cur ? { ...prev, [targetKey]: { ...cur, stopping: true } } : prev;
+    });
+    try {
+      await cancelChatTurn({ sessionId: sid, runId, profile });
+    } catch (err) {
+      abortRef.current.get(targetKey)?.abort();
+      setError(err instanceof Error ? err.message : "The agent could not be stopped.");
+    }
   }
 
   /**
@@ -989,7 +975,8 @@ export function ChatPane({
         sessionId={sessionId}
         initialText={initialDraft}
         onSend={send}
-        onStop={stopTurn}
+        onStop={() => void stopTurn()}
+        stopping={selTurn?.stopping ?? false}
       />
 
       {detailsSession ? (

@@ -1,6 +1,6 @@
 "use client";
 
-import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useState } from "react";
 import { friendlyError } from "@/components/projects/errors";
 
@@ -41,10 +41,13 @@ export function OutputsPanel({
   /** §13: a shelved project offers restore as the only write. */
   archived?: boolean;
 }) {
+  const router = useRouter();
   const [outputs, setOutputs] = useState(initial);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [offersClosure, setOffersClosure] = useState(false);
+  const [closing, setClosing] = useState(false);
+  const [closed, setClosed] = useState(false);
 
   // Add-output form state
   const [newTitle, setNewTitle] = useState("");
@@ -79,10 +82,40 @@ export function OutputsPanel({
       };
       setOutputs((prev) => applyAcceptEnvelope(prev, outputId, payload).outputs);
       if (payload.offers_closure === true) setOffersClosure(true);
+      // Progress, health and the header rollup are derived on the server
+      // read; revalidate so they move with the row.
+      router.refresh();
     } catch (err) {
       setError(err instanceof Error ? err.message : "That didn't stick — try again.");
     } finally {
       setBusyId(null);
+    }
+  };
+
+  const markDone = async () => {
+    setClosing(true);
+    setError(null);
+    try {
+      const res = await fetch(`/api/projects/${encodeURIComponent(slug)}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ status: "done" }),
+      });
+      const data = (await res.json().catch(() => ({}))) as { detail?: string };
+      if (!res.ok) {
+        throw new Error(
+          friendlyError(
+            { status: res.status, detail: data.detail },
+            "The project could not be marked done.",
+          ),
+        );
+      }
+      setClosed(true);
+      router.refresh();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "The project could not be marked done.");
+    } finally {
+      setClosing(false);
     }
   };
 
@@ -174,12 +207,32 @@ export function OutputsPanel({
           data-component="ClosureOffer"
           className="mt-2 rounded-lg border border-[var(--color-accent)]/40 bg-[var(--color-surface-2)] px-3 py-2 text-sm"
         >
-          Every required output is now accepted — this project offers
-          closure. Decide it on{" "}
-          <Link href="/projects" className="text-[var(--color-accent)] underline">
-            /projects
-          </Link>
-          .
+          {closed ? (
+            "This project is marked done. It stays on the record; archive it from the ⋯ menu when you want it off the list."
+          ) : (
+            <>
+              Every required output is now accepted — this project can be
+              closed. Mark it done here, or keep it open for another run.
+              <span className="mt-2 flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  onClick={() => void markDone()}
+                  disabled={closing}
+                  className="rounded-lg bg-[var(--color-accent)] px-3 py-1.5 text-xs font-medium text-[var(--color-accent-fg)] disabled:opacity-50"
+                >
+                  {closing ? "Marking done…" : "Mark project done"}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setOffersClosure(false)}
+                  disabled={closing}
+                  className="rounded-lg border border-[var(--color-border)] px-3 py-1.5 text-xs disabled:opacity-50"
+                >
+                  Keep open
+                </button>
+              </span>
+            </>
+          )}
         </p>
       ) : null}
 

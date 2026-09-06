@@ -4,6 +4,21 @@ import { friendlyError } from "@/components/projects/errors";
 import { outputsLabel } from "@/components/projects/outputsLabel";
 
 describe("friendlyError", () => {
+  it("never leaks the schedule route's spec references", () => {
+    const said = friendlyError({
+      status: 409,
+      detail: "a schedule needs an active playbook — save and activate a method first (§3.1)",
+    });
+    expect(said).not.toMatch(/§|playbook|method/);
+    expect(said).toMatch(/Plan panel.*activate/i);
+    expect(
+      friendlyError({ status: 409, detail: "project needs a host profile before it can be scheduled" }),
+    ).toMatch(/People/);
+    expect(
+      friendlyError({ status: 422, detail: "a project needs a recurring schedule, not a one-off time" }),
+    ).toMatch(/recurring/i);
+  });
+
   it("turns the registry's lifecycle refusals into what to do next", () => {
     expect(
       friendlyError({

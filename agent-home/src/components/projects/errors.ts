@@ -31,8 +31,28 @@ const RULES: Rule[] = [
         : `The project is ${m[1].replace("_", " ")} — activate it before running.`,
   },
   {
-    test: /has no playbook|has no steps/i,
+    test: /has no playbook|has no steps|needs an active playbook/i,
     say: () => "There is no active plan yet — write one in the Plan panel and activate it.",
+  },
+  {
+    test: /only a repeatable project can carry a schedule/i,
+    say: () => "Only a repeatable project can have a schedule — this project's cadence is not repeatable.",
+  },
+  {
+    test: /needs a host profile before it can be scheduled/i,
+    say: () => "Add an agent profile under People before setting a schedule.",
+  },
+  {
+    test: /needs a recurring schedule/i,
+    say: () => "Use a recurring schedule (e.g. a cron expression or “every 30m”), not a one-off time.",
+  },
+  {
+    test: /needs completion before it can be scheduled/i,
+    say: () => "Complete the project brief (goal, host profile, outputs) before setting a schedule.",
+  },
+  {
+    test: /schedule must not be empty/i,
+    say: () => "Enter a schedule first.",
   },
   {
     test: /has no profiles/i,

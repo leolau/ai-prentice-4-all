@@ -647,6 +647,21 @@ export class HermesApiClient {
   }
 
   /**
+   * Stop an in-flight turn. Closing the SSE connection deliberately does not
+   * stop the server-side turn, so Stop is an explicit verb
+   * (`POST /api/sessions/{id}/chat/stream/cancel`).
+   */
+  async cancelChatRun(
+    sessionId: string,
+    runId: string,
+  ): Promise<{ run_id: string; cancelled: boolean; done: boolean }> {
+    return this.request(
+      `/api/sessions/${encodeURIComponent(sessionId)}/chat/stream/cancel`,
+      { method: "POST", json: { run_id: runId } },
+    );
+  }
+
+  /**
    * Resolve a pending tool approval for a streamed run. `choice` is one of
    * `once | session | always | deny` (or `approve`, aliased server-side).
    * Forwards to `POST /v1/runs/{run_id}/approval` → `resolve_gateway_approval`,

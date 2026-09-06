@@ -9,7 +9,8 @@ import { Spinner } from "@/components/ui/Spinner";
  *   - `thinking`  — turn accepted, no text yet (the model is composing);
  *   - `tool`      — a tool call is running (`detail` names it);
  *   - `streaming` — tokens are arriving (the reply is being written);
- *   - `waiting_approval` — a gated tool is blocked on the user's decision.
+ *   - `waiting_approval` — a gated tool is blocked on the user's decision;
+ *   - `stopping`  — the user hit Stop; the server is winding the turn down.
  * Every active phase shows the elapsed time so a long turn visibly advances.
  * Rendered as an aria-live region so the state is also announced to AT.
  */
@@ -19,7 +20,8 @@ export type ChatActivity =
   | "thinking"
   | "tool"
   | "streaming"
-  | "waiting_approval";
+  | "waiting_approval"
+  | "stopping";
 
 /** Silence (no assistant text yet) after which we explain the wait. */
 export const LONG_TASK_HINT_MS = 20_000;
@@ -31,6 +33,7 @@ const LABELS: Record<Exclude<ChatActivity, "idle" | "tool">, string> = {
   thinking: "a4all agent is thinking…",
   streaming: "a4all agent is writing…",
   waiting_approval: "Waiting for your approval…",
+  stopping: "Stopping…",
 };
 
 export function formatElapsed(ms: number): string {
@@ -77,9 +80,14 @@ export function StatusIndicator({
     activity === "tool" ? `Running ${detail || "a tool"}…` : LABELS[activity];
   const clock =
     elapsedMs !== undefined && elapsedMs >= 1000 ? formatElapsed(elapsedMs) : null;
-  const stalled = !waiting && (quietMs ?? 0) >= STALL_WARNING_MS;
+  const stopping = activity === "stopping";
+  const stalled = !waiting && !stopping && (quietMs ?? 0) >= STALL_WARNING_MS;
   const longTask =
-    !waiting && !stalled && !hasOutput && (elapsedMs ?? 0) >= LONG_TASK_HINT_MS;
+    !waiting &&
+    !stopping &&
+    !stalled &&
+    !hasOutput &&
+    (elapsedMs ?? 0) >= LONG_TASK_HINT_MS;
   return (
     <div
       data-component="StatusIndicator"
