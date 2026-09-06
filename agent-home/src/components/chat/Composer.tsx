@@ -17,15 +17,18 @@ export function Composer({
   sessionId,
   onSend,
   onStop,
+  initialText = "",
 }: {
   sending: boolean;
   storageEnabled: boolean;
   sessionId: string | null;
+  /** Pre-filled text (a deep link's `?draft=`); the user still presses send. */
+  initialText?: string;
   onSend: (text: string, attachments: ChatAttachment[]) => void | Promise<void>;
   /** Cancel the in-flight turn for the conversation on screen. */
   onStop?: () => void;
 }) {
-  const [text, setText] = useState("");
+  const [text, setText] = useState(initialText);
   const [attachments, setAttachments] = useState<ChatAttachment[]>([]);
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);

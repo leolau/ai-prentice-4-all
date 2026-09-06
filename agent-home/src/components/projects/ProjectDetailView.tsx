@@ -6,7 +6,14 @@ import { useState } from "react";
 import {
   AddToProjectSheet,
 } from "@/components/projects/AddToProjectSheet";
+import { EditBriefSheet } from "@/components/projects/EditBriefSheet";
 import { ProjectLifecycleMenu } from "@/components/projects/ProjectLifecycleMenu";
+import { ReadinessChecklist } from "@/components/projects/ReadinessChecklist";
+import {
+  extraFindings,
+  isRunnable,
+  readinessItems,
+} from "@/components/projects/readiness";
 import { dayDistance } from "@/components/projects/format";
 import { BoardPanel } from "@/components/projects/panels/BoardPanel";
 import { BriefPanel } from "@/components/projects/panels/BriefPanel";
@@ -19,6 +26,7 @@ import { PlanPanel } from "@/components/projects/panels/PlanPanel";
 import { ProgressPanel } from "@/components/projects/panels/ProgressPanel";
 import { ReferencesPanel } from "@/components/projects/panels/ReferencesPanel";
 import { RunsPanel } from "@/components/projects/panels/RunsPanel";
+import { SettingsPanel } from "@/components/projects/panels/SettingsPanel";
 import { ToolsPanel } from "@/components/projects/panels/ToolsPanel";
 import {
   CADENCE_GLYPH,
@@ -33,6 +41,7 @@ import type {
   ProjectBoardView,
   ProjectDetail,
   ProjectDirectivesResponse,
+  ProjectDoctorDetail,
   ProjectHealth,
   ProjectPlaybookResponse,
 } from "@/types";
@@ -51,6 +60,7 @@ const PANEL_ANCHORS: { id: string; label: string }[] = [
   { id: "panel-board", label: "Board" },
   { id: "panel-runs", label: "Runs" },
   { id: "panel-plan", label: "Plan" },
+  { id: "panel-settings", label: "Settings" },
   { id: "panel-guidance", label: "Guidance" },
   { id: "panel-people", label: "People" },
   { id: "panel-files", label: "Files" },
@@ -71,6 +81,7 @@ export function ProjectDetailView({
   board,
   playbook,
   directives,
+  doctor = null,
   callerUserId,
   isInstanceAdmin,
 }: {
@@ -78,6 +89,8 @@ export function ProjectDetailView({
   board: ProjectBoardView | null;
   playbook: ProjectPlaybookResponse | null;
   directives: ProjectDirectivesResponse | null;
+  /** Server-side findings the local checklist cannot see (§9.2). */
+  doctor?: ProjectDoctorDetail | null;
   /** The signed-in principal's user id — the lifecycle gate (§13). */
   callerUserId: string;
   /** Box-wide owner/admin outranks the per-project matrix (§11). */
@@ -87,6 +100,19 @@ export function ProjectDetailView({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [addOpen, setAddOpen] = useState(false);
+  const [editOpen, setEditOpen] = useState(false);
+
+  const callerRole =
+    project.members.find((member) => member.user_id === callerUserId)?.role ??
+    null;
+  const canLead =
+    isInstanceAdmin ||
+    project.owner_user_id === callerUserId ||
+    callerRole === "lead";
+
+  const readiness = readinessItems(project, playbook);
+  const runnable = isRunnable(readiness);
+  const findings = extraFindings(doctor, readiness);
 
   // §12 live updates: a run promoted in the background becomes visible
   // without a manual reload — the poller refreshes when the event head
@@ -215,7 +241,12 @@ export function ProjectDetailView({
                 <button
                   type="button"
                   onClick={() => void post(`${slugPath}/runs`)}
-                  disabled={busy}
+                  disabled={busy || !runnable}
+                  title={
+                    runnable
+                      ? undefined
+                      : "Finish the checklist below before running."
+                  }
                   className="rounded-xl bg-[var(--color-accent)] px-4 py-2 text-sm font-medium text-[var(--color-accent-fg)] disabled:opacity-50"
                 >
                   Run now
@@ -251,9 +282,22 @@ export function ProjectDetailView({
               >
                 Add
               </button>
+              {canLead ? (
+                <button
+                  type="button"
+                  onClick={() => setEditOpen(true)}
+                  className="rounded-xl border border-[var(--color-border)] px-4 py-2 text-sm disabled:opacity-50"
+                >
+                  Edit
+                </button>
+              ) : null}
               </>
               )}
             </div>
+
+            {!project.archived ? (
+              <ReadinessChecklist items={readiness} findings={findings} />
+            ) : null}
 
             {error ? (
               <p className="mt-2 text-sm text-red-400" role="alert">
@@ -296,7 +340,20 @@ export function ProjectDetailView({
             />
             <BoardPanel slug={project.slug} board={board} />
             <RunsPanel slug={project.slug} runs={project.runs} />
-            <PlanPanel playbook={playbook} />
+            <PlanPanel
+              slug={project.slug}
+              playbook={playbook}
+              profiles={project.profiles.map((row) => row.profile)}
+              hostProfile={project.host_profile}
+              projectName={project.name}
+              canActivate={canLead}
+              archived={project.archived}
+            />
+            <SettingsPanel
+              project={project}
+              canLead={canLead}
+              hasActivePlan={Boolean(playbook?.active)}
+            />
             <GuidancePanel
               slug={project.slug}
               initial={directives}
@@ -319,6 +376,16 @@ export function ProjectDetailView({
           }}
           fixedSlug={project.slug}
           fixedName={project.name}
+        />
+      ) : null}
+
+      {editOpen ? (
+        <EditBriefSheet
+          project={project}
+          onClose={() => {
+            setEditOpen(false);
+            router.refresh();
+          }}
         />
       ) : null}
     </div>

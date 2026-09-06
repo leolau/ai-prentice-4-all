@@ -1532,7 +1532,10 @@ export interface PlaybookStep {
   title: string;
   body?: string | null;
   assignee?: string | null;
+  /** Step keys this one waits on (the stored name; `needs` is a legacy alias). */
+  depends_on?: string[];
   needs?: string[];
+  mode?: "card" | "inline";
   checkpoint?: boolean;
   [extra: string]: unknown;
 }
@@ -1637,7 +1640,9 @@ export interface ProjectEventsResponse {
 export interface ProjectDoctorFinding {
   code: string;
   severity: "info" | "attention" | "stalled";
-  message: string;
+  /** The Python payload names the text `detail`; older callers read `message`. */
+  detail?: string;
+  message?: string;
 }
 
 export interface ProjectsDoctorItem {

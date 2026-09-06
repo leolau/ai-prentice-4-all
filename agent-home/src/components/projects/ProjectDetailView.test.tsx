@@ -233,9 +233,31 @@ describe("detail panels", () => {
     expect(html).toContain("waiting");
   });
 
+  const PLAN_PROPS = {
+    slug: "monday-digest",
+    profiles: ["default"],
+    hostProfile: "default",
+    projectName: "Monday digest",
+    canActivate: true,
+    archived: false,
+  };
+
   it("PlanPanel covers the no-plan state", () => {
-    const html = renderToStaticMarkup(<PlanPanel playbook={null} />);
+    const html = renderToStaticMarkup(
+      <PlanPanel {...PLAN_PROPS} playbook={null} />,
+    );
     expect(html).toContain("Plan");
+    expect(html).toContain("unavailable");
+  });
+
+  it("PlanPanel offers Write plan and the agent-draft door when no plan is active", () => {
+    const html = renderToStaticMarkup(
+      <PlanPanel {...PLAN_PROPS} playbook={{ active: null, revisions: [] }} />,
+    );
+    expect(html).toContain("Write plan");
+    expect(html).toContain('data-component="AskAgentToDraft"');
+    expect(html).toContain("/chat?profile=default&amp;draft=");
+    expect(html).toContain("monday-digest");
   });
 
   it("PlanPanel renders the active revision's steps and provenance", () => {
@@ -256,10 +278,13 @@ describe("detail panels", () => {
       },
       revisions: [],
     };
-    const html = renderToStaticMarkup(<PlanPanel playbook={playbook} />);
+    const html = renderToStaticMarkup(
+      <PlanPanel {...PLAN_PROPS} playbook={playbook} />,
+    );
     expect(html).toContain("Draft it");
     expect(html).toContain("Send it");
     expect(html).toContain("revision 3");
+    expect(html).toContain("Revise");
   });
 
   it("PlanPanel shows a retro's proposed revision awaiting activation", () => {
@@ -279,10 +304,19 @@ describe("detail panels", () => {
         },
       ],
     };
-    const html = renderToStaticMarkup(<PlanPanel playbook={playbook} />);
+    const html = renderToStaticMarkup(
+      <PlanPanel {...PLAN_PROPS} playbook={playbook} />,
+    );
     expect(html).toContain('data-component="ProposedRevisions"');
     expect(html).toContain("awaiting activation");
     expect(html).toContain("proposed by run 14");
+    expect(html).toContain(">Activate<");
+
+    const member = renderToStaticMarkup(
+      <PlanPanel {...PLAN_PROPS} canActivate={false} playbook={playbook} />,
+    );
+    expect(member).not.toContain(">Activate<");
+    expect(member).toContain("a lead activates");
   });
 
   it("GuidancePanel shows proposed directives with the member's Activate", () => {
@@ -500,6 +534,88 @@ describe("ProjectDetailView", () => {
     );
     expect(html).toContain("Activate");
     expect(html).not.toContain("Run now");
+  });
+
+  it("explains what blocks a run and disables Run now until it is ready", () => {
+    const html = renderToStaticMarkup(
+      <ProjectDetailView
+        project={PROJECT}
+        board={BOARD}
+        playbook={{ active: null, revisions: [] }}
+        directives={null}
+        doctor={{
+          slug: PROJECT.slug,
+          health: "attention",
+          findings: [
+            { code: "no_active_playbook", severity: "attention", detail: "no plan" },
+            { code: "cron_job_missing", severity: "attention", detail: "The cron job is gone." },
+          ],
+          clean: false,
+        }}
+        callerUserId="leo"
+        isInstanceAdmin={false}
+      />,
+    );
+    expect(html).toContain('data-component="ReadinessChecklist"');
+    expect(html).toContain("Before it can run");
+    // Missing outputs + plan link to their panels; the doctor's extra finding rides along.
+    expect(html).toContain('href="#panel-outputs"');
+    expect(html).toContain('href="#panel-plan"');
+    expect(html).toContain("The cron job is gone.");
+    expect(html).not.toContain("no plan");
+    expect(html).toMatch(/<button[^>]*disabled=""[^>]*>Run now<\/button>/);
+    // Lead-only edit + settings panel are present.
+    expect(html).toContain(">Edit<");
+    expect(html).toContain('data-component="SettingsPanel"');
+    expect(html).toContain("every monday 09:00");
+    expect(html).toContain('data-component="AutonomyControl"');
+  });
+
+  it("hides the checklist once every precondition holds", () => {
+    const html = renderToStaticMarkup(
+      <ProjectDetailView
+        project={{
+          ...PROJECT,
+          outputs: [OUTPUT({ id: "out_1" })],
+        }}
+        board={BOARD}
+        playbook={{
+          active: {
+            project_id: "prj_1",
+            rev: 1,
+            body: "",
+            steps: [{ key: "a", title: "A" }],
+            active: 1,
+            created_by: "leo",
+            created_at: NOW,
+            activated_at: NOW,
+            note: null,
+          },
+          revisions: [],
+        }}
+        directives={null}
+        doctor={{ slug: PROJECT.slug, health: "ok", findings: [], clean: true }}
+        callerUserId="leo"
+        isInstanceAdmin={false}
+      />,
+    );
+    expect(html).not.toContain('data-component="ReadinessChecklist"');
+    expect(html).not.toMatch(/<button[^>]*disabled=""[^>]*>Run now<\/button>/);
+  });
+
+  it("hides Edit and the settings controls from a plain member", () => {
+    const html = renderToStaticMarkup(
+      <ProjectDetailView
+        project={{ ...PROJECT, owner_user_id: "someone-else", members: [{ ...PROJECT.members[0], user_id: "leo", role: "member" }] }}
+        board={BOARD}
+        playbook={null}
+        directives={null}
+        callerUserId="leo"
+        isInstanceAdmin={false}
+      />,
+    );
+    expect(html).not.toContain(">Edit<");
+    expect(html).not.toContain("Save schedule");
   });
 });
 
