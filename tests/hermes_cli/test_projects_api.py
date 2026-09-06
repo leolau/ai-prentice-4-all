@@ -616,6 +616,71 @@ def test_card_create_lands_in_triage_on_the_project(env):
     assert task.project_id == project["id"]
 
 
+def test_card_patch_edits_assigns_and_moves_through_structured_verbs(env):
+    project = _create(env)
+    _activate(env, project)
+    client, _state = env
+    slug = project["slug"]
+    tid = client.post(
+        f"/api/registry/projects/{slug}/cards", json={"title": "Draft"}
+    ).json()["task_id"]
+    url = f"/api/registry/projects/{slug}/cards/{tid}"
+
+    # Title / body / assignee in one patch; the assignee must be a project
+    # profile.
+    assert client.patch(url, json={"assignee": "nope"}).status_code == 422
+    resp = client.patch(
+        url, json={"title": "Draft the outline", "body": "Two pages.", "assignee": "default"}
+    )
+    assert resp.status_code == 200, resp.text
+    card = resp.json()
+    assert card["title"] == "Draft the outline"
+    assert card["body"] == "Two pages."
+    assert card["assignee"] == "default"
+    assert client.patch(url, json={"title": "  "}).status_code == 422
+    assert client.patch(url, json={}).status_code == 422
+
+    # Columns: triage → ready (approve) → blocked → ready → done; the
+    # dispatcher's columns and triage are never a target, and a move the
+    # verb refuses comes back as 409 with the reason.
+    assert client.patch(url, json={"status": "running"}).status_code == 422
+    assert client.patch(url, json={"status": "todo"}).status_code == 422
+    assert client.patch(url, json={"status": "triage"}).status_code == 422
+    for status in ("ready", "blocked", "ready", "done"):
+        resp = client.patch(url, json={"status": status})
+        assert resp.status_code == 200, (status, resp.text)
+        assert resp.json()["status"] == status
+    resp = client.patch(url, json={"status": "blocked"})
+    assert resp.status_code == 409
+    assert "blocked" in resp.json()["detail"]
+
+    # Unassign with null.
+    assert client.patch(url, json={"assignee": None}).json()["assignee"] is None
+
+    # Unknown card is a 404, and another project's card is too.
+    assert client.patch(
+        f"/api/registry/projects/{slug}/cards/task_missing", json={"title": "x"}
+    ).status_code == 404
+
+
+def test_card_patch_refused_for_strangers_and_archived_projects(env):
+    project = _create(env)
+    _activate(env, project)
+    client, state = env
+    slug = project["slug"]
+    tid = client.post(
+        f"/api/registry/projects/{slug}/cards", json={"title": "Draft"}
+    ).json()["task_id"]
+    url = f"/api/registry/projects/{slug}/cards/{tid}"
+
+    state["actor"] = STRANGER
+    assert client.patch(url, json={"title": "Mine now"}).status_code in (403, 404)
+    state["actor"] = OWNER
+
+    assert client.post(f"/api/registry/projects/{slug}/archive").status_code == 200
+    assert client.patch(url, json={"title": "Too late"}).status_code == 409
+
+
 # ---------------------------------------------------------------------------
 # Members / profiles guardrails
 # ---------------------------------------------------------------------------

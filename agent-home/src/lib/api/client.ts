@@ -1454,6 +1454,26 @@ export class HermesApiClient {
     );
   }
 
+  /**
+   * `PATCH /{slug}/cards/{task_id}` — hand-edit a card: title / body /
+   * assignee (null unassigns) / status (a column move). Judgement act.
+   */
+  async updateProjectCard(
+    slug: string,
+    taskId: string,
+    payload: {
+      title?: string;
+      body?: string;
+      assignee?: string | null;
+      status?: string;
+    },
+  ): Promise<ProjectCardDetail> {
+    return this.request(
+      `/api/registry/projects/${encodeURIComponent(slug)}/cards/${encodeURIComponent(taskId)}`,
+      { method: "PATCH", json: payload },
+    );
+  }
+
   /** One card, re-checked under the caller's principal. */
   async projectCard(
     slug: string,

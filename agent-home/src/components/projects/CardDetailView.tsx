@@ -1,6 +1,7 @@
 import Link from "next/link";
 
 import { CardActions } from "@/components/projects/CardActions";
+import { CardEditor } from "@/components/projects/CardEditor";
 import { dateTimeLabel, durationLabel } from "@/components/projects/format";
 import { Pill, type Tone } from "@/components/ui/Pill";
 import type { ProjectCardDetail } from "@/types";
@@ -16,16 +17,23 @@ const STATUS_TONE: Record<string, Tone> = {
 };
 
 /**
- * One card, read-only (§13): everything the board row knows — stage,
- * assignee, step, the body, the result and the latest worker summary.
- * Card actions (comments, transitions) stay on the board surface.
+ * One card (§13): everything the board row knows — stage, assignee, step,
+ * the body, the result and the latest worker summary — plus the hand edits
+ * a member may make (title / brief / assignee / column) and the operator
+ * recovery actions (stop / re-run).
  */
 export function CardDetailView({
   slug,
   card,
+  profiles = [],
+  archived = false,
 }: {
   slug: string;
   card: ProjectCardDetail;
+  /** The project's profiles — the only valid assignees. */
+  profiles?: string[];
+  /** §13: an archived project's cards are read-only. */
+  archived?: boolean;
 }) {
   const tone = STATUS_TONE[card.status] ?? "muted";
   const timing = [
@@ -61,7 +69,12 @@ export function CardDetailView({
         <p className="mt-1 text-xs text-[var(--color-muted)]">
           {timing.join(" · ")}
         </p>
-        <CardActions slug={slug} taskId={card.id} status={card.status} />
+        {!archived ? (
+          <>
+            <CardActions slug={slug} taskId={card.id} status={card.status} />
+            <CardEditor slug={slug} card={card} profiles={profiles} />
+          </>
+        ) : null}
         <Link
           href={`/projects/${encodeURIComponent(slug)}`}
           className="mt-2 inline-block text-xs text-[var(--color-accent)]"

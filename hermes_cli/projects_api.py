@@ -1893,6 +1893,135 @@ async def get_card(request: Request, task_id: str) -> dict[str, Any]:
         raise HTTPException(status_code=404, detail="card not found")
 
 
+_CARD_STATUS_MOVES = ("ready", "blocked", "done", "archived")
+
+
+def _move_card_sync(bconn, task, new_status: str, actor: str) -> tuple[bool, str]:
+    """Route a human column move to the structured kanban verb that owns
+    the transition. ``running``/``review``/``scheduled`` are the
+    dispatcher's and a worker's to set, never a drag; returns
+    ``(ok, reason)`` so the caller can name what refused."""
+    cur = task.status
+    if cur == new_status:
+        return True, ""
+    if new_status == "done":
+        return kanban_db.complete_task(bconn, task.id), (
+            "only a ready or running card can be marked done"
+        )
+    if new_status == "blocked":
+        return kanban_db.block_task(bconn, task.id, reason=f"blocked by {actor}"), (
+            "only a ready or running card can be blocked"
+        )
+    if new_status == "archived":
+        return kanban_db.archive_task(bconn, task.id), "the card is already archived"
+    if new_status == "ready":
+        if cur in ("blocked", "scheduled"):
+            return kanban_db.unblock_task(bconn, task.id), "the card is not blocked"
+        if cur == "triage":
+            # Specify promotes to todo and runs the ready pass itself; a
+            # parent-gated card legitimately stays in todo.
+            if not kanban_db.specify_triage_task(bconn, task.id):
+                return False, "the card left triage already"
+            after = kanban_db.get_task(bconn, task.id)
+            if after is not None and after.status == "ready":
+                return True, ""
+        ok, reason = kanban_db.promote_task(bconn, task.id, actor=actor)
+        return ok, reason or "the card cannot be made ready from here"
+    return False, f"unknown status {new_status!r}"
+
+
+@router.patch("/{slug}/cards/{task_id}")
+async def update_card(request: Request, task_id: str) -> dict[str, Any]:
+    """Edit a card by hand: ``title`` / ``body`` / ``assignee`` (a project
+    profile, or ``null`` to unassign) / ``status`` (a column move).
+
+    A judgement act (§10): moving a card to ``ready`` is the human
+    approval the dispatcher waits for, so the plain ``member`` role may do
+    it; a viewer never writes. ``running``, ``review`` and ``scheduled``
+    are not settable — the worker and the dispatcher own those.
+    """
+    project, _role, profiles, principal = await _require_write(
+        request, judgement=True
+    )
+    _refuse_if_archived(project, "editing a card")
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="invalid JSON body")
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="expected a JSON object")
+
+    title = body.get("title")
+    if title is not None:
+        title = str(title).strip()
+        if not title:
+            raise HTTPException(status_code=422, detail="title must not be empty")
+    card_body = body.get("body")
+    if card_body is not None:
+        card_body = str(card_body)
+    has_assignee = "assignee" in body
+    assignee = body.get("assignee")
+    if has_assignee and assignee is not None:
+        assignee = str(assignee).strip() or None
+        if assignee is not None and assignee not in {
+            row["profile"] for row in profiles
+        }:
+            raise HTTPException(
+                status_code=422,
+                detail=f"{assignee!r} is not one of this project's profiles",
+            )
+    status = body.get("status")
+    if status is not None:
+        status = str(status)
+        if status not in _CARD_STATUS_MOVES:
+            raise HTTPException(
+                status_code=422,
+                detail="status must be one of " + ", ".join(_CARD_STATUS_MOVES),
+            )
+    if title is None and card_body is None and not has_assignee and status is None:
+        raise HTTPException(status_code=422, detail="nothing to change")
+
+    actor = f"user:{principal.user_id}"
+
+    def _sync() -> dict:
+        with _board_conn(project) as bconn:
+            task = kanban_db.get_task(bconn, task_id)
+            if task is None or getattr(task, "project_id", None) != project.id:
+                raise KeyError(task_id)
+            if title is not None or card_body is not None:
+                sets, vals = [], []
+                if title is not None:
+                    sets.append("title = ?")
+                    vals.append(title)
+                if card_body is not None:
+                    sets.append("body = ?")
+                    vals.append(card_body)
+                vals.append(task_id)
+                with kanban_db.write_txn(bconn):
+                    bconn.execute(
+                        f"UPDATE tasks SET {', '.join(sets)} WHERE id = ?", vals
+                    )
+                    kanban_db._append_event(bconn, task_id, "edited", {"actor": actor})
+            if has_assignee:
+                try:
+                    kanban_db.assign_task(bconn, task_id, assignee)
+                except RuntimeError as exc:
+                    raise ValueError(str(exc))
+            if status is not None:
+                ok, reason = _move_card_sync(bconn, task, status, actor)
+                if not ok:
+                    raise ValueError(reason)
+            updated = kanban_db.get_task(bconn, task_id)
+            return kanban_view.task_dict(updated)
+
+    try:
+        return await asyncio.to_thread(_sync)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="card not found")
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+
+
 @router.post("/{slug}/cards/{task_id}/reclaim")
 async def reclaim_card(request: Request, task_id: str) -> dict[str, Any]:
     """Stop a stuck worker and re-queue the card.

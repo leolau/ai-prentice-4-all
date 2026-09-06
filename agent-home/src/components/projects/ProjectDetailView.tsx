@@ -14,7 +14,8 @@ import {
   isRunnable,
   readinessItems,
 } from "@/components/projects/readiness";
-import { dayDistance } from "@/components/projects/format";
+import { agoLabel, dayDistance } from "@/components/projects/format";
+import { SummariseSheet } from "@/components/projects/SummariseSheet";
 import { BoardPanel } from "@/components/projects/panels/BoardPanel";
 import { BriefPanel } from "@/components/projects/panels/BriefPanel";
 import { FilesPanel } from "@/components/projects/panels/FilesPanel";
@@ -101,6 +102,7 @@ export function ProjectDetailView({
   const [error, setError] = useState<string | null>(null);
   const [addOpen, setAddOpen] = useState(false);
   const [editOpen, setEditOpen] = useState(false);
+  const [summariseOpen, setSummariseOpen] = useState(false);
 
   const callerRole =
     project.members.find((member) => member.user_id === callerUserId)?.role ??
@@ -146,6 +148,37 @@ export function ProjectDetailView({
       const data = (await res.json().catch(() => ({}))) as { detail?: string };
       if (!res.ok) {
         setError(data.detail ?? "That did not go through.");
+        return;
+      }
+      router.refresh();
+    } catch {
+      setError("Could not reach the server.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // Run now lands on the run page so the live activity stream is the first
+  // thing the user sees; the backend answers `{run: {run_no, …}, …}`.
+  const runNow = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await fetch(`${slugPath}/runs`, { method: "POST" });
+      const data = (await res.json().catch(() => ({}))) as {
+        detail?: string;
+        run?: { run_no?: number };
+        run_no?: number;
+      };
+      if (!res.ok) {
+        setError(data.detail ?? "That did not go through.");
+        return;
+      }
+      const runNo = data.run?.run_no ?? data.run_no;
+      if (typeof runNo === "number") {
+        router.push(
+          `/projects/${encodeURIComponent(project.slug)}/runs/${runNo}`,
+        );
         return;
       }
       router.refresh();
@@ -225,9 +258,17 @@ export function ProjectDetailView({
             ) : null}
             <p className="mt-1 text-xs text-[var(--color-muted)]">{meta}</p>
             {project.summary ? (
-              <p className="mt-2 rounded-xl bg-[var(--color-surface-2)] px-3 py-2 text-sm italic">
-                {project.summary}
-              </p>
+              <div
+                data-component="ProjectSummary"
+                className="mt-2 rounded-xl bg-[var(--color-surface-2)] px-3 py-2 text-sm"
+              >
+                <p className="italic">{project.summary}</p>
+                {project.summary_at != null ? (
+                  <p className="mt-1 text-xs text-[var(--color-muted)]">
+                    Summarised {agoLabel(project.summary_at)}
+                  </p>
+                ) : null}
+              </div>
             ) : null}
 
             <div className="mt-3 flex flex-wrap gap-2">
@@ -240,7 +281,7 @@ export function ProjectDetailView({
               {project.status === "active" ? (
                 <button
                   type="button"
-                  onClick={() => void post(`${slugPath}/runs`)}
+                  onClick={() => void runNow()}
                   disabled={busy || !runnable}
                   title={
                     runnable
@@ -291,6 +332,13 @@ export function ProjectDetailView({
                   Edit
                 </button>
               ) : null}
+              <button
+                type="button"
+                onClick={() => setSummariseOpen(true)}
+                className="rounded-xl border border-[var(--color-border)] px-4 py-2 text-sm disabled:opacity-50"
+              >
+                {project.summary ? "Update summary" : "Summarise"}
+              </button>
               </>
               )}
             </div>
@@ -338,8 +386,16 @@ export function ProjectDetailView({
               project={project}
               blockedCards={blockedCards}
             />
-            <BoardPanel slug={project.slug} board={board} />
-            <RunsPanel slug={project.slug} runs={project.runs} />
+            <BoardPanel
+              slug={project.slug}
+              board={board}
+              archived={project.archived}
+            />
+            <RunsPanel
+              slug={project.slug}
+              runs={project.runs}
+              archived={project.archived}
+            />
             <PlanPanel
               slug={project.slug}
               playbook={playbook}
@@ -376,6 +432,17 @@ export function ProjectDetailView({
           }}
           fixedSlug={project.slug}
           fixedName={project.name}
+        />
+      ) : null}
+
+      {summariseOpen ? (
+        <SummariseSheet
+          slug={project.slug}
+          initial={project.summary ?? ""}
+          onClose={() => {
+            setSummariseOpen(false);
+            router.refresh();
+          }}
         />
       ) : null}
 
