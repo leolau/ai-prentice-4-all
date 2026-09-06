@@ -14,7 +14,10 @@ import { Composer } from "@/components/chat/Composer";
 import { SessionModal } from "@/components/chat/SessionModal";
 import { SessionSearchBar } from "@/components/chat/SessionSearchBar";
 import { SessionTabs } from "@/components/chat/SessionTabs";
-import { StatusIndicator } from "@/components/chat/StatusIndicator";
+import {
+  StatusIndicator,
+  type ChatActivity,
+} from "@/components/chat/StatusIndicator";
 import { TagFilterBar } from "@/components/chat/TagFilterBar";
 import { chatHeaderActionsRef } from "@/lib/chat/header-actions";
 import { markSessionRead } from "@/lib/chat/last-read";
@@ -82,6 +85,27 @@ function visible(messages: ChatMessage[]): ChatMessage[] {
   return messages.filter((m) => m.role === "user" || m.role === "assistant");
 }
 
+/**
+ * Live "what is happening" state of one in-flight turn, keyed like the turn
+ * buffers. Drives the activity surface and the status indicator's phase,
+ * elapsed clock, long-task hint and stall warning.
+ */
+interface TurnActivity {
+  reasoning: string;
+  tools: ToolChip[];
+  /** When the user hit send (or the page re-attached). */
+  startedAt: number;
+  /** Last stream event of any kind — silence beyond a threshold reads as a stall. */
+  lastEventAt: number;
+  /** Server confirmed it registered the turn (`run.accepted` or any later event). */
+  accepted: boolean;
+}
+
+function emptyActivity(): TurnActivity {
+  const t = Date.now();
+  return { reasoning: "", tools: [], startedAt: t, lastEventAt: t, accepted: false };
+}
+
 /** True while the latest assistant turn has streamed no text yet. */
 function assistantIsEmpty(messages: ChatMessage[]): boolean {
   const last = messages[messages.length - 1];
@@ -135,9 +159,11 @@ export function ChatPane({
   const [error, setError] = useState<string | null>(null);
   const [approvals, setApprovals] = useState<Record<string, ChatApprovalRequest>>({});
   const [decisions, setDecisions] = useState<Record<string, string>>({});
-  const [liveActivity, setLiveActivity] = useState<
-    Record<string, { reasoning: string; tools: ToolChip[] }>
-  >({});
+  const [liveActivity, setLiveActivity] = useState<Record<string, TurnActivity>>({});
+  // Wall clock, ticked once a second only while a turn is in flight, so the
+  // elapsed counter / long-task hint / stall warning advance without a timer
+  // per turn.
+  const [now, setNow] = useState(() => Date.now());
   const [resolvingApproval, setResolvingApproval] = useState(false);
   const threadRef = useRef<HTMLDivElement | null>(null);
   // Mirrors the selected session for use inside async stream callbacks, and
@@ -222,10 +248,29 @@ export function ChatPane({
     };
   }, []);
 
+  useEffect(() => {
+    if (sendingKeys.length === 0) return;
+    const id = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(id);
+  }, [sendingKeys.length]);
+
   const selKey = keyOf(sessionId);
   const selBusy = sendingKeys.includes(selKey);
   const selApproval = approvals[selKey] ?? null;
   const selDecision = decisions[selKey] ?? null;
+  const selTurn = selBusy ? (liveActivity[selKey] ?? null) : null;
+  const selRunningTool = selTurn?.tools.find((t) => !t.done) ?? null;
+  const selActivity: ChatActivity = selApproval
+    ? "waiting_approval"
+    : !selBusy
+      ? "idle"
+      : selRunningTool
+        ? "tool"
+        : !assistantIsEmpty(messages)
+          ? "streaming"
+          : selTurn && !selTurn.accepted
+            ? "sending"
+            : "thinking";
 
   // Keep the thread pinned to the bottom as content grows: streamed text, the
   // status indicator, an approval card, or the decision note. A double rAF lets
@@ -299,43 +344,59 @@ export function ChatPane({
     setError(null);
   }
 
+  /** Start (or reset) the activity record for a turn, stamping its clock. */
+  function beginActivity(turnKey: string) {
+    const t = Date.now();
+    setLiveActivity((prev) => ({
+      ...prev,
+      [turnKey]: {
+        reasoning: "",
+        tools: [],
+        startedAt: t,
+        lastEventAt: t,
+        accepted: false,
+      },
+    }));
+  }
+
   function makeTurnHandlers(
     turnKey: string,
     setLive: (content: string) => void,
   ): ChatStreamHandlers {
+    // Every stream event bumps lastEventAt so the stall detector only fires
+    // on genuine silence, not on a long but visibly active step.
+    const touch = (
+      update: (cur: TurnActivity) => Partial<TurnActivity>,
+    ) =>
+      setLiveActivity((prev) => {
+        const cur = prev[turnKey] ?? emptyActivity();
+        return {
+          ...prev,
+          [turnKey]: { ...cur, ...update(cur), lastEventAt: Date.now() },
+        };
+      });
     return {
+      onAccepted: () => touch(() => ({ accepted: true })),
       onDelta: (delta) => {
         const buf = liveRef.current.get(turnKey);
         setLive((buf?.assistant ?? "") + delta);
+        touch(() => ({ accepted: true }));
       },
       onReasoning: (text) =>
-        setLiveActivity((prev) => ({
-          ...prev,
-          [turnKey]: {
-            reasoning: (prev[turnKey]?.reasoning ?? "") + text,
-            tools: prev[turnKey]?.tools ?? [],
-          },
-        })),
+        touch((cur) => ({ reasoning: cur.reasoning + text, accepted: true })),
       onToolStart: (tool) =>
-        setLiveActivity((prev) => ({
-          ...prev,
-          [turnKey]: {
-            reasoning: prev[turnKey]?.reasoning ?? "",
-            tools: [...(prev[turnKey]?.tools ?? []), { ...tool, done: false }],
-          },
+        touch((cur) => ({
+          tools: [...cur.tools, { ...tool, done: false }],
+          accepted: true,
         })),
       onToolComplete: (tool) =>
-        setLiveActivity((prev) => ({
-          ...prev,
-          [turnKey]: {
-            reasoning: prev[turnKey]?.reasoning ?? "",
-            tools: (prev[turnKey]?.tools ?? []).map((c) =>
-              c.id === tool.id ? { ...c, done: true } : c,
-            ),
-          },
+        touch((cur) => ({
+          tools: cur.tools.map((c) => (c.id === tool.id ? { ...c, done: true } : c)),
         })),
-      onApproval: (req) =>
-        setApprovals((prev) => ({ ...prev, [turnKey]: req })),
+      onApproval: (req) => {
+        setApprovals((prev) => ({ ...prev, [turnKey]: req }));
+        touch(() => ({}));
+      },
       onCompleted: (content) => {
         setApprovals((prev) => dropKey(prev, turnKey));
         if (content) setLive(content);
@@ -356,6 +417,7 @@ export function ChatPane({
       prev.includes(turnKey) ? prev : [...prev, turnKey],
     );
     liveRef.current.set(turnKey, { user: "", assistant: "" });
+    beginActivity(turnKey);
     setMessages((prev) => {
       const last = prev[prev.length - 1];
       return last && last.role === "user"
@@ -399,6 +461,7 @@ export function ChatPane({
     // Buffer this turn so it survives session switches; the buffer's assistant
     // text is the single source of truth for accumulated deltas.
     liveRef.current.set(turnKey, { user: text, assistant: "" });
+    beginActivity(turnKey);
     const controller = new AbortController();
     abortRef.current.set(turnKey, controller);
     setMessages((prev) => [
@@ -903,15 +966,11 @@ export function ChatPane({
           tools={liveActivity[selKey]?.tools ?? []}
         />
         <StatusIndicator
-          activity={
-            selApproval
-              ? "waiting_approval"
-              : selBusy
-                ? assistantIsEmpty(messages)
-                  ? "thinking"
-                  : "streaming"
-                : "idle"
-          }
+          activity={selActivity}
+          detail={selRunningTool?.name}
+          elapsedMs={selTurn ? now - selTurn.startedAt : undefined}
+          quietMs={selTurn ? now - selTurn.lastEventAt : undefined}
+          hasOutput={!assistantIsEmpty(messages)}
         />
       </div>
 

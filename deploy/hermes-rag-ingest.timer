@@ -1,12 +1,14 @@
-; Nightly, off-peak, with jitter so a restart storm does not align the runs.
+; Nightly, off-peak for the owner's timezone (18:20 UTC = 02:20 HKT; the box
+; runs UTC and 03:20 UTC is late morning in Hong Kong), with jitter so a
+; restart storm does not align the runs.
 
 [Unit]
 Description=Nightly Hermes Drive ingestion pass
 
 [Timer]
-OnCalendar=*-*-* 03:20:00
+OnCalendar=*-*-* 18:20:00
 RandomizedDelaySec=20m
-; A box that was off at 03:20 still catches up, once, rather than skipping a day.
+; A box that was off at 18:20 still catches up, once, rather than skipping a day.
 Persistent=true
 Unit=hermes-rag-ingest.service
 

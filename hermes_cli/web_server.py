@@ -10724,6 +10724,10 @@ async def session_chat_stream(session_id: str, request: Request):
     trace, ledger = _agent_home_trace(principal, sid)
     _trace_emit(trace, "inbound", sid, "agent-home chat message")
 
+    # Per-turn latency marks (monotonic seconds) — logged at the end so a slow
+    # turn can be attributed to setup, model first-token, or tools.
+    marks = {"accepted": time.monotonic(), "first_delta": 0.0, "tools": 0}
+
     def _publish(item) -> None:
         queue.put_nowait(item)
         _chat_run_publish(run_entry, item)
@@ -10731,8 +10735,15 @@ async def session_chat_stream(session_id: str, request: Request):
     def _enqueue(name: str, payload: dict) -> None:
         loop.call_soon_threadsafe(_publish, (name, payload))
 
+    # First frame on the wire, before the executor picks the turn up: the
+    # browser can show a server-confirmed "received" state within the round
+    # trip even when the model takes many seconds to produce its first token.
+    _publish(("run.accepted", {"run_id": run_id, "session_id": sid}))
+
     def _delta(delta: str) -> None:
         if delta:
+            if not marks["first_delta"]:
+                marks["first_delta"] = time.monotonic()
             _enqueue("assistant.delta", {"delta": delta, "run_id": run_id})
 
     def _reasoning(text: str) -> None:
@@ -10741,6 +10752,7 @@ async def session_chat_stream(session_id: str, request: Request):
 
     def _tool_start(tc_id: str, name: str, args: dict) -> None:
         # id+name only: args/result can carry secrets and stay server-side.
+        marks["tools"] += 1
         _enqueue(
             "tool.start",
             {"tool_id": str(tc_id or ""), "name": str(name or "tool"), "run_id": run_id},
@@ -10823,6 +10835,21 @@ async def session_chat_stream(session_id: str, request: Request):
             eff_sid = result.get("session_id", sid) if isinstance(result, dict) else sid
             _enqueue("assistant.completed", {"content": final_response, "run_id": run_id})
             _enqueue("run.completed", {"session_id": eff_sid, "usage": usage, "run_id": run_id})
+            now = time.monotonic()
+            first_ms = (
+                int((marks["first_delta"] - marks["accepted"]) * 1000)
+                if marks["first_delta"]
+                else -1
+            )
+            _log.info(
+                "[agent-home] turn-timing run=%s session=%s first_token_ms=%d total_ms=%d tools=%d chars=%d",
+                run_id,
+                eff_sid,
+                first_ms,
+                int((now - marks["accepted"]) * 1000),
+                marks["tools"],
+                len(final_response),
+            )
             _trace_emit(
                 trace,
                 "outbound",

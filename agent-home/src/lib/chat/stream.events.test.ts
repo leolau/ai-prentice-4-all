@@ -14,8 +14,9 @@ afterEach(() => {
 });
 
 describe("streamChatTurn reasoning and tool events", () => {
-  it("dispatches reasoning.delta, tool.start and tool.complete frames", async () => {
+  it("dispatches run.accepted, reasoning.delta, tool.start and tool.complete frames", async () => {
     const body = [
+      "event: run.accepted\ndata: {\"run_id\":\"run_1\",\"session_id\":\"sess_1\"}",
       "event: reasoning.delta\ndata: {\"text\":\"checking the run…\"}",
       "event: tool.start\ndata: {\"tool_id\":\"tc1\",\"name\":\"execute_code\"}",
       "event: tool.complete\ndata: {\"tool_id\":\"tc1\",\"name\":\"execute_code\"}",
@@ -27,6 +28,7 @@ describe("streamChatTurn reasoning and tool events", () => {
     ].join("\n\n") + "\n\n";
     vi.stubGlobal("fetch", vi.fn(async () => sseResponse(body)));
 
+    const accepted: string[] = [];
     const reasoning: string[] = [];
     const starts: ChatToolEvent[] = [];
     const completes: ChatToolEvent[] = [];
@@ -34,6 +36,7 @@ describe("streamChatTurn reasoning and tool events", () => {
     await streamChatTurn(
       { sessionId: "sess_1", message: "hi", attachments: [] },
       {
+        onAccepted: (id) => accepted.push(id),
         onReasoning: (t) => reasoning.push(t),
         onToolStart: (t) => starts.push(t),
         onToolComplete: (t) => completes.push(t),
@@ -41,6 +44,7 @@ describe("streamChatTurn reasoning and tool events", () => {
       },
     );
 
+    expect(accepted).toEqual(["run_1"]);
     expect(reasoning).toEqual(["checking the run…"]);
     expect(starts).toEqual([{ id: "tc1", name: "execute_code" }]);
     expect(completes).toEqual([{ id: "tc1", name: "execute_code" }]);
