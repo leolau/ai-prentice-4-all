@@ -364,3 +364,58 @@ def test_expired_cooldown_allows_preflight(tmp_path):
     agent._emit_status.assert_called_once()
     agent._compress_context.assert_called()
 
+
+
+def test_preflight_stops_between_passes_when_interrupted(tmp_path):
+    """An explicit Stop during preflight compaction must not run further
+    (multi-minute) summariser passes before the turn loop can observe the
+    interrupt."""
+    agent = _make_agent_with_cooldown(tmp_path / "state.db", "sess-1")
+
+    def _compress_then_interrupt(messages, *_a, **_k):
+        agent._interrupt_requested = True
+        return messages[:-1], "SYSTEM"
+
+    agent._compress_context = MagicMock(side_effect=_compress_then_interrupt)
+
+    with patch("agent.turn_context._should_run_preflight_estimate", return_value=True), \
+         patch("agent.turn_context.estimate_request_tokens_rough", return_value=999_999):
+        ctx = _build(agent)
+
+    assert isinstance(ctx, TurnContext)
+    assert agent._compress_context.call_count == 1
+
+
+def test_preflight_skipped_entirely_when_interrupt_already_pending(tmp_path):
+    agent = _make_agent_with_cooldown(tmp_path / "state.db", "sess-1")
+    agent._interrupt_requested = True
+
+    with patch("agent.turn_context._should_run_preflight_estimate", return_value=True), \
+         patch("agent.turn_context.estimate_request_tokens_rough", return_value=999_999):
+        _build(agent)
+
+    agent._compress_context.assert_not_called()
+
+
+def test_preflight_rebaselines_history_after_no_progress_in_place_pass(tmp_path):
+    """The compressor returns copies and an in-place pass has already written
+    them to state.db. A pass that makes no progress must still re-baseline
+    ``conversation_history`` to those copies, or the end-of-turn flush treats
+    the compacted summary dicts as new and appends them a second time."""
+    agent = _make_agent_with_cooldown(tmp_path / "state.db", "sess-1")
+    agent._last_compaction_in_place = True
+
+    def _compress_copies(messages, *_a, **_k):
+        return [dict(m) for m in messages], "SYSTEM"
+
+    agent._compress_context = MagicMock(side_effect=_compress_copies)
+    history = [{"role": "user", "content": "a"}, {"role": "assistant", "content": "b"}]
+
+    with patch("agent.turn_context._should_run_preflight_estimate", return_value=True), \
+         patch("agent.turn_context.estimate_request_tokens_rough", return_value=999_999):
+        ctx = _build(agent, conversation_history=history)
+
+    assert agent._compress_context.call_count == 1
+    live_ids = {id(m) for m in ctx.messages}
+    assert all(id(m) in live_ids for m in ctx.conversation_history)
+    assert not any(id(m) in live_ids for m in history)
