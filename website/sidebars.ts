@@ -88,6 +88,7 @@ const sidebars: SidebarsConfig = {
             'user-guide/features/codex-app-server-runtime',
             'user-guide/features/kanban-tutorial',
             'user-guide/features/kanban-worker-lanes',
+            'user-guide/features/projects',
             'user-guide/features/goals',
             'user-guide/features/code-execution',
             'user-guide/features/hooks',

@@ -50,7 +50,8 @@ AppMcpBridge (client)   ──WSS──▶  app-mcp (this service)
 | Tool | Purpose |
 |---|---|
 | `app_state` | Current page + last-active element + connection status |
-| `app_pages` | The app's page map with the current page marked |
+| `app_pages` | The app's page map with the current page marked (and whether a guide exists) |
+| `app_page_help` | Usage guide for the current page (or a given path): what it is for, how to use it end to end, what the options mean, who may do what. Sub-pages inherit their feature's guide (`app_mcp/help.py`) |
 | `app_describe_page` | Live snapshot: every interactive element with id/role/name/state |
 | `app_act` | Safe actions (click/type/select/focus/read/scroll/navigate/snapshot); refuses destructive-looking targets |
 | `app_act_destructive` | Same, for destructive actions — gated by `approvals.tools` |

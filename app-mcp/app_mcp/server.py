@@ -27,6 +27,7 @@ import websockets
 from mcp.server.fastmcp import FastMCP
 
 from .guard import looks_destructive
+from .help import help_for
 from .hub import Hub, HubError
 from .pages import PAGES
 from .ticket import verify_ticket
@@ -169,12 +170,30 @@ async def app_state() -> dict[str, Any]:
 @mcp.tool()
 async def app_pages() -> dict[str, Any]:
     """The map of agent-home pages (route, name, purpose), with the user's
-    current page marked. For what is ON the current page, use app_describe_page."""
+    current page marked. For what is ON the current page, use app_describe_page;
+    for how a page or feature is used, app_page_help."""
     current = hub.state_summary().get("page")
     return {
         "current": current,
-        "pages": [{**p, "current": p["path"] == current} for p in PAGES],
+        "pages": [
+            {**p, "current": p["path"] == current, "has_help": help_for(p["path"]) is not None}
+            for p in PAGES
+        ],
     }
+
+
+@mcp.tool()
+async def app_page_help(path: str | None = None) -> dict[str, Any]:
+    """Usage guide for an agent-home page or feature, written for the user:
+    what the screen is for, how to use it end to end, what each option means
+    and who may do what. Defaults to the page the user is on; pass a path
+    (e.g. "/projects") to explain another one. Use this to answer "how do I
+    use …", "what does this page do", "what is the difference between …"."""
+    target = path or hub.state_summary().get("page")
+    text = help_for(target)
+    if text is None:
+        return {"ok": False, "path": target, "detail": "No guide for this page."}
+    return {"ok": True, "path": target, "help": text}
 
 
 @mcp.tool()
@@ -189,9 +208,11 @@ async def app_describe_page() -> dict[str, Any]:
     if not result.get("ok"):
         return result
     elements = result.get("elements") or []
+    page = hub.state_summary().get("page")
     return {
         "ok": True,
-        "page": hub.state_summary().get("page"),
+        "page": page,
+        "has_help": help_for(page) is not None,
         "element_count": len(elements),
         "elements": elements,
     }
