@@ -586,6 +586,12 @@ def _encode_cursor(created_at: int, pid: str) -> str:
 # the server expands it here so the filter and the cursor agree (F2).
 _HEALTH_ALIASES = {"attention": frozenset({"attention", "stalled"})}
 
+# ``active`` is the list's default view — the live work. A project still in
+# ``planning`` (created, no active plan yet) is live work that needs the
+# user's attention most, so the default view must show it rather than hide
+# it until its first activation.
+_STATUS_ALIASES = {"active": frozenset({"active", "planning"})}
+
 
 def _list_sync(
     principal,
@@ -607,6 +613,9 @@ def _list_sync(
     health_set = _HEALTH_ALIASES.get(health) if health else None
     if health and health_set is None:
         health_set = frozenset({health})
+    status_set = _STATUS_ALIASES.get(status) if status else None
+    if status and status_set is None:
+        status_set = frozenset({status})
 
     # Every filter runs BEFORE the page slice and the cursor is taken from
     # the last row *examined*: a post-slice filter both repeats rows and
@@ -631,7 +640,7 @@ def _list_sync(
                 # set the flag without the status.
                 if not (getattr(p, "archived", 0) or p.status == "archived"):
                     continue
-            elif status and p.status != status:
+            elif status_set and p.status not in status_set:
                 continue
             if cadence and getattr(p, "cadence", None) != cadence:
                 continue

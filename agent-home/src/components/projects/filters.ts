@@ -37,7 +37,11 @@ export const FILTER_CHIPS: { view: ProjectListView; label: string }[] = [
   { view: "archived", label: "Archived" },
 ];
 
-/** The list defaults to the live work (acceptance §16 Frontend). */
+/**
+ * The list defaults to the live work (acceptance §16 Frontend). The server
+ * expands `status=active` to active + planning, so a just-created project
+ * is on the default view while it still needs its plan.
+ */
 export const DEFAULT_VIEW: ProjectListView = "active";
 
 export interface ProjectsFilterState {
