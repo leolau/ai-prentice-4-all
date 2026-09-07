@@ -281,8 +281,6 @@ describe("detail panels", () => {
   const PLAN_PROPS = {
     slug: "monday-digest",
     profiles: ["default"],
-    hostProfile: "default",
-    projectName: "Monday digest",
     canActivate: true,
     archived: false,
   };
@@ -295,14 +293,15 @@ describe("detail panels", () => {
     expect(html).toContain("unavailable");
   });
 
-  it("PlanPanel offers Write plan and the agent-draft door when no plan is active", () => {
+  it("PlanPanel offers Write plan and Draft with the agent when no plan is active", () => {
     const html = renderToStaticMarkup(
       <PlanPanel {...PLAN_PROPS} playbook={{ active: null, revisions: [] }} />,
     );
     expect(html).toContain("Write plan");
-    expect(html).toContain('data-component="AskAgentToDraft"');
-    expect(html).toContain("/chat?profile=default&amp;draft=");
-    expect(html).toContain("monday-digest");
+    expect(html).toContain('data-component="DraftPlanWithAgent"');
+    expect(html).toContain("Draft with the agent");
+    // The agent-draft door never leaves the project page for chat.
+    expect(html).not.toContain("/chat?");
   });
 
   it("PlanPanel renders the active revision's steps and provenance", () => {

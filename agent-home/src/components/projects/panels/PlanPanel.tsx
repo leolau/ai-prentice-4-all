@@ -1,12 +1,20 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { friendlyError } from "@/components/projects/errors";
 
 import { dateTimeLabel } from "@/components/projects/format";
 import { BusyRegion } from "@/components/ui/BusyRegion";
-import type { PlaybookRev, PlaybookStep, ProjectPlaybookResponse } from "@/types";
+import type {
+  PlaybookRev,
+  PlaybookStep,
+  ProjectPlaybookDraftState,
+  ProjectPlaybookResponse,
+} from "@/types";
+
+/** How often the panel asks the server whether the agent's draft is ready. */
+export const DRAFT_POLL_MS = 2_000;
 
 interface StepDraft {
   title: string;
@@ -30,18 +38,6 @@ export function stepKey(title: string, index: number, taken: Set<string>): strin
   while (taken.has(key)) key = `${base}-${n++}`;
   taken.add(key);
   return key;
-}
-
-/** The chat prompt the "ask the agent" door opens with. */
-export function draftPlanPrompt(slug: string, name: string): string {
-  return (
-    `Draft a plan (playbook) for the project "${name}" (slug: ${slug}). ` +
-    `Read its brief with \`hermes projects show ${slug}\`, write 3–7 concrete ` +
-    `steps as JSON ({"body": "<prose>", "steps": [{"key", "title", "body", ` +
-    `"assignee", "depends_on", "checkpoint"}]}) and save it as a proposed ` +
-    `revision with \`hermes projects playbook ${slug} save <file>\`. ` +
-    `Do not activate it — I will review and activate it myself.`
-  );
 }
 
 function stepsToPayload(drafts: StepDraft[]): PlaybookStep[] {
@@ -74,16 +70,19 @@ function draftsFromRev(rev: PlaybookRev | null): StepDraft[] {
 /**
  * The active playbook, labelled **Plan** — "playbook" is our word, not the
  * user's (§13). Prose plus steps as an indented list, its revision and who
- * activated it. Proposed revisions (§8.2 — a retro's write-back, or a draft
- * saved here) render beneath with the lead's Activate; saving is open to any
- * member, activation stays a human lead/admin act (§7.2).
+ * activated it. Proposed revisions (§8.2 — a retro's write-back, a draft
+ * saved here, or one the agent drafted on request) render beneath with the
+ * lead's Activate; saving is open to any member, activation stays a human
+ * lead/admin act (§7.2).
+ *
+ * "Draft with the agent" starts a server-side job (`POST …/playbook/draft`)
+ * and polls until the proposal lands — nothing enters the user's chat, and
+ * a reload while it runs resumes the wait.
  */
 export function PlanPanel({
   slug,
   playbook,
   profiles,
-  hostProfile,
-  projectName,
   canActivate,
   archived,
 }: {
@@ -91,8 +90,6 @@ export function PlanPanel({
   playbook: ProjectPlaybookResponse | null;
   /** The project's profiles — the only legal step assignees. */
   profiles: string[];
-  hostProfile: string | null;
-  projectName: string;
   canActivate: boolean;
   archived: boolean;
 }) {
@@ -106,12 +103,98 @@ export function PlanPanel({
   const [busy, setBusy] = useState(false);
   const [busyRev, setBusyRev] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [drafting, setDrafting] = useState(false);
+  const [draftNotice, setDraftNotice] = useState<string | null>(null);
 
   const slugPath = `/api/projects/${encodeURIComponent(slug)}`;
-  const chatHref = `/chat?${new URLSearchParams({
-    ...(hostProfile ? { profile: hostProfile } : {}),
-    draft: draftPlanPrompt(slug, projectName),
-  }).toString()}`;
+
+  const settleDraft = useCallback(
+    (state: ProjectPlaybookDraftState) => {
+      if (state.status === "running") {
+        setDrafting(true);
+        return;
+      }
+      setDrafting(false);
+      if (state.status === "done") {
+        setDraftNotice(
+          `The agent proposed revision ${state.rev ?? ""} — review it below and activate it when it looks right.`,
+        );
+        router.refresh();
+      } else if (state.status === "failed") {
+        setError(
+          friendlyError(
+            { status: 502, detail: state.detail },
+            "The agent could not draft a plan — try again, or write it yourself.",
+          ),
+        );
+      }
+    },
+    [router],
+  );
+
+  // On mount: resume waiting on a draft started before a reload. While
+  // drafting: poll until the job settles. Both use the same GET.
+  const unavailable = playbook == null;
+  useEffect(() => {
+    if (archived || unavailable) return;
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const poll = async () => {
+      try {
+        const res = await fetch(`${slugPath}/playbook/draft`);
+        const state = (await res.json().catch(() => ({}))) as ProjectPlaybookDraftState;
+        if (cancelled) return;
+        if (!res.ok || !state.status) {
+          setDrafting(false);
+          return;
+        }
+        if (state.status === "running") {
+          setDrafting(true);
+          timer = setTimeout(() => void poll(), DRAFT_POLL_MS);
+          return;
+        }
+        // A finished job seen on first mount is old news; only report the
+        // outcome of a draft this panel was waiting on.
+        if (drafting) settleDraft(state);
+      } catch {
+        if (cancelled) return;
+        setDrafting(false);
+        if (drafting) setError("Could not reach the server.");
+      }
+    };
+    void poll();
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+    };
+  }, [archived, unavailable, slugPath, drafting, settleDraft]);
+
+  const draftWithAgent = async () => {
+    setError(null);
+    setDraftNotice(null);
+    try {
+      const res = await fetch(`${slugPath}/playbook/draft`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: "{}",
+      });
+      const data = (await res.json().catch(() => ({}))) as ProjectPlaybookDraftState & {
+        detail?: string;
+      };
+      if (!res.ok) {
+        setError(
+          friendlyError(
+            { status: res.status, detail: data.detail },
+            "The agent could not start drafting.",
+          ),
+        );
+        return;
+      }
+      settleDraft(data);
+    } catch {
+      setError("Could not reach the server.");
+    }
+  };
 
   const openEditor = (from: PlaybookRev | null) => {
     setBody(from?.body ?? "");
@@ -183,6 +266,17 @@ export function PlanPanel({
         <h2 className="flex-1 text-xs uppercase tracking-wide text-[var(--color-muted)]">
           Plan
         </h2>
+        {!archived && !editing && playbook != null ? (
+          <button
+            type="button"
+            data-component="DraftPlanWithAgent"
+            onClick={() => void draftWithAgent()}
+            disabled={drafting}
+            className="rounded-lg border border-[var(--color-border)] px-2.5 py-1 text-xs disabled:opacity-50"
+          >
+            {drafting ? "Agent is drafting…" : "Draft with the agent"}
+          </button>
+        ) : null}
         {!archived && !editing ? (
           <button
             type="button"
@@ -200,17 +294,29 @@ export function PlanPanel({
         </p>
       ) : (
         <>
-          {active == null && !editing ? (
+          {active == null && !editing && !drafting && proposed.length === 0 ? (
             <p className="mt-2 text-sm text-[var(--color-muted)]">
-              No active plan yet — a run needs one. Write it here, or{" "}
-              <a
-                href={chatHref}
-                data-component="AskAgentToDraft"
-                className="text-[var(--color-accent)] underline-offset-2 hover:underline"
-              >
-                ask the agent to draft one
-              </a>{" "}
-              and activate it when it looks right.
+              No active plan yet — a run needs one. Ask the agent to draft one
+              from the brief, or write it here; either way you activate it
+              when it looks right.
+            </p>
+          ) : null}
+
+          {drafting ? (
+            <p
+              data-component="DraftPlanProgress"
+              role="status"
+              className="mt-2 text-sm text-[var(--color-muted)]"
+            >
+              The agent is reading the brief and drafting steps — usually under
+              a minute. It will appear below as a proposed revision; you can
+              leave this page, the draft continues on the server.
+            </p>
+          ) : null}
+
+          {draftNotice ? (
+            <p role="status" className="mt-2 text-sm text-[var(--color-accent)]">
+              {draftNotice}
             </p>
           ) : null}
 

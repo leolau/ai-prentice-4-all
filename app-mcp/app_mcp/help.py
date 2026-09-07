@@ -21,8 +21,9 @@ HOW TO USE PROJECTS, START TO FINISH
 1. Create — Projects › New project. Give it a name and goal, list the outputs
    it must deliver (a document, a report, a summary…), pick a cadence and an
    autonomy level (below), then choose who drafts the plan: "ask the agent"
-   opens a chat with the brief pre-filled so the agent proposes a plan, or
-   "write it myself" lets you type the steps.
+   has the agent read the brief and propose a plan in the background (you
+   land on the project page and watch it arrive), or "write it myself" lets
+   you type the steps. Either way you end up on the project's own page.
 2. Get it ready — the project page opens on a readiness checklist: outputs
    declared, a host profile, an active plan, and (for repeatable projects) a
    schedule. Each unmet item links to the panel that fixes it. "Run now" stays

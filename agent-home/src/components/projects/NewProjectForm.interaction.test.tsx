@@ -51,7 +51,7 @@ describe("NewProjectForm handlers", () => {
       <NewProjectForm servingProfile="default" />,
     );
     fillStep1(getByPlaceholderText);
-    fireEvent.click(getByText("Next"));
+    fireEvent.click(getByText("Next: how it runs"));
     fireEvent.click(getByText("I’ll write it myself"));
     fireEvent.click(getByText("Create project"));
 
@@ -70,29 +70,52 @@ describe("NewProjectForm handlers", () => {
     expect(body.outputs).toEqual([{ title: "The Monday digest email" }]);
   });
 
-  it("hands the brief to the agent when the plan choice is 'agent' (the default)", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn().mockResolvedValue(jsonResponse(200, { slug: "monday-digest" })),
+  it("creates, starts the agent draft server-side and lands on the project page (default choice)", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      jsonResponse(200, { slug: "monday-digest", status: "running" }),
     );
+    vi.stubGlobal("fetch", fetchMock);
 
     const { getByPlaceholderText, getByText } = render(
       <NewProjectForm servingProfile="default" />,
     );
     fillStep1(getByPlaceholderText);
-    fireEvent.click(getByText("Next"));
-    // Each cadence/autonomy choice explains itself in user terms.
+    fireEvent.click(getByText("Next: how it runs"));
+    // Each cadence/autonomy choice explains itself in user terms, and the
+    // second step says nothing is created until the button is pressed.
+    expect(getByText(/Step 2 of 2/)).toBeTruthy();
+    expect(getByText(/Nothing is created until/)).toBeTruthy();
     expect(getByText(/You start each run yourself/)).toBeTruthy();
     expect(getByText(/pauses at checkpoints/)).toBeTruthy();
-    fireEvent.click(getByText("Create and draft the plan"));
+    fireEvent.click(getByText("Create project and draft the plan"));
 
     await waitFor(() => expect(router.push).toHaveBeenCalled());
-    const href = router.push.mock.calls[0][0] as string;
-    expect(href.startsWith("/chat?")).toBe(true);
-    const params = new URLSearchParams(href.slice("/chat?".length));
-    expect(params.get("profile")).toBe("default");
-    expect(params.get("draft")).toContain("slug: monday-digest");
-    expect(params.get("draft")).toContain("Do not activate it");
+    // Never into chat: the draft is a project-scoped server-side job…
+    expect(fetchMock.mock.calls[1][0]).toBe(
+      "/api/projects/monday-digest/playbook/draft",
+    );
+    expect((fetchMock.mock.calls[1][1] as RequestInit).method).toBe("POST");
+    // …and the user lands on the project's own page, Plan panel in view.
+    expect(router.push).toHaveBeenCalledWith("/projects/monday-digest#panel-plan");
+  });
+
+  it("lands on the project page without a draft when the user writes the plan", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(jsonResponse(200, { slug: "monday-digest" }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { getByPlaceholderText, getByText, getByLabelText } = render(
+      <NewProjectForm servingProfile="default" />,
+    );
+    fillStep1(getByPlaceholderText);
+    fireEvent.click(getByText("Next: how it runs"));
+    fireEvent.click(getByLabelText(/write it myself/));
+    fireEvent.click(getByText("Create project"));
+
+    await waitFor(() => expect(router.push).toHaveBeenCalled());
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(router.push).toHaveBeenCalledWith("/projects/monday-digest#panel-plan");
   });
 
   it("maps a 422's missing list onto the blank field and keeps what was typed", async () => {
@@ -109,8 +132,8 @@ describe("NewProjectForm handlers", () => {
       <NewProjectForm servingProfile="default" />,
     );
     fillStep1(getByPlaceholderText);
-    fireEvent.click(getByText("Next"));
-    fireEvent.click(getByText("Create and draft the plan"));
+    fireEvent.click(getByText("Next: how it runs"));
+    fireEvent.click(getByText("Create project and draft the plan"));
 
     // The refusal names the field — never a bare toast…
     await findByText("This field is mandatory.");
