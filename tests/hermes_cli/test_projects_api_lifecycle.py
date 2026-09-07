@@ -305,6 +305,32 @@ def test_archived_project_list_membership(env):
     assert any(p["slug"] == project["slug"] for p in shelved["items"])
 
 
+def test_default_list_shows_planning_projects(env):
+    """A freshly created project sits in ``planning`` until its plan is
+    activated; the default (``status=active``) view must show it — that is
+    where the user goes next — while ``paused`` stays out."""
+    client, _state = env
+    resp = client.post(PREFIX, json={
+        "goal": "Draft the Monday digest",
+        "description": "A weekly digest compiled and emailed each Monday.",
+        "host_profile": "default",
+        "outputs": [{"title": "The Monday digest email"}],
+    })
+    assert resp.status_code == 200, resp.text
+    fresh = resp.json()
+    assert fresh["status"] == "planning"
+    paused = _create_active_project(env)
+    with projects_db.connect_closing() as conn:
+        projects_db.set_project_status(conn, paused["id"], "paused")
+
+    default = client.get(f"{PREFIX}?status=active").json()
+    slugs = {p["slug"] for p in default["items"]}
+    assert fresh["slug"] in slugs
+    assert paused["slug"] not in slugs
+    only_paused = client.get(f"{PREFIX}?status=paused").json()
+    assert {p["slug"] for p in only_paused["items"]} == {paused["slug"]}
+
+
 # ---------------------------------------------------------------------------
 # Hard delete (decision 17: the narrow exception)
 # ---------------------------------------------------------------------------
