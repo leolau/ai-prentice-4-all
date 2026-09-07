@@ -47,6 +47,7 @@ import base64
 import json
 import logging
 import re
+import threading
 import time
 from typing import Any, Optional
 
@@ -2173,6 +2174,231 @@ async def save_playbook_route(request: Request) -> dict[str, Any]:
         return {"rev": rev, "active": False}
 
     return await asyncio.to_thread(_save_sync)
+
+
+# ---------------------------------------------------------------------------
+# POST/GET /{slug}/playbook/draft — the agent drafts a proposed revision
+# ---------------------------------------------------------------------------
+#
+# One background job per project, tracked in-process (like chat runs): the
+# browser starts it, polls for the outcome, and the proposal lands as an
+# ordinary inactive revision the lead activates from the Plan panel. The
+# model call is an auxiliary task ("projects_plan"; falls back to the
+# compression model when unconfigured), never the interactive agent loop, so
+# nothing enters the user's chat.
+
+_PLAN_DRAFTS: dict[str, dict[str, Any]] = {}
+_PLAN_DRAFTS_LOCK = threading.Lock()
+_PLAN_DRAFT_TASK = "projects_plan"
+_PLAN_DRAFT_FALLBACK_TASK = "compression"
+_PLAN_DRAFT_MAX_STEPS = 12
+
+_PLAN_DRAFT_SYSTEM = (
+    "You draft execution plans for an AI agent that will carry out a project "
+    "for a user. Reply with ONE JSON object and nothing else, shaped as "
+    '{"body": "<2-4 sentences: the approach>", "steps": [{"key": "<kebab-case, '
+    'unique>", "title": "<imperative, one line>", "body": "<what done looks '
+    'like, 1-2 sentences>", "depends_on": ["<key>"], "checkpoint": <bool>}]}. '
+    "Write 3-7 concrete steps that together deliver every listed output; set "
+    "checkpoint=true on a step whose result the user should review before "
+    "the agent continues (typically before anything is sent or published). "
+    "Do not invent outputs, people or tools that are not in the brief."
+)
+
+
+def _plan_draft_prompt(project, outputs: list[dict]) -> str:
+    lines = [f"Project: {project.name}", f"Goal: {project.goal or ''}"]
+    if (project.description or "").strip():
+        lines += ["", "Brief:", project.description.strip()]
+    if (project.target_audience or "").strip():
+        lines += ["", f"Audience: {project.target_audience.strip()}"]
+    lines += ["", "Outputs the project must deliver:"]
+    for out in outputs:
+        flag = "" if out.get("required", 1) else " (optional)"
+        lines.append(f"- {out.get('title') or out.get('id')}{flag}")
+    lines += [
+        "",
+        f"Cadence: {project.cadence}; autonomy: {project.autonomy}.",
+    ]
+    return "\n".join(lines)
+
+
+def _extract_json_object(text: str) -> dict:
+    text = (text or "").strip()
+    fence = re.search(r"```(?:json)?\s*(\{.*\})\s*```", text, re.S)
+    if fence:
+        text = fence.group(1)
+    start, end = text.find("{"), text.rfind("}")
+    if start < 0 or end <= start:
+        raise ValueError("the model did not return a plan")
+    data = json.loads(text[start : end + 1])
+    if not isinstance(data, dict):
+        raise ValueError("the model did not return a plan")
+    return data
+
+
+def _normalise_draft_steps(
+    raw_steps: Any, *, assignee: Optional[str], profile_names: set[str]
+) -> list[dict]:
+    if not isinstance(raw_steps, list) or not raw_steps:
+        raise ValueError("the model returned no steps")
+    def _slug(raw: Any, fallback: str) -> str:
+        key = re.sub(r"[^a-z0-9]+", "-", str(raw or "").lower()).strip("-")
+        return key[:40] or fallback
+
+    steps: list[dict] = []
+    key_map: dict[str, str] = {}
+    seen: set[str] = set()
+    for i, step in enumerate(raw_steps[:_PLAN_DRAFT_MAX_STEPS]):
+        if not isinstance(step, dict):
+            continue
+        title = str(step.get("title") or "").strip()
+        if not title:
+            continue
+        original = str(step.get("key") or "").strip()
+        key = _slug(original or title, f"step-{i + 1}")
+        base, n = key, 2
+        while key in seen:
+            key = f"{base}-{n}"
+            n += 1
+        seen.add(key)
+        if original:
+            key_map[original] = key
+        key_map[_slug(original or title, key)] = key
+        deps = step.get("depends_on") or step.get("needs") or []
+        who = step.get("assignee")
+        if not (isinstance(who, str) and who in profile_names):
+            who = assignee
+        steps.append(
+            {
+                "key": key,
+                "title": title,
+                "body": str(step.get("body") or ""),
+                "assignee": who,
+                "depends_on": [str(d) for d in deps] if isinstance(deps, list) else [],
+                "checkpoint": bool(step.get("checkpoint")),
+            }
+        )
+    # Dependencies name the model's keys; map them onto the cleaned keys
+    # and drop any that did not survive (or point at the step itself).
+    for step in steps:
+        mapped = [key_map.get(d, key_map.get(_slug(d, ""), d)) for d in step["depends_on"]]
+        step["depends_on"] = [
+            d for d in dict.fromkeys(mapped) if d in seen and d != step["key"]
+        ]
+    return projects_db.validate_playbook_steps(steps)
+
+
+def _call_plan_model(prompt: str) -> str:
+    from agent.auxiliary_client import _get_auxiliary_task_config, call_llm
+
+    task = (
+        _PLAN_DRAFT_TASK
+        if _get_auxiliary_task_config(_PLAN_DRAFT_TASK).get("provider")
+        else _PLAN_DRAFT_FALLBACK_TASK
+    )
+    response = call_llm(
+        task,
+        messages=[
+            {"role": "system", "content": _PLAN_DRAFT_SYSTEM},
+            {"role": "user", "content": prompt},
+        ],
+        temperature=0.3,
+        max_tokens=2000,
+    )
+    return response.choices[0].message.content or ""
+
+
+def _plan_draft_job(
+    *,
+    project_id: str,
+    prompt: str,
+    assignee: Optional[str],
+    profile_names: set[str],
+    created_by: Optional[str],
+) -> None:
+    def _set(**fields: Any) -> None:
+        with _PLAN_DRAFTS_LOCK:
+            state = _PLAN_DRAFTS.get(project_id)
+            if state is not None:
+                state.update(fields)
+
+    try:
+        data = _extract_json_object(_call_plan_model(prompt))
+        steps = _normalise_draft_steps(
+            data.get("steps"), assignee=assignee, profile_names=profile_names
+        )
+        with projects_db.connect_closing() as conn:
+            rev = projects_db.save_playbook_rev(
+                conn,
+                project_id=project_id,
+                body=str(data.get("body") or "").strip(),
+                steps=steps,
+                created_by=created_by,
+                note="drafted by the agent",
+            )
+        _set(status="done", rev=rev, finished_at=int(time.time()))
+    except Exception as exc:  # noqa: BLE001 — surfaced to the UI, not raised
+        logger.warning("plan draft failed for project %s: %s", project_id, exc)
+        _set(status="failed", detail=str(exc), finished_at=int(time.time()))
+
+
+@router.post("/{slug}/playbook/draft")
+async def draft_playbook_route(request: Request) -> dict[str, Any]:
+    """Ask the agent to draft a proposed plan from the brief (§7.2).
+
+    Same gate as saving a revision — the proposal is inactive until a
+    lead activates it. Returns at once; poll ``GET …/playbook/draft``.
+    """
+    project, _role, profiles, principal = await _require_write(
+        request, judgement=True
+    )
+    _refuse_if_archived(project, "drafting its plan")
+
+    def _start_sync() -> dict:
+        with _PLAN_DRAFTS_LOCK:
+            current = _PLAN_DRAFTS.get(project.id)
+            if current and current.get("status") == "running":
+                raise HTTPException(
+                    status_code=409, detail="the agent is already drafting a plan"
+                )
+        with projects_db.connect_closing() as conn:
+            outputs = projects_db.get_project_outputs(conn, project.id)
+        if not outputs:
+            raise HTTPException(
+                status_code=409,
+                detail="declare at least one output before drafting a plan",
+            )
+        profile_names = {p["profile"] for p in profiles}
+        assignee = project.host_profile or (
+            sorted(profile_names)[0] if profile_names else None
+        )
+        state = {"status": "running", "started_at": int(time.time())}
+        with _PLAN_DRAFTS_LOCK:
+            _PLAN_DRAFTS[project.id] = state
+        threading.Thread(
+            target=_plan_draft_job,
+            kwargs={
+                "project_id": project.id,
+                "prompt": _plan_draft_prompt(project, outputs),
+                "assignee": assignee,
+                "profile_names": profile_names,
+                "created_by": principal.user_id,
+            },
+            name=f"plan-draft-{project.slug}",
+            daemon=True,
+        ).start()
+        return dict(state)
+
+    return await asyncio.to_thread(_start_sync)
+
+
+@router.get("/{slug}/playbook/draft")
+async def draft_playbook_status_route(request: Request) -> dict[str, Any]:
+    project, _role, _profiles, _principal = await _require_read(request)
+    with _PLAN_DRAFTS_LOCK:
+        state = _PLAN_DRAFTS.get(project.id)
+        return dict(state) if state else {"status": "idle"}
 
 
 @router.post("/{slug}/playbook/{rev}/activate")

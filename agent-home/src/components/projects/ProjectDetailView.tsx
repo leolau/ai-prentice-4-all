@@ -414,8 +414,6 @@ export function ProjectDetailView({
               slug={project.slug}
               playbook={playbook}
               profiles={project.profiles.map((row) => row.profile)}
-              hostProfile={project.host_profile}
-              projectName={project.name}
               canActivate={canLead}
               archived={project.archived}
             />
