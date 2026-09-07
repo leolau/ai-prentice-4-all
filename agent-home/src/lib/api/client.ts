@@ -68,6 +68,7 @@ import type {
   ProjectEventsResponse,
   ProjectLink,
   ProjectOutput,
+  ProjectPlaybookDraftState,
   ProjectPlaybookResponse,
   ProjectRun,
   ProjectScheduleResult,
@@ -1720,6 +1721,21 @@ export class HermesApiClient {
     return this.request(
       `/api/registry/projects/${encodeURIComponent(slug)}/playbook`,
       { method: "POST", json: payload },
+    );
+  }
+
+  /** Ask the agent to draft a proposed revision from the brief; runs
+   *  server-side, poll `projectPlaybookDraft` for the outcome. */
+  async draftProjectPlaybook(slug: string): Promise<ProjectPlaybookDraftState> {
+    return this.request(
+      `/api/registry/projects/${encodeURIComponent(slug)}/playbook/draft`,
+      { method: "POST", json: {} },
+    );
+  }
+
+  async projectPlaybookDraft(slug: string): Promise<ProjectPlaybookDraftState> {
+    return this.request(
+      `/api/registry/projects/${encodeURIComponent(slug)}/playbook/draft`,
     );
   }
 

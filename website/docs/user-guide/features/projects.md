@@ -17,7 +17,7 @@ Create → Get it ready → Plan → Activate → Run → Board / Outputs → Ac
 1. Name and goal — one sentence each is enough; the goal is what the agent works towards.
 2. Outputs — what the project must deliver (a document, a report, a summary…). Mark the required ones; a one-off project offers to close once every required output is accepted.
 3. Cadence and autonomy (see [the two axes](#the-two-axes) below). Both can be changed later in **Settings**.
-4. Plan — choose **ask the agent to draft one** (opens a chat with the brief pre-filled; the agent proposes a plan you then activate) or **write it myself**.
+4. Plan — choose **ask the agent to draft one** (the agent reads the brief and proposes a plan in the background; it appears on the project page as a proposed revision you then activate) or **write it myself**. Either way, creating lands you on the project's own page — never in chat.
 
 You land on the project page with the readiness checklist open.
 

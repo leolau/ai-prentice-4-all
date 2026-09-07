@@ -4,7 +4,6 @@ import { useRouter } from "next/navigation";
 import { useState } from "react";
 
 import { friendlyError } from "@/components/projects/errors";
-import { draftPlanPrompt } from "@/components/projects/panels/PlanPanel";
 import { BusyRegion } from "@/components/ui/BusyRegion";
 import type { ProjectAutonomy, ProjectCadence } from "@/types";
 
@@ -121,16 +120,17 @@ export function NewProjectForm({ servingProfile }: { servingProfile: string }) {
         missing?: unknown;
       };
       if (res.ok && data.slug) {
-        // The project exists but cannot run until a plan is active. Either
-        // hand the brief to the agent now, or land on the detail page where
-        // the readiness checklist points at the Plan panel.
+        // The project exists but cannot run until a plan is active. Always
+        // land on its page, where the readiness checklist points at the Plan
+        // panel; with the agent choice, start the server-side draft first so
+        // the panel is already waiting on it. A refused draft is not a
+        // failed create — the project exists either way.
         if (plan === "agent") {
-          const params = new URLSearchParams({
-            profile: servingProfile,
-            draft: draftPlanPrompt(data.slug, name.trim() || goal.trim()),
-          });
-          router.push(`/chat?${params.toString()}`);
-          return;
+          await fetch(`/api/projects/${encodeURIComponent(data.slug)}/playbook/draft`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: "{}",
+          }).catch(() => undefined);
         }
         router.push(`/projects/${data.slug}#panel-plan`);
         return;
@@ -283,6 +283,10 @@ export function NewProjectForm({ servingProfile }: { servingProfile: string }) {
             <p className="text-xs uppercase tracking-wide text-[var(--color-muted)]">
               Step 2 of 2 — how it runs
             </p>
+            <p className="-mt-2 text-xs text-[var(--color-muted)]">
+              Nothing is created until you press the button at the bottom;
+              afterwards you land on the project&rsquo;s own page.
+            </p>
 
             <label className="flex flex-col gap-1 text-sm">
               <span>Cadence</span>
@@ -345,8 +349,9 @@ export function NewProjectForm({ servingProfile }: { servingProfile: string }) {
                 <span>
                   Ask the agent to draft it
                   <span className="block text-xs text-[var(--color-muted)]">
-                    Opens a chat with the brief; the agent proposes steps and
-                    you activate the plan when it looks right.
+                    The agent reads the brief and proposes steps in the
+                    background; you land on the project page and activate the
+                    plan when it looks right.
                   </span>
                 </span>
               </label>
@@ -362,8 +367,8 @@ export function NewProjectForm({ servingProfile }: { servingProfile: string }) {
                 <span>
                   I&rsquo;ll write it myself
                   <span className="block text-xs text-[var(--color-muted)]">
-                    Lands on the project page with the readiness checklist and
-                    the Plan editor.
+                    You land on the project page with the readiness checklist
+                    and an empty Plan editor.
                   </span>
                 </span>
               </label>
@@ -409,9 +414,9 @@ export function NewProjectForm({ servingProfile }: { servingProfile: string }) {
             className="rounded-xl bg-[var(--color-accent)] px-4 py-2 text-sm font-medium text-[var(--color-accent-fg)] disabled:opacity-50"
           >
             {step === 1
-              ? "Next"
+              ? "Next: how it runs"
               : plan === "agent"
-                ? "Create and draft the plan"
+                ? "Create project and draft the plan"
                 : "Create project"}
           </button>
         </div>

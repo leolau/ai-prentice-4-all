@@ -1575,6 +1575,16 @@ export interface ProjectPlaybookResponse {
   revisions: PlaybookRev[];
 }
 
+/** Outcome of asking the agent to draft a plan (server-side job, polled). */
+export interface ProjectPlaybookDraftState {
+  status: "idle" | "running" | "done" | "failed";
+  started_at?: number;
+  finished_at?: number;
+  /** The proposed (inactive) revision saved when `status === "done"`. */
+  rev?: number;
+  detail?: string;
+}
+
 /** Standing instruction or feedback (§5) — durable, compiled into future runs. */
 export interface ProjectDirective {
   id: string;
