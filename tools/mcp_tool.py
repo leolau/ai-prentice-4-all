@@ -285,6 +285,11 @@ if _MCP_AVAILABLE and not _MCP_MESSAGE_HANDLER_SUPPORTED:
 # ---------------------------------------------------------------------------
 
 _DEFAULT_TOOL_TIMEOUT = 300      # seconds for tool calls
+# Per-call cap on the text an MCP tool may return into model context.
+# Search-style tools (Canva, Drive, Notion) happily hand back 10-50 KB of
+# JSON per call; repeated a few times that alone forces context compression.
+# Override per server with ``max_result_chars`` in config.yaml.
+_DEFAULT_MAX_RESULT_CHARS = 12_000
 _DEFAULT_CONNECT_TIMEOUT = 60    # seconds for initial connection per server
 _MAX_RECONNECT_RETRIES = 5
 _MAX_INITIAL_CONNECT_RETRIES = 3 # retries for the very first connection attempt
@@ -1422,7 +1427,7 @@ class MCPServerTask:
     """
 
     __slots__ = (
-        "name", "session", "tool_timeout",
+        "name", "session", "tool_timeout", "max_result_chars",
         "_task", "_ready", "_shutdown_event", "_reconnect_event",
         "_tools", "_error", "_config",
         "_sampling", "_elicitation",
@@ -1436,6 +1441,7 @@ class MCPServerTask:
         self.name = name
         self.session: Optional[Any] = None
         self.tool_timeout: float = _DEFAULT_TOOL_TIMEOUT
+        self.max_result_chars: int = _DEFAULT_MAX_RESULT_CHARS
         self._task: Optional[asyncio.Task] = None
         self._ready = asyncio.Event()
         self._shutdown_event = asyncio.Event()
@@ -2304,6 +2310,7 @@ class MCPServerTask:
         """
         self._config = config
         self.tool_timeout = config.get("timeout", _DEFAULT_TOOL_TIMEOUT)
+        self.max_result_chars = _coerce_max_result_chars(config.get("max_result_chars"))
         self._auth_type = (config.get("auth") or "").lower().strip()
 
         # Set up sampling handler if enabled and SDK types are available
@@ -3354,7 +3361,36 @@ async def _connect_server(name: str, config: dict) -> MCPServerTask:
 # Handler / check-fn factories
 # ---------------------------------------------------------------------------
 
-def _make_tool_handler(server_name: str, tool_name: str, tool_timeout: float):
+def _coerce_max_result_chars(raw) -> int:
+    """``max_result_chars`` from config: positive int, or the default. ``0``
+    / negative disables the cap."""
+    if raw is None:
+        return _DEFAULT_MAX_RESULT_CHARS
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return _DEFAULT_MAX_RESULT_CHARS
+
+
+def _clip_result(text: str, limit: int) -> str:
+    """Head-truncate ``text`` to ``limit`` chars with a note the model can
+    act on (narrow the query, page, or ask for fewer fields)."""
+    if limit <= 0 or len(text) <= limit:
+        return text
+    dropped = len(text) - limit
+    return (
+        text[:limit]
+        + f"\n…[truncated {dropped:,} chars — result capped at {limit:,}; "
+        "narrow the query or request fewer fields rather than re-running as is]"
+    )
+
+
+def _make_tool_handler(
+    server_name: str,
+    tool_name: str,
+    tool_timeout: float,
+    max_result_chars: int = _DEFAULT_MAX_RESULT_CHARS,
+):
     """Return a sync handler that calls an MCP tool via the background loop.
 
     The handler conforms to the registry's dispatch interface:
@@ -3461,7 +3497,7 @@ def _make_tool_handler(server_name: str, tool_name: str, tool_timeout: float):
                 image_tag = _cache_mcp_image_block(block)
                 if image_tag:
                     parts.append(image_tag)
-            text_result = "\n".join(parts) if parts else ""
+            text_result = _clip_result("\n".join(parts) if parts else "", max_result_chars)
 
             # Combine content + structuredContent when both are present.
             # MCP spec: content is model-oriented (text), structuredContent
@@ -3469,11 +3505,22 @@ def _make_tool_handler(server_name: str, tool_name: str, tool_timeout: float):
             # is the primary payload; structuredContent supplements it.
             structured = getattr(result, "structuredContent", None)
             if structured is not None:
+                structured_json = json.dumps(structured, ensure_ascii=False)
                 if text_result:
+                    # structuredContent usually mirrors the text block; when
+                    # the text already fills the budget, the copy is the part
+                    # to drop.
+                    if len(text_result) + len(structured_json) > max_result_chars > 0:
+                        return json.dumps({"result": text_result}, ensure_ascii=False)
                     return json.dumps({
                         "result": text_result,
                         "structuredContent": structured,
                     }, ensure_ascii=False)
+                if 0 < max_result_chars < len(structured_json):
+                    return json.dumps(
+                        {"result": _clip_result(structured_json, max_result_chars)},
+                        ensure_ascii=False,
+                    )
                 return json.dumps({"result": structured}, ensure_ascii=False)
             return json.dumps({"result": text_result}, ensure_ascii=False)
 
@@ -4236,7 +4283,9 @@ def _register_server_tools(name: str, server: MCPServerTask, config: dict) -> Li
             name=tool_name_prefixed,
             toolset=toolset_name,
             schema=schema,
-            handler=_make_tool_handler(name, mcp_tool.name, server.tool_timeout),
+            handler=_make_tool_handler(
+                name, mcp_tool.name, server.tool_timeout, server.max_result_chars
+            ),
             check_fn=_make_check_fn(name),
             is_async=False,
             description=schema["description"],

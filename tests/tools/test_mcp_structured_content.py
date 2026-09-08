@@ -141,3 +141,46 @@ class TestStructuredContentPreservation:
         raw = handler({})
         data = json.loads(raw)
         assert data["result"] == payload
+
+
+class TestResultCap:
+    """Oversized tool output (Canva/Drive search dumps) is clipped before it
+    reaches model context, with a note telling the model to narrow the query
+    instead of re-running the same call."""
+
+    def test_text_clipped_with_note(self, _patch_mcp_server):
+        session = _patch_mcp_server
+        session.call_tool = AsyncMock(
+            return_value=_FakeCallToolResult(content=[_FakeContentBlock("x" * 500)])
+        )
+        handler = mcp_tool._make_tool_handler("test-server", "my-tool", 30.0, 100)
+        data = json.loads(handler({}))
+        assert data["result"].startswith("x" * 100)
+        assert "truncated 400 chars" in data["result"]
+        assert "x" * 101 not in data["result"]
+
+    def test_structured_copy_dropped_when_text_fills_budget(self, _patch_mcp_server):
+        session = _patch_mcp_server
+        payload = {"items": ["y" * 80]}
+        session.call_tool = AsyncMock(
+            return_value=_FakeCallToolResult(
+                content=[_FakeContentBlock("z" * 90)], structuredContent=payload,
+            )
+        )
+        handler = mcp_tool._make_tool_handler("test-server", "my-tool", 30.0, 100)
+        data = json.loads(handler({}))
+        assert data == {"result": "z" * 90}
+
+    def test_default_keeps_normal_results_intact(self, _patch_mcp_server):
+        session = _patch_mcp_server
+        session.call_tool = AsyncMock(
+            return_value=_FakeCallToolResult(content=[_FakeContentBlock("hello")])
+        )
+        handler = mcp_tool._make_tool_handler("test-server", "my-tool", 30.0)
+        assert json.loads(handler({})) == {"result": "hello"}
+
+    def test_config_override_and_disable(self):
+        assert mcp_tool._coerce_max_result_chars(None) == mcp_tool._DEFAULT_MAX_RESULT_CHARS
+        assert mcp_tool._coerce_max_result_chars("4000") == 4000
+        assert mcp_tool._coerce_max_result_chars("nope") == mcp_tool._DEFAULT_MAX_RESULT_CHARS
+        assert mcp_tool._clip_result("a" * 50, 0) == "a" * 50

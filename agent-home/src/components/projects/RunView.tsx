@@ -14,17 +14,186 @@ import { useRunLive } from "@/components/projects/useRunLive";
 import { useRunActivity } from "@/components/projects/useRunActivity";
 import { LiveActivity } from "@/components/chat/LiveActivity";
 import { BusyRegion } from "@/components/ui/BusyRegion";
-import { Pill, type Tone } from "@/components/ui/Pill";
-import type { ProjectDelivery, ProjectRun, ProjectRunStatus } from "@/types";
+import { Spinner } from "@/components/ui/Spinner";
+import type {
+  ProjectDelivery,
+  ProjectRun,
+  ProjectRunCard,
+  ProjectRunStatus,
+} from "@/types";
 
-const RUN_TONE: Record<ProjectRunStatus, Tone> = {
-  running: "accent",
-  waiting: "warning",
-  blocked: "danger",
-  done: "success",
-  failed: "danger",
-  cancelled: "muted",
+/**
+ * One colour per run state, used for the badge, the progress bar and the
+ * header edge so the state reads at a glance: green = working, amber = held
+ * on a person, red = failed/blocked/stalled, blue = finished, grey = stopped.
+ */
+type StatusStyle = {
+  label: string;
+  badge: string;
+  bar: string;
+  edge: string;
+  animated: boolean;
 };
+
+const RUN_STYLE: Record<ProjectRunStatus, StatusStyle> = {
+  running: {
+    label: "Running",
+    badge: "bg-emerald-500/15 text-emerald-300 ring-emerald-400/40",
+    bar: "bg-emerald-400",
+    edge: "border-l-emerald-400",
+    animated: true,
+  },
+  waiting: {
+    label: "Waiting for you",
+    badge: "bg-amber-500/15 text-amber-300 ring-amber-400/40",
+    bar: "bg-amber-400",
+    edge: "border-l-amber-400",
+    animated: false,
+  },
+  blocked: {
+    label: "Blocked",
+    badge: "bg-red-500/15 text-red-300 ring-red-400/40",
+    bar: "bg-red-400",
+    edge: "border-l-red-400",
+    animated: false,
+  },
+  done: {
+    label: "Done",
+    badge: "bg-sky-500/15 text-sky-300 ring-sky-400/40",
+    bar: "bg-sky-400",
+    edge: "border-l-sky-400",
+    animated: false,
+  },
+  failed: {
+    label: "Failed",
+    badge: "bg-red-500/20 text-red-300 ring-red-400/60",
+    bar: "bg-red-500",
+    edge: "border-l-red-500",
+    animated: false,
+  },
+  cancelled: {
+    label: "Stopped",
+    badge: "bg-[var(--color-surface-2)] text-[var(--color-muted)] ring-[var(--color-border)]",
+    bar: "bg-[var(--color-muted)]",
+    edge: "border-l-[var(--color-border)]",
+    animated: false,
+  },
+};
+
+const STALLED_STYLE: StatusStyle = {
+  label: "Stalled",
+  badge: "bg-red-500/15 text-red-300 ring-red-400/40",
+  bar: "bg-red-400",
+  edge: "border-l-red-400",
+  animated: false,
+};
+
+/** Board column → colour + plain words for a card row. */
+const CARD_STYLE: Record<string, { dot: string; label: string; animated?: boolean }> = {
+  running: { dot: "bg-emerald-400", label: "working", animated: true },
+  ready: { dot: "bg-emerald-400/50", label: "queued — a worker picks it up next" },
+  todo: { dot: "bg-amber-400/70", label: "waiting on an earlier step" },
+  triage: { dot: "bg-amber-400", label: "held — released on Continue" },
+  blocked: { dot: "bg-red-400", label: "blocked — needs you" },
+  done: { dot: "bg-sky-400", label: "done" },
+  archived: { dot: "bg-[var(--color-muted)]", label: "stopped" },
+};
+
+function cardStyle(status: string | null) {
+  return (
+    CARD_STYLE[status ?? ""] ?? {
+      dot: "bg-[var(--color-muted)]",
+      label: status ?? "unknown",
+    }
+  );
+}
+
+function RunStatusBadge({
+  style,
+  live,
+}: {
+  style: StatusStyle;
+  live: boolean;
+}) {
+  return (
+    <span
+      data-component="RunStatusBadge"
+      role="status"
+      className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-medium ring-1 ${style.badge}`}
+    >
+      {style.animated && live ? (
+        <span className="relative flex h-2 w-2" aria-hidden="true">
+          <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-current opacity-60" />
+          <span className="relative inline-flex h-2 w-2 rounded-full bg-current" />
+        </span>
+      ) : (
+        <span
+          className="inline-block h-2 w-2 rounded-full bg-current"
+          aria-hidden="true"
+        />
+      )}
+      {style.label}
+    </span>
+  );
+}
+
+function RunProgress({
+  percent,
+  style,
+  live,
+  cards,
+}: {
+  percent: number;
+  style: StatusStyle;
+  live: boolean;
+  cards: ProjectRunCard[];
+}) {
+  const done = cards.filter((c) => c.status === "done").length;
+  const working = cards.filter((c) => c.status === "running").length;
+  return (
+    <div data-component="RunProgress" className="mt-3">
+      <div className="flex items-center justify-between text-xs">
+        <span className="flex items-center gap-1.5 text-[var(--color-muted)]">
+          {live && style.animated ? <Spinner className="text-emerald-300" /> : null}
+          {cards.length > 0
+            ? `${done} of ${cards.length} step${cards.length === 1 ? "" : "s"} done${
+                working > 0 ? ` · ${working} working` : ""
+              }`
+            : live
+              ? "Working…"
+              : "No steps on this run"}
+        </span>
+        <span className="font-semibold tabular-nums">{percent}%</span>
+      </div>
+      <div
+        className="mt-1 h-2 w-full overflow-hidden rounded-full bg-[var(--color-surface-2)]"
+        role="progressbar"
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-valuenow={percent}
+        aria-label="Run completion"
+      >
+        <div
+          className={`h-full rounded-full transition-[width] duration-700 ${style.bar} ${
+            live && style.animated ? "animate-pulse" : ""
+          }`}
+          style={{ width: `${Math.max(percent, live ? 2 : 0)}%` }}
+        />
+      </div>
+    </div>
+  );
+}
+
+function completionOf(run: ProjectRun, cards: ProjectRunCard[]): number {
+  if (typeof run.completion_percent === "number") return run.completion_percent;
+  if (run.status === "done") return 100;
+  if (cards.length === 0) return 0;
+  const total = cards.reduce(
+    (sum, c) => sum + (c.status === "done" ? 1 : c.status === "running" ? 0.5 : 0),
+    0,
+  );
+  return Math.round((100 * total) / cards.length);
+}
 
 function deliveryLabel(delivery: ProjectDelivery): string {
   const what = delivery.label ?? delivery.link_ref ?? "an artefact";
@@ -163,6 +332,9 @@ export function RunView({
     !archived &&
     (run.status === "waiting" || (live && run.awaiting_continue === true));
   const activity = useRunActivity(slug, run.run_no, live);
+  const style = stalled ? STALLED_STYLE : RUN_STYLE[run.status];
+  const percent = completionOf(run, cards);
+  const retried = cards.filter((c) => (c.failed_attempts ?? 0) > 0);
 
   return (
     <div data-component="RunView" className="flex flex-col gap-4">
@@ -171,15 +343,20 @@ export function RunView({
           {/* ── Headline ──────────────────────────────────────────── */}
           <header
             data-component="RunHeader"
-            className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface)] p-4"
+            className={`rounded-2xl border border-l-4 border-[var(--color-border)] bg-[var(--color-surface)] p-4 ${style.edge}`}
           >
             <div className="flex items-center gap-2">
               <h1 className="min-w-0 flex-1 truncate text-lg font-semibold">
                 Run #{run.run_no}
               </h1>
-              {stalled ? <Pill tone="danger">stalled</Pill> : null}
-              <Pill tone={RUN_TONE[run.status]}>{run.status}</Pill>
+              <RunStatusBadge style={style} live={live && !stalled} />
             </div>
+            <RunProgress
+              percent={percent}
+              style={style}
+              live={live && !stalled}
+              cards={cards}
+            />
             <p className="mt-1 text-xs text-[var(--color-muted)]">
               {run.trigger} · on {run.profile} · started{" "}
               {dateTimeLabel(run.started_at)} ·{" "}
@@ -286,6 +463,31 @@ export function RunView({
               </p>
             ) : null}
 
+            {retried.length > 0 ? (
+              <div
+                data-component="RetryBanner"
+                role="status"
+                className="mt-2 rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm text-amber-200"
+              >
+                <p>
+                  {retried.length === 1
+                    ? "One step crashed and was retried"
+                    : `${retried.length} steps crashed and were retried`}
+                  {live ? " — the run kept going." : "."}
+                </p>
+                <ul className="mt-1 flex flex-col gap-0.5 text-xs">
+                  {retried.map((c) => (
+                    <li key={c.task_id} className="truncate">
+                      <span className="font-medium">{c.title ?? c.task_id}</span>
+                      {" — attempt "}
+                      {c.attempts ?? 0}
+                      {c.last_error ? `: ${c.last_error}` : ""}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ) : null}
+
             {stalled ? (
               <p
                 data-component="StallBanner"
@@ -305,9 +507,10 @@ export function RunView({
                 </p>
                 {activity.unavailable ? (
                   <p className="mt-1 text-xs text-[var(--color-muted)]">
-                    This run&rsquo;s work is running on the board, in its own
-                    worker — its reasoning is not streamed here. The cards
-                    below move as it progresses.
+                    A worker is on it, in its own process — its reasoning is
+                    not streamed here. Watch the steps below: the green dot
+                    is the one being worked on, and the bar above fills as
+                    steps finish. Open a step to see its log and comments.
                   </p>
                 ) : activity.reasoning === "" &&
                   activity.tools.length === 0 ? (
@@ -360,21 +563,41 @@ export function RunView({
               </p>
             ) : (
               <ul className="mt-2 flex flex-col gap-1.5">
-                {cards.map((card) => (
-                  <li key={card.task_id}>
-                    <Link
-                      href={`/projects/${encodeURIComponent(slug)}/cards/${encodeURIComponent(card.task_id)}`}
-                      className="flex items-center gap-2 rounded-lg bg-[var(--color-surface-2)] px-3 py-2 text-sm active:opacity-70"
-                    >
-                      <span className="min-w-0 flex-1 truncate">
-                        {card.title ?? card.task_id}
-                      </span>
-                      <span className="text-xs text-[var(--color-muted)]">
-                        {[card.step_key, card.status].filter(Boolean).join(" · ")}
-                      </span>
-                    </Link>
-                  </li>
-                ))}
+                {cards.map((card) => {
+                  const cs = cardStyle(card.status);
+                  const failed = card.failed_attempts ?? 0;
+                  return (
+                    <li key={card.task_id}>
+                      <Link
+                        href={`/projects/${encodeURIComponent(slug)}/cards/${encodeURIComponent(card.task_id)}`}
+                        data-status={card.status ?? "unknown"}
+                        className="flex items-center gap-2.5 rounded-lg bg-[var(--color-surface-2)] px-3 py-2 text-sm active:opacity-70"
+                      >
+                        <span className="relative flex h-2.5 w-2.5 shrink-0" aria-hidden="true">
+                          {cs.animated && live ? (
+                            <span className={`absolute inline-flex h-full w-full animate-ping rounded-full opacity-60 ${cs.dot}`} />
+                          ) : null}
+                          <span className={`relative inline-flex h-2.5 w-2.5 rounded-full ${cs.dot}`} />
+                        </span>
+                        <span className="min-w-0 flex-1">
+                          <span className="block truncate">
+                            {card.title ?? card.task_id}
+                          </span>
+                          <span className="block truncate text-xs text-[var(--color-muted)]">
+                            {card.step_key ? `${card.step_key} · ` : ""}
+                            {cs.label}
+                            {failed > 0
+                              ? ` · attempt ${card.attempts ?? failed + 1}, ${failed} crashed`
+                              : ""}
+                          </span>
+                        </span>
+                        {card.status === "running" && live ? (
+                          <Spinner className="text-emerald-300" />
+                        ) : null}
+                      </Link>
+                    </li>
+                  );
+                })}
               </ul>
             )}
           </section>

@@ -160,6 +160,10 @@ def specify_task(
         return SpecifyOutcome(
             task_id, False, f"task is not in triage (status={task.status!r})"
         )
+    if task.project_id:
+        return SpecifyOutcome(
+            task_id, False, "project card — its run promotes it, not the sweeper"
+        )
 
     try:
         from agent.auxiliary_client import get_auxiliary_extra_body, get_text_auxiliary_client
@@ -262,6 +266,10 @@ def list_triage_ids(*, tenant: Optional[str] = None) -> list[str]:
     """Return task ids currently in the triage column.
 
     ``tenant`` narrows the sweep; ``None`` returns every triage task.
+
+    Project cards are skipped: a project run creates its cards in triage on
+    purpose and promotes them itself (autonomy gates, checkpoints), so the
+    sweeper must not rewrite or release them.
     """
     with kb.connect_closing() as conn:
         tasks = kb.list_tasks(
@@ -270,4 +278,4 @@ def list_triage_ids(*, tenant: Optional[str] = None) -> list[str]:
             tenant=tenant,
             include_archived=False,
         )
-    return [t.id for t in tasks]
+    return [t.id for t in tasks if not t.project_id]

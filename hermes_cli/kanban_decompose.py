@@ -289,6 +289,10 @@ def decompose_task(
         return DecomposeOutcome(
             task_id, False, f"task is not in triage (status={task.status!r})"
         )
+    if task.project_id:
+        return DecomposeOutcome(
+            task_id, False, "project card — its run promotes it, not the decomposer"
+        )
 
     cfg = _load_config()
     orchestrator = _resolve_orchestrator_profile(cfg)
@@ -466,7 +470,11 @@ def decompose_task(
 
 
 def list_triage_ids(*, tenant: Optional[str] = None) -> list[str]:
-    """Return task ids currently in the triage column."""
+    """Return task ids currently in the triage column.
+
+    Project cards are skipped: a project run holds its cards in triage on
+    purpose and promotes them itself, so the sweeper must not fan them out.
+    """
     with kb.connect_closing() as conn:
         rows = kb.list_tasks(
             conn,
@@ -474,4 +482,4 @@ def list_triage_ids(*, tenant: Optional[str] = None) -> list[str]:
             tenant=tenant,
             limit=1000,
         )
-    return [row.id for row in rows]
+    return [row.id for row in rows if not row.project_id]

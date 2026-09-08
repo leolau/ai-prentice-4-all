@@ -945,18 +945,18 @@ def cancel_run(pconn, bconn, *, project: projects_db.Project, run: dict) -> dict
         raise ValueError(f"run {run['run_no']} is already {run['status']}")
     archived: List[str] = []
     left_running: List[str] = []
-    for rc in projects_db.get_run_cards(pconn, run["id"]):
+    for task_id in _run_card_subtree(pconn, bconn, run):
         row = bconn.execute(
-            "SELECT status FROM tasks WHERE id = ?", (rc["task_id"],)
+            "SELECT status FROM tasks WHERE id = ?", (task_id,)
         ).fetchone()
         if row is None:
             continue
         if row["status"] == "running":
-            left_running.append(rc["task_id"])
+            left_running.append(task_id)
             continue
         if row["status"] in ("triage", "todo", "ready"):
-            kanban_db.archive_task(bconn, rc["task_id"])
-            archived.append(rc["task_id"])
+            kanban_db.archive_task(bconn, task_id)
+            archived.append(task_id)
     outcome = "cancelled"
     if left_running:
         outcome += f" ({len(left_running)} card(s) left running to finish)"
@@ -990,9 +990,9 @@ def stop_run(pconn, bconn, *, project: projects_db.Project, run: dict) -> dict:
         raise ValueError(f"run {run['run_no']} is already {run['status']}")
     stopped: List[str] = []
     archived: List[str] = []
-    for rc in projects_db.get_run_cards(pconn, run["id"]):
+    for task_id in _run_card_subtree(pconn, bconn, run):
         row = bconn.execute(
-            "SELECT status FROM tasks WHERE id = ?", (rc["task_id"],)
+            "SELECT status FROM tasks WHERE id = ?", (task_id,)
         ).fetchone()
         if row is None:
             continue
@@ -1004,16 +1004,16 @@ def stop_run(pconn, bconn, *, project: projects_db.Project, run: dict) -> dict:
             # is not a worker this stop terminated, and is not counted as
             # one. It is still blocked, so nothing respawns it.
             if kanban_db.reclaim_task(
-                bconn, rc["task_id"], reason="run stopped from agent-home"
+                bconn, task_id, reason="run stopped from agent-home"
             ):
-                stopped.append(rc["task_id"])
+                stopped.append(task_id)
             kanban_db.block_task(
-                bconn, rc["task_id"], reason="run stopped from agent-home"
+                bconn, task_id, reason="run stopped from agent-home"
             )
             continue
         if row["status"] in ("triage", "todo", "ready"):
-            kanban_db.archive_task(bconn, rc["task_id"])
-            archived.append(rc["task_id"])
+            kanban_db.archive_task(bconn, task_id)
+            archived.append(task_id)
     parts = ["stopped"]
     if stopped:
         parts.append(f"{len(stopped)} worker(s) terminated")
@@ -1024,6 +1024,31 @@ def stop_run(pconn, bconn, *, project: projects_db.Project, run: dict) -> dict:
     return projects_db_close_and_fetch(
         pconn, run, status="cancelled", outcome="; ".join(parts)
     )
+
+
+def _run_card_subtree(pconn, bconn, run: dict) -> List[str]:
+    """The run's cards plus every card a worker spawned beneath them
+    (``task_links`` descendants) that stayed in the same project. A worker
+    that fans a step out into children leaves nothing in ``run_cards``;
+    without this walk Stop archives the parent and the children keep
+    running for hours, outside anything the run page shows."""
+    project_id = run.get("project_id")
+    ordered: List[str] = []
+    seen: set = set()
+    stack = [rc["task_id"] for rc in projects_db.get_run_cards(pconn, run["id"])]
+    while stack:
+        tid = stack.pop(0)
+        if tid in seen:
+            continue
+        seen.add(tid)
+        ordered.append(tid)
+        rows = bconn.execute(
+            "SELECT l.child_id FROM task_links l JOIN tasks t ON t.id = l.child_id "
+            "WHERE l.parent_id = ? AND (t.project_id = ? OR t.project_id IS NULL)",
+            (tid, project_id),
+        ).fetchall()
+        stack.extend(r["child_id"] for r in rows)
+    return ordered
 
 
 def projects_db_close_and_fetch(
