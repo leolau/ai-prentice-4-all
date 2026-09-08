@@ -924,17 +924,17 @@ def _handle_create(args: dict, **kw) -> str:
         try:
             # Inherit the spawning worker's own task workspace when the
             # caller didn't specify one (see resolution note above).
-            if _inherit_workspace:
-                _self_tid = os.environ.get("HERMES_KANBAN_TASK")
-                if _self_tid:
-                    _self_task = kb.get_task(conn, _self_tid)
-                    if _self_task is not None and _self_task.workspace_kind:
-                        workspace_kind = _self_task.workspace_kind
-                        workspace_path = _self_task.workspace_path
-                        # Keep follow-up children inside the same project so the
-                        # whole subtree shares one repo + branch convention.
-                        if project_id is None and _self_task.project_id:
-                            project_id = _self_task.project_id
+            _self_tid = os.environ.get("HERMES_KANBAN_TASK")
+            _self_task = kb.get_task(conn, _self_tid) if _self_tid else None
+            if _self_task is not None:
+                # Follow-up cards stay inside the spawning card's project —
+                # whatever workspace they ask for — so the project's Stop
+                # and run page see the whole subtree.
+                if project_id is None and _self_task.project_id:
+                    project_id = _self_task.project_id
+                if _inherit_workspace and _self_task.workspace_kind:
+                    workspace_kind = _self_task.workspace_kind
+                    workspace_path = _self_task.workspace_path
             new_tid = kb.create_task(
                 conn,
                 title=str(title).strip(),

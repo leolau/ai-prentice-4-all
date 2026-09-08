@@ -214,6 +214,26 @@ def test_list_triage_ids(kanban_home):
     assert ids_tenant == [b]
 
 
+def test_sweeper_leaves_project_cards_alone(kanban_home):
+    """A project run parks its cards in triage on purpose (supervised
+    successors wait on Continue); the auto-specify sweep must neither list
+    nor rewrite them."""
+    with kb.connect() as conn:
+        plain = kb.create_task(conn, title="plain", triage=True)
+        card = kb.create_task(conn, title="project card", triage=True)
+        conn.execute(
+            "UPDATE tasks SET project_id = 'p_test' WHERE id = ?", (card,)
+        )
+        conn.commit()
+
+    assert spec.list_triage_ids() == [plain]
+    outcome = spec.specify_task(card, author="auto-specifier")
+    assert outcome.ok is False
+    assert "project card" in outcome.reason
+    with kb.connect() as conn:
+        assert kb.get_task(conn, card).status == "triage"
+
+
 # ---------------------------------------------------------------------------
 # CLI wiring — argparse + _cmd_specify
 # ---------------------------------------------------------------------------

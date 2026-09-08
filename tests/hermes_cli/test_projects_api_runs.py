@@ -18,6 +18,7 @@ Behaviour contracts:
 
 from __future__ import annotations
 
+import time
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -426,6 +427,49 @@ def test_stop_kills_the_live_card_and_is_refused_twice(env):
     assert resp.status_code == 409
 
 
+def test_stop_covers_cards_a_worker_spawned_under_the_run(env):
+    """A worker that fans its step out into child cards (``kanban_create``
+    with ``parents=[self]``) leaves nothing in ``run_cards``. Stop must still
+    reach them — terminate the running child, archive the queued one — or
+    they keep running for hours outside the project."""
+    project = _active_project(env)
+    other = _active_project(env, name="Other", slug="other-project")
+    client, _state = env
+    _save_and_activate_playbook(env, project)
+    started = client.post(
+        f"/api/registry/projects/{project['slug']}/runs", json={}
+    ).json()
+    first = next(iter(started["cards"].values()))
+    with kanban_db.connect_closing() as bconn:
+        running_child = kanban_db.create_task(
+            bconn, title="child a", assignee="default", parents=(first,),
+            project_id=project["id"],
+        )
+        queued_grandchild = kanban_db.create_task(
+            bconn, title="grandchild", assignee="default",
+            parents=(running_child,), project_id=project["id"],
+        )
+        other_project = kanban_db.create_task(
+            bconn, title="foreign", assignee="default", parents=(first,),
+            project_id=other["id"],
+        )
+        bconn.execute(
+            "UPDATE tasks SET status = 'running' WHERE id IN (?, ?)",
+            (first, running_child),
+        )
+
+    resp = client.post(
+        f"/api/registry/projects/{project['slug']}/runs/1/stop", json={}
+    )
+    assert resp.status_code == 200, resp.text
+    assert "2 worker(s) terminated" in resp.json()["outcome"]
+    with kanban_db.connect_closing() as bconn:
+        assert kanban_db.get_task(bconn, first).status == "blocked"
+        assert kanban_db.get_task(bconn, running_child).status == "blocked"
+        assert kanban_db.get_task(bconn, queued_grandchild).status == "archived"
+        assert kanban_db.get_task(bconn, other_project).status != "archived"
+
+
 def test_retro_writes_the_record(env):
     project = _active_project(env)
     client, _state = env
@@ -610,3 +654,55 @@ def test_run_reports_awaiting_continue_once_checkpoint_is_done(env):
     assert resp.status_code == 200, resp.text
     resp = client.get(f"/api/registry/projects/{project['slug']}/runs/1")
     assert resp.json()["awaiting_continue"] is False
+
+
+def test_run_reports_completion_and_card_attempt_history(env):
+    """The page needs a % and a reason, not just ``running``: done cards
+    count whole, a working card half; a card's earlier crashed/protocol-
+    violating attempts surface as ``failed_attempts`` + ``last_error``."""
+    project = _active_project(env)
+    client, _state = env
+    client.patch(
+        f"/api/registry/projects/{project['slug']}", json={"max_in_progress": 3}
+    )
+    _save_and_activate_playbook(env, project)
+    started = client.post(
+        f"/api/registry/projects/{project['slug']}/runs", json={}
+    ).json()
+    gather_id, approve_id = started["cards"]["gather"], started["cards"]["approve"]
+
+    body = client.get(f"/api/registry/projects/{project['slug']}/runs/1").json()
+    assert body["completion_percent"] == 0
+    by_id = {c["task_id"]: c for c in body["cards"]}
+    assert by_id[gather_id]["failed_attempts"] == 0
+    assert by_id[gather_id]["last_error"] is None
+
+    now = int(time.time())
+    with kanban_db.connect_closing() as bconn:
+        bconn.execute(
+            "INSERT INTO task_runs (task_id, status, started_at, ended_at, outcome, error) "
+            "VALUES (?, 'crashed', ?, ?, 'crashed', ?)",
+            (
+                gather_id,
+                now - 120,
+                now - 60,
+                "worker exited cleanly (rc=0) without calling kanban_complete "
+                "or kanban_block — protocol violation",
+            ),
+        )
+        bconn.commit()
+        assert kanban_db.claim_task(bconn, gather_id, claimer="test:1")
+
+    body = client.get(f"/api/registry/projects/{project['slug']}/runs/1").json()
+    assert body["completion_percent"] == 17  # 0.5 of 3 cards
+    card = {c["task_id"]: c for c in body["cards"]}[gather_id]
+    assert card["status"] == "running"
+    assert card["attempts"] == 2
+    assert card["failed_attempts"] == 1
+    assert "protocol violation" in card["last_error"]
+
+    with kanban_db.connect_closing() as bconn:
+        assert kanban_db.complete_task(bconn, gather_id, result="ok")
+    body = client.get(f"/api/registry/projects/{project['slug']}/runs/1").json()
+    assert body["completion_percent"] == 33
+    assert approve_id in {c["task_id"] for c in body["cards"]}

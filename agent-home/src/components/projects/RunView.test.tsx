@@ -120,7 +120,7 @@ describe("RunView stall truth", () => {
     const { getByText, getByRole } = render(
       <RunView slug="monday-digest" run={stalledRun} />,
     );
-    expect(getByText("stalled")).toBeTruthy();
+    expect(getByText(/^stalled$/i)).toBeTruthy();
     expect(getByText(/no worker is active/)).toBeTruthy();
     // Stop and restart offered together on a stalled run.
     expect(getByRole("button", { name: "Cancel" })).toBeTruthy();
@@ -210,5 +210,66 @@ describe("RunView on a supervised checkpoint hold", () => {
       <RunView slug="monday-digest" run={RUN({ status: "running" })} />,
     );
     expect(queryByRole("button", { name: "Continue" })).toBeNull();
+  });
+});
+
+describe("RunView live visuals", () => {
+  const cards = [
+    { task_id: "t1", step_key: "research", status: "done", title: "Research", attempts: 1, failed_attempts: 0, last_error: null, last_outcome: null },
+    {
+      task_id: "t2", step_key: "design", status: "running", title: "Design",
+      attempts: 2, failed_attempts: 1,
+      last_error: "worker exited cleanly (rc=0) without calling kanban_complete or kanban_block — protocol violation",
+      last_outcome: "crashed",
+    },
+    { task_id: "t3", step_key: "review", status: "triage", title: "Review", attempts: 0, failed_attempts: 0, last_error: null, last_outcome: null },
+  ];
+
+  it("shows a green animated Running badge, the % bar and per-step state", () => {
+    const { container, getByText, getByRole } = render(
+      <RunView
+        slug="p"
+        run={RUN({ status: "running", cards, completion_percent: 50 })}
+      />,
+    );
+    const badge = container.querySelector('[data-component="RunStatusBadge"]');
+    expect(badge?.textContent).toContain("Running");
+    expect(badge?.className).toMatch(/emerald/);
+    expect(badge?.querySelector(".animate-ping")).toBeTruthy();
+    expect(getByRole("progressbar").getAttribute("aria-valuenow")).toBe("50");
+    expect(getByText("50%")).toBeTruthy();
+    expect(getByText(/1 of 3 steps done · 1 working/)).toBeTruthy();
+    expect(container.querySelector('[data-status="running"] .animate-ping')).toBeTruthy();
+    expect(getByText(/held — released on Continue/)).toBeTruthy();
+    // The retry is named, with its reason, not hidden behind "running".
+    expect(getByText(/One step crashed and was retried/)).toBeTruthy();
+    expect(getByText(/protocol violation/)).toBeTruthy();
+    expect(getByText(/attempt 2, 1 crashed/)).toBeTruthy();
+  });
+
+  it("derives the % client-side when the server omits it", () => {
+    const { getByRole } = render(
+      <RunView slug="p" run={RUN({ status: "running", cards })} />,
+    );
+    // done 1 + running 0.5 = 1.5 / 3
+    expect(getByRole("progressbar").getAttribute("aria-valuenow")).toBe("50");
+  });
+
+  it("reads red Failed with no animation, and grey Stopped for cancelled", () => {
+    const failed = render(
+      <RunView slug="p" run={RUN({ status: "failed", ended_at: NOW, cards: [] })} />,
+    );
+    const badge = failed.container.querySelector('[data-component="RunStatusBadge"]');
+    expect(badge?.textContent).toContain("Failed");
+    expect(badge?.className).toMatch(/red/);
+    expect(badge?.querySelector(".animate-ping")).toBeNull();
+    failed.unmount();
+
+    const stopped = render(
+      <RunView slug="p" run={RUN({ status: "cancelled", ended_at: NOW })} />,
+    );
+    expect(
+      stopped.container.querySelector('[data-component="RunStatusBadge"]')?.textContent,
+    ).toContain("Stopped");
   });
 });

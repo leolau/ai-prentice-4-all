@@ -2601,6 +2601,52 @@ def _run_stalled(
     )
 
 
+_CARD_WEIGHT = {
+    "done": 1.0,
+    "running": 0.5,
+    "blocked": 0.0,
+    "ready": 0.0,
+    "todo": 0.0,
+    "triage": 0.0,
+    "archived": 0.0,
+}
+
+
+def _run_completion_percent(run: dict, cards: list[dict]) -> int:
+    """0–100 from the cards' board state: done counts whole, a card with a
+    worker on it counts half. A finished run reads 100 whatever its cards
+    ended as (cancel archives them); a run without cards is 0 until done."""
+    if run.get("status") == "done":
+        return 100
+    if not cards:
+        return 0
+    total = sum(_CARD_WEIGHT.get(c.get("status") or "", 0.0) for c in cards)
+    return int(round(100 * total / len(cards)))
+
+
+def _card_attempts(bconn, task_id: str) -> dict:
+    """Attempt history for a card, so the run page can say *why* a card is
+    on its second try instead of showing a bare ``running``.
+
+    ``attempts`` counts every worker claim; ``failed_attempts`` the closed
+    ones that did not complete/block cleanly (crash, timeout, protocol
+    violation, spawn failure); ``last_error`` is the newest such error.
+    """
+    runs = kanban_db.list_runs(bconn, task_id)
+    failed = [
+        r for r in runs
+        if r.ended_at is not None
+        and r.outcome not in ("completed", "blocked", "reclaimed", None)
+    ]
+    last = failed[-1] if failed else None
+    return {
+        "attempts": len(runs),
+        "failed_attempts": len(failed),
+        "last_error": last.error if last else None,
+        "last_outcome": last.outcome if last else None,
+    }
+
+
 def _run_blocked_tasks(bconn, cards: list[dict]) -> list[dict]:
     """Blocked tasks anywhere in the run's dependency tree.
 
@@ -2670,16 +2716,17 @@ def _run_payload(
     cards = []
     for rc in projects_db.get_run_cards(conn, run["id"]):
         task = kanban_db.get_task(bconn, rc["task_id"])
-        cards.append(
-            {
-                "task_id": rc["task_id"],
-                "step_key": rc.get("step_key"),
-                "status": task.status if task else None,
-                "title": task.title if task else None,
-            }
-        )
+        card = {
+            "task_id": rc["task_id"],
+            "step_key": rc.get("step_key"),
+            "status": task.status if task else None,
+            "title": task.title if task else None,
+        }
+        card.update(_card_attempts(bconn, rc["task_id"]))
+        cards.append(card)
     payload = dict(run)
     payload["cards"] = cards
+    payload["completion_percent"] = _run_completion_percent(run, cards)
     blocked = _run_blocked_tasks(bconn, cards)
     payload["blocked_tasks"] = blocked
     payload["stalled"] = _run_stalled(run, cards, blocked)

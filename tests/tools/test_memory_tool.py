@@ -895,3 +895,24 @@ class TestLoadTimeSnapshotSanitization:
         # Block marker appears exactly once, not nested
         assert snapshot.count("[BLOCKED:") == 1
         assert "Clean fact" in snapshot
+
+
+class TestOversizedFileSnapshot:
+    """An external appender can push MEMORY.md far past the tool's limit; the
+    system-prompt snapshot must stay bounded (only the newest entries survive)
+    while the live entries keep everything for inspection/removal."""
+
+    def test_snapshot_keeps_newest_entries_within_limit(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("tools.memory_tool.get_memory_dir", lambda: tmp_path)
+        entries = [f"[calendar 2026-08-{i%28+1:02d} 02:30 from a@b.c] fact {i} " + "x" * 60 for i in range(40)]
+        (tmp_path / "MEMORY.md").write_text("\n§\n".join(entries), encoding="utf-8")
+        s = MemoryStore(memory_char_limit=500, user_char_limit=300)
+        s.load_from_disk()
+
+        block = s.format_for_system_prompt("memory")
+        assert len(s.memory_entries) == 40
+        assert "fact 39" in block
+        assert "fact 0 " not in block
+        assert "older entries omitted" in block
+        body = block.split("═" * 46)[-1]
+        assert len(body) < 500 + 200  # content bounded near the limit (+ the omission marker)

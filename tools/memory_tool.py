@@ -1134,7 +1134,25 @@ class MemoryStore:
             return ""
 
         limit = self._char_limit(target)
+        omitted = 0
+        # The tool itself never writes past the limit, but external appenders
+        # (memory bridges, hand edits) can. The snapshot goes into every
+        # system prompt, so keep only the newest entries that fit rather than
+        # inflating each conversation's baseline context.
+        while len(entries) > 1 and len(ENTRY_DELIMITER.join(entries)) > limit:
+            entries = entries[1:]
+            omitted += 1
+        if omitted:
+            logger.warning(
+                "%s memory file exceeds %d chars; %d oldest entries omitted from the system prompt",
+                target, limit, omitted,
+            )
         content = ENTRY_DELIMITER.join(entries)
+        if omitted:
+            content = (
+                f"[{omitted} older entries omitted — file over the {limit:,} char limit; "
+                f"prune with memory(action=remove)]{ENTRY_DELIMITER}{content}"
+            )
         current = len(content)
         pct = min(100, int((current / limit) * 100)) if limit > 0 else 0
 

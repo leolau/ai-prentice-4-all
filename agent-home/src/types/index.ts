@@ -1490,6 +1490,12 @@ export interface ProjectRunCard {
   step_key: string | null;
   status: string | null;
   title: string | null;
+  /** Worker claims so far (the current one included). */
+  attempts?: number;
+  /** Closed attempts that ended in crash / timeout / protocol violation. */
+  failed_attempts?: number;
+  last_error?: string | null;
+  last_outcome?: string | null;
 }
 
 /** A blocked task in the run's dependency tree — why a run stalls. */
@@ -1537,6 +1543,8 @@ export interface ProjectRun {
    * run is orphaned, not busy.
    */
   stalled?: boolean;
+  /** Server-derived 0–100 from the cards' board state (done = 1, running = ½). */
+  completion_percent?: number;
   /**
    * Server-derived: a supervised run whose checkpoint step(s) are done while
    * their successors still wait in triage — held on the human's Continue.
