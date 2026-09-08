@@ -2221,3 +2221,16 @@ def test_maybe_auto_subscribe_swallows_add_notify_sub_failure(monkeypatch, worke
     d = json.loads(out)
     assert d["ok"] is True, d
     assert d["subscribed"] is False, d
+
+
+def test_kanban_guidance_forbids_ending_on_a_question():
+    """A worker that signs off with "shall I proceed?" in plain text is
+    recorded as a protocol violation and retried from scratch (seen on a
+    project run). The guidance must name that outcome and the two valid
+    terminal calls so the model does not learn it the hard way."""
+    from agent.prompt_builder import KANBAN_GUIDANCE
+
+    assert "shall I continue?" in KANBAN_GUIDANCE
+    assert "protocol violation" in KANBAN_GUIDANCE
+    assert "exactly one of those two calls" in KANBAN_GUIDANCE
+    assert "`kanban_complete`/`kanban_block`" in KANBAN_GUIDANCE

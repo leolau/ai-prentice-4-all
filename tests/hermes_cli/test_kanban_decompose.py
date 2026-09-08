@@ -326,6 +326,33 @@ def test_decompose_returns_false_when_task_not_triage(kanban_home):
     assert "not in triage" in outcome.reason
 
 
+def test_decompose_leaves_project_cards_alone(kanban_home):
+    """A project run holds its cards in triage on purpose; the sweep must
+    neither list them nor fan them out into project-less children."""
+    with kb.connect() as conn:
+        plain = kb.create_task(conn, title="plain", triage=True)
+        card = kb.create_task(conn, title="project card", triage=True)
+        conn.execute(
+            "UPDATE tasks SET project_id = 'p_test' WHERE id = ?", (card,)
+        )
+        conn.commit()
+
+    assert decomp.list_triage_ids() == [plain]
+    patches = _patch_list_profiles(["orchestrator"])
+    for p in patches:
+        p.start()
+    try:
+        outcome = decomp.decompose_task(card, author="auto-decomposer")
+    finally:
+        for p in patches:
+            p.stop()
+    assert outcome.ok is False
+    assert "project card" in outcome.reason
+    with kb.connect() as conn:
+        assert kb.get_task(conn, card).status == "triage"
+        assert len(kb.list_tasks(conn, include_archived=True)) == 2
+
+
 def test_decompose_no_aux_client_configured(kanban_home):
     with kb.connect() as conn:
         tid = kb.create_task(conn, title="x", triage=True)

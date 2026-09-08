@@ -15,15 +15,25 @@ Configuration (read from the triage agent's config.json under the "memory" key):
     enabled            — if false, no-op (default: true)
     memory_file        — override path to MEMORY.md (default: $HERMES_HOME/memories/MEMORY.md)
     max_facts_per_batch — cap to prevent flooding memory (default: 10)
+    max_file_chars     — rolling budget for bridged entries in MEMORY.md
+                         (default: 2200, the memory tool's own file limit).
+                         When exceeded, the OLDEST bridged entries are evicted;
+                         hand-written (untagged) agent notes are never touched.
+
+MEMORY.md is injected verbatim into every system prompt, so an unbounded
+append here inflates every conversation's baseline context.
 """
 
 import json
 import os
+import re
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 
 ENTRY_DELIMITER = "\n§\n"
+DEFAULT_MAX_FILE_CHARS = 2200
+_PROVENANCE_RE = re.compile(r"^\[(whatsapp|email|calendar) \d{4}-\d{2}-\d{2} \d{2}:\d{2} from ")
 
 # Cache the config so we don't re-read config.json on every batch.
 _config_cache = None
@@ -75,6 +85,37 @@ def _get_max_facts(config_path=None):
     """Get the max facts per batch cap."""
     mem_cfg = _get_memory_config(config_path)
     return mem_cfg.get('max_facts_per_batch', 10)
+
+
+def _get_max_file_chars(config_path=None):
+    mem_cfg = _get_memory_config(config_path)
+    try:
+        return int(mem_cfg.get('max_file_chars', DEFAULT_MAX_FILE_CHARS))
+    except (TypeError, ValueError):
+        return DEFAULT_MAX_FILE_CHARS
+
+
+def _is_bridged(entry):
+    return bool(_PROVENANCE_RE.match(entry))
+
+
+def _fit_to_budget(entries, budget):
+    """Evict the oldest bridged entries until the joined file fits ``budget``.
+
+    Untagged entries (written by the agent's memory tool) are kept whatever
+    happens; if they alone exceed the budget nothing bridged survives.
+    """
+    entries = list(entries)
+
+    def size(items):
+        return len(ENTRY_DELIMITER.join(items))
+
+    while size(entries) > budget:
+        idx = next((i for i, e in enumerate(entries) if _is_bridged(e)), None)
+        if idx is None:
+            break
+        del entries[idx]
+    return entries
 
 
 def remember_facts(facts, *, source, sender, config_path=None):
@@ -139,18 +180,12 @@ def remember_facts(facts, *, source, sender, config_path=None):
     except Exception:
         existing = ''
 
-    # Append with § delimiter
-    # If the file is empty, start with the first entry (no leading delimiter).
-    # If it has content, add a § delimiter before the new entries.
-    new_block = ENTRY_DELIMITER.join(entries)
-
-    if existing:
-        # Ensure existing content ends with a newline before the delimiter
-        if not existing.endswith('\n'):
-            existing += '\n'
-        content = existing + ENTRY_DELIMITER + new_block
-    else:
-        content = new_block
+    existing_entries = [e.strip() for e in existing.split(ENTRY_DELIMITER) if e.strip()]
+    combined = _fit_to_budget(existing_entries + entries, _get_max_file_chars(config_path))
+    content = ENTRY_DELIMITER.join(combined)
+    written = sum(1 for e in entries if e in combined)
+    if written == 0:
+        return 0
 
     # Atomic write via temp file + rename
     tmp_file = memory_file.with_suffix('.md.tmp')
@@ -165,4 +200,4 @@ def remember_facts(facts, *, source, sender, config_path=None):
             pass
         return 0
 
-    return len(entries)
+    return written
