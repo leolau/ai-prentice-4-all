@@ -58,7 +58,11 @@ from agent.model_metadata import (
 )
 from agent.process_bootstrap import _install_safe_stdio
 from agent.prompt_caching import apply_anthropic_cache_control
-from agent.retry_utils import adaptive_rate_limit_backoff, jittered_backoff
+from agent.retry_utils import (
+    adaptive_rate_limit_backoff,
+    is_alibaba_token_plan_quota_error,
+    jittered_backoff,
+)
 from agent.trajectory import has_incomplete_scratchpad
 from agent.usage_pricing import estimate_usage_cost, normalize_usage
 from hermes_constants import PARTIAL_STREAM_STUB_ID
@@ -3072,8 +3076,14 @@ def run_conversation(
                     FailoverReason.timeout,
                     FailoverReason.overloaded,
                 }
+                # Alibaba Token Plan quota 429s are per-minute ceilings that
+                # refill on their own; retry on the long schedule first and
+                # let the retries-exhausted path below hand over to fallback.
+                _defer_fallback_for_refill = is_alibaba_token_plan_quota_error(
+                    base_url=getattr(agent, "base_url", None), error=api_error,
+                )
                 _should_fallback = (
-                    is_rate_limited
+                    (is_rate_limited and not _defer_fallback_for_refill)
                     or (_is_transport_failure and retry_count >= 2)
                 )
                 if _should_fallback and agent._fallback_index < len(agent._fallback_chain):
@@ -3995,11 +4005,15 @@ def run_conversation(
                         _policy_note = " (Z.AI Coding overload adaptive long backoff)"
                     elif _backoff_policy == "zai_coding_overload_short":
                         _policy_note = " (Z.AI Coding overload short retry)"
+                    elif _backoff_policy == "alibaba_token_plan_long":
+                        _policy_note = " (Alibaba Token Plan per-minute quota — waiting for the window to roll)"
+                    elif _backoff_policy == "alibaba_token_plan_short":
+                        _policy_note = " (Alibaba Token Plan quota short retry)"
                     _rate_limit_status = f"⏱️ Rate limited. Waiting {wait_time:.1f}s (attempt {retry_count + 1}/{max_retries}){_policy_note}..."
                     # Normal retries are buffered to avoid noisy transient chatter. Long
                     # Z.AI Coding waits are different: they can last minutes, so surface
                     # progress immediately instead of making the TUI look frozen.
-                    if _backoff_policy == "zai_coding_overload_long":
+                    if _backoff_policy in ("zai_coding_overload_long", "alibaba_token_plan_long"):
                         agent._emit_status(_rate_limit_status)
                     else:
                         agent._buffer_status(_rate_limit_status)
