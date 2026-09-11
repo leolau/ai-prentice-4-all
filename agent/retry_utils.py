@@ -24,6 +24,17 @@ _jitter_lock = threading.Lock()
 # not sit silent for 20+ minutes.
 _ZAI_CODING_OVERLOAD_LONG_BACKOFF = (30.0, 60.0, 90.0, 120.0)
 
+# Alibaba Model Studio Token Plan (``token-plan.<region>.maas.aliyuncs.com``)
+# reports a tripped per-model tokens-per-minute ceiling as HTTP 429
+# ``insufficient_quota`` / "Allocated quota exceeded" — the same wording it
+# uses for a genuinely spent plan, and without a Retry-After. Observed on the
+# box: the ceiling clears within a minute or two, so the default 2s→60s
+# schedule with three attempts gives up before the bucket refills. Wait for
+# the window to roll before handing the turn to the fallback chain.
+_ALIBABA_TOKEN_PLAN_LONG_BACKOFF = (45.0, 60.0, 90.0)
+_ALIBABA_TOKEN_PLAN_HOST = ".maas.aliyuncs.com"
+_ALIBABA_TOKEN_PLAN_SUBDOMAIN = "token-plan."
+
 
 def jittered_backoff(
     attempt: int,
@@ -97,6 +108,24 @@ def is_zai_coding_overload_error(*, base_url: str | None, model: str | None, err
     )
 
 
+def is_alibaba_token_plan_quota_error(*, base_url: str | None, error: Any) -> bool:
+    """Return True for Alibaba Token Plan ``insufficient_quota`` 429s.
+
+    Only the Token Plan host is matched: the pay-as-you-go DashScope endpoint
+    reports rate limits with distinct codes and its quota errors are not
+    expected to clear on their own.
+    """
+    base = (base_url or "").lower()
+    status = getattr(error, "status_code", None)
+    text = _error_text(error)
+    return (
+        status == 429
+        and _ALIBABA_TOKEN_PLAN_HOST in base
+        and _ALIBABA_TOKEN_PLAN_SUBDOMAIN in base
+        and ("insufficient_quota" in text or "allocated quota exceeded" in text)
+    )
+
+
 def adaptive_rate_limit_backoff(
     attempt: int,
     *,
@@ -111,12 +140,24 @@ def adaptive_rate_limit_backoff(
     For most providers this returns ``default_wait`` unchanged. For Z.AI
     Coding Plan GLM-5.2 overloads, keep the first ``short_attempts`` retries on
     the normal short exponential schedule, then switch to progressively longer
-    waits (30s → 60s → 90s → 120s, capped) plus light jitter.
+    waits (30s → 60s → 90s → 120s, capped) plus light jitter. For Alibaba
+    Token Plan quota 429s only the first retry stays short (a cheap probe for
+    a transient); the rest wait 45s → 60s → 90s so the per-minute bucket has
+    rolled before the default three-attempt budget hands over to fallback.
 
     ``attempt`` is 1-based, matching the retry loop's logged attempt number.
     Returns ``(wait_seconds, reason_label)`` where ``reason_label`` is suitable
     for status/log decoration when a provider-specific policy fired.
     """
+    if is_alibaba_token_plan_quota_error(base_url=base_url, error=error):
+        if attempt <= 1:
+            return default_wait, "alibaba_token_plan_short"
+        idx = min(attempt - 2, len(_ALIBABA_TOKEN_PLAN_LONG_BACKOFF) - 1)
+        base_delay = _ALIBABA_TOKEN_PLAN_LONG_BACKOFF[idx]
+        return (
+            jittered_backoff(1, base_delay=base_delay, max_delay=base_delay, jitter_ratio=0.2),
+            "alibaba_token_plan_long",
+        )
     if not is_zai_coding_overload_error(base_url=base_url, model=model, error=error):
         return default_wait, None
     if attempt <= short_attempts:
