@@ -2523,6 +2523,22 @@ def get_run_cards(conn: sqlite3.Connection, run_id: str) -> List[dict]:
     ]
 
 
+def get_run_card_by_task(
+    conn: sqlite3.Connection, task_id: str
+) -> Optional[dict]:
+    """Reverse lookup: the run (if any) a card belongs to.
+
+    Used by ``projects_reconcile`` to find the owning run of a card that
+    just settled (done/blocked) on the kanban side, so the run can top up
+    its promoted cards without the kanban store knowing anything about
+    Projects.
+    """
+    row = conn.execute(
+        "SELECT * FROM project_run_cards WHERE task_id = ?", (task_id,)
+    ).fetchone()
+    return dict(row) if row else None
+
+
 # ---------------------------------------------------------------------------
 # Root migration: import the legacy per-profile stores (design §2.1)
 # ---------------------------------------------------------------------------
