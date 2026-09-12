@@ -938,6 +938,46 @@ def continue_run(
     return {"run": updated, "promoted": promoted, "budget_gate": None}
 
 
+def refill_run_cards(
+    pconn, bconn, *, project: projects_db.Project, run: dict
+) -> List[str]:
+    """Top up this run's promoted cards after a card frees ``max_in_progress``
+    room (§4.1) — the completion-side counterpart to the one-shot promotion
+    at ``start_run()``/``continue_run()``.
+
+    ``promote_run_cards()`` is otherwise called from exactly those two
+    places, so a run whose cap is smaller than its playbook (the default,
+    ``max_in_progress=1``) promotes its first batch and then never promotes
+    again on its own — it stalls until a human calls ``continue``, even
+    with zero checkpoints involved. This is the hook that keeps a run
+    self-propelling: called after a run-linked card leaves
+    ``running``/``ready`` (done, blocked, or a dependency wait), it re-runs
+    the same promotion the run started with.
+
+    A held checkpoint's successors are never forced open here — that stays
+    ``continue_run()``'s human act (``force_held`` defaults to ``False``).
+    A no-op (``[]``) when the run is not ``running``, has no playbook, or
+    has nothing left to promote.
+    """
+    if run.get("status") != "running":
+        return []
+    playbook = projects_db.get_playbook(pconn, project.id, rev=run.get("playbook_rev"))
+    steps = (playbook or {}).get("steps") or []
+    if not steps:
+        return []
+    autonomy = project.autonomy or "supervised"
+    held = set() if autonomy == "autonomous" else held_step_keys(steps)
+    return promote_run_cards(
+        bconn,
+        pconn,
+        project=project,
+        run_id=run["id"],
+        steps=steps,
+        autonomy=autonomy,
+        held=held,
+    )
+
+
 def cancel_run(pconn, bconn, *, project: projects_db.Project, run: dict) -> dict:
     """Stop promoting; archive this run's un-started cards; NEVER kill a
     running worker (§12)."""
