@@ -1284,3 +1284,76 @@ class GatewayKanbanWatchersMixin:
 
         _release_singleton_lock(self._kanban_dispatcher_lock_handle)
         self._kanban_dispatcher_lock_handle = None
+
+    async def _projects_reconcile_watcher(self) -> None:
+        """Sweep every project's open runs on an interval (Gap B —
+        plans/2026-09-13-project-run-resilience-plan.md).
+
+        Card completion is exactly the event a process restart can lose:
+        the worker finished and called back into a process that no longer
+        exists, or the restart landed before any card even left ``triage``.
+        The completion-side hook (``kanban_db._reconcile_project_run_capacity``)
+        covers the first case going forward; this sweep is the backstop that
+        also catches a run already orphaned when the gateway (re)starts —
+        it runs once shortly after startup, then on
+        ``projects.reconcile_interval_seconds`` (default 300s).
+
+        No singleton lock here (unlike the kanban dispatcher): every write
+        this sweep makes goes through ``kanban_db.specify_triage_task`` /
+        ``projects_db.close_project_run``, which are already
+        transaction-safe against concurrent callers (including another
+        profile's gateway sweeping the same project — the shared root
+        store, by design, has no notion of "which profile owns this run").
+        Worst case with two gateways racing is a harmless duplicate no-op
+        or a doubled approval notification, never a corrupt write.
+
+        Disabled entirely when the Projects store isn't configured or
+        importable — most installs don't use Projects, and this must cost
+        them nothing.
+        """
+        try:
+            from hermes_cli import projects_reconcile
+            from hermes_cli import projects_run as _projects_run
+        except Exception:
+            logger.debug("projects reconcile: projects modules unavailable; disabled")
+            return
+
+        try:
+            cfg = _projects_run.projects_runtime_config()
+        except Exception:
+            logger.warning("projects reconcile: cannot load config; using defaults")
+            cfg = {}
+        interval = cfg.get(
+            "reconcile_interval_seconds",
+            _projects_run.DEFAULT_RECONCILE_INTERVAL_SECONDS,
+        )
+        try:
+            interval = max(float(interval), 30.0)  # sanity floor
+        except (TypeError, ValueError):
+            interval = float(_projects_run.DEFAULT_RECONCILE_INTERVAL_SECONDS)
+
+        # Initial delay so the gateway finishes wiring adapters, same as
+        # the other embedded watchers — and importantly, so a run
+        # orphaned by THIS restart gets one sweep shortly after boot
+        # instead of waiting a full interval.
+        await asyncio.sleep(15)
+
+        while self._running:
+            try:
+                results = await asyncio.to_thread(
+                    projects_reconcile.reconcile_all_open_runs
+                )
+                for outcome in results or []:
+                    # Quiet by default — only log when something actually
+                    # happened, so a healthy box stays silent.
+                    logger.info("projects reconcile: %s", outcome)
+            except asyncio.CancelledError:
+                logger.debug("projects reconcile: cancelled")
+                raise
+            except Exception:
+                logger.exception("projects reconcile: unexpected watcher error")
+
+            slept = 0.0
+            while slept < interval and self._running:
+                await asyncio.sleep(min(1.0, interval - slept))
+                slept += 1.0
