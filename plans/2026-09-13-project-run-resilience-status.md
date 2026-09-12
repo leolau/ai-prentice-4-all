@@ -5,7 +5,7 @@ file as work lands — one row per gap, per the plan's §7 breakdown.
 
 | # | Gap | Description | Status | PR / commit | Notes |
 |---|-----|-------------|--------|--------------|-------|
-| 1 | A | `reconcile_run()` refill hook (kanban_db → projects_reconcile → promote_run_cards on card settle) | **Not started** | — | Highest-value, no config needed |
+| 1 | A | `refill_run_cards()` + `projects_reconcile.on_card_settled()` refill hook (kanban_db → projects_reconcile → projects_run on card settle) | **Done** | [#388](https://github.com/leolau/ai-prentice-4-all/pull/388) | See "Gap A implementation notes" below |
 | 2 | B | `reconcile_all_open_runs()` + `run_stall_seconds`/`reconcile_interval_seconds` config + gateway watcher wiring + auto-fail stale runs | **Not started** | — | Depends on #1's `reconcile_run()` |
 | 3 | C | `doctor_findings`/`derive_health` `run_stalled` code (all cadences) | **Not started** | — | Read-only, can ship independently |
 | 4 | — | FG-32 §20.2 pointer to this defect + plan doc | **Not started** | — | Do after #1–#3 merge |
@@ -37,6 +37,58 @@ file as work lands — one row per gap, per the plan's §7 breakdown.
 - Read `gateway/kanban_watchers.py::_kanban_dispatcher_watcher`: confirmed
   this is the existing periodic-tick loop the fix should extend (Gap B call
   site), rather than adding a new service/loop.
+
+## Gap A implementation notes (deviations from the plan's §3.1 sketch)
+
+- `refill_run_cards(pconn, bconn, *, project, run)` landed in
+  `hermes_cli/projects_run.py` (not a separate function named
+  `reconcile_run` — folded straight into the module `promote_run_cards`
+  already lives in, since it's a thin wrapper around it, mirroring
+  `continue_run()`'s own playbook/held setup almost verbatim).
+- The completion-side hook is `hermes_cli/projects_reconcile.py`
+  (`on_card_settled(bconn, task_id)`), called from a new
+  `hermes_cli/kanban_db.py::_reconcile_project_run_capacity(conn, task_id)`
+  helper — added right after each of the 3 existing
+  `_fire_kanban_lifecycle_hook("kanban_task_completed"/"kanban_task_blocked",
+  ...)` call sites (`complete_task`, and both exits of `block_task`:
+  the `dependency`-kind early return and the shared blocked/triage-loop
+  path). This covers every place a run-linked card leaves
+  `running`/`ready` — confirmed by reading all `_fire_kanban_lifecycle_hook`
+  call sites rather than assuming.
+- Deliberately **not** wired through the plugin `invoke_hook`/`register_hook`
+  mechanism in `hermes_cli/plugins.py` — that system is for third-party
+  plugins reaching into core (see `website/docs/guides/build-a-hermes-plugin.md`);
+  no other core-internal consumer uses it today, and using it here would
+  invert that layering. Direct lazy-imported function call instead, matching
+  the existing pattern right next to it (`_fire_kanban_lifecycle_hook` itself
+  lazy-imports `hermes_cli.plugins`).
+- `projects_db.get_run_card_by_task(conn, task_id)` added as the reverse
+  lookup (`project_run_cards` has no `task_id` index by design — a full
+  table isn't expected to need one at this scale, matches the existing
+  `get_run_cards` query style).
+- Tests added directly to `tests/hermes_cli/test_projects_run.py` (no new
+  test file) in the existing §4/`max_in_progress` section:
+  `test_completing_a_card_auto_promotes_the_next_one` (the real
+  regression — exercises `kanban_db.complete_task()` end to end, the
+  actual production call path, no mocking of the promotion layer) and
+  `test_refill_run_cards_is_a_noop_off_a_running_run` (never forces a held
+  checkpoint open; no-ops on a closed run).
+  - Discovered along the way: `project_run_cards` rows come back from
+    `get_run_cards()` sorted by `task_id` (its primary key), not playbook
+    order — harmless for steps with real `depends_on` edges (those still
+    gate correctly) but means "first card promoted" among mutually
+    independent steps is arbitrary. Not in scope for this fix; the test
+    was written to not assume a specific step is promoted first.
+- Verified no regressions: built a throwaway local venv (Python 3.12,
+  `pip install -e .`), ran `tests/hermes_cli/test_projects_run.py` (39
+  passed) and the full `test_kanban_*.py` + `test_projects_*.py` sweep
+  (973 passed, 25 failed) — then confirmed via `git stash` that the exact
+  same 25 tests fail identically on unmodified `develop` (pre-existing
+  environment gaps, e.g. a subprocess CLI test needing `asyncpg`, unrelated
+  to this change).
+- Shipped as its own PR ([#388](https://github.com/leolau/ai-prentice-4-all/pull/388)),
+  separate from this plan's docs-only PR ([#387](https://github.com/leolau/ai-prentice-4-all/pull/387)),
+  since #387 was explicitly "docs only, no behavior change."
 
 ## How to update this file
 
