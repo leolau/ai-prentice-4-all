@@ -168,6 +168,31 @@ def _fire_kanban_lifecycle_hook(event: str, task_id: str, **fields: Any) -> None
         _log.debug("kanban lifecycle hook %s failed: %s", event, exc)
 
 
+def _reconcile_project_run_capacity(
+    conn: sqlite3.Connection, task_id: str
+) -> None:
+    """After a run-linked card leaves ``running``/``ready`` (done, blocked,
+    or a dependency wait), give the owning Projects run a chance to promote
+    its next ``triage`` card into the freed ``max_in_progress`` slot
+    (FG-32 §4.1) — ``projects_run.promote_run_cards()`` is otherwise only
+    called at ``start_run()``/``continue_run()``, so a run would stall
+    after its first batch of cards with no human action.
+
+    Called right after ``_fire_kanban_lifecycle_hook`` at every place a
+    card settles, with the same connection so no extra board lock is
+    taken. Fully best-effort — a broken projects store must never break a
+    board state transition. A no-op for a task with no ``project_id``.
+    """
+    try:
+        from hermes_cli import projects_reconcile
+        projects_reconcile.on_card_settled(conn, task_id)
+    except Exception:  # pragma: no cover - defensive
+        _log.debug(
+            "projects: capacity reconcile failed for %s", task_id,
+            exc_info=True,
+        )
+
+
 # A running task's claim is valid for 15 minutes by default; after that the
 # next dispatcher tick reclaims it. Workers that outlive this window should
 # call ``heartbeat_claim(task_id)`` periodically. In practice most kanban
@@ -4375,6 +4400,7 @@ def complete_task(
         run_id=run_id,
         summary=(summary if summary is not None else result),
     )
+    _reconcile_project_run_capacity(conn, task_id)
     return True
 
 
@@ -4846,6 +4872,7 @@ def block_task(
                 run_id=run_id,
                 reason=reason,
             )
+            _reconcile_project_run_capacity(conn, task_id)
             return True
 
         # Truly-blocked kinds. Increment the unblock-loop counter when this is a
@@ -4958,6 +4985,7 @@ def block_task(
         run_id=run_id,
         reason=reason,
     )
+    _reconcile_project_run_capacity(conn, task_id)
     return True
 
 
