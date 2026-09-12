@@ -8,9 +8,10 @@ file as work lands — one row per gap, per the plan's §7 breakdown.
 | 1 | A | `refill_run_cards()` + `projects_reconcile.on_card_settled()` refill hook (kanban_db → projects_reconcile → projects_run on card settle) | **Done** | [#388](https://github.com/leolau/ai-prentice-4-all/pull/388) | See "Gap A implementation notes" below |
 | 2 | B | `reconcile_all_open_runs()` + `run_stall_seconds`/`reconcile_interval_seconds` config + gateway watcher wiring + auto-fail stale runs | **Not started** | — | Depends on #1's `reconcile_run()` |
 | 3 | C | `doctor_findings`/`derive_health` `run_stalled` code (all cadences) | **Not started** | — | Read-only, can ship independently |
-| 4 | — | FG-32 §20.2 pointer to this defect + plan doc | **Not started** | — | Do after #1–#3 merge |
-| 5 | — | Tests (unit: refill, reconcile, doctor; gateway watcher interval; E2E full-run-without-manual-continue) | **Not started** | — | Written alongside each of #1–#3, per plan §5 |
-| 6 | — | Production cleanup: orphaned run `run_91b11d845e73` on `ai-professsional-builder-course-ppt` | **Not started** | — | Expected to self-resolve once #2 deploys; manual triage only if it doesn't |
+| 4 | — | FG-32 §20.2 pointer to this defect + plan doc | **Not started** | — | Do once #2/#3/#7 all land, one pointer covering all of them |
+| 5 | — | Tests (unit: refill, reconcile, doctor; gateway watcher interval; E2E full-run-without-manual-continue) | **Partially done** | [#388](https://github.com/leolau/ai-prentice-4-all/pull/388) | Gap A's tests landed with #388. B/C/D tests still to write |
+| 6 | — | Production cleanup: orphaned run `run_91b11d845e73` on `ai-professsional-builder-course-ppt` | **Done** | — | Manually unstuck 2026-09-12 — see "Gap D" below for why a code fix alone wouldn't have caught this one |
+| 7 | D (new) | `promote_run_cards()` picks which `triage` card to promote by **task-ID sort order**, not playbook/dependency order — under a `max_in_progress` cap smaller than the playbook width, it can promote a card whose own dependency was never promoted, deadlocking the run permanently (this is what actually broke the production run, not Gap A) | **Not started** | — | See "Gap D details" below |
 
 ## Investigation record (already done, 2026-09-13)
 
@@ -89,6 +90,50 @@ file as work lands — one row per gap, per the plan's §7 breakdown.
 - Shipped as its own PR ([#388](https://github.com/leolau/ai-prentice-4-all/pull/388)),
   separate from this plan's docs-only PR ([#387](https://github.com/leolau/ai-prentice-4-all/pull/387)),
   since #387 was explicitly "docs only, no behavior change."
+
+## Gap D details (found 2026-09-13, while manually recovering the production run)
+
+Root-causing the still-stuck production run after Gap A shipped revealed a
+**second, independent bug** in `promote_run_cards()`
+(`hermes_cli/projects_run.py`) — the actual reason this specific run never
+moved:
+
+- `projects_db.get_run_cards()` returns a run's linked cards via
+  `SELECT * FROM project_run_cards WHERE run_id = ?` with no `ORDER BY`.
+  SQLite returns these in primary-key (`task_id`) order, which is random
+  relative to the playbook's step order.
+- `promote_run_cards()` iterates that list and promotes the first `N` (up to
+  `room`, from `max_in_progress`) cards that are still `status == 'triage'`
+  — it does **not** check whether a card's own `depends_on` chain has
+  actually been promoted/completed. Dependency gating only happens later,
+  at the `todo → ready` transition inside `recompute_ready()`.
+- Net effect: with `max_in_progress=1` and a playbook wider than 1 step deep,
+  the *first* card promoted can be an arbitrary one — including a card whose
+  dependency was never itself promoted. That card then sits in `todo`
+  forever (can't reach `ready`, dependency unsatisfied), while the actual
+  dependency-free root step never gets a turn, because the run's one
+  `max_in_progress` slot is already "spent" on the wrong card.
+- This is exactly what happened to `run_91b11d845e73`: `draft-lab-prompts`
+  (depends on `draft-general-style-prompt`) got promoted instead of the
+  true root `setup-canva-presentation` (no dependencies) — permanently
+  deadlocking the run regardless of Gap A/B/C.
+- **Not fixed by Gap A**: the refill hook only re-invokes
+  `promote_run_cards()` on a *card settling* — with the wrong card stuck in
+  `todo` and nothing ever reaching `running`/`ready`, no completion event
+  ever fires, so Gap A's hook never gets a chance to run.
+- **Manual recovery applied**: directly called
+  `kanban_db.specify_triage_task(bconn, "t_ec025ca3", author="leo_owner")`
+  (the actual root card) — bypassing the generic `hermes kanban specify`
+  CLI sweeper, which correctly refuses project-owned cards ("its run
+  promotes it, not the sweeper"). The dispatcher (confirmed healthy)
+  claimed and spawned a worker within one tick.
+- **Suggested fix** (not yet implemented): `promote_run_cards()` should
+  prefer topologically-ready candidates — e.g. sort candidates by whether
+  their `depends_on` set is already satisfied (done/no deps) before falling
+  back to arrival/step order — rather than promoting the first
+  `status == 'triage'` row in an arbitrary DB order. Needs a test with a
+  playbook wider than `max_in_progress` and dependencies between steps,
+  asserting the *root* step (not an arbitrary sibling) is the one promoted.
 
 ## How to update this file
 
