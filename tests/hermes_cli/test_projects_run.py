@@ -318,6 +318,56 @@ def test_max_in_progress_caps_promotion(stores):
             assert kanban_db.get_task(bconn, tid).status == "triage"
 
 
+def test_promotion_prefers_the_dependency_free_root_over_a_blocked_sibling(stores):
+    """Regression: ``get_run_cards()`` returns a run's cards with no
+    playbook order (SQLite returns ``project_run_cards`` rows by
+    ``task_id``, random relative to the playbook). With a cap narrower
+    than the playbook, promoting whichever triage card happens to sort
+    first — instead of preferring one whose dependencies are actually
+    satisfied — can pick a step whose own dependency was never promoted,
+    permanently deadlocking the run (found in production: a real root
+    step sat in ``triage`` for 15+ hours while a downstream sibling sat
+    stuck in ``todo``, unable to ever reach ``ready``).
+
+    ``root`` has no dependencies; ``child_a``/``child_b`` both depend on
+    it and are not yet satisfiable. With ``max_in_progress=1``, exactly
+    ``root`` must be the one promoted — never a child — regardless of
+    how the DB happens to order the three triage rows.
+    """
+    project, _ = _make_project(autonomy="autonomous", max_in_progress=1)
+    steps = [
+        {"key": "root", "title": "Root step"},
+        {"key": "child_a", "title": "Child A", "depends_on": ["root"]},
+        {"key": "child_b", "title": "Child B", "depends_on": ["root"]},
+    ]
+    _save_playbook(project.id, steps)
+    with projects_db.connect_closing() as conn:
+        projects_db.activate_playbook_rev(conn, project.id, 1)
+    result = _start(project.id)
+    assert result["promoted"] == [result["cards"]["root"]]
+    with kanban_db.connect_closing() as bconn:
+        # 'ready', not 'todo': specify_triage_task's own recompute_ready
+        # advances a parent-free card immediately.
+        assert kanban_db.get_task(bconn, result["cards"]["root"]).status == "ready"
+        assert kanban_db.get_task(bconn, result["cards"]["child_a"]).status == "triage"
+        assert kanban_db.get_task(bconn, result["cards"]["child_b"]).status == "triage"
+
+
+def test_promotion_falls_back_to_playbook_order_among_equally_ready_siblings(stores):
+    """When multiple candidates are equally ready (no unmet dependency —
+    the common case of independent steps), the tie-break is playbook
+    position, not the incidental DB row order — deterministic, and
+    matches what a human reading the playbook top-to-bottom would expect
+    to run first."""
+    project, _ = _make_project(autonomy="autonomous", max_in_progress=1)
+    steps = [{"key": f"s{i}", "title": f"Step {i}"} for i in range(3)]
+    _save_playbook(project.id, steps)
+    with projects_db.connect_closing() as conn:
+        projects_db.activate_playbook_rev(conn, project.id, 1)
+    result = _start(project.id)
+    assert result["promoted"] == [result["cards"]["s0"]]
+
+
 def test_completing_a_card_auto_promotes_the_next_one(stores):
     """Regression for the incident where a run with ``max_in_progress=1``
     promoted its first card and then never promoted again: nothing used

@@ -456,6 +456,7 @@ def _full_health(conn, project, card_rollup: dict, profiles: list) -> str:
         profiles=profiles,
         runs=runs,
         cron_job=cron_job,
+        pconn=conn,
     )
 
 
@@ -3411,13 +3412,14 @@ async def project_doctor_route(request: Request) -> dict[str, Any]:
             findings = projects_schedule.doctor_findings(
                 conn, project, profiles=profiles, runs=runs, cron_job=cron_job
             )
-        health = projects_schedule.derive_health(
-            project,
-            card_rollup=rollup,
-            profiles=profiles,
-            runs=runs,
-            cron_job=cron_job,
-        )
+            health = projects_schedule.derive_health(
+                project,
+                card_rollup=rollup,
+                profiles=profiles,
+                runs=runs,
+                cron_job=cron_job,
+                pconn=conn,
+            )
         return {
             "slug": project.slug,
             "health": health,

@@ -451,6 +451,71 @@ def test_doctor_cadence_overdues_and_broken_board(stores, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# Run staleness (Gap B/C) — a stuck `running` run must not look identical
+# to a working one, for ANY cadence, not just repeatable's schedule check.
+# plans/2026-09-13-project-run-resilience-plan.md
+# ---------------------------------------------------------------------------
+
+
+def _running_run_row(*, started_at, run_id="run_test", run_no=1):
+    return {
+        "id": run_id, "run_no": run_no, "started_at": started_at,
+        "status": "running", "outcome": None, "score_user": None,
+    }
+
+
+@pytest.mark.parametrize("cadence", ["one_off", "repeatable", "standing"])
+def test_doctor_finds_a_stalled_running_run_for_any_cadence(stores, cadence):
+    project = _repeatable_project(cadence=cadence)
+    stale = _running_run_row(started_at=NOW - 3 * 3600)  # 3h — over the 2h default
+    codes = {f["code"] for f in _findings(project, runs=[stale])}
+    assert "run_stalled" in codes
+
+
+def test_doctor_does_not_flag_a_fresh_running_run(stores):
+    project = _repeatable_project(cadence="one_off")
+    fresh = _running_run_row(started_at=NOW - 60)  # 1 minute ago
+    codes = {f["code"] for f in _findings(project, runs=[fresh])}
+    assert "run_stalled" not in codes
+
+
+def test_doctor_ignores_a_closed_run_regardless_of_age(stores):
+    project = _repeatable_project(cadence="one_off")
+    old_but_done = dict(_running_run_row(started_at=NOW - 10 * 3600), status="done")
+    codes = {f["code"] for f in _findings(project, runs=[old_but_done])}
+    assert "run_stalled" not in codes
+
+
+def test_health_ladder_for_a_stale_running_run(stores):
+    """attention past the threshold, stalled past 4x it — mirrors the
+    existing 'stalled outranks attention' precedent for schedule silence."""
+    project = _repeatable_project(cadence="one_off")
+
+    moderately_stale = _running_run_row(started_at=NOW - 3 * 3600)  # >1x, <4x
+    with projects_db.connect_closing() as conn:
+        assert projects_schedule.derive_health(
+            project, card_rollup=dict(_ROLLUP), profiles=_profiles(project.id),
+            runs=[moderately_stale], now=NOW, pconn=conn,
+        ) == "attention"
+
+    very_stale = _running_run_row(started_at=NOW - 9 * 3600)  # >4x
+    with projects_db.connect_closing() as conn:
+        assert projects_schedule.derive_health(
+            project, card_rollup=dict(_ROLLUP), profiles=_profiles(project.id),
+            runs=[very_stale], now=NOW, pconn=conn,
+        ) == "stalled"
+
+
+def test_health_skips_the_run_staleness_check_without_pconn(stores):
+    """Callers that don't have a connection handy (none currently, but the
+    param is optional) get the old behavior — never a crash, never a
+    false positive from a check they didn't ask for."""
+    project = _repeatable_project(cadence="one_off")
+    very_stale = _running_run_row(started_at=NOW - 9 * 3600)
+    assert _health(project, runs=[very_stale]) == "ok"
+
+
+# ---------------------------------------------------------------------------
 # Period estimation — sizes the staleness window, never load-bearing
 # ---------------------------------------------------------------------------
 
