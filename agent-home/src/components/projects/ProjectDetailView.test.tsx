@@ -726,6 +726,45 @@ describe("CardDetailView", () => {
     expect(html).not.toContain('data-component="CardEditor"');
     expect(html).not.toContain('data-component="CardActions"');
   });
+
+  // Regression: a blocked card used to show status="blocked" and nothing
+  // else — no reason, no next step (kanban_block's `reason` is required at
+  // the tool layer but the card detail endpoint dropped it before it ever
+  // reached the UI; see the projects_api.py get_card() fix).
+  it("surfaces why a blocked card stopped and what to do next", () => {
+    const html = renderToStaticMarkup(
+      <CardDetailView
+        slug="s"
+        card={{
+          ...CARD({
+            status: "blocked",
+            block_kind: "needs_input",
+            latest_summary: "Which Canva template should I use?",
+          }),
+          age: null,
+        }}
+        profiles={["default"]}
+      />,
+    );
+    expect(html).toContain('data-component="CardBlockedReason"');
+    expect(html).toContain("Needs your input");
+    expect(html).toContain("Which Canva template should I use?");
+    expect(html).toContain("Make ready");
+    // Not repeated in a second, generically-labelled section.
+    expect(html).not.toContain('data-component="CardResult"');
+  });
+
+  it("still shows a blocked banner when no reason was recorded", () => {
+    const html = renderToStaticMarkup(
+      <CardDetailView
+        slug="s"
+        card={{ ...CARD({ status: "blocked" }), age: null }}
+        profiles={[]}
+      />,
+    );
+    expect(html).toContain('data-component="CardBlockedReason"');
+    expect(html).toContain("No reason was recorded for this block.");
+  });
 });
 
 describe("CardActions", () => {
