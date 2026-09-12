@@ -212,6 +212,7 @@ describe("detail panels", () => {
         slug="monday-digest"
         project={PROJECT}
         blockedCards={[CARD({ id: "task_3", status: "blocked", title: "Blocked by tone decision" })]}
+        readiness={[]}
       />,
     );
     expect(html).toContain("1 of 2 outputs accepted");

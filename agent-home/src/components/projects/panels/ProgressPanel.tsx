@@ -1,17 +1,25 @@
 import Link from "next/link";
 
 import { outputsLabel } from "@/components/projects/outputsLabel";
+import type { ReadinessItem } from "@/components/projects/readiness";
 import type { ProjectBoardTask, ProjectDetail } from "@/types";
 
 /**
  * The one sentence that says what the project needs from a person right
  * now, in priority order: a waiting run, blocked cards, outputs to accept,
- * a missing plan/activation — else nothing. Null when the agent has it.
+ * then the first unmet item on the same readiness ladder the header
+ * checklist shows — else nothing. Null when the agent has it.
+ *
+ * This used to compute its own, differently-worded "activate" / "finish
+ * the checklist" messages from `runnable` alone, which could point at a
+ * panel that had no matching control (e.g. Settings for "Activate") or
+ * blame the wrong item. Reusing `readiness` means this card and the
+ * header's `ReadinessChecklist` can never disagree about what's next.
  */
 export function nextAction(
   project: ProjectDetail,
   blockedCards: ProjectBoardTask[],
-  runnable: boolean,
+  readiness: ReadinessItem[],
 ): { text: string; href: string } | null {
   if (project.archived) return null;
   const waiting = project.runs.find((run) => run.status === "waiting");
@@ -34,11 +42,9 @@ export function nextAction(
       href: "#panel-outputs",
     };
   }
-  if (project.status !== "active") {
-    return { text: "Activate the project to let it run.", href: "#panel-settings" };
-  }
-  if (!runnable) {
-    return { text: "Finish the readiness checklist so it can run.", href: "#panel-plan" };
+  const blocking = readiness.find((item) => !item.ok);
+  if (blocking) {
+    return { text: blocking.hint, href: blocking.anchor };
   }
   if (project.runs.some((run) => run.status === "running")) {
     return { text: "A run is in progress — nothing needed from you.", href: "#panel-runs" };
@@ -55,16 +61,16 @@ export function ProgressPanel({
   slug,
   project,
   blockedCards,
-  runnable = true,
+  readiness,
 }: {
   slug: string;
   project: ProjectDetail;
   blockedCards: ProjectBoardTask[];
-  runnable?: boolean;
+  readiness: ReadinessItem[];
 }) {
   const { progress, card_rollup: rollup } = project;
   const outputs = outputsLabel(project.output_rollup);
-  const action = nextAction(project, blockedCards, runnable);
+  const action = nextAction(project, blockedCards, readiness);
   return (
     <section
       id="panel-progress"
