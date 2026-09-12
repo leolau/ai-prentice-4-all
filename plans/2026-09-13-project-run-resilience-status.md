@@ -3,15 +3,21 @@
 Companion to `plans/2026-09-13-project-run-resilience-plan.md`. Update this
 file as work lands — one row per gap, per the plan's §7 breakdown.
 
+**Deploy status as of 2026-09-13**: Gap A (#388) is merged AND deployed to
+the Hetzner production box (`76d8a0984`). Gap B/C/D (#389) are merged to
+`develop` but **deliberately not deployed** — built and verified locally
+per an explicit request to not touch production while doing this round of
+work. The next production deploy of `develop` will carry them.
+
 | # | Gap | Description | Status | PR / commit | Notes |
 |---|-----|-------------|--------|--------------|-------|
 | 1 | A | `refill_run_cards()` + `projects_reconcile.on_card_settled()` refill hook (kanban_db → projects_reconcile → projects_run on card settle) | **Done** | [#388](https://github.com/leolau/ai-prentice-4-all/pull/388) | See "Gap A implementation notes" below |
-| 2 | B | `reconcile_all_open_runs()` + `run_stall_seconds`/`reconcile_interval_seconds` config + gateway watcher wiring + auto-fail stale runs | **Not started** | — | Depends on #1's `reconcile_run()` |
-| 3 | C | `doctor_findings`/`derive_health` `run_stalled` code (all cadences) | **Not started** | — | Read-only, can ship independently |
-| 4 | — | FG-32 §20.2 pointer to this defect + plan doc | **Not started** | — | Do once #2/#3/#7 all land, one pointer covering all of them |
-| 5 | — | Tests (unit: refill, reconcile, doctor; gateway watcher interval; E2E full-run-without-manual-continue) | **Partially done** | [#388](https://github.com/leolau/ai-prentice-4-all/pull/388) | Gap A's tests landed with #388. B/C/D tests still to write |
+| 2 | B | `reconcile_all_open_runs()` + `run_stall_seconds`/`reconcile_interval_seconds` config + gateway watcher wiring + auto-fail stale runs | **Done** (code merged; **not deployed to production**) | [#389](https://github.com/leolau/ai-prentice-4-all/pull/389) | See "Gap B/C/D implementation notes" below |
+| 3 | C | `doctor_findings`/`derive_health` `run_stalled` code (all cadences) | **Done** (code merged; **not deployed to production**) | [#389](https://github.com/leolau/ai-prentice-4-all/pull/389) | Read-only, shipped alongside B/D |
+| 4 | — | FG-32 §20.2 pointer to this defect + plan doc | **Not started** | — | Do once #389 is deployed and verified live |
+| 5 | — | Tests (unit: refill, reconcile, doctor; gateway watcher interval; E2E full-run-without-manual-continue) | **Done** | [#388](https://github.com/leolau/ai-prentice-4-all/pull/388), [#389](https://github.com/leolau/ai-prentice-4-all/pull/389) | Gap A tests in #388; B/C/D tests in #389 |
 | 6 | — | Production cleanup: orphaned run `run_91b11d845e73` on `ai-professsional-builder-course-ppt` | **Done** | — | Manually unstuck 2026-09-12 — see "Gap D" below for why a code fix alone wouldn't have caught this one |
-| 7 | D (new) | `promote_run_cards()` picks which `triage` card to promote by **task-ID sort order**, not playbook/dependency order — under a `max_in_progress` cap smaller than the playbook width, it can promote a card whose own dependency was never promoted, deadlocking the run permanently (this is what actually broke the production run, not Gap A) | **Not started** | — | See "Gap D details" below |
+| 7 | D (new) | `promote_run_cards()` picks which `triage` card to promote by **task-ID sort order**, not playbook/dependency order — under a `max_in_progress` cap smaller than the playbook width, it can promote a card whose own dependency was never promoted, deadlocking the run permanently (this is what actually broke the production run, not Gap A) | **Done** (code merged; **not deployed to production**) | [#389](https://github.com/leolau/ai-prentice-4-all/pull/389) | See "Gap D details" below |
 
 ## Investigation record (already done, 2026-09-13)
 
@@ -127,13 +133,79 @@ moved:
   CLI sweeper, which correctly refuses project-owned cards ("its run
   promotes it, not the sweeper"). The dispatcher (confirmed healthy)
   claimed and spawned a worker within one tick.
-- **Suggested fix** (not yet implemented): `promote_run_cards()` should
-  prefer topologically-ready candidates — e.g. sort candidates by whether
-  their `depends_on` set is already satisfied (done/no deps) before falling
-  back to arrival/step order — rather than promoting the first
-  `status == 'triage'` row in an arbitrary DB order. Needs a test with a
-  playbook wider than `max_in_progress` and dependencies between steps,
-  asserting the *root* step (not an arbitrary sibling) is the one promoted.
+- **Fixed** in [#389](https://github.com/leolau/ai-prentice-4-all/pull/389):
+  `promote_run_cards()` now splits candidates into dependency-satisfied
+  vs. not (ready ones promoted first), tie-broken by playbook position
+  instead of the incidental DB row order — exactly the suggested fix
+  below, implemented as described.
+
+## Gap B/C/D implementation notes (deviations from the plan's §3.1–§3.3 sketch)
+
+- **Gap D** landed inside the existing `promote_run_cards()` in
+  `hermes_cli/projects_run.py` rather than a new function — it's the same
+  loop, just re-ordering its candidate list before promoting. One extra
+  `SELECT ... WHERE id IN (...)` per call to snapshot every run card's
+  current status once (used both for the `triage` filter and for
+  `_deps_satisfied()`), replacing the old per-row `SELECT`.
+- **Gap B**'s `reconcile_all_open_runs()` and `_reconcile_one_run()` landed
+  in `hermes_cli/projects_reconcile.py` (the module Gap A already created),
+  not a new module — matches the plan's naming closely (`reconcile_run`
+  from the sketch became the inline `_reconcile_one_run` per-run helper;
+  the public entry point is `reconcile_all_open_runs`).
+- The shared liveness read is `projects_reconcile.run_last_activity_at(pconn,
+  project, run)` (plan called it `run_last_activity_at` too — landed
+  as-designed). It opens its own board connection
+  (`kanban_db.connect_closing(board=project.board_slug or None)`) rather
+  than requiring the caller to already have one open, so both the sweep
+  and `doctor`/`health` can call it with only a projects-db connection in
+  hand.
+- **Idempotency against two gateways**: before closing a stale run,
+  `_reconcile_one_run()` re-reads the run fresh from the DB and checks it's
+  still `running` — added because the shared root Projects store has no
+  per-profile ownership, so two profiles' gateways could both be sweeping
+  the same project. Not covered by a real two-process test (out of scope
+  for a unit test), but covered by
+  `test_reconcile_is_idempotent_against_an_already_closed_run` (simulates
+  the race by closing the run between `start_run()` and the sweep call).
+- **Gateway wiring**: a new sibling watcher method
+  `_projects_reconcile_watcher()` in `gateway/kanban_watchers.py`, started
+  via `asyncio.create_task()` in `gateway/run.py::start()` right next to
+  the existing `_kanban_dispatcher_watcher()` call — additive, per the
+  plan's "extend the existing watcher loop, don't add a new service"
+  constraint. Deliberately has **no singleton lock** (unlike the kanban
+  dispatcher's `.dispatcher.lock`) — every write it makes goes through
+  primitives (`specify_triage_task`, `close_project_run`) that are already
+  transaction-safe against concurrent callers; a lock would add complexity
+  for a failure mode (duplicate no-op / doubled notification) that's
+  already harmless.
+- **Gap C** required threading a new optional `pconn` parameter through
+  `derive_health()` (not in the original plan sketch, which only mentioned
+  extending `doctor_findings`) — `derive_health()` didn't take a connection
+  at all before this, and the run-staleness check needs one. Both call
+  sites in `hermes_cli/projects_api.py` (`_full_health` and
+  `project_doctor_route`) were updated to pass it; any other caller that
+  omits `pconn` keeps the old behavior unchanged (tested).
+- Config: `projects.run_stall_seconds` (default `7200`) and
+  `projects.reconcile_interval_seconds` (default `300`) landed exactly as
+  specced in `projects_run.projects_runtime_config()`.
+- **Verification**: the first full-suite run (raw `pytest file1 file2 ...`
+  across ~300 files in one process) produced several false failures,
+  including one of this PR's own new tests — traced to cross-file global-
+  state/async-mock pollution from combining that many files in a single
+  pytest process, NOT anything this change broke. Confirmed by re-running
+  through the repo's actual canonical runner
+  (`scripts/run_tests.sh`, which isolates each file in its own subprocess
+  per `AGENTS.md`/the script's own docstring) — 986 passed, 2 failed, both
+  pre-existing and unrelated (verified identical via `git stash` against
+  unmodified `develop`). Lesson for next time: use `scripts/run_tests.sh`
+  from the start, not a bare multi-file `pytest` invocation.
+- **Not deployed to production** — built and tested locally only, per an
+  explicit request while investigating/fixing this to not touch the
+  Hetzner box again this round. The already-orphaned run
+  (`run_91b11d845e73`) was already manually recovered before this code
+  existed (see row 6); B/C/D landing in production will make the *next*
+  incident like it self-heal instead of needing another manual
+  investigation.
 
 ## How to update this file
 
