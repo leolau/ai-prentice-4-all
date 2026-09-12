@@ -1922,7 +1922,14 @@ async def get_card(request: Request, task_id: str) -> dict[str, Any]:
                 and not _instance_admin(principal)
             ):
                 raise KeyError(task_id)
-            return kanban_view.task_dict(task)
+            # The board-list endpoint attaches each card's latest run summary
+            # (kanban_db.latest_summaries, batched) so a blocked/handed-off
+            # card isn't a blank drawer; this single-card endpoint used to
+            # call task_dict() with no summary at all, so `kanban_block`'s
+            # required `reason` — the one thing a human needs to see to know
+            # what to do — never reached the card detail page.
+            summary = kanban_db.latest_summary(bconn, task_id)
+            return kanban_view.task_dict(task, latest_summary=summary)
 
     try:
         return await asyncio.to_thread(_get_sync)

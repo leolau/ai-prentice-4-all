@@ -17,6 +17,27 @@ const STATUS_TONE: Record<string, Tone> = {
 };
 
 /**
+ * Human framing for `kanban_db.VALID_BLOCK_KINDS` — matches the language
+ * `kanban_block`'s tool schema uses when asking the worker why it stopped,
+ * so the human sees the same vocabulary the agent chose from.
+ */
+const BLOCK_KIND_LABEL: Record<string, string> = {
+  needs_input: "Needs your input",
+  capability: "The agent can't do this — needs a human",
+  transient: "Hit a snag — may clear on retry",
+};
+
+/** Why this card stopped, in one line: `kanban_block`'s required `reason`
+ * text, or a fallback for the (now rare) case a caller blocked it without
+ * one — e.g. a manual column move via the board, not the agent tool. */
+function blockReasonText(card: ProjectCardDetail): string {
+  const reason = card.latest_summary ?? card.result;
+  return reason && reason.trim()
+    ? reason
+    : "No reason was recorded for this block.";
+}
+
+/**
  * One card (§13): everything the board row knows — stage, assignee, step,
  * the body, the result and the latest worker summary — plus the hand edits
  * a member may make (title / brief / assignee / column) and the operator
@@ -69,6 +90,27 @@ export function CardDetailView({
         <p className="mt-1 text-xs text-[var(--color-muted)]">
           {timing.join(" · ")}
         </p>
+        {card.status === "blocked" ? (
+          <div
+            data-component="CardBlockedReason"
+            className="mt-3 rounded-xl border border-red-500/30 bg-red-500/10 p-3"
+          >
+            <p className="text-xs font-medium uppercase tracking-wide text-red-300">
+              {card.block_kind
+                ? (BLOCK_KIND_LABEL[card.block_kind] ?? "Blocked")
+                : "Blocked"}
+            </p>
+            <p className="mt-1 whitespace-pre-wrap text-sm">
+              {blockReasonText(card)}
+            </p>
+            {!archived ? (
+              <p className="mt-2 text-xs text-[var(--color-muted)]">
+                Use Edit card below to answer or adjust the brief, then Make
+                ready to let the agent pick it back up.
+              </p>
+            ) : null}
+          </div>
+        ) : null}
         {!archived ? (
           <>
             <CardActions slug={slug} taskId={card.id} status={card.status} />
@@ -95,7 +137,10 @@ export function CardDetailView({
         </section>
       ) : null}
 
-      {card.latest_summary || card.result ? (
+      {/* Blocked already shows this text, framed as "why + what to do",
+          in the header banner above — repeating it here would just be the
+          same sentence twice. */}
+      {card.status !== "blocked" && (card.latest_summary || card.result) ? (
         <section
           data-component="CardResult"
           className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface)] p-4"
