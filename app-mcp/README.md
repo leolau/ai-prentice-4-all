@@ -1,9 +1,11 @@
 # app-mcp — the agent's eyes and hands on agent-home
 
 app-mcp is internal app infrastructure: a standalone service that lets the
-Hermes agent **see** and **drive** the agent-home UI at runtime.
+Hermes agent **see** and **drive** the agent-home UI at runtime, and (Folder
+Bridge) read local files the user has explicitly approved from their own
+Mac.
 
-Two capabilities, exposed as MCP tools (`mcp_app_*` on the agent side):
+Three capabilities, exposed as MCP tools (`mcp_app_*` on the agent side):
 
 1. **Introspection** — what page the user is on, which element they last
    touched, and a live, detailed description of every interactive element on
@@ -13,12 +15,18 @@ Two capabilities, exposed as MCP tools (`mcp_app_*` on the agent side):
    actions run immediately; anything destructive (delete / archive / send /
    submit …) must go through `app_act_destructive`, which Hermes gates behind
    its tool-approval flow, so the user approves in-chat before it happens.
+3. **Folder Bridge** — list/search/read within local folders on the user's
+   Mac that they explicitly approved via the browser's File System Access
+   API at `/files/bridge`. Read-only; nothing outside an approved folder is
+   ever reachable. See "Why Folder Bridge reads are recommended-gated" below.
 
 **Awareness is automatic**: the agent-home browser bridge reports page +
 last-active element to this service, and every chat turn sent from the app
 carries a one-line `[app context: …]` ahead of the message (see
 `agent-home/src/lib/chat/ui-context.ts`). The user can say "this page" or
-"the button I'm on" and the agent knows what they mean.
+"the button I'm on" and the agent knows what they mean. Folder Bridge is
+opt-in and separate: nothing is shared until the user opens `/files/bridge`
+and explicitly approves folders there.
 
 ## Architecture
 
@@ -27,23 +35,31 @@ Browser (agent-home)                     Box
 ────────────────────                     ───
 AppMcpBridge (client)   ──WSS──▶  app-mcp (this service)
   · reports page + focus            · WS hub      127.0.0.1:9221
-  · executes commands               · MCP endpoint 127.0.0.1:9220/mcp
-      ▲                                 ▲
-      │ 60s HMAC ticket                 │ mcp_servers: app:
-  POST /api/app-mcp/ticket        Hermes agent (tools/mcp_tool.py)
-  (BFF, signed session)           approvals.tools: [mcp_app_app_act_destructive]
+  · executes commands                 · /app-mcp/ws         → UI hub
+                                       · /app-mcp/folders/ws → folder hub
+FolderBridge (client,   ──WSS──▶     · MCP endpoint 127.0.0.1:9220/mcp
+  /files/bridge only)
+  · showDirectoryPicker()                ▲
+  · list/search/read locally              │ mcp_servers: app:
+      ▲                                Hermes agent (tools/mcp_tool.py)
+      │ 60s HMAC ticket (both)        approvals.tools: [mcp_app_app_act_destructive,
+  POST /api/app-mcp/ticket                  mcp_app_folder_bridge_read_file,
+  (BFF, signed session)                     mcp_app_folder_bridge_search_files]
 ```
 
 - **Auth**: the browser never shares its session cookie with this service.
   The agent-home BFF (which owns authentication) mints a 60-second
   HMAC-signed ticket (`<user_id>.<expiry_ms>.<sig>`); the service verifies it
   with the shared secret (`APP_MCP_TICKET_SECRET` ==
-  `AGENT_HOME_APP_MCP_SECRET`).
-- **Exposure**: nothing public except Caddy's `/app-mcp/ws` reverse proxy on
-  the agent-home origin. The MCP endpoint is loopback-only.
+  `AGENT_HOME_APP_MCP_SECRET`). The same ticket/secret authenticates both WS
+  paths — a ticket only proves "this is user X right now"; the browser picks
+  which capability it wants by which path it dials.
+- **Exposure**: nothing public except Caddy's `/app-mcp/ws` and
+  `/app-mcp/folders/ws` reverse proxies on the agent-home origin. The MCP
+  endpoint is loopback-only.
 - **Graceful degradation**: no secret configured → ticket route answers 503,
   the bridge retries quietly, everything else works. Service down → MCP tools
-  return a structured "no app session connected" error.
+  return a structured "no app/folder session connected" error.
 
 ## MCP tools
 
@@ -55,6 +71,25 @@ AppMcpBridge (client)   ──WSS──▶  app-mcp (this service)
 | `app_describe_page` | Live snapshot: every interactive element with id/role/name/state |
 | `app_act` | Safe actions (click/type/select/focus/read/scroll/navigate/snapshot); refuses destructive-looking targets |
 | `app_act_destructive` | Same, for destructive actions — gated by `approvals.tools` |
+| `folder_bridge_state` | Whether a Folder Bridge browser session is connected |
+| `folder_bridge_list_folders` | The user's currently-approved folders (id, label, permission status) |
+| `folder_bridge_list_directory` | List a directory inside an approved folder |
+| `folder_bridge_search_files` | Search by filename/snippet across approved folders — **recommend gating** |
+| `folder_bridge_read_file` | Read a file's content — **recommend gating** |
+| `folder_bridge_get_file_metadata` | A file's size/modified time without reading it |
+
+### Why Folder Bridge reads are recommended-gated
+
+`app_act`/`app_act_destructive` are bounded by what the signed-in user could
+already do in agent-home. `folder_bridge_read_file` and
+`folder_bridge_search_files` reach **arbitrary local files on the user's own
+Mac** that they approved — new blast radius, and exactly the "reads must be
+gated too" case `docs/deployment/mcp-approval-gating.md` calls out for other
+providers (a prompt-injected instruction from an email/WhatsApp message could
+otherwise ask the agent to read and exfiltrate a local file with no human in
+the loop). `folder_bridge_list_folders`/`_list_directory`/`_get_file_metadata`
+are left ungated by default (names/sizes/timestamps only, same sensitivity as
+`app_describe_page`); widen to `mcp_app_folder_bridge_*` for maximum caution.
 
 ## Hermes wiring (box config.yaml)
 
@@ -66,9 +101,13 @@ mcp_servers:
 approvals:
   tools:
     - mcp_app_app_act_destructive
+    - mcp_app_folder_bridge_read_file
+    - mcp_app_folder_bridge_search_files
 ```
 
-Restart the gateway after changing either block.
+Restart the gateway after changing either block. This is a deliberate,
+owner-made config change on the production box — it is not turned on by
+merely deploying this code.
 
 ## Running
 

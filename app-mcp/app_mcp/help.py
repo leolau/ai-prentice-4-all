@@ -125,6 +125,18 @@ HELP: dict[str, str] = {
         "browse what is registered and where it lives; link a file to a project "
         "from the project's Files panel."
     ),
+    "/files/bridge": (
+        "Folder Bridge lets you connect local folders on your Mac so the agent "
+        "can search and read them directly, without you uploading anything. "
+        "Chromium browsers only (Chrome, Edge, Brave). Press Connect, then Add "
+        "folder and pick a folder — you can add more than one. Once connected, "
+        "ask the agent in chat to search or read a file from that folder; the "
+        "first real read usually asks for your approval in chat. Remove a "
+        "folder any time to revoke its access, or Disconnect to end the "
+        "session entirely. Access is read-only and limited to the folders you "
+        "explicitly approved here — closing this page ends the agent's access "
+        "until you reopen it."
+    ),
     "/activity": (
         "Activity shows what the agent has been doing as traces; open one to "
         "see the steps, tools and timing of a single piece of work."

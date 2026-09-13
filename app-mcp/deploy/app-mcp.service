@@ -1,9 +1,11 @@
-# systemd unit for app-mcp (agent-home UI introspection/control bridge).
+# systemd unit for app-mcp (agent-home UI introspection/control bridge, plus
+# the Folder Bridge local-filesystem MCP tools).
 #
 # Two loopback listeners: the WebSocket hub the browser bridge connects to
-# (127.0.0.1:9221 — Caddy fronts ONLY /app-mcp/ws on the public origin), and
-# the MCP streamable-HTTP endpoint the Hermes agent consumes
-# (127.0.0.1:9220/mcp, via `mcp_servers: app:` in the agent's config.yaml).
+# (127.0.0.1:9221 — Caddy fronts ONLY /app-mcp/ws and /app-mcp/folders/ws on
+# the public origin), and the MCP streamable-HTTP endpoint the Hermes agent
+# consumes (127.0.0.1:9220/mcp, via `mcp_servers: app:` in the agent's
+# config.yaml).
 #
 # Runs from the main checkout (FG-23 A0.1 pattern): one `git pull` moves it.
 # Reuses the hermes-agent venv — mcp and websockets are already pinned there.
