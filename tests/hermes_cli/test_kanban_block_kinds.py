@@ -17,6 +17,7 @@ forever. The fix gives ``block_task`` a typed ``kind`` and a persistent
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
 import pytest
@@ -200,3 +201,126 @@ def test_block_without_kind_is_backward_compatible(kanban_home: Path) -> None:
         t = kb.get_task(conn, tid)
         assert t.status == "blocked"
         assert t.block_kind is None
+
+
+# ---------------------------------------------------------------------------
+# Auto-retry timer (a block that clears on its own — e.g. a daily API quota)
+# ---------------------------------------------------------------------------
+
+
+def test_retry_after_seconds_stamps_retry_at(kanban_home: Path) -> None:
+    with kb.connect_closing() as conn:
+        tid = _running_task(conn)
+        before = int(time.time())
+        assert kb.block_task(
+            conn, tid, reason="Canva's daily limit was reached",
+            kind="transient", retry_after_seconds=86_400,
+        )
+        t = kb.get_task(conn, tid)
+        assert t.status == "blocked"
+        assert t.retry_at is not None
+        assert t.retry_at >= before + 86_400
+
+
+def test_negative_or_zero_retry_after_seconds_rejected(kanban_home: Path) -> None:
+    with kb.connect_closing() as conn:
+        tid = _running_task(conn)
+        with pytest.raises(ValueError):
+            kb.block_task(conn, tid, reason="x", retry_after_seconds=0)
+        with pytest.raises(ValueError):
+            kb.block_task(conn, tid, reason="x", retry_after_seconds=-5)
+
+
+def test_auto_retry_unblocks_once_the_timer_elapses(kanban_home: Path) -> None:
+    with kb.connect_closing() as conn:
+        tid = _running_task(conn)
+        kb.block_task(
+            conn, tid, reason="quota wall", kind="transient",
+            retry_after_seconds=60,
+        )
+        # Not due yet.
+        assert kb.auto_retry_timed_blocks(conn) == []
+        assert kb.get_task(conn, tid).status == "blocked"
+        # Fast-forward past the timer.
+        future = int(time.time()) + 61
+        assert kb.auto_retry_timed_blocks(conn, now=future) == [tid]
+        t = kb.get_task(conn, tid)
+        assert t.status == "ready"
+        assert t.retry_at is None
+        events = [e for e in kb.list_events(conn, tid) if e.kind == "auto_retry"]
+        assert events, "expected an auto_retry event, not a plain unblocked"
+
+
+def test_auto_retry_leaves_untimed_blocks_alone(kanban_home: Path) -> None:
+    """A block with no retry_after_seconds keeps waiting for a human."""
+    with kb.connect_closing() as conn:
+        tid = _running_task(conn)
+        kb.block_task(conn, tid, reason="need a decision", kind="needs_input")
+        assert kb.get_task(conn, tid).retry_at is None
+        far_future = int(time.time()) + 10 ** 9
+        assert kb.auto_retry_timed_blocks(conn, now=far_future) == []
+        assert kb.get_task(conn, tid).status == "blocked"
+
+
+def test_auto_retry_still_escalates_a_genuine_loop_to_triage(kanban_home: Path) -> None:
+    """A retry timer is not a way to spin forever: if the worker hits the
+    same wall again right after an auto-retry, the existing unblock-loop
+    breaker still trips at BLOCK_RECURRENCE_LIMIT — same as a human/cron
+    unblock would."""
+    with kb.connect_closing() as conn:
+        tid = _running_task(conn)
+        kb.block_task(
+            conn, tid, reason="quota wall", kind="transient",
+            retry_after_seconds=1,
+        )
+        future = int(time.time()) + 2
+        assert kb.auto_retry_timed_blocks(conn, now=future) == [tid]
+        _make_running_again(conn, tid)
+        kb.block_task(
+            conn, tid, reason="quota wall again", kind="transient",
+            retry_after_seconds=1,
+        )
+        t = kb.get_task(conn, tid)
+        assert t.status == "triage"
+        assert t.retry_at is None  # no timer once it's a human's problem
+
+
+def test_dispatch_once_runs_the_auto_retry_sweep(kanban_home: Path) -> None:
+    """The feature has to actually fire on its own: a real dispatcher tick
+    (not just a direct auto_retry_timed_blocks() call) must pick up a
+    timed-out block. dry_run=True only skips the claim+spawn step —
+    reclaim/promote/auto-retry bookkeeping still runs for real, same as
+    test_dispatch_dry_run_does_not_claim relies on for its own assertions."""
+    with kb.connect_closing() as conn:
+        tid = _running_task(conn)
+        kb.block_task(
+            conn, tid, reason="quota wall", kind="transient",
+            retry_after_seconds=3600,
+        )
+        # Back-date the timer instead of sleeping through it — dispatch_once
+        # doesn't take a `now` override, so this is the only way to test the
+        # real tick's wiring without slowing the suite down.
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE tasks SET retry_at = ? WHERE id = ?",
+                (int(time.time()) - 1, tid),
+            )
+        res = kb.dispatch_once(conn, dry_run=True)
+        assert tid in res.auto_retried
+        assert kb.get_task(conn, tid).status == "ready"
+
+
+def test_manual_unblock_clears_a_pending_retry_timer(kanban_home: Path) -> None:
+    """A human clicking 'Make ready' before the timer fires must not leave
+    a stale retry_at that could later auto-retry a task the human already
+    handled some other way."""
+    with kb.connect_closing() as conn:
+        tid = _running_task(conn)
+        kb.block_task(
+            conn, tid, reason="quota wall", kind="transient",
+            retry_after_seconds=3600,
+        )
+        assert kb.unblock_task(conn, tid)
+        t = kb.get_task(conn, tid)
+        assert t.status == "ready"
+        assert t.retry_at is None

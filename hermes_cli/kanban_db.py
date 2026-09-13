@@ -945,6 +945,11 @@ class Task:
     # Unblock-loop counter. See the column comment in SCHEMA_SQL and
     # ``BLOCK_RECURRENCE_LIMIT``. Reset only on successful completion.
     block_recurrences: int = 0
+    # Epoch seconds after which a ``blocked`` task auto-unblocks on its own
+    # (see the column comment in SCHEMA_SQL and ``auto_retry_timed_blocks``).
+    # None when no timer is set — waits for a human, same as before this
+    # field existed.
+    retry_at: Optional[int] = None
     owner_user_id: Optional[str] = None
     visibility: str = "shared"
 
@@ -1030,6 +1035,11 @@ class Task:
                 int(row["block_recurrences"])
                 if "block_recurrences" in keys and row["block_recurrences"] is not None
                 else 0
+            ),
+            retry_at=(
+                int(row["retry_at"])
+                if "retry_at" in keys and row["retry_at"] is not None
+                else None
             ),
             owner_user_id=(
                 row["owner_user_id"] if "owner_user_id" in keys else None
@@ -1216,7 +1226,15 @@ CREATE TABLE IF NOT EXISTS tasks (
     -- ``blocked`` so a cron can't spin it forever. Reset to 0 only on a
     -- successful completion — NOT on unblock (resetting on unblock is exactly
     -- the amnesia that let the loop run unbounded).
-    block_recurrences    INTEGER NOT NULL DEFAULT 0
+    block_recurrences    INTEGER NOT NULL DEFAULT 0,
+    -- Epoch seconds after which a ``blocked`` task is eligible for automatic
+    -- unblock (``auto_retry_timed_blocks``, called every dispatcher tick).
+    -- Set by ``block_task(..., retry_after_seconds=...)`` for a block that
+    -- will clear on its own (a daily/hourly API quota, a token that
+    -- refreshes) rather than needing a human decision. NULL means no timer
+    -- — the pre-existing behaviour of waiting for a human. Cleared on any
+    -- unblock (manual or automatic) so a stale timestamp never lingers.
+    retry_at              INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS task_links (
@@ -2037,6 +2055,12 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
             "block_recurrences",
             "block_recurrences INTEGER NOT NULL DEFAULT 0",
         )
+
+    if "retry_at" not in cols:
+        # Auto-retry timer for a ``blocked`` task (see the column comment in
+        # SCHEMA_SQL). Existing blocked rows get NULL — unaffected, same
+        # human-only behaviour they had before this migration.
+        _add_column_if_missing(conn, "tasks", "retry_at", "retry_at INTEGER")
 
     # Indexes over additive ``tasks`` columns must be created after the
     # columns exist. Keeping them in SCHEMA_SQL breaks legacy boards: SQLite
@@ -4779,6 +4803,7 @@ def block_task(
     reason: Optional[str] = None,
     kind: Optional[str] = None,
     expected_run_id: Optional[int] = None,
+    retry_after_seconds: Optional[int] = None,
 ) -> bool:
     """Transition ``running``/``ready`` → ``blocked`` (or route elsewhere).
 
@@ -4804,6 +4829,20 @@ def block_task(
       can use it to signal "this might clear on its own"; it still participates
       in the loop breaker so a forever-flaky task eventually escalates.
 
+    ``retry_after_seconds``, when given, stamps ``retry_at = now +
+    retry_after_seconds`` on a task that actually lands in ``blocked`` — a
+    later dispatcher tick (:func:`auto_retry_timed_blocks`) unblocks it on
+    its own once that time passes, no human needed. Meant for a block that
+    will clear by itself (a daily/hourly API quota, a credential that
+    refreshes), most naturally paired with ``kind="transient"``, but not
+    restricted to it: if the worker re-hits the same wall, the unblock-loop
+    breaker above still applies (a same-cause re-block still counts toward
+    :data:`BLOCK_RECURRENCE_LIMIT` and escalates to ``triage`` — auto-retry
+    is not a way to loop forever, it's a way to not need a human for the
+    *first* wait). Ignored (no timer set) when the block instead routes to
+    ``todo`` (``dependency``) or ``triage`` (loop detected) — neither is a
+    "wait it out" state.
+
     Returns True on any successful transition (to ``blocked``, ``todo``, or
     ``triage``), False when the task wasn't in a blockable state.
     """
@@ -4811,6 +4850,13 @@ def block_task(
         raise ValueError(
             f"block kind must be one of {sorted(VALID_BLOCK_KINDS)} or None"
         )
+    if retry_after_seconds is not None and retry_after_seconds <= 0:
+        raise ValueError("retry_after_seconds must be a positive number of seconds")
+    retry_at = (
+        int(time.time()) + int(retry_after_seconds)
+        if retry_after_seconds is not None
+        else None
+    )
     routed_to = "blocked"
     recurrences = 0
     with write_txn(conn):
@@ -4895,7 +4941,8 @@ def block_task(
                        claim_expires = NULL,
                        worker_pid    = NULL,
                        block_kind    = ?,
-                       block_recurrences = ?
+                       block_recurrences = ?,
+                       retry_at      = NULL
                  WHERE id = ?
                    AND status IN ('running', 'ready')
                 """ + ("" if expected_run_id is None else " AND current_run_id = ?"),
@@ -4934,11 +4981,12 @@ def block_task(
                            claim_expires = NULL,
                            worker_pid    = NULL,
                            block_kind    = ?,
-                           block_recurrences = ?
+                           block_recurrences = ?,
+                           retry_at      = ?
                      WHERE id = ?
                        AND status IN ('running', 'ready')
                     """,
-                    (kind, recurrences, task_id),
+                    (kind, recurrences, retry_at, task_id),
                 )
             else:
                 cur = conn.execute(
@@ -4949,12 +4997,13 @@ def block_task(
                            claim_expires = NULL,
                            worker_pid    = NULL,
                            block_kind    = ?,
-                           block_recurrences = ?
+                           block_recurrences = ?,
+                           retry_at      = ?
                      WHERE id = ?
                        AND status IN ('running', 'ready')
                        AND current_run_id = ?
                     """,
-                    (kind, recurrences, task_id, int(expected_run_id)),
+                    (kind, recurrences, retry_at, task_id, int(expected_run_id)),
                 )
             if cur.rowcount != 1:
                 return False
@@ -4973,7 +5022,10 @@ def block_task(
                 )
             _append_event(
                 conn, task_id, "blocked",
-                {"reason": reason, "kind": kind, "recurrences": recurrences},
+                {
+                    "reason": reason, "kind": kind, "recurrences": recurrences,
+                    "retry_at": retry_at,
+                },
                 run_id=run_id,
             )
         _blocked_task = get_task(conn, task_id)
@@ -5060,7 +5112,9 @@ def promote_task(
     return True, None
 
 
-def unblock_task(conn: sqlite3.Connection, task_id: str) -> bool:
+def unblock_task(
+    conn: sqlite3.Connection, task_id: str, *, auto: bool = False,
+) -> bool:
     """Transition ``blocked``/``scheduled`` -> ready or todo.
 
     Defensively closes any stale ``current_run_id`` pointer before flipping
@@ -5069,6 +5123,13 @@ def unblock_task(conn: sqlite3.Connection, task_id: str) -> bool:
     the leaked run is closed as ``reclaimed`` inside the same txn so the
     runs invariant (``current_run_id IS NULL`` ⇔ run row in terminal
     state) holds for the rest of this function's lifetime.
+
+    Always clears ``retry_at`` — once unblocked (by a human or by
+    :func:`auto_retry_timed_blocks`), a stale timer from a prior block would
+    otherwise linger and mean nothing. ``auto=True`` (used only by
+    :func:`auto_retry_timed_blocks`) records the ``auto_retry`` event kind
+    instead of ``unblocked``, so board history / notifications can tell "a
+    human clicked unblock" apart from "the timer fired".
     """
     now = int(time.time())
     with write_txn(conn):
@@ -5113,17 +5174,60 @@ def unblock_task(conn: sqlite3.Connection, task_id: str) -> bool:
         # start for the dispatcher's retry budget.
         cur = conn.execute(
             "UPDATE tasks SET status = ?, current_run_id = NULL, "
-            "consecutive_failures = 0, last_failure_error = NULL "
+            "consecutive_failures = 0, last_failure_error = NULL, "
+            "retry_at = NULL "
             "WHERE id = ? AND status IN ('blocked', 'scheduled')",
             (new_status, task_id),
         )
         if cur.rowcount != 1:
             return False
         _append_event(
-            conn, task_id, "unblocked",
+            conn, task_id, "auto_retry" if auto else "unblocked",
             {"status": new_status} if new_status != "ready" else None,
         )
         return True
+
+
+def auto_retry_timed_blocks(
+    conn: sqlite3.Connection, *, now: Optional[int] = None,
+) -> list[str]:
+    """Unblock every task whose ``retry_at`` timer has passed.
+
+    Called once per dispatcher tick (``dispatch_once`` → ``_dispatch_once_locked``)
+    for every board, so a card blocked with ``block_task(...,
+    retry_after_seconds=...)`` — a daily API quota, a rate limit, a
+    credential that refreshes — resumes on its own without a human ever
+    opening the card. Each eligible task goes through the same
+    :func:`unblock_task` path a manual "Make ready" click uses (parent-gate
+    re-check, run/claim cleanup, ``retry_at`` cleared), just tagged
+    ``auto=True`` so the ``auto_retry`` event is distinguishable from a
+    human unblock in board history and notifications.
+
+    If the worker hits the same wall again, ``block_task``'s existing
+    unblock-loop breaker (:data:`BLOCK_RECURRENCE_LIMIT`) takes over exactly
+    as it would for a human/cron unblock — a wrong retry estimate escalates
+    to ``triage`` after two rounds instead of looping forever. Best-effort
+    per task: one bad row must never stop the rest of the board's timers
+    from firing.
+    """
+    now = int(now if now is not None else time.time())
+    rows = conn.execute(
+        "SELECT id FROM tasks WHERE status = 'blocked' AND retry_at IS NOT NULL "
+        "AND retry_at <= ?",
+        (now,),
+    ).fetchall()
+    retried: list[str] = []
+    for row in rows:
+        task_id = row["id"]
+        try:
+            if unblock_task(conn, task_id, auto=True):
+                retried.append(task_id)
+        except Exception:
+            _log.warning(
+                "kanban: auto-retry unblock failed for task %s", task_id,
+                exc_info=True,
+            )
+    return retried
 
 
 def specify_triage_task(
@@ -5974,6 +6078,11 @@ class DispatchResult:
     (EX_TEMPFAIL sentinel exit) and were released back to ``ready`` WITHOUT
     counting a failure. These never trip the circuit breaker — a long quota
     window just makes the task bounce cheaply until the window clears."""
+    auto_retried: list[str] = field(default_factory=list)
+    """Task ids unblocked because their ``retry_at`` timer
+    (``block_task(..., retry_after_seconds=...)``) passed — see
+    :func:`auto_retry_timed_blocks`. Not a crash/failure signal; these were
+    deliberately parked with a "check back later" timer."""
     skipped_locked: bool = False
     """True when this tick was skipped because another process already held
     the board's dispatch lock (issue #35240). A losing dispatcher does no
@@ -7278,6 +7387,10 @@ def _dispatch_once_locked(
     reap_worker_zombies()
 
     result = DispatchResult()
+    # Auto-retry timed-out blocks first: a task whose quota/rate-limit timer
+    # just fired should be eligible for this same tick's promote/spawn pass,
+    # not wait for the next one.
+    result.auto_retried = auto_retry_timed_blocks(conn)
     result.reclaimed = release_stale_claims(conn)
     result.stale = detect_stale_running(
         conn, stale_timeout_seconds=stale_timeout_seconds,
