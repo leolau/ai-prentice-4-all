@@ -713,6 +713,38 @@ def test_block_rejects_empty_reason(worker_env):
         assert json.loads(out).get("error")
 
 
+def test_block_with_retry_after_seconds_stamps_retry_at(worker_env):
+    """The model-facing side of the auto-retry timer: a Canva-daily-limit
+    -style block that names how long until it's worth trying again."""
+    from tools import kanban_tools as kt
+    out = kt._handle_block({
+        "reason": "Canva's daily image-generation limit was reached",
+        "kind": "transient",
+        "retry_after_seconds": 86_400,
+    })
+    d = json.loads(out)
+    assert d["ok"] is True
+    assert d["retry_at"] is not None
+    from hermes_cli import kanban_db as kb
+    conn = kb.connect()
+    try:
+        task = kb.get_task(conn, worker_env)
+        assert task.status == "blocked"
+        assert task.retry_at == d["retry_at"]
+    finally:
+        conn.close()
+
+
+def test_block_rejects_non_positive_retry_after_seconds(worker_env):
+    from tools import kanban_tools as kt
+    for bad in [0, -60, "soon"]:
+        out = kt._handle_block({
+            "reason": "quota wall", "kind": "transient",
+            "retry_after_seconds": bad,
+        })
+        assert json.loads(out).get("error")
+
+
 def _make_goal_mode_worker_env(monkeypatch, tmp_path):
     """Set up an isolated HERMES_HOME with one claimed goal_mode task,
     matching the pattern used by the kanban_complete judge gate tests."""

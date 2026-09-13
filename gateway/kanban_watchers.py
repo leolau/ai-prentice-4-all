@@ -164,7 +164,7 @@ class GatewayKanbanWatchersMixin:
 
         # "status" covers dashboard drag-drop and `_set_status_direct()`
         # writes — surface those transitions to subscribers too.
-        TERMINAL_KINDS = ("completed", "blocked", "gave_up", "crashed", "timed_out", "status", "archived", "unblocked")
+        TERMINAL_KINDS = ("completed", "blocked", "gave_up", "crashed", "timed_out", "status", "archived", "unblocked", "auto_retry")
         # Subscriptions are removed only when the task reaches a truly final
         # status (done / archived). We used to also unsub on any terminal
         # event kind (gave_up / crashed / timed_out / blocked), but that
@@ -396,6 +396,16 @@ class GatewayKanbanWatchersMixin:
                             if ev.payload and ev.payload.get("status"):
                                 new_status = str(ev.payload["status"])
                             msg = f"🔄 {board_tag}{tag}Kanban {sub['task_id']} → {new_status}"
+                        elif kind == "auto_retry":
+                            # Unlike a human-driven "unblocked" (silent below —
+                            # they already know), this one IS worth a ping:
+                            # nobody touched the card, its retry_at timer
+                            # (block_task(..., retry_after_seconds=...)) just
+                            # elapsed and it resumed on its own.
+                            msg = (
+                                f"▶ {board_tag}{tag}Kanban {sub['task_id']} "
+                                f"auto-retried — its wait timer elapsed"
+                            )
                         else:
                             # archived / unblocked are claimed by TERMINAL_KINDS
                             # (so the cursor advances past them and they can't

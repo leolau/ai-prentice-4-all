@@ -1,4 +1,6 @@
 import asyncio
+import time
+
 import pytest
 
 from pathlib import Path
@@ -147,6 +149,75 @@ async def test_notifier_unsubs_after_abnormal_events(kind, kanban_home):
         "(claim_unseen_events_for_sub advances atomically inside the "
         "same write txn as the read)."
     )
+
+
+@pytest.mark.asyncio
+async def test_notifier_pings_on_auto_retry_and_keeps_subscription(kanban_home):
+    """auto_retry (block_task(..., retry_after_seconds=...)'s timer firing,
+    via auto_retry_timed_blocks) is worth a ping — unlike a human-driven
+    unblock, nobody touched the card. Same "keep the subscription" contract
+    as gave_up/crashed/timed_out: the worker could hit the same wall again
+    and the loop breaker's eventual triage escalation should reach the user
+    too."""
+    import hermes_cli.kanban_db as kb
+    from gateway.run import GatewayRunner
+    from gateway.config import Platform
+
+    conn = kb.connect()
+    try:
+        tid = kb.create_task(conn, title="daily Canva quota", assignee="worker1")
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET status='ready' WHERE id=?", (tid,))
+        kb.claim_task(conn, tid, claimer="worker1")
+        kb.block_task(
+            conn, tid, reason="Canva's daily limit was reached",
+            kind="transient", retry_after_seconds=1,
+        )
+        kb.add_notify_sub(conn, task_id=tid, platform="telegram", chat_id="chat1")
+        past = int(time.time()) - 1
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET retry_at = ? WHERE id = ?", (past, tid))
+        assert kb.auto_retry_timed_blocks(conn) == [tid]
+    finally:
+        conn.close()
+
+    runner = object.__new__(GatewayRunner)
+    runner._running = True
+    runner._kanban_sub_fail_counts = {}
+
+    fake_adapter = MagicMock()
+    sent: list[str] = []
+
+    async def _record_and_maybe_stop(chat_id, msg, metadata=None):
+        sent.append(msg)
+        # The sub predates the "blocked" event too (no created_at gate on
+        # the cursor), so this poll delivers both events. Stop once the
+        # auto_retry one — the thing this test is about — has arrived.
+        if "auto-retried" in msg:
+            runner._running = False
+
+    fake_adapter.send = AsyncMock(side_effect=_record_and_maybe_stop)
+    runner.adapters = {Platform.TELEGRAM: fake_adapter}
+
+    _orig_sleep = asyncio.sleep
+
+    async def _fast_sleep(_):
+        await _orig_sleep(0)
+
+    with patch("gateway.run.asyncio.sleep", side_effect=_fast_sleep):
+        await asyncio.wait_for(
+            runner._kanban_notifier_watcher(interval=1),
+            timeout=10.0,
+        )
+
+    assert any("auto-retried" in m for m in sent), sent
+
+    conn = kb.connect()
+    try:
+        subs = kb.list_notify_subs(conn, tid)
+    finally:
+        conn.close()
+    assert len(subs) == 1, "Subscription should survive an auto_retry ping"
 
 
 @pytest.mark.asyncio
