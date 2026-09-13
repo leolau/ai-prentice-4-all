@@ -110,6 +110,13 @@ plan this is D1 multi-user-not-multi-tenant + FG-03 one-brain gateway.)
   — **mid-feature** hand-off: the live box's move to `app_prod`, and the inbound
   file registry (what is written, what is left, and the duplicate-collapse
   design error not to repeat).
+- [`SESSION-HANDOFF-2026-09-projects-run-resilience.md`](./SESSION-HANDOFF-2026-09-projects-run-resilience.md)
+  — **closeout** hand-off: a production Projects run stuck 13+ hours,
+  four independent FG-32 defects found and fixed (refill hook, restart
+  recovery, doctor/health visibility, promotion ordering), all deployed and
+  verified live — plus a gateway-unit misconfiguration caused and fixed
+  mid-session (read before running `hermes gateway install`/`restart` on
+  the box again).
 - [`architecture-design-number-one.md`](./architecture-design-number-one.md) — frozen design #1 (read-only history).
 - `AGENT-HANDOFF.md` — this note (now just a pointer to the plan).
 - `../WHATSAPP_IMPLEMENTATION.md`, `../EMAIL_IMPLEMENTATION.md`,
