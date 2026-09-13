@@ -14,8 +14,24 @@
 #
 # Port 3100 (not 3000): :3000 on this box is the WhatsApp bridge. Match the
 # PORT set in the service's EnvironmentFile.
+#
+# app-mcp note: the `AppMcpBridge` (always-on UI bridge) and the opt-in
+# Folder Bridge (`/files/bridge`) both dial a WebSocket on the standalone
+# app-mcp service, loopback port 9221 (see app-mcp/README.md) — NOT the
+# Next.js server on :3100. Both paths must be routed there explicitly
+# (`reverse_proxy` forwards the `Connection: Upgrade` header automatically,
+# same as any other proxied request); everything else on this origin,
+# including agent-home's own /api/*, stays on :3100.
 
 home.leolau.ai-and-i.io {
     encode zstd gzip
-    reverse_proxy 127.0.0.1:3100
+
+    @app_mcp_ws path /app-mcp/ws /app-mcp/folders/ws
+    handle @app_mcp_ws {
+        reverse_proxy 127.0.0.1:9221
+    }
+
+    handle {
+        reverse_proxy 127.0.0.1:3100
+    }
 }

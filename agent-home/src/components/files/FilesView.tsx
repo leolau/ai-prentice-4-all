@@ -106,6 +106,22 @@ export function FilesView({
 
   return (
     <div data-component="FilesView" className="flex flex-col gap-4">
+      <Link
+        href="/files/bridge"
+        data-component="FolderBridgeAction"
+        className="flex items-center justify-between gap-2 rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface)] p-4 text-sm"
+      >
+        <span>
+          <span className="block font-medium">Folder Bridge</span>
+          <span className="block text-xs text-[var(--color-muted)]">
+            Connect local Mac folders for the agent to search and read
+          </span>
+        </span>
+        <span aria-hidden className="text-[var(--color-muted)]">
+          →
+        </span>
+      </Link>
+
       <div className="flex flex-col gap-3">
         <input
           data-component="FilesSearch"
