@@ -17,8 +17,51 @@ Plan: `2026-09-13-folder-bridge.md`
 | Tests: Python (`test_routing.py`), TS (`fsOps.test.ts`) | **Done** — 12/12 TS, 24/24 Python |
 | Verification: `tsc --noEmit`, targeted `vitest run` | **Done**, both clean |
 | Verification: full `vitest run` (whole agent-home suite) | 94 files / 629 tests pass; 14 pre-existing environment errors (jsdom `html-encoding-sniffer` ESM/CJS interop, unrelated files, not caused by this change) |
-| Production config (`approvals.tools`, deploy) | **Not done — owner decision, deliberately deferred** |
-| Whether `app-mcp` itself is live on the current (Hetzner) production box | **Not verified** — flagged as a gap in the design doc; `PRODUCTION.md`'s service catalog doesn't list it |
+| Merged to `develop` (PR #395) and `main` (PR #396) | **Done** |
+| Deployed to production (Hetzner) | **Done** — see "Production deploy" below |
+| Production config (`approvals.tools`) | **Done** — gated, per owner's explicit choice |
+| Whether `app-mcp` itself is live on the current (Hetzner) production box | **Verified live** before this deploy (read-only check): enabled/active, listening on 9220/9221, ticket route 401s without a cookie |
+
+## Production deploy (2026-09-13)
+
+1. `PR #395` (`feat/folder-bridge` → `develop`) merged, then `PR #396`
+   (`develop` → `main`) merged. Both branches now at this work.
+2. Ran `/opt/data/deploy-hermes.sh develop` on the box — pulled
+   `dc7a941ce`, rebuilt `agent-home` (new `/files/bridge` route present in
+   the build output), restarted all 14 `hermes-*` units + `agent-home`,
+   `deploy OK`.
+3. **`app-mcp.service` manually restarted** — the deploy script's `UNITS`
+   glob is `hermes-*.service` + `agent-home`, so it never touches
+   `app-mcp`. Confirmed the new code is running via
+   `ExecMainStartTimestamp`.
+4. **Caddyfile manually patched on the box** — its `/app-mcp/ws*` matcher
+   was a literal prefix match that would not have covered
+   `/app-mcp/folders/ws`. Replaced with a named matcher covering both
+   paths, `caddy validate` (clean) then `systemctl reload caddy`.
+   Independent pre-existing gap (this proxy block was never in the
+   checked-in `Caddyfile.agent-home` at all) fixed by this session's repo
+   change; the box needed the equivalent hand-edit since its Caddyfile
+   isn't rendered from the repo.
+5. **`approvals.tools` updated** on the box's `config.yaml` — added
+   `mcp_app_folder_bridge_read_file` and `mcp_app_folder_bridge_search_files`
+   (owner's explicit choice, asked before touching prod config).
+   `hermes-gateway.service` restarted to pick it up.
+6. Verification: all 16 long-running units `enabled/active`; the 2
+   pre-existing failed units (`cloud-init-hotplugd`, `hermes-secret-backup`)
+   unchanged; Supabase 11/11 healthy; `/`, `/files/bridge` both 200; a
+   live registration probe on the box confirmed all 6
+   `mcp_app_folder_bridge_*` tools are registered and reachable through
+   `mcp_servers: app:`. Pre-existing unrelated warnings observed in logs
+   (Telegram `getUpdates` conflict from an off-box poller, `google-workspace`
+   and `aws-api*` MCP servers failing to connect due to a `uvx` permission
+   issue) — not caused by this deploy, not touched.
+
+One thing to flag: I deleted the pre-edit backup copies of `config.yaml`
+and the Caddyfile from the box right after confirming both changes were
+good, rather than leaving them for a rollback window. The exact prior
+content of both is preserved in this session's transcript if a revert is
+ever needed, but in hindsight I should have left the `.bak` files in place
+for a few days instead of cleaning up immediately.
 
 ## What shipped
 
