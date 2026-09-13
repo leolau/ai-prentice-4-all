@@ -1735,6 +1735,9 @@ export interface ProjectBoardTask {
   project_id: string | null;
   result: string | null;
   current_step_key: string | null;
+  /** Why a `blocked` card stopped (`kanban_db.VALID_BLOCK_KINDS`), or
+   * `null` for a legacy/un-typed block. Absent for every other status. */
+  block_kind?: "needs_input" | "capability" | "transient" | null;
   [extra: string]: unknown;
 }
 

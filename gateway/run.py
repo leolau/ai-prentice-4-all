@@ -7073,6 +7073,13 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # simply don't use kanban; this loop becomes a no-op.
         asyncio.create_task(self._kanban_dispatcher_watcher())
 
+        # Start background Projects run reconciler — refills a run's
+        # promoted cards and fails a run loudly once it has gone stale
+        # with nothing left to promote (Gap B, plans/2026-09-13-project-
+        # run-resilience-plan.md). No-op for installs that don't use
+        # Projects; disabled entirely if the module isn't importable.
+        asyncio.create_task(self._projects_reconcile_watcher())
+
         # Start background reconnection watcher for platforms that failed at startup
         if self._failed_platforms:
             logger.info(

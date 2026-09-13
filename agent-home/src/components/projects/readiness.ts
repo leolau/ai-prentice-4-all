@@ -55,6 +55,17 @@ export function readinessItems(
           : "The active plan has no steps.",
       anchor: "#panel-plan",
     },
+    // The activation gate itself (`PATCH status=active`) refuses on the
+    // same outputs/profile prerequisites, so it belongs right after them —
+    // not lumped in with "runnable" as a separate, differently-worded check
+    // the way `ProgressPanel.nextAction` used to do it.
+    {
+      key: "status",
+      label: "Project activated",
+      ok: project.status === "active",
+      hint: "Activate it — the button is at the top of this page.",
+      anchor: "#project-header",
+    },
   ];
   if (project.cadence === "repeatable") {
     items.push({

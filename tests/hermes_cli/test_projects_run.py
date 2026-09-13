@@ -318,6 +318,133 @@ def test_max_in_progress_caps_promotion(stores):
             assert kanban_db.get_task(bconn, tid).status == "triage"
 
 
+def test_promotion_prefers_the_dependency_free_root_over_a_blocked_sibling(stores):
+    """Regression: ``get_run_cards()`` returns a run's cards with no
+    playbook order (SQLite returns ``project_run_cards`` rows by
+    ``task_id``, random relative to the playbook). With a cap narrower
+    than the playbook, promoting whichever triage card happens to sort
+    first — instead of preferring one whose dependencies are actually
+    satisfied — can pick a step whose own dependency was never promoted,
+    permanently deadlocking the run (found in production: a real root
+    step sat in ``triage`` for 15+ hours while a downstream sibling sat
+    stuck in ``todo``, unable to ever reach ``ready``).
+
+    ``root`` has no dependencies; ``child_a``/``child_b`` both depend on
+    it and are not yet satisfiable. With ``max_in_progress=1``, exactly
+    ``root`` must be the one promoted — never a child — regardless of
+    how the DB happens to order the three triage rows.
+    """
+    project, _ = _make_project(autonomy="autonomous", max_in_progress=1)
+    steps = [
+        {"key": "root", "title": "Root step"},
+        {"key": "child_a", "title": "Child A", "depends_on": ["root"]},
+        {"key": "child_b", "title": "Child B", "depends_on": ["root"]},
+    ]
+    _save_playbook(project.id, steps)
+    with projects_db.connect_closing() as conn:
+        projects_db.activate_playbook_rev(conn, project.id, 1)
+    result = _start(project.id)
+    assert result["promoted"] == [result["cards"]["root"]]
+    with kanban_db.connect_closing() as bconn:
+        # 'ready', not 'todo': specify_triage_task's own recompute_ready
+        # advances a parent-free card immediately.
+        assert kanban_db.get_task(bconn, result["cards"]["root"]).status == "ready"
+        assert kanban_db.get_task(bconn, result["cards"]["child_a"]).status == "triage"
+        assert kanban_db.get_task(bconn, result["cards"]["child_b"]).status == "triage"
+
+
+def test_promotion_falls_back_to_playbook_order_among_equally_ready_siblings(stores):
+    """When multiple candidates are equally ready (no unmet dependency —
+    the common case of independent steps), the tie-break is playbook
+    position, not the incidental DB row order — deterministic, and
+    matches what a human reading the playbook top-to-bottom would expect
+    to run first."""
+    project, _ = _make_project(autonomy="autonomous", max_in_progress=1)
+    steps = [{"key": f"s{i}", "title": f"Step {i}"} for i in range(3)]
+    _save_playbook(project.id, steps)
+    with projects_db.connect_closing() as conn:
+        projects_db.activate_playbook_rev(conn, project.id, 1)
+    result = _start(project.id)
+    assert result["promoted"] == [result["cards"]["s0"]]
+
+
+def test_completing_a_card_auto_promotes_the_next_one(stores):
+    """Regression for the incident where a run with ``max_in_progress=1``
+    promoted its first card and then never promoted again: nothing used
+    to call ``promote_run_cards()`` a second time, so the run sat
+    ``running`` forever with the rest of its cards stuck in ``triage``,
+    restart or not.
+
+    ``kanban_db.complete_task()`` (the real production call path — no
+    mocking of the promotion layer) must now top up the run's next card
+    on its own, with no ``continue_run()`` involved.
+    """
+    project, _ = _make_project(autonomy="autonomous", max_in_progress=1)
+    steps = [{"key": f"s{i}", "title": f"Step {i}"} for i in range(3)]
+    _save_playbook(project.id, steps)
+    with projects_db.connect_closing() as conn:
+        projects_db.activate_playbook_rev(conn, project.id, 1)
+    result = _start(project.id)
+    cards = result["cards"]
+    # The 3 steps have no depends_on between them, so which one lands
+    # first is an implementation detail — only the count (exactly 1,
+    # the cap) is a contract.
+    assert len(result["promoted"]) == 1
+    first_id = result["promoted"][0]
+    rest = [tid for tid in cards.values() if tid != first_id]
+    assert len(rest) == 2
+    with kanban_db.connect_closing() as bconn:
+        for tid in rest:
+            assert kanban_db.get_task(bconn, tid).status == "triage"
+        # The promoted card reaches the work pool exactly as the
+        # dispatcher would land it.
+        bconn.execute(
+            "UPDATE tasks SET status = 'running' WHERE id = ?", (first_id,)
+        )
+        assert kanban_db.complete_task(bconn, first_id, result="done")
+        # No human continue_run() call anywhere above — the completion
+        # itself must have refilled the freed max_in_progress slot.
+        rest_statuses = [kanban_db.get_task(bconn, tid).status for tid in rest]
+        assert kanban_db.get_task(bconn, first_id).status == "done"
+    # Cap still 1: exactly one of the remaining two is promoted (landing in
+    # 'todo', immediately advanced to 'ready' by complete_task's own
+    # recompute_ready() since it has no unmet dependency), the other stays
+    # untouched in triage.
+    assert sorted(rest_statuses) == ["ready", "triage"]
+
+
+def test_refill_run_cards_is_a_noop_off_a_running_run(stores):
+    """``refill_run_cards()`` never promotes past a held checkpoint, and
+    never touches a run that has already closed — it only ever tops up
+    capacity for a still-``running`` run (the completion-side counterpart
+    to ``continue_run()``, not a replacement for its human "pass the
+    checkpoint" act)."""
+    project, _ = _make_project(max_in_progress=4)  # STEPS has a checkpoint
+    _save_playbook(project.id)
+    with projects_db.connect_closing() as conn:
+        projects_db.activate_playbook_rev(conn, project.id, 1)
+    result = _start(project.id)
+    run = result["run"]
+    with projects_db.connect_closing() as conn:
+        with kanban_db.connect_closing() as bconn:
+            fresh_project = projects_db.get_project(conn, project.id)
+            promoted = projects_run.refill_run_cards(
+                conn, bconn, project=fresh_project, run=run
+            )
+    # "approve" is a checkpoint; "send" (its successor) stays held.
+    assert result["cards"]["send"] not in promoted
+    with kanban_db.connect_closing() as bconn:
+        assert kanban_db.get_task(bconn, result["cards"]["send"]).status == "triage"
+
+    with projects_db.connect_closing() as conn:
+        closed_run = dict(run, status="done")
+        with kanban_db.connect_closing() as bconn:
+            fresh_project = projects_db.get_project(conn, project.id)
+            assert projects_run.refill_run_cards(
+                conn, bconn, project=fresh_project, run=closed_run
+            ) == []
+
+
 # ---------------------------------------------------------------------------
 # §4.1 — narrowing filter, never a grant
 # ---------------------------------------------------------------------------

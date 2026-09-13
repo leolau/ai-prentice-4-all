@@ -706,6 +706,14 @@ def _handle_block(args: dict, **kw) -> str:
     reason = redact_sensitive_text(str(reason), force=True)
     kind = args.get("kind")
     board = args.get("board")
+    retry_after_seconds = args.get("retry_after_seconds")
+    if retry_after_seconds is not None:
+        try:
+            retry_after_seconds = int(retry_after_seconds)
+        except (TypeError, ValueError):
+            return tool_error("retry_after_seconds must be a whole number of seconds")
+        if retry_after_seconds <= 0:
+            return tool_error("retry_after_seconds must be a positive number of seconds")
     try:
         kb, conn = _connect(board=board)
         if kind is not None and kind not in kb.VALID_BLOCK_KINDS:
@@ -743,6 +751,7 @@ def _handle_block(args: dict, **kw) -> str:
                 reason=reason,
                 kind=kind,
                 expected_run_id=_worker_run_id(tid),
+                retry_after_seconds=retry_after_seconds,
             )
             if not ok:
                 return tool_error(
@@ -758,6 +767,9 @@ def _handle_block(args: dict, **kw) -> str:
                 run_id=run.id if run else None,
                 status=landed.status if landed else "blocked",
                 block_kind=kind,
+                # None when the loop breaker escalated straight to triage
+                # (retry_at is cleared there) or no timer was requested.
+                retry_at=landed.retry_at if landed else None,
             )
         finally:
             conn.close()
@@ -1328,7 +1340,10 @@ KANBAN_BLOCK_SCHEMA = {
         "``reason`` is shown to the human on the board. If a task keeps "
         "getting unblocked and re-blocked for the same reason, it is "
         "auto-escalated to triage. Use for genuine blockers only — don't "
-        "block on things you can resolve yourself."
+        "block on things you can resolve yourself. If this will clear on "
+        "its own — a daily/hourly API quota, a rate limit, a credential "
+        "that refreshes — set ``retry_after_seconds`` and the card resumes "
+        "by itself once that time passes; no human has to click anything."
     ),
     "parameters": {
         "type": "object",
@@ -1352,6 +1367,20 @@ KANBAN_BLOCK_SCHEMA = {
                     "Why you're blocked. 'dependency' waits in todo and "
                     "resumes automatically; the others surface to a human. "
                     "Omit only if none apply."
+                ),
+            },
+            "retry_after_seconds": {
+                "type": "integer",
+                "minimum": 1,
+                "description": (
+                    "Only for a block that will clear on its own — most "
+                    "often 'transient' (e.g. a rate limit or a daily "
+                    "generation cap): how many seconds until it's worth "
+                    "trying again (86400 for a 24h quota reset, 3600 for an "
+                    "hourly one, etc.). The card auto-unblocks once this "
+                    "elapses, no human needed. Omit for a block that "
+                    "genuinely needs a human decision (like 'needs_input') — "
+                    "auto-retrying those just re-blocks for the same reason."
                 ),
             },
             "board": _board_schema_prop(),

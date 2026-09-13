@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import { memo, type ReactNode } from "react";
 
 import { ChatFile } from "@/components/chat/ChatFile";
 import { ChatMedia } from "@/components/chat/ChatMedia";
@@ -118,7 +118,16 @@ function CompactionDivider() {
   );
 }
 
-export function MessageBubble({
+/**
+ * Memoized so a streaming turn — which re-renders `ChatPane` on every delta
+ * and once a second while a turn is in flight — only re-parses Markdown and
+ * re-runs the media-segment regex for the bubble whose `message` object
+ * actually changed. `setLastAssistantContent` (lib/chat/messages.ts)
+ * preserves identity for every other message, so this is a real skip, not
+ * just a re-render with the same output: without it, a long conversation
+ * re-parses every bubble's Markdown on every token.
+ */
+export const MessageBubble = memo(function MessageBubble({
   message,
   msgIndex,
   highlightTerm,
@@ -170,4 +179,4 @@ export function MessageBubble({
       </div>
     </>
   );
-}
+});

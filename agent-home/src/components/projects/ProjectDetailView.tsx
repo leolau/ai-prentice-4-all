@@ -245,6 +245,7 @@ export function ProjectDetailView({
         <div className="flex flex-col gap-4">
           {/* ── Header ─────────────────────────────────────────────── */}
           <header
+            id="project-header"
             data-component="ProjectHeader"
             className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface)] p-4"
           >
@@ -296,11 +297,7 @@ export function ProjectDetailView({
                   type="button"
                   onClick={() => void runNow()}
                   disabled={busy || !runnable}
-                  title={
-                    runnable
-                      ? undefined
-                      : "Finish the checklist below before running."
-                  }
+                  title={runnable ? undefined : "See the checklist below."}
                   className="rounded-xl bg-[var(--color-accent)] px-4 py-2 text-sm font-medium text-[var(--color-accent-fg)] disabled:opacity-50"
                 >
                   Run now
@@ -357,7 +354,12 @@ export function ProjectDetailView({
             </div>
 
             {!project.archived ? (
-              <ReadinessChecklist items={readiness} findings={findings} />
+              <ReadinessChecklist
+                items={readiness}
+                findings={findings}
+                onActivate={() => void activate()}
+                activating={busy}
+              />
             ) : null}
 
             {error ? (
@@ -392,7 +394,7 @@ export function ProjectDetailView({
               slug={project.slug}
               project={project}
               blockedCards={blockedCards}
-              runnable={runnable}
+              readiness={readiness}
             />
             <OutputsPanel
               slug={project.slug}

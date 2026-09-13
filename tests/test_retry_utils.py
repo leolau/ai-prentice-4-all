@@ -5,7 +5,12 @@ import threading
 import agent.retry_utils as retry_utils
 from types import SimpleNamespace
 
-from agent.retry_utils import adaptive_rate_limit_backoff, is_zai_coding_overload_error, jittered_backoff
+from agent.retry_utils import (
+    adaptive_rate_limit_backoff,
+    is_alibaba_token_plan_quota_error,
+    is_zai_coding_overload_error,
+    jittered_backoff,
+)
 
 
 def test_backoff_is_exponential():
@@ -198,6 +203,60 @@ def test_zai_coding_overload_backoff_grows_after_short_retries(monkeypatch):
         assert policy == "zai_coding_overload_long"
 
     assert waits == [30.0, 60.0, 90.0, 120.0, 120.0, 120.0]
+
+
+_ALIBABA_TOKEN_PLAN_URL = "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1"
+
+
+def _alibaba_quota_error():
+    return SimpleNamespace(
+        status_code=429,
+        body={
+            "error": {
+                "message": "Allocated quota exceeded, please increase your quota limit.",
+                "type": "insufficient_quota",
+                "code": "insufficient_quota",
+            }
+        },
+    )
+
+
+def test_alibaba_token_plan_classifier_is_narrow():
+    err = _alibaba_quota_error()
+    assert is_alibaba_token_plan_quota_error(base_url=_ALIBABA_TOKEN_PLAN_URL, error=err)
+
+    # Pay-as-you-go DashScope is not a refilling per-minute bucket.
+    assert not is_alibaba_token_plan_quota_error(
+        base_url="https://dashscope-intl.aliyuncs.com/compatible-mode/v1", error=err
+    )
+    # Other 429 shapes on the same host keep the default schedule.
+    assert not is_alibaba_token_plan_quota_error(
+        base_url=_ALIBABA_TOKEN_PLAN_URL,
+        error=SimpleNamespace(status_code=429, body={"error": {"code": "rate_limit_exceeded", "message": "slow down"}}),
+    )
+    assert not is_alibaba_token_plan_quota_error(
+        base_url=_ALIBABA_TOKEN_PLAN_URL,
+        error=SimpleNamespace(status_code=400, body={"error": {"code": "insufficient_quota", "message": "x"}}),
+    )
+
+
+def test_alibaba_token_plan_backoff_waits_for_window_within_default_budget(monkeypatch):
+    monkeypatch.setattr(retry_utils, "jittered_backoff", lambda *a, **kw: kw["base_delay"])
+    err = _alibaba_quota_error()
+
+    wait, policy = adaptive_rate_limit_backoff(
+        1, base_url=_ALIBABA_TOKEN_PLAN_URL, model="glm-5.2", error=err, default_wait=2.5
+    )
+    assert (wait, policy) == (2.5, "alibaba_token_plan_short")
+
+    waits = []
+    for attempt in range(2, 6):
+        wait, policy = adaptive_rate_limit_backoff(
+            attempt, base_url=_ALIBABA_TOKEN_PLAN_URL, model="glm-5.2", error=err, default_wait=4.0
+        )
+        waits.append(wait)
+        assert policy == "alibaba_token_plan_long"
+    assert waits == [45.0, 60.0, 90.0, 90.0]
 
 
 def test_non_zai_backoff_returns_default_wait():

@@ -625,6 +625,37 @@ def test_board_and_card_reads_hide_other_users_private_cards(env):
     ).status_code == 404
 
 
+def test_card_detail_surfaces_the_block_reason(env):
+    """Regression: GET /cards/{id} used to call ``task_dict()`` with no
+    ``latest_summary``, so ``kanban_block``'s *required* ``reason`` — the
+    one thing a human needs to see to know what to do with a blocked card
+    — never reached the card detail response, even though the board-list
+    endpoint already attaches it via ``kanban_db.latest_summaries()``. A
+    blocked card must show both the reason text and the block kind."""
+    project = _create(env)
+    _activate(env, project)
+    client, _state = env
+    slug = project["slug"]
+    tid = client.post(
+        f"/api/registry/projects/{slug}/cards", json={"title": "Draft"}
+    ).json()["task_id"]
+    with kanban_db.connect_closing() as bconn:
+        kanban_db.specify_triage_task(bconn, tid)
+        bconn.execute(
+            "UPDATE tasks SET status = 'running' WHERE id = ?", (tid,)
+        )
+        assert kanban_db.block_task(
+            bconn, tid,
+            reason="Which Canva template should I use?",
+            kind="needs_input",
+        )
+
+    card = client.get(f"/api/registry/projects/{slug}/cards/{tid}").json()
+    assert card["status"] == "blocked"
+    assert card["latest_summary"] == "Which Canva template should I use?"
+    assert card["block_kind"] == "needs_input"
+
+
 def test_card_create_lands_in_triage_on_the_project(env):
     project = _create(env)
     _activate(env, project)

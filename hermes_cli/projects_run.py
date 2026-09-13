@@ -45,6 +45,15 @@ DEFAULT_MAX_SKILLS = 5
 DEFAULT_GUIDANCE_MAX_DIRECTIVES = 20
 DEFAULT_GUIDANCE_MAX_CHARS = 4000
 DEFAULT_BRIEF_MAX_CHARS = 1200
+# A `running` run with no card/session activity for longer than this looks
+# orphaned rather than slow (Gap B/C — see plans/2026-09-13-project-run-
+# resilience-plan.md). 2h is long enough to never fire on a legitimately
+# long inline session, short enough to catch a restart-orphaned run same-day.
+DEFAULT_RUN_STALL_SECONDS = 7200
+# How often the gateway's embedded watcher sweeps open runs for capacity
+# refill + staleness (Gap B). Independent of dispatch_interval_seconds —
+# this is a much cheaper, much less frequent pass.
+DEFAULT_RECONCILE_INTERVAL_SECONDS = 300
 
 _CONFIG_CACHE: Optional[Dict[str, Any]] = None
 
@@ -74,6 +83,13 @@ def projects_runtime_config() -> Dict[str, Any]:
         ),
         "brief_max_chars": _int_or(
             raw.get("brief_max_chars"), DEFAULT_BRIEF_MAX_CHARS
+        ),
+        "run_stall_seconds": _int_or(
+            raw.get("run_stall_seconds"), DEFAULT_RUN_STALL_SECONDS
+        ),
+        "reconcile_interval_seconds": _int_or(
+            raw.get("reconcile_interval_seconds"),
+            DEFAULT_RECONCILE_INTERVAL_SECONDS,
         ),
     }
     _CONFIG_CACHE = out
@@ -430,6 +446,18 @@ def promote_run_cards(
     The ``max_in_progress`` cap is enforced here — the project's own
     promotion step, never by patching the shared dispatcher: count cards in
     running + ready, promote at most up to the cap.
+
+    Candidate order matters when the cap is narrower than the playbook:
+    ``get_run_cards()`` has no natural order (SQLite returns
+    ``project_run_cards`` rows by primary key, i.e. by ``task_id`` — random
+    relative to the playbook). Promoting whichever triage card happens to
+    sort first can pick a step whose own dependency was never promoted,
+    which then can never reach ``ready`` — deadlocking the run on a step
+    that is not even the one blocking progress, while the real
+    dependency-free root never gets a turn (found in production, 2026-09).
+    So candidates are (a) split into dependency-satisfied vs. not, ready
+    ones first, and (b) ordered by playbook position as the deterministic
+    tie-break within each group, instead of by the incidental DB order.
     """
     if autonomy == "manual":
         return []
@@ -444,22 +472,47 @@ def promote_run_cards(
         if room == 0:
             return []
 
-    promoted: List[str] = []
+    task_ids = list(key_of.keys())
+    status_by_task: Dict[str, str] = {}
+    if task_ids:
+        placeholders = ",".join("?" for _ in task_ids)
+        rows = bconn.execute(
+            f"SELECT id, status FROM tasks WHERE id IN ({placeholders})",
+            task_ids,
+        ).fetchall()
+        status_by_task = {row["id"]: row["status"] for row in rows}
+    status_by_key = {
+        key_of[tid]: status
+        for tid, status in status_by_task.items()
+        if key_of.get(tid)
+    }
+
+    def _deps_satisfied(step_key: str) -> bool:
+        step = by_key.get(step_key)
+        deps = (step.get("depends_on") if step else None) or []
+        return all(status_by_key.get(dep) == "done" for dep in deps)
+
+    eligible: List[tuple] = []
     for rc in run_cards:
         key = key_of.get(rc["task_id"]) or rc.get("step_key")
         if key is None or key not in by_key:
             continue
         if key in held and not force_held:
             continue
+        if status_by_task.get(rc["task_id"]) != "triage":
+            continue
+        eligible.append((rc["task_id"], key))
+
+    order_index = {s["key"]: i for i, s in enumerate(steps)}
+    eligible.sort(key=lambda pair: order_index.get(pair[1], len(steps)))
+    eligible.sort(key=lambda pair: 0 if _deps_satisfied(pair[1]) else 1)
+
+    promoted: List[str] = []
+    for task_id, _key in eligible:
         if room is not None and len(promoted) >= room:
             break
-        row = bconn.execute(
-            "SELECT status FROM tasks WHERE id = ?", (rc["task_id"],)
-        ).fetchone()
-        if row is None or row["status"] != "triage":
-            continue
-        if kanban_db.specify_triage_task(bconn, rc["task_id"]):
-            promoted.append(rc["task_id"])
+        if kanban_db.specify_triage_task(bconn, task_id):
+            promoted.append(task_id)
     return promoted
 
 
@@ -936,6 +989,46 @@ def continue_run(
         projects_db.update_project_run(pconn, run["id"], status="running")
         updated = projects_db.get_project_run_by_id(pconn, run["id"])
     return {"run": updated, "promoted": promoted, "budget_gate": None}
+
+
+def refill_run_cards(
+    pconn, bconn, *, project: projects_db.Project, run: dict
+) -> List[str]:
+    """Top up this run's promoted cards after a card frees ``max_in_progress``
+    room (§4.1) — the completion-side counterpart to the one-shot promotion
+    at ``start_run()``/``continue_run()``.
+
+    ``promote_run_cards()`` is otherwise called from exactly those two
+    places, so a run whose cap is smaller than its playbook (the default,
+    ``max_in_progress=1``) promotes its first batch and then never promotes
+    again on its own — it stalls until a human calls ``continue``, even
+    with zero checkpoints involved. This is the hook that keeps a run
+    self-propelling: called after a run-linked card leaves
+    ``running``/``ready`` (done, blocked, or a dependency wait), it re-runs
+    the same promotion the run started with.
+
+    A held checkpoint's successors are never forced open here — that stays
+    ``continue_run()``'s human act (``force_held`` defaults to ``False``).
+    A no-op (``[]``) when the run is not ``running``, has no playbook, or
+    has nothing left to promote.
+    """
+    if run.get("status") != "running":
+        return []
+    playbook = projects_db.get_playbook(pconn, project.id, rev=run.get("playbook_rev"))
+    steps = (playbook or {}).get("steps") or []
+    if not steps:
+        return []
+    autonomy = project.autonomy or "supervised"
+    held = set() if autonomy == "autonomous" else held_step_keys(steps)
+    return promote_run_cards(
+        bconn,
+        pconn,
+        project=project,
+        run_id=run["id"],
+        steps=steps,
+        autonomy=autonomy,
+        held=held,
+    )
 
 
 def cancel_run(pconn, bconn, *, project: projects_db.Project, run: dict) -> dict:

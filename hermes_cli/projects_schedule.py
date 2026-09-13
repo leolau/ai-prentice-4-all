@@ -423,6 +423,48 @@ def _epoch_from_timestamp(value) -> int:
         return 0
 
 
+def _run_stall_config() -> dict:
+    """Lazy import — ``projects_run`` is the config owner (§ Gap B/C: doctor
+    and the sweep must read the same threshold or they'll disagree about
+    what "stale" means)."""
+    try:
+        from hermes_cli import projects_run
+
+        return projects_run.projects_runtime_config()
+    except Exception:  # noqa: BLE001 — config is advisory here
+        return {"run_stall_seconds": 7200}
+
+
+def _stalest_open_run(pconn, project, runs: List[dict], *, now: int) -> Optional[dict]:
+    """The ``running`` run (if any) with no card/session activity for
+    longest past ``run_stall_seconds`` — ``None`` when every open run is
+    either not stale or not ``running``. Read-only, fail-open: any error
+    here reads as "nothing to report", never as a crash.
+    """
+    try:
+        from hermes_cli import projects_reconcile
+    except Exception:  # noqa: BLE001
+        return None
+    cfg = _run_stall_config()
+    threshold = cfg.get("run_stall_seconds", 7200)
+    worst: Optional[dict] = None
+    for run in runs:
+        if run.get("status") != "running":
+            continue
+        try:
+            last = projects_reconcile.run_last_activity_at(pconn, project, run)
+        except Exception:  # noqa: BLE001
+            continue
+        if not last:
+            continue
+        age = now - last
+        if age <= threshold:
+            continue
+        if worst is None or age > worst["age"]:
+            worst = {"run": run, "age": age}
+    return worst
+
+
 def derive_health(
     project,
     *,
@@ -431,6 +473,7 @@ def derive_health(
     runs: List[dict],
     cron_job: Optional[dict] = None,
     now: Optional[int] = None,
+    pconn=None,
 ) -> str:
     """``stalled`` outranks ``attention``: silence beats noise.
 
@@ -438,11 +481,24 @@ def derive_health(
     round-trip. Callers that cannot afford the store read on every row may
     pass the project with ``cron_job_id`` cleared; the list route resolves
     the job only for scheduled projects.
+
+    ``pconn``, when given, additionally checks every ``running`` run for
+    staleness (Gap B/C — a run stuck since a lost process restart looked
+    identical to a working one otherwise, for *any* cadence, not just
+    ``repeatable``'s schedule-silence check above). Omitted by callers that
+    don't have a connection handy; the check is simply skipped then, same
+    fail-open posture as everything else here.
     """
     now = int(now if now is not None else time.time())
     cadence = getattr(project, "cadence", "one_off")
 
     # ---- stalled --------------------------------------------------------
+    if pconn is not None:
+        stalled_run = _stalest_open_run(pconn, project, runs, now=now)
+        if stalled_run is not None:
+            cfg = _run_stall_config()
+            if stalled_run["age"] > cfg["run_stall_seconds"] * 4:
+                return "stalled"
     if cadence == "repeatable":
         if not any(p.get("role") == "host" for p in profiles):
             # The host row left project_profiles — never silently re-home.
@@ -464,6 +520,8 @@ def derive_health(
             return "stalled"
 
     # ---- attention -------------------------------------------------------
+    if pconn is not None and stalled_run is not None:
+        return "attention"
     if card_rollup.get("blocked"):
         return "attention"
     if any(r.get("status") in ("waiting", "blocked") for r in runs):
@@ -510,6 +568,7 @@ _SEVERITY = {
     "standing_overdue": "attention",
     "one_off_overdue": "attention",
     "board_missing": "attention",
+    "run_stalled": "attention",
 }
 
 
@@ -613,5 +672,19 @@ def doctor_findings(
                 bconn.execute("SELECT 1 FROM tasks LIMIT 1")
         except Exception:
             _add("board_missing", f"board '{board}' does not resolve")
+
+    # A stuck run looks identical to a working one on the list page —
+    # for EVERY cadence, not just repeatable's schedule-silence check
+    # above. Gap B/C (plans/2026-09-13-project-run-resilience-plan.md):
+    # found via a run that sat `running` for 13+ hours after a process
+    # restart with `doctor` reporting nothing wrong.
+    stalled_run = _stalest_open_run(conn, project, runs, now=now)
+    if stalled_run is not None:
+        hours = stalled_run["age"] // 3600
+        _add(
+            "run_stalled",
+            f"run {stalled_run['run'].get('run_no')} has shown no "
+            f"card/session activity for {hours}h — likely orphaned",
+        )
 
     return findings
