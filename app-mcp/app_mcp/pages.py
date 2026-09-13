@@ -21,6 +21,11 @@ PAGES: list[dict[str, str]] = [
     {"path": "/projects/[slug]/cards/[id]", "name": "Board card", "purpose": "One board card"},
     {"path": "/projects/new", "name": "New project", "purpose": "Create a project"},
     {"path": "/files", "name": "Files", "purpose": "Shared file registry"},
+    {
+        "path": "/files/bridge",
+        "name": "Folder Bridge",
+        "purpose": "Connect local Mac folders so the agent can search/read them",
+    },
     {"path": "/activity", "name": "Activity", "purpose": "Agent activity traces"},
     {"path": "/activity/[traceId]", "name": "Trace", "purpose": "One activity trace"},
     {"path": "/graph", "name": "Graph", "purpose": "Communication graph"},
