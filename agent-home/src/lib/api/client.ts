@@ -1843,6 +1843,18 @@ export class HermesApiClient {
   }
 
   /**
+   * Continue a `failed`/`cancelled` run from wherever its cards already
+   * are — distinct from `startProjectRun` ("Repeat this run"), which
+   * starts a brand-new run on the same method and redoes every step.
+   */
+  async resumeProjectRun(slug: string, runNo: number): Promise<ProjectRun> {
+    return this.request(
+      `/api/registry/projects/${encodeURIComponent(slug)}/runs/${encodeURIComponent(runNo)}/resume`,
+      { method: "POST", json: {} },
+    );
+  }
+
+  /**
    * The run's live reasoning and tool activity as raw SSE, for the BFF to
    * pipe. `after` resumes from a sequence number so a reconnect replays what
    * it missed. Like `openChatStream`, the body is NOT consumed here.

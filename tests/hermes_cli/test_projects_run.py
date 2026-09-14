@@ -813,6 +813,120 @@ def test_stop_refuses_a_run_that_is_already_closed(stores):
                 )
 
 
+# ---------------------------------------------------------------------------
+# Resume — continue a failed/cancelled run from its own progress, never
+# re-instantiating the playbook (distinct from start_run()/"Repeat this run")
+# ---------------------------------------------------------------------------
+
+
+def test_resume_refuses_a_run_that_is_not_closed(stores):
+    project, _ = _make_project(autonomy="autonomous")
+    _save_playbook(project.id, [{"key": "a", "title": "A"}])
+    with projects_db.connect_closing() as conn:
+        projects_db.activate_playbook_rev(conn, project.id, 1)
+    run = _start(project.id)["run"]
+    with projects_db.connect_closing() as conn:
+        with kanban_db.connect_closing() as bconn:
+            fresh = projects_db.get_project(conn, project.id)
+            with pytest.raises(ValueError, match="only a failed or cancelled run"):
+                projects_run.resume_run(conn, bconn, project=fresh, run=run)
+
+
+def test_resume_continues_from_progress_without_redoing_done_work(stores):
+    project, _ = _make_project(autonomy="autonomous", max_in_progress=4)
+    steps = [{"key": "a", "title": "A"}, {"key": "b", "title": "B"}]
+    _save_playbook(project.id, steps)
+    with projects_db.connect_closing() as conn:
+        projects_db.activate_playbook_rev(conn, project.id, 1)
+    result = _start(project.id)
+    run = result["run"]
+    with kanban_db.connect_closing() as bconn:
+        assert kanban_db.complete_task(bconn, result["cards"]["a"], result="done")
+        bconn.execute(
+            "UPDATE tasks SET status = 'running' WHERE id = ?",
+            (result["cards"]["b"],),
+        )
+        assert kanban_db.block_task(
+            bconn, result["cards"]["b"], reason="rate limited", kind="transient"
+        )
+    with projects_db.connect_closing() as conn:
+        closed = projects_run.close_run(
+            conn, run=run, status="failed", outcome="stalled",
+            error="no activity for 2h",
+        )
+    assert closed["status"] == "failed"
+
+    with projects_db.connect_closing() as conn:
+        with kanban_db.connect_closing() as bconn:
+            fresh_project = projects_db.get_project(conn, project.id)
+            resumed = projects_run.resume_run(
+                conn, bconn, project=fresh_project, run=closed
+            )
+        with kanban_db.connect_closing() as bconn:
+            a = kanban_db.get_task(bconn, result["cards"]["a"])
+            b = kanban_db.get_task(bconn, result["cards"]["b"])
+
+    assert resumed["run"]["status"] == "running"
+    assert resumed["run"]["outcome"] is None
+    assert resumed["run"]["error"] is None
+    assert resumed["run"]["ended_at"] is None
+    assert a.status == "done"  # never redone — instantiate_run_cards is never called
+    assert b.status in ("ready", "todo")  # unblocked, back in the work pool
+
+
+def test_resume_re_promotes_a_checkpoint_successor_stuck_in_triage(stores):
+    """Regression for the production incident: a checkpoint's successor can
+    reach `triage` a second time via the board's own block-loop breaker
+    (`BLOCK_RECURRENCE_LIMIT`) even after its checkpoint was already passed
+    once via `continue_run()`. A naive re-promotion (force_held=False) would
+    refuse it as still "held" by the checkpoint purely from the playbook's
+    static shape — Resume must release it anyway, because a human tapping
+    Resume already knows this step passed its checkpoint."""
+    project, _ = _make_project(max_in_progress=4)
+    _save_playbook(project.id)  # STEPS: gather -> draft -> approve* -> send
+    with projects_db.connect_closing() as conn:
+        projects_db.activate_playbook_rev(conn, project.id, 1)
+    result = _start(project.id)
+    run = result["run"]
+    send_id = result["cards"]["send"]
+
+    with projects_db.connect_closing() as conn:
+        with kanban_db.connect_closing() as bconn:
+            fresh = projects_db.get_project(conn, project.id)
+            out = projects_run.continue_run(conn, bconn, project=fresh, run=run)
+    assert send_id in out["promoted"]  # checkpoint passed, "send" released
+
+    # Simulate "send" getting bounced to triage by the loop breaker (two
+    # same-cause blocks) after its checkpoint already passed.
+    with kanban_db.connect_closing() as bconn:
+        for _ in range(2):
+            bconn.execute(
+                "UPDATE tasks SET status = 'running' WHERE id = ?", (send_id,)
+            )
+            assert kanban_db.block_task(
+                bconn, send_id, reason="rate limited", kind="transient"
+            )
+        send = kanban_db.get_task(bconn, send_id)
+    assert send.status == "triage"  # loop breaker escalated it
+
+    with projects_db.connect_closing() as conn:
+        closed = projects_run.close_run(
+            conn, run=run, status="failed", outcome="stalled", error="stalled"
+        )
+
+    with projects_db.connect_closing() as conn:
+        with kanban_db.connect_closing() as bconn:
+            fresh = projects_db.get_project(conn, project.id)
+            resumed = projects_run.resume_run(
+                conn, bconn, project=fresh, run=closed
+            )
+        with kanban_db.connect_closing() as bconn:
+            send_after = kanban_db.get_task(bconn, send_id)
+
+    assert send_id in resumed["promoted"]
+    assert send_after.status in ("todo", "ready")
+
+
 def test_run_cost_is_fail_open(stores):
     assert projects_run.run_cost(None) is None
     assert projects_run.run_cost("t-1") is None  # no ledger configured

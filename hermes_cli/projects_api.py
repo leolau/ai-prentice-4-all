@@ -2868,6 +2868,35 @@ async def continue_run_route(request: Request, run_no: int) -> dict[str, Any]:
         raise HTTPException(status_code=404, detail="run not found")
 
 
+@router.post("/{slug}/runs/{run_no}/resume")
+async def resume_run_route(request: Request, run_no: int) -> dict[str, Any]:
+    """Continue a ``failed``/``cancelled`` run from wherever its cards
+    already are — distinct from ``POST /runs`` ("Repeat this run"), which
+    starts a brand-new run on the same method and redoes every step."""
+    project, _role, _profiles, _principal = await _require_write(
+        request, judgement=True
+    )
+    _refuse_if_archived(project, "resuming a run")
+
+    def _resume_sync() -> dict:
+        with projects_db.connect_closing() as conn:
+            run = projects_db.get_project_run(conn, project.id, run_no)
+            if run is None:
+                raise KeyError(run_no)
+            with _board_conn(project) as bconn:
+                try:
+                    return projects_run.resume_run(
+                        conn, bconn, project=project, run=run
+                    )
+                except ValueError as exc:
+                    raise HTTPException(status_code=409, detail=str(exc))
+
+    try:
+        return await asyncio.to_thread(_resume_sync)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="run not found")
+
+
 @router.post("/{slug}/runs/{run_no}/cancel")
 async def cancel_run_route(request: Request, run_no: int) -> dict[str, Any]:
     """Stop promoting and archive the run's un-started cards; a running
