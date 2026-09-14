@@ -360,11 +360,35 @@ export function RunView({
   // so a person never has to piece the state together from several signals
   // at once — the confusion a real run's "Failed" badge caused in
   // production while a card kept working underneath it.
-  const nextAction = ((): { tone: "action" | "attention" | "ok"; text: string } | null => {
+  const nextAction = ((): {
+    tone: "action" | "attention" | "ok";
+    text: string;
+    /** The checkpoint/blocked card's own words, quoted verbatim — the
+     * whole point being a person doesn't have to click through to find
+     * out what it's actually waiting on. */
+    detail?: string;
+    href?: string;
+    hrefLabel?: string;
+    /** The successor card(s) a checkpoint hold is keeping in triage —
+     * where to actually add answers (Edit card → brief), before tapping
+     * Continue below. */
+    heldCards?: { task_id: string; title: string | null }[];
+  } | null => {
     if (canContinue) {
+      const wait = run.checkpoint_wait;
       return {
         tone: "action",
-        text: "Review the checkpoint step's work below, then tap Continue to release the next step(s).",
+        text: wait?.checkpoint_title
+          ? `"${wait.checkpoint_title}" is done and waiting on your review before its next step(s) proceed.`
+          : "Review the checkpoint step's work below, then tap Continue to release the next step(s).",
+        detail: wait?.comment ?? undefined,
+        href: wait?.checkpoint_task_id
+          ? `/projects/${encodeURIComponent(slug)}/cards/${encodeURIComponent(wait.checkpoint_task_id)}`
+          : undefined,
+        hrefLabel: "Open the checkpoint card",
+        heldCards: wait?.held_task_ids?.length
+          ? cards.filter((c) => wait.held_task_ids.includes(c.task_id))
+          : undefined,
       };
     }
     if (canResume) {
@@ -436,7 +460,7 @@ export function RunView({
               cards={cards}
             />
             {nextAction ? (
-              <p
+              <div
                 data-component="NextAction"
                 role="status"
                 className={`mt-2 rounded-lg border px-3 py-2 text-sm ${
@@ -447,15 +471,50 @@ export function RunView({
                       : "border-[var(--color-border)] bg-[var(--color-surface-2)] text-[var(--color-muted)]"
                 }`}
               >
-                <span className="font-medium">
-                  {nextAction.tone === "action"
-                    ? "Next: "
-                    : nextAction.tone === "attention"
-                      ? "Needs attention: "
-                      : ""}
-                </span>
-                {nextAction.text}
-              </p>
+                <p>
+                  <span className="font-medium">
+                    {nextAction.tone === "action"
+                      ? "Next: "
+                      : nextAction.tone === "attention"
+                        ? "Needs attention: "
+                        : ""}
+                  </span>
+                  {nextAction.text}
+                </p>
+                {nextAction.detail ? (
+                  <p className="mt-1.5 whitespace-pre-wrap border-l-2 border-current/30 pl-2 text-[var(--color-muted)]">
+                    {nextAction.detail}
+                  </p>
+                ) : null}
+                {nextAction.href ? (
+                  <Link
+                    href={nextAction.href}
+                    className="mt-1.5 inline-block underline"
+                  >
+                    {nextAction.hrefLabel ?? "Open"}
+                  </Link>
+                ) : null}
+                {nextAction.heldCards?.length ? (
+                  <div className="mt-1.5">
+                    <p className="text-xs">
+                      To add your answer before tapping Continue, open the
+                      held step below and edit its brief:
+                    </p>
+                    <ul className="mt-1 flex flex-col gap-1">
+                      {nextAction.heldCards.map((c) => (
+                        <li key={c.task_id}>
+                          <Link
+                            href={`/projects/${encodeURIComponent(slug)}/cards/${encodeURIComponent(c.task_id)}`}
+                            className="underline"
+                          >
+                            {c.title ?? c.task_id}
+                          </Link>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                ) : null}
+              </div>
             ) : null}
             <p className="mt-1 text-xs text-[var(--color-muted)]">
               {run.trigger} · on {run.profile} · started{" "}
@@ -573,17 +632,6 @@ export function RunView({
                 </button>
               ) : null}
             </div>
-
-            {canContinue && run.status !== "waiting" ? (
-              <p
-                data-component="CheckpointBanner"
-                role="status"
-                className="mt-2 rounded-lg border border-[var(--color-accent)]/40 bg-[var(--color-accent)]/10 px-3 py-2 text-sm"
-              >
-                The checkpoint step is done. Review its work, then Continue to
-                release the next step(s) to the board.
-              </p>
-            ) : null}
 
             {retried.length > 0 ? (
               <div

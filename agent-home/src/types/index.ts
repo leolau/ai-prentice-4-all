@@ -1506,6 +1506,22 @@ export interface ProjectRunBlockedTask {
   error: string | null;
 }
 
+/**
+ * What a supervised run's checkpoint hold is actually waiting on (§7.1,
+ * §12 push edition) — the checkpoint card's own comment, not just a
+ * boolean, so the run page can show a person what to look at instead of
+ * a generic "there's a checkpoint" sentence.
+ */
+export interface ProjectRunCheckpointWait {
+  checkpoint_task_id: string | null;
+  checkpoint_title: string | null;
+  /** The checkpoint card's most recent comment (or run summary if it left
+   * no comment) — the worker's findings/questions, verbatim. */
+  comment: string | null;
+  /** The successor card(s) still held in triage until Continue. */
+  held_task_ids: string[];
+}
+
 /** The full run row (§6) as the detail/list reads return it. */
 export interface ProjectRun {
   id: string;
@@ -1550,6 +1566,8 @@ export interface ProjectRun {
    * their successors still wait in triage — held on the human's Continue.
    */
   awaiting_continue?: boolean;
+  /** `null` while `awaiting_continue` is false; the detail when it's true. */
+  checkpoint_wait?: ProjectRunCheckpointWait | null;
 }
 
 /** The method, one revision (§7). `steps` is parsed JSON on the detail read. */

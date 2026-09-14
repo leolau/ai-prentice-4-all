@@ -81,9 +81,18 @@ def _on_card_settled(bconn, task_id: str) -> List[str]:
         project = projects_db.get_project(pconn, run["project_id"])
         if project is None:
             return []
-        return projects_run.refill_run_cards(
+        promoted = projects_run.refill_run_cards(
             pconn, bconn, project=project, run=run
         )
+        if not promoted:
+            # Nothing left to promote right now — the common reason is a
+            # checkpoint that just engaged (the card that settled *was*
+            # the checkpoint). Notify the instant it happens rather than
+            # waiting on the next periodic sweep (§12 push edition).
+            projects_run.notify_if_awaiting_checkpoint(
+                pconn, bconn, project=project, run=run
+            )
+        return promoted
 
 
 # ---------------------------------------------------------------------------
@@ -213,6 +222,22 @@ def _reconcile_one_run(
             if task is not None and task.status in ("running", "ready"):
                 in_flight = True
                 break
+
+        # Nothing promoted, nothing in flight — that is also exactly what
+        # a run legitimately parked at a checkpoint looks like. A held
+        # checkpoint is not "orphaned"; it is correctly waiting on a
+        # human, for however long that takes, and must never be auto-
+        # failed for going quiet (§7.1). Re-notify here too (deduped) as
+        # the safety net for the case the completion hook's own notify
+        # never fired — e.g. a process restart landed between the card
+        # settling and the hook running.
+        if not in_flight and projects_run.notify_if_awaiting_checkpoint(
+            pconn, bconn, project=project, run=run
+        ):
+            return {
+                "project": project.slug, "run_no": run.get("run_no"),
+                "action": "awaiting_continue",
+            }
     if in_flight:
         return None
 

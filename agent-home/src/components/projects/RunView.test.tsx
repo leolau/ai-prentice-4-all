@@ -194,7 +194,7 @@ describe("RunView Stop now", () => {
 });
 
 describe("RunView on a supervised checkpoint hold", () => {
-  it("offers Continue (with the checkpoint note) while the row still says running", () => {
+  it("offers Continue while the row still says running", () => {
     const { getByRole, getByText } = render(
       <RunView
         slug="monday-digest"
@@ -202,7 +202,43 @@ describe("RunView on a supervised checkpoint hold", () => {
       />,
     );
     expect(getByRole("button", { name: "Continue" })).toBeTruthy();
-    expect(getByText(/checkpoint step is done/i)).toBeTruthy();
+    expect(getByText(/checkpoint step's work below/i)).toBeTruthy();
+  });
+
+  it("quotes the checkpoint card's own comment, links straight to it, and lists the held card(s) to answer in", () => {
+    const { getByText, getByRole, getAllByRole } = render(
+      <RunView
+        slug="monday-digest"
+        run={RUN({
+          status: "running",
+          awaiting_continue: true,
+          cards: [
+            { task_id: "t_pricing", step_key: "pricing", status: "done", title: "Draft pricing for all 7 items", attempts: 1, failed_attempts: 0, last_error: null, last_outcome: null },
+            { task_id: "t_proposal", step_key: "proposal", status: "triage", title: "Draft the service proposal", attempts: 0, failed_attempts: 0, last_error: null, last_outcome: null },
+          ],
+          checkpoint_wait: {
+            checkpoint_task_id: "t_pricing",
+            checkpoint_title: "Draft pricing for all 7 items",
+            comment: "Pricing drafted — HK$609,200 total. Does the company already own the headsets?",
+            held_task_ids: ["t_proposal"],
+          },
+        })}
+      />,
+    );
+    expect(getByText(/"Draft pricing for all 7 items" is done/i)).toBeTruthy();
+    expect(getByText(/Does the company already own the headsets/i)).toBeTruthy();
+    const link = getByRole("link", { name: "Open the checkpoint card" });
+    expect(link.getAttribute("href")).toBe(
+      "/projects/monday-digest/cards/t_pricing",
+    );
+    // Also rendered by the ordinary card list further down the page —
+    // any match having the right href is enough.
+    const heldLinks = getAllByRole("link", { name: "Draft the service proposal" });
+    expect(
+      heldLinks.some(
+        (l) => l.getAttribute("href") === "/projects/monday-digest/cards/t_proposal",
+      ),
+    ).toBe(true);
   });
 
   it("keeps Continue away from a running run without a hold", () => {
