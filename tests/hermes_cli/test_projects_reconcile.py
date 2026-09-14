@@ -313,6 +313,72 @@ def test_checkpoint_wait_info_is_not_masked_by_a_second_still_open_checkpoint(st
     assert still["status"] == "running"  # never auto-failed
 
 
+def test_completing_the_last_card_closes_the_run_as_done(stores):
+    """Regression (2026-09-14, real project): finishing every card never
+    itself closed the run — a fully-finished run just sat `running`
+    forever with nothing left to promote, which read as "stalled" on the
+    run page even though everything actually succeeded ("7 of 7 steps
+    done" next to a red Failed/Stalled badge). The completion hook
+    (on_card_settled, via kanban_db.complete_task) must close it the
+    instant the last card settles — no waiting on the periodic sweep."""
+    project = _make_project(autonomy="autonomous", max_in_progress=1)
+    steps = [
+        {"key": "s0", "title": "Step 0"},
+        {"key": "s1", "title": "Step 1", "depends_on": ["s0"]},
+    ]
+    _save_playbook(project.id, steps)
+    with projects_db.connect_closing() as conn:
+        projects_db.activate_playbook_rev(conn, project.id, 1)
+    result = _start(project.id)
+    run = result["run"]
+    s0_id, s1_id = result["cards"]["s0"], result["cards"]["s1"]
+
+    with kanban_db.connect_closing() as bconn:
+        bconn.execute("UPDATE tasks SET status = 'running' WHERE id = ?", (s0_id,))
+        assert kanban_db.complete_task(bconn, s0_id, result="done")
+        assert kanban_db.get_task(bconn, s1_id).status in ("ready", "todo")
+        bconn.execute("UPDATE tasks SET status = 'running' WHERE id = ?", (s1_id,))
+        # Not yet closed — one card is still open.
+        with projects_db.connect_closing() as conn:
+            assert projects_db.get_project_run_by_id(conn, run["id"])["status"] == "running"
+        assert kanban_db.complete_task(bconn, s1_id, result="done")
+
+    with projects_db.connect_closing() as conn:
+        closed = projects_db.get_project_run_by_id(conn, run["id"])
+    assert closed["status"] == "done"
+    assert closed["ended_at"] is not None
+    assert closed["outcome"] is not None
+
+
+def test_reconcile_sweep_also_closes_a_run_whose_completion_event_was_lost(stores):
+    """Safety net for the case on_card_settled never fired (a process
+    restart landed between the last card settling and the hook running)
+    — the periodic sweep must close it too, not just refill/notify."""
+    project = _make_project(autonomy="autonomous", max_in_progress=1)
+    steps = [{"key": "s0", "title": "Step 0"}]
+    _save_playbook(project.id, steps)
+    with projects_db.connect_closing() as conn:
+        projects_db.activate_playbook_rev(conn, project.id, 1)
+    result = _start(project.id)
+    run = result["run"]
+    s0_id = result["cards"]["s0"]
+
+    with kanban_db.connect_closing() as bconn:
+        # Raw status flip — bypasses complete_task()'s settle hook
+        # entirely, exactly like the restart-orphan scenario elsewhere
+        # in this file.
+        bconn.execute("UPDATE tasks SET status = 'done' WHERE id = ?", (s0_id,))
+
+    results = projects_reconcile.reconcile_all_open_runs()
+    assert any(
+        r.get("action") == "completed" and r.get("run_no") == run["run_no"]
+        for r in results
+    )
+    with projects_db.connect_closing() as conn:
+        closed = projects_db.get_project_run_by_id(conn, run["id"])
+    assert closed["status"] == "done"
+
+
 def test_reconcile_leaves_a_fresh_running_run_alone(stores):
     """Nothing stale, nothing new to refill (start_run already promoted
     everything room allowed) — the sweep must be a true no-op."""
