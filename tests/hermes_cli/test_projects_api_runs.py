@@ -743,23 +743,36 @@ def test_run_reports_awaiting_continue_once_checkpoint_is_done(env):
     gather_id, approve_id = started["cards"]["gather"], started["cards"]["approve"]
 
     resp = client.get(f"/api/registry/projects/{project['slug']}/runs/1")
-    assert resp.json()["awaiting_continue"] is False  # checkpoint not done yet
+    body = resp.json()
+    assert body["awaiting_continue"] is False  # checkpoint not done yet
+    assert body["checkpoint_wait"] is None
 
     with kanban_db.connect_closing() as bconn:
         assert kanban_db.complete_task(bconn, gather_id, result="ok")
+        bconn.execute("UPDATE tasks SET status = 'running' WHERE id = ?", (approve_id,))
+        kanban_db.add_comment(
+            bconn, approve_id, "default", "Ready to ship — confirm the subject line?"
+        )
         assert kanban_db.complete_task(bconn, approve_id, result="looks good")
 
     resp = client.get(f"/api/registry/projects/{project['slug']}/runs/1")
     body = resp.json()
     assert body["status"] == "running"
     assert body["awaiting_continue"] is True
+    # The whole point (§12): the page must show *what* it's waiting on,
+    # quoting the checkpoint card's own comment, not just a boolean.
+    wait = body["checkpoint_wait"]
+    assert wait["checkpoint_task_id"] == approve_id
+    assert "confirm the subject line" in wait["comment"]
 
     resp = client.post(
         f"/api/registry/projects/{project['slug']}/runs/1/continue", json={}
     )
     assert resp.status_code == 200, resp.text
     resp = client.get(f"/api/registry/projects/{project['slug']}/runs/1")
-    assert resp.json()["awaiting_continue"] is False
+    body = resp.json()
+    assert body["awaiting_continue"] is False
+    assert body["checkpoint_wait"] is None
 
 
 def test_run_reports_completion_and_card_attempt_history(env):

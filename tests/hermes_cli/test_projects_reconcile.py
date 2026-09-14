@@ -185,6 +185,69 @@ def test_reconcile_fails_a_stale_run_with_nothing_left_to_promote(stores):
     assert APPROVALS.calls, "a stalled-run approval must be raised, not swallowed"
 
 
+def test_reconcile_never_fails_a_run_parked_at_a_checkpoint(stores):
+    """The exact incident this was built to fix (2026-09-14 tender-project
+    report): a supervised run whose checkpoint card finished — correctly
+    holding its successor in triage — must never be auto-failed as
+    'stale' just because a human hasn't answered yet. It is waiting on a
+    person, not orphaned, and a live approval quoting the checkpoint
+    card's own comment must be raised so the person actually finds out."""
+    project = _make_project(autonomy="supervised", max_in_progress=1)
+    steps = [
+        {"key": "s0", "title": "Step 0"},
+        {
+            "key": "s1", "title": "Step 1 (checkpoint)",
+            "depends_on": ["s0"], "checkpoint": True,
+        },
+        {"key": "s2", "title": "Step 2", "depends_on": ["s1"]},
+    ]
+    _save_playbook(project.id, steps)
+    with projects_db.connect_closing() as conn:
+        projects_db.activate_playbook_rev(conn, project.id, 1)
+    result = _start(project.id)
+    run = result["run"]
+    s0_id = result["cards"]["s0"]
+    s1_id = result["cards"]["s1"]
+
+    with kanban_db.connect_closing() as bconn:
+        bconn.execute("UPDATE tasks SET status = 'running' WHERE id = ?", (s0_id,))
+        assert kanban_db.complete_task(bconn, s0_id, result="done")
+        # The completion hook (Gap A) promotes the checkpoint step itself —
+        # only its *successor* (s2) is held.
+        assert kanban_db.get_task(bconn, s1_id).status in ("ready", "todo")
+        bconn.execute("UPDATE tasks SET status = 'running' WHERE id = ?", (s1_id,))
+        kanban_db.add_comment(
+            bconn, s1_id, "default", "Two questions for you: A or B? X or Y?"
+        )
+        assert kanban_db.complete_task(bconn, s1_id, result="done")
+        assert kanban_db.get_task(bconn, result["cards"]["s2"]).status == "triage"
+
+    future = int(run["started_at"]) + 3 * 3600  # past the 2h default threshold
+    results = projects_reconcile.reconcile_all_open_runs(now=future)
+
+    with projects_db.connect_closing() as conn:
+        still = projects_db.get_project_run_by_id(conn, run["id"])
+    assert still["status"] == "running"  # never auto-failed
+    assert any(
+        r.get("action") == "awaiting_continue" and r.get("run_no") == run["run_no"]
+        for r in results
+    )
+    # `start_run()` itself already raised a generic notice ("this playbook
+    # has checkpoints") the moment the run began — before anyone could
+    # know whether s1 would ever actually be reached. The *live* one,
+    # raised once the checkpoint genuinely engaged (by on_card_settled
+    # during kanban_db.complete_task above, and re-detected here by the
+    # sweep against this non-deduping fake store), is the last call and
+    # must quote the checkpoint card's own comment.
+    assert APPROVALS.calls, "the checkpoint hold must raise a live approval"
+    live_calls = [c for c in APPROVALS.calls if "Two questions for you" in c["body"]]
+    assert live_calls, "the live checkpoint notice was never raised"
+    for raised in live_calls:
+        assert raised["dedupe_key"] == (
+            f"proj:{project.slug}:run:{run['run_no']}:checkpoint:s1"
+        )
+
+
 def test_reconcile_leaves_a_fresh_running_run_alone(stores):
     """Nothing stale, nothing new to refill (start_run already promoted
     everything room allowed) — the sweep must be a true no-op."""

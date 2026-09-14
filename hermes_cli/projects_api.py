@@ -2748,32 +2748,28 @@ def _run_blocked_tasks(bconn, cards: list[dict]) -> list[dict]:
     return blocked
 
 
-def _run_awaits_continue(
-    conn, project: projects_db.Project, run: dict, cards: list[dict]
-) -> bool:
-    """A supervised run whose checkpoint step(s) are done while their
-    successors still sit in triage is held on the human's continue (§7.1).
-
-    The row keeps saying ``running`` (nothing turns it to ``waiting`` when a
-    checkpoint card finishes), so the hold is derived here from the
-    playbook + board state; the run page turns it into a Continue button.
+def _checkpoint_wait_payload(conn, bconn, project, run: dict, cards: list[dict]) -> Optional[dict]:
+    """The UI-facing form of `projects_run.checkpoint_wait_info` — adds the
+    checkpoint card's own comment/summary (its findings/questions) so the
+    run page can show *what* it's waiting on, not just *that* it is (§12).
     """
-    if run.get("status") not in ("running", "waiting") or not cards:
-        return False
-    if (getattr(project, "autonomy", None) or "supervised") != "supervised":
-        return False
-    playbook = projects_db.get_playbook(
-        conn, project.id, rev=run.get("playbook_rev")
-    )
-    steps = (playbook or {}).get("steps") or []
-    held = projects_run.held_step_keys(steps)
-    if not held:
-        return False
-    checkpoints = {s["key"] for s in steps if s.get("checkpoint")}
-    status_of = {c.get("step_key"): c.get("status") for c in cards}
-    if any(status_of.get(k) != "done" for k in checkpoints if k in status_of):
-        return False
-    return any(status_of.get(k) == "triage" for k in held)
+    info = projects_run.checkpoint_wait_info(conn, project, run, cards)
+    if info is None:
+        return None
+    task_id = info.get("checkpoint_task_id")
+    comment = None
+    if task_id:
+        try:
+            comments = kanban_db.list_comments(bconn, task_id)
+            comment = comments[-1].body if comments else kanban_db.latest_summary(bconn, task_id)
+        except Exception:  # noqa: BLE001 — the hold itself is still real without this
+            comment = None
+    return {
+        "checkpoint_task_id": task_id,
+        "checkpoint_title": info.get("checkpoint_title"),
+        "comment": comment,
+        "held_task_ids": info.get("held_task_ids") or [],
+    }
 
 
 def _run_payload(
@@ -2797,7 +2793,9 @@ def _run_payload(
     blocked = _run_blocked_tasks(bconn, cards)
     payload["blocked_tasks"] = blocked
     payload["stalled"] = _run_stalled(run, cards, blocked)
-    payload["awaiting_continue"] = _run_awaits_continue(conn, project, run, cards)
+    checkpoint_wait = _checkpoint_wait_payload(conn, bconn, project, run, cards)
+    payload["awaiting_continue"] = checkpoint_wait is not None
+    payload["checkpoint_wait"] = checkpoint_wait
     payload["cost"] = projects_run.run_cost(
         run.get("trace_id"), principal=principal
     )
