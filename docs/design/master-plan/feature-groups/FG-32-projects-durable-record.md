@@ -1903,6 +1903,28 @@ The design-relevant ones, in the order the second review recommends fixing them:
   project and `hermes kanban create --project <archived>` has no test at all.
   **Block 4f** of the end-to-end review is the worklist.
 
+9. **Run resilience — a run could stall forever with `doctor` reporting
+   nothing wrong** (found 2026-09-12, production incident:
+   `plans/2026-09-13-project-run-resilience-plan.md` /
+   `plans/2026-09-13-project-run-resilience-status.md`;
+   `docs/design/SESSION-HANDOFF-2026-09-projects-run-resilience.md` for the
+   full closeout). Three independent defects: `promote_run_cards()` picked
+   which `triage` card to promote by incidental DB row order rather than
+   dependency readiness, so a narrow `max_in_progress` cap could promote a
+   card whose own dependency was never promoted, deadlocking the run on a
+   step that wasn't even the one blocking progress; nothing re-invoked
+   `promote_run_cards()` when a card settled, so a run only ever promoted
+   its first batch and then stalled with no human action; and neither
+   `doctor_findings` nor `derive_health` inspected a `running` run's
+   liveness for any cadence. **FIXED** (#388, #389, deployed to
+   production and verified live): a completion-triggered refill hook
+   (`hermes_cli/projects_reconcile.py::on_card_settled`), a periodic sweep
+   that refills every open run and fails one loudly once it's gone stale
+   with nothing left to promote (`reconcile_all_open_runs`, embedded in the
+   gateway on a 5-minute interval), a `run_stalled` doctor/health code for
+   every cadence, and dependency-aware promotion ordering in
+   `promote_run_cards()`.
+
 ### 20.3 Testing gaps that let the above through
 
 §16's contracts are behaviour-shaped and the store/router honour them. Two
