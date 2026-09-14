@@ -656,6 +656,50 @@ def test_card_detail_surfaces_the_block_reason(env):
     assert card["block_kind"] == "needs_input"
 
 
+def test_card_detail_surfaces_live_progress_while_running(env):
+    """A card's worker runs in another process with no reasoning stream —
+    heartbeat notes and comments are the equivalent progress signal, and
+    the card page must actually receive them (found missing: the page
+    showed a running card with no update at all, not even a stale one)."""
+    project = _create(env)
+    _activate(env, project)
+    client, _state = env
+    slug = project["slug"]
+    tid = client.post(
+        f"/api/registry/projects/{slug}/cards", json={"title": "Draft"}
+    ).json()["task_id"]
+    with kanban_db.connect_closing() as bconn:
+        kanban_db.specify_triage_task(bconn, tid)
+        bconn.execute(
+            "UPDATE tasks SET status = 'running' WHERE id = ?", (tid,)
+        )
+        assert kanban_db.heartbeat_worker(bconn, tid, note="42/100 done")
+        # A later heartbeat with no note must not blank out the last real
+        # one — the card should keep showing the most recent *note*.
+        assert kanban_db.heartbeat_worker(bconn, tid, note=None)
+        kanban_db.add_comment(bconn, tid, "default", "Halfway through the batch.")
+
+    card = client.get(f"/api/registry/projects/{slug}/cards/{tid}").json()
+    assert card["status"] == "running"
+    assert card["latest_heartbeat"]["note"] == "42/100 done"
+    assert len(card["comments"]) == 1
+    assert card["comments"][0]["body"] == "Halfway through the batch."
+    assert card["comments"][0]["author"] == "default"
+
+
+def test_card_detail_has_no_heartbeat_or_comments_when_there_are_none(env):
+    project = _create(env)
+    _activate(env, project)
+    client, _state = env
+    slug = project["slug"]
+    tid = client.post(
+        f"/api/registry/projects/{slug}/cards", json={"title": "Draft"}
+    ).json()["task_id"]
+    card = client.get(f"/api/registry/projects/{slug}/cards/{tid}").json()
+    assert card["latest_heartbeat"] is None
+    assert card["comments"] == []
+
+
 def test_card_create_lands_in_triage_on_the_project(env):
     project = _create(env)
     _activate(env, project)

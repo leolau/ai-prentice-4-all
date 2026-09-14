@@ -1929,7 +1929,31 @@ async def get_card(request: Request, task_id: str) -> dict[str, Any]:
             # required `reason` — the one thing a human needs to see to know
             # what to do — never reached the card detail page.
             summary = kanban_db.latest_summary(bconn, task_id)
-            return kanban_view.task_dict(task, latest_summary=summary)
+            payload = kanban_view.task_dict(task, latest_summary=summary)
+            # A card's worker runs in its own process — there is no live
+            # reasoning/tool-call stream to show the way an inline Projects
+            # run's session has (run_activity.py). Heartbeat notes and
+            # comments are the equivalent lightweight progress signal a
+            # worker already posts (e.g. "93/131 slides completed…"); the
+            # card page previously showed neither, and — being a plain
+            # server-rendered read with no polling — never refreshed while
+            # a card sat `running`, so a person watching it saw nothing
+            # move at all.
+            payload["comments"] = [
+                {"author": c.author, "body": c.body, "created_at": c.created_at}
+                for c in kanban_db.list_comments(bconn, task_id)
+            ]
+            heartbeat_notes = [
+                {"note": e.payload["note"], "created_at": e.created_at}
+                for e in kanban_db.list_events(bconn, task_id)
+                if e.kind == "heartbeat"
+                and isinstance(e.payload, dict)
+                and e.payload.get("note")
+            ]
+            payload["latest_heartbeat"] = (
+                heartbeat_notes[-1] if heartbeat_notes else None
+            )
+            return payload
 
     try:
         return await asyncio.to_thread(_get_sync)
