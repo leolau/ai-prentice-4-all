@@ -87,7 +87,7 @@ import time
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable, Optional
+from typing import Any, Iterable, List, Optional
 
 from hermes_cli.access import (
     Principal,
@@ -8882,6 +8882,59 @@ def read_worker_log(
         return data.decode("utf-8", errors="replace")
     except OSError:
         return None
+
+
+# The CLI's rich-terminal output is meant for a real terminal, not a log
+# file: ANSI colour/cursor codes, spinner frames re-drawn in place via a
+# bare `\r` (never a `\n`, so a naive line-split leaves them all jammed
+# onto one "line"), and decorative box-drawing borders around each turn.
+# None of that is useful to a browser — the actual content (the model's
+# own sentences, and a one-line tool-call summary like `grep  0.4s`) is
+# in there too, just buried in it.
+_ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;?]*[a-zA-Z]")
+_DECORATIVE_LINE_RE = re.compile(r"^[\s\-─│┌┐└┘┼┤├┬┴━┃═╭╮╰╯╺╸]*$")
+# The "╭─ ⚕ Hermes ───…───╮" rule drawn above every reasoning block — pure
+# chrome announcing "here comes the next block", no content of its own.
+_TURN_BANNER_RE = re.compile(r"^[╭╰][─\s]*.{0,4}Hermes.{0,4}[─\s]*[╮╯]$")
+# A spinner frame repeats the same tool-call line with only its trailing
+# elapsed-time suffix changing (`grep  0.1s` → `grep  0.4s` → …) — strip
+# that suffix before comparing consecutive lines so only the frame's
+# final, settled state survives.
+_TRAILING_ELAPSED_RE = re.compile(r"\s+\d+(?:\.\d+)?s$")
+
+
+def worker_log_plain_tail(
+    task_id: str, *, board: Optional[str] = None, max_chars: int = 4_000,
+) -> Optional[str]:
+    """The worker's log, with the terminal-only noise stripped out — the
+    closest thing a board-dispatched card has to a live reasoning stream
+    (there is no in-process buffer to tail the way an inline run's
+    session has; this file is the one thing every process can read).
+    Returns the tail (most recent ``max_chars``), or ``None`` if the
+    worker has never spawned or the file is empty once cleaned.
+    """
+    raw = read_worker_log(task_id, board=board)
+    if not raw:
+        return None
+    text = _ANSI_ESCAPE_RE.sub("", raw)
+    lines: List[str] = []
+    last_key: Optional[str] = None
+    for segment in re.split(r"[\r\n]", text):
+        line = segment.strip()
+        if not line or _DECORATIVE_LINE_RE.match(line) or _TURN_BANNER_RE.match(line):
+            continue
+        key = _TRAILING_ELAPSED_RE.sub("", line)
+        if key == last_key:
+            # The same spinner frame redrawn with a new elapsed suffix —
+            # keep only its final, settled value.
+            lines[-1] = line
+            continue
+        last_key = key
+        lines.append(line)
+    cleaned = "\n".join(lines)
+    if len(cleaned) > max_chars:
+        cleaned = cleaned[-max_chars:]
+    return cleaned or None
 
 
 # ---------------------------------------------------------------------------
