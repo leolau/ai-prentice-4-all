@@ -18,6 +18,7 @@ Behaviour contracts:
 
 from __future__ import annotations
 
+import json
 import time
 import pytest
 from fastapi import FastAPI
@@ -211,6 +212,59 @@ def test_playbook_assignee_must_be_a_project_profile(env):
     )
     assert resp.status_code == 422
     assert "ghost-profile" in resp.json()["detail"]
+
+
+def _parse_sse(text: str) -> list[tuple[str, dict]]:
+    """Minimal SSE reader for a fully-drained `TestClient` response — only
+    safe for a stream that terminates on its own (an `end`/`gone` frame),
+    since `TestClient.get()` reads the whole body before returning."""
+    frames: list[tuple[str, dict]] = []
+    for block in text.strip("\n").split("\n\n"):
+        if not block.strip() or block.startswith(":"):
+            continue
+        event, data_lines = "message", []
+        for line in block.split("\n"):
+            if line.startswith("event:"):
+                event = line[len("event:"):].strip()
+            elif line.startswith("data:"):
+                data_lines.append(line[len("data:"):].strip())
+        if data_lines:
+            frames.append((event, json.loads("\n".join(data_lines))))
+    return frames
+
+
+def test_run_stream_pushes_the_row_then_ends_once_it_is_terminal(env):
+    """A run page no longer has to poll for this (§12 push edition): once
+    the run is `done`/`failed`/`cancelled` the stream is a single frame —
+    a still-live run's browser tab would instead see repeated `update`
+    frames as cards/status change, up to the tick this test doesn't wait
+    out."""
+    project = _active_project(env)
+    client, _state = env
+    _save_and_activate_playbook(env, project)
+    run = client.post(
+        f"/api/registry/projects/{project['slug']}/runs", json={}
+    ).json()["run"]
+    with projects_db.connect_closing() as conn:
+        projects_db.update_project_run(
+            conn, run["id"], status="done", ended_at=int(time.time())
+        )
+
+    resp = client.get(
+        f"/api/registry/projects/{project['slug']}/runs/{run['run_no']}/stream"
+    )
+    assert resp.status_code == 200
+    frames = _parse_sse(resp.text)
+    assert frames[0][0] == "update"
+    assert frames[0][1]["status"] == "done"
+    assert frames[-1][0] == "end"
+
+
+def test_run_stream_is_404_for_an_unknown_run(env):
+    project = _active_project(env)
+    client, _state = env
+    resp = client.get(f"/api/registry/projects/{project['slug']}/runs/99/stream")
+    assert resp.status_code == 404
 
 
 def test_run_pins_its_rev_so_activation_mid_flight_is_safe(env):

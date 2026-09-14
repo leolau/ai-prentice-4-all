@@ -1887,6 +1887,70 @@ export class HermesApiClient {
     return res;
   }
 
+  /**
+   * The run row itself, pushed live (§12 push edition) instead of the
+   * browser polling `projectRun` on a timer: the same payload, re-sent
+   * only when it actually changes, ending once the run is terminal. Raw
+   * SSE for the BFF to pipe, like `openRunActivityStream`.
+   */
+  async openRunStream(slug: string, runNo: number): Promise<Response> {
+    return this._openRowStream(
+      `/api/registry/projects/${encodeURIComponent(slug)}/runs/${encodeURIComponent(runNo)}/stream`,
+      "That run could not be found.",
+    );
+  }
+
+  /**
+   * One card's row, pushed live while a worker is on it — same payload as
+   * `projectCard`, ending once the card leaves `running`.
+   */
+  async openCardStream(slug: string, taskId: string): Promise<Response> {
+    return this._openRowStream(
+      `/api/registry/projects/${encodeURIComponent(slug)}/cards/${encodeURIComponent(taskId)}/stream`,
+      "That card could not be found.",
+    );
+  }
+
+  /**
+   * The project's event cursor, pushed live instead of the project page
+   * polling `projectEvents` on a timer. Never ends on its own — the
+   * project has no terminal state — so the caller tears the connection
+   * down on unmount.
+   */
+  async openProjectEventsStream(slug: string): Promise<Response> {
+    return this._openRowStream(
+      `/api/registry/projects/${encodeURIComponent(slug)}/events/stream`,
+      "That project could not be found.",
+    );
+  }
+
+  /** Shared opener behind `openRunStream` / `openCardStream` /
+   * `openProjectEventsStream`: same auth headers and error shape as
+   * `openRunActivityStream`, the body is NOT consumed here. */
+  private async _openRowStream(
+    path: string,
+    notFoundDetail: string,
+  ): Promise<Response> {
+    const headers = new Headers({ accept: "text/event-stream" });
+    if (this.hermesToken) {
+      headers.set("cookie", `hermes_session_at=${this.hermesToken}`);
+      headers.set("authorization", `Bearer ${this.hermesToken}`);
+    }
+    const res = await fetch(`${this.baseUrl}${path}`, {
+      headers,
+      cache: "no-store",
+    });
+    if (!res.ok || !res.body) {
+      const text = res.body ? await res.text().catch(() => "") : "";
+      throw new HermesApiError(
+        res.status,
+        upstreamDetail(text ? safeJson(text) : undefined, notFoundDetail),
+        text,
+      );
+    }
+    return res;
+  }
+
   /** Stop the run now: terminate live workers, then close it. */
   async stopProjectRun(slug: string, runNo: number): Promise<ProjectRun> {
     return this.request(
