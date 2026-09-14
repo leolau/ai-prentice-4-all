@@ -1,75 +1,48 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useEffect } from "react";
+import { useRef } from "react";
 
-/** The detail page's poll interval (§12 live updates). */
-const POLL_INTERVAL_MS = 15_000;
+import { useRowStream } from "@/components/projects/useRowStream";
+import type { StreamFrame } from "@/lib/chat/stream";
 
 /**
- * One cursor-aware poll cycle against `GET /api/projects/:slug/events` (E3).
- * Split out of the hook so the contract is testable without a DOM: the
- * cursor is seeded from the *first* response (a 0 would refresh for history
- * the page already rendered), a movement calls `onMovement` exactly once per
- * head change, and every failure — network or non-2xx — is swallowed,
- * because live updates are an optimisation, never a surfaced error.
+ * Fold one frame from `GET .../events/stream` into the cursor's next value.
+ * `moved` is true only when a head was already known and increased — the
+ * very first frame just seeds `seen`, because a page's initial server
+ * render already reflects that head, and refreshing on it would be a
+ * pointless round trip rather than a real update. Split out so the
+ * contract is testable without a DOM.
  */
-export function createProjectEventsPoller(
-  slug: string,
-  onMovement: () => void,
-  fetchImpl: typeof fetch = fetch,
-): { tick: () => Promise<void> } {
-  let since: number | null = null;
-  const tick = async () => {
-    // Poll only while the tab is visible; under a DOM-less test runner the
-    // check simply passes.
-    if (
-      typeof document !== "undefined" &&
-      document.visibilityState !== "visible"
-    ) {
-      return;
-    }
-    try {
-      const query = since != null ? `?since=${since}` : "";
-      const res = await fetchImpl(
-        `/api/projects/${encodeURIComponent(slug)}/events${query}`,
-      );
-      if (!res.ok) return; // never surface a poll error
-      const data = (await res.json().catch(() => null)) as
-        | { latest_event_id?: unknown }
-        | null;
-      const head =
-        data != null && typeof data.latest_event_id === "number"
-          ? data.latest_event_id
-          : null;
-      if (head == null) return;
-      if (since === null) {
-        since = head; // seed from the first answer, not 0
-        return;
-      }
-      if (head > since) {
-        since = head; // the head, not the last event
-        onMovement();
-      }
-    } catch {
-      // a network failure is swallowed too — same contract
-    }
-  };
-  return { tick };
+export function applyProjectEventsFrame(
+  seen: number | null,
+  frame: StreamFrame,
+): { seen: number | null; moved: boolean } {
+  if (frame.event !== "update") return { seen, moved: false };
+  const head = frame.data.latest_event_id;
+  if (typeof head !== "number") return { seen, moved: false };
+  if (seen === null) return { seen: head, moved: false };
+  if (head > seen) return { seen: head, moved: true };
+  return { seen, moved: false };
 }
 
 /**
- * The live-update tail for one project: polls while mounted and calls
- * `router.refresh()` when the event head moves. The server re-derives
- * progress, health and the rollup on read, so a refresh IS the update —
- * the hook is the whole feature.
+ * The live-update tail for one project, pushed by the server (§12 push
+ * edition) instead of polled on a timer: calls `router.refresh()` whenever
+ * the project's event cursor moves. The server re-derives progress, health
+ * and the rollup on read, so a refresh IS the update — the hook is the
+ * whole feature. Never stops on its own (a project has no terminal
+ * state) — only unmounting tears the connection down.
  */
 export function useProjectEvents(slug: string): void {
   const router = useRouter();
-  useEffect(() => {
-    const poller = createProjectEventsPoller(slug, () => router.refresh());
-    void poller.tick();
-    const timer = setInterval(() => void poller.tick(), POLL_INTERVAL_MS);
-    return () => clearInterval(timer);
-  }, [slug, router]);
+  const seenRef = useRef<number | null>(null);
+  useRowStream(
+    `/api/projects/${encodeURIComponent(slug)}/events/stream`,
+    (frame) => {
+      const result = applyProjectEventsFrame(seenRef.current, frame);
+      seenRef.current = result.seen;
+      if (result.moved) router.refresh();
+    },
+  );
 }
