@@ -1,8 +1,13 @@
+"use client";
+
 import Link from "next/link";
+import { useState } from "react";
 
 import { CardActions } from "@/components/projects/CardActions";
 import { CardEditor } from "@/components/projects/CardEditor";
-import { dateTimeLabel, durationLabel } from "@/components/projects/format";
+import { agoLabel, dateTimeLabel, durationLabel } from "@/components/projects/format";
+import { useCardLive } from "@/components/projects/useCardLive";
+import { Spinner } from "@/components/ui/Spinner";
 import { Pill, type Tone } from "@/components/ui/Pill";
 import type { ProjectCardDetail } from "@/types";
 
@@ -45,7 +50,7 @@ function blockReasonText(card: ProjectCardDetail): string {
  */
 export function CardDetailView({
   slug,
-  card,
+  card: initial,
   profiles = [],
   archived = false,
 }: {
@@ -56,7 +61,22 @@ export function CardDetailView({
   /** §13: an archived project's cards are read-only. */
   archived?: boolean;
 }) {
+  const [card, setCard] = useState(initial);
+
+  // A worker runs in its own process — there is no live reasoning/tool
+  // stream the way an inline Projects run's session has. Its heartbeat
+  // note and comments are the equivalent progress signal; re-read the
+  // card while it's `running` so they actually reach the page instead of
+  // sitting frozen at whatever the server rendered on load (found
+  // confusing in production: a running card showed no update at all).
+  useCardLive(slug, card.id, card.status, (fresh) =>
+    setCard((prev) => ({ ...prev, ...fresh })),
+  );
+
   const tone = STATUS_TONE[card.status] ?? "muted";
+  const isRunning = card.status === "running";
+  const heartbeat = card.latest_heartbeat ?? null;
+  const comments = card.comments ?? [];
   const timing = [
     `created ${dateTimeLabel(card.created_at)}`,
     card.started_at != null ? `started ${dateTimeLabel(card.started_at)}` : null,
@@ -125,6 +145,31 @@ export function CardDetailView({
         </Link>
       </header>
 
+      {isRunning ? (
+        <section
+          data-component="CardProgress"
+          className="rounded-2xl border border-[var(--color-accent)]/30 bg-[var(--color-surface)] p-4"
+        >
+          <h2 className="flex items-center gap-1.5 text-xs uppercase tracking-wide text-[var(--color-muted)]">
+            <Spinner className="text-[var(--color-accent)]" />
+            What&apos;s happening
+          </h2>
+          {heartbeat ? (
+            <p className="mt-2 whitespace-pre-wrap text-sm">
+              {heartbeat.note}
+              <span className="ml-2 text-xs text-[var(--color-muted)]">
+                updated {agoLabel(heartbeat.created_at)}
+              </span>
+            </p>
+          ) : (
+            <p className="mt-2 text-sm text-[var(--color-muted)]">
+              A worker is on it, in its own process — its reasoning isn&apos;t
+              streamed here. Waiting for its first progress update&hellip;
+            </p>
+          )}
+        </section>
+      ) : null}
+
       {card.body ? (
         <section
           data-component="CardBody"
@@ -151,6 +196,27 @@ export function CardDetailView({
           <p className="mt-2 whitespace-pre-wrap text-sm">
             {card.latest_summary ?? card.result}
           </p>
+        </section>
+      ) : null}
+
+      {comments.length > 0 ? (
+        <section
+          data-component="CardUpdates"
+          className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface)] p-4"
+        >
+          <h2 className="text-xs uppercase tracking-wide text-[var(--color-muted)]">
+            Updates
+          </h2>
+          <ul className="mt-2 flex flex-col gap-3">
+            {[...comments].reverse().map((c, i) => (
+              <li key={`${c.created_at}-${i}`} className="text-sm">
+                <p className="whitespace-pre-wrap">{c.body}</p>
+                <p className="mt-0.5 text-xs text-[var(--color-muted)]">
+                  {c.author} · {dateTimeLabel(c.created_at)}
+                </p>
+              </li>
+            ))}
+          </ul>
         </section>
       ) : null}
     </div>

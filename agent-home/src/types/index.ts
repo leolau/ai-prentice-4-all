@@ -1754,14 +1754,34 @@ export interface ProjectCardAge {
   time_to_complete_seconds: number | null;
 }
 
+/** One entry in a card's comment thread — the worker's own narrated
+ * progress updates land here (`kanban_comment`), same table a human's
+ * card-page reply would use. */
+export interface ProjectCardComment {
+  author: string;
+  body: string;
+  created_at: number;
+}
+
+/** The most recent `heartbeat` event that carried a `note` — a running
+ * card's lightweight liveness + progress signal (e.g. "93/131 done").
+ * `null` when the card has never heartbeat-noted (not yet started, or a
+ * worker that never calls out progress). */
+export interface ProjectCardHeartbeat {
+  note: string;
+  created_at: number;
+}
+
 /**
  * `GET /{slug}/cards/{task_id}` — `kanban_view.task_dict` verbatim: the
- * board row plus the age metrics and (when the caller passes one) the
- * latest run summary.
+ * board row plus the age metrics, the latest run summary, the comment
+ * thread and the latest heartbeat note (when the caller passes one/exist).
  */
 export interface ProjectCardDetail extends ProjectBoardTask {
   age?: ProjectCardAge | null;
   latest_summary?: string | null;
+  comments?: ProjectCardComment[];
+  latest_heartbeat?: ProjectCardHeartbeat | null;
 }
 
 export interface ProjectBoardView {
