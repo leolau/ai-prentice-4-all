@@ -1800,6 +1800,15 @@ export interface ProjectCardDetail extends ProjectBoardTask {
   latest_summary?: string | null;
   comments?: ProjectCardComment[];
   latest_heartbeat?: ProjectCardHeartbeat | null;
+  /**
+   * The worker's own log, cleaned of terminal-only noise (ANSI codes,
+   * spinner-frame repeats, decorative borders) down to its reasoning
+   * sentences and tool-call summaries — the closest thing a
+   * board-dispatched card has to a live reasoning stream. `null` before
+   * the worker has written anything (or once it's been garbage
+   * collected).
+   */
+  worker_log_tail?: string | null;
 }
 
 export interface ProjectBoardView {

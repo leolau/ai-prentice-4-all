@@ -1932,15 +1932,16 @@ def _card_payload(bconn, project: projects_db.Project, task_id: str, *, principa
     # what to do — never reached the card detail page.
     summary = kanban_db.latest_summary(bconn, task_id)
     payload = kanban_view.task_dict(task, latest_summary=summary)
-    # A card's worker runs in its own process — there is no live
-    # reasoning/tool-call stream to show the way an inline Projects
-    # run's session has (run_activity.py). Heartbeat notes and
-    # comments are the equivalent lightweight progress signal a
-    # worker already posts (e.g. "93/131 slides completed…"); the
-    # card page previously showed neither, and — being a plain
-    # server-rendered read with no polling — never refreshed while
-    # a card sat `running`, so a person watching it saw nothing
-    # move at all.
+    # A card's worker runs in its own process — there is no *in-memory*
+    # reasoning/tool-call buffer to tail the way an inline Projects run's
+    # session has (run_activity.py). But `_default_spawn` (kanban_db.py)
+    # redirects the worker's stdout/stderr to a durable per-task log file
+    # any process can read; `worker_log_plain_tail` strips the
+    # terminal-only noise (ANSI codes, spinner-frame repeats, decorative
+    # borders) down to the model's own sentences and its tool-call
+    # summaries — the closest thing to a live stream this surface has.
+    # Heartbeat notes and comments are the lighter-weight progress signal
+    # a worker also posts (e.g. "93/131 slides completed…").
     payload["comments"] = [
         {"author": c.author, "body": c.body, "created_at": c.created_at}
         for c in kanban_db.list_comments(bconn, task_id)
@@ -1953,6 +1954,9 @@ def _card_payload(bconn, project: projects_db.Project, task_id: str, *, principa
         and e.payload.get("note")
     ]
     payload["latest_heartbeat"] = heartbeat_notes[-1] if heartbeat_notes else None
+    payload["worker_log_tail"] = kanban_db.worker_log_plain_tail(
+        task_id, board=project.board_slug or None
+    )
     return payload
 
 

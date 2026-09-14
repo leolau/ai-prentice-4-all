@@ -689,6 +689,41 @@ def test_card_detail_surfaces_live_progress_while_running(env):
     assert card["comments"][0]["author"] == "default"
 
 
+def test_card_detail_surfaces_the_workers_own_log_cleaned_of_terminal_noise(
+    env, tmp_path, monkeypatch,
+):
+    """A board-dispatched card's worker has no in-memory reasoning buffer
+    to tail (that's `run_activity.py`, for inline sessions only) — but its
+    stdout/stderr is captured to a durable log file any process can read.
+    The card page must surface it, with the terminal-only noise (ANSI
+    codes, spinner-frame repeats) stripped."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+    project = _create(env)
+    _activate(env, project)
+    client, _state = env
+    slug = project["slug"]
+    tid = client.post(
+        f"/api/registry/projects/{slug}/cards", json={"title": "Draft"}
+    ).json()["task_id"]
+    with kanban_db.connect_closing() as bconn:
+        kanban_db.specify_triage_task(bconn, tid)
+        bconn.execute("UPDATE tasks SET status = 'running' WHERE id = ?", (tid,))
+
+    log_path = kanban_db.worker_log_path(tid)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_path.write_bytes(
+        "\x1b[1m╭─ ⚕ Hermes ─╮\x1b[0m\r\n"
+        "Reading the tender document now.\r\n"
+        "───────\n".encode("utf-8")
+    )
+
+    card = client.get(f"/api/registry/projects/{slug}/cards/{tid}").json()
+    assert card["worker_log_tail"] is not None
+    assert "Reading the tender document now." in card["worker_log_tail"]
+    assert "\x1b" not in card["worker_log_tail"]
+    assert "Hermes" not in card["worker_log_tail"]
+
+
 def test_card_detail_has_no_heartbeat_or_comments_when_there_are_none(env):
     project = _create(env)
     _activate(env, project)

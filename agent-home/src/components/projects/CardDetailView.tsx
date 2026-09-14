@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 import { CardActions } from "@/components/projects/CardActions";
 import { CardEditor } from "@/components/projects/CardEditor";
@@ -63,12 +63,14 @@ export function CardDetailView({
 }) {
   const [card, setCard] = useState(initial);
 
-  // A worker runs in its own process — there is no live reasoning/tool
-  // stream the way an inline Projects run's session has. Its heartbeat
-  // note and comments are the equivalent progress signal; re-read the
-  // card while it's `running` so they actually reach the page instead of
-  // sitting frozen at whatever the server rendered on load (found
-  // confusing in production: a running card showed no update at all).
+  // A worker runs in its own process — there is no *in-memory* reasoning
+  // stream the way an inline Projects run's session has, but its output
+  // is captured to a durable log the box already cleans up for display
+  // (`worker_log_tail`). Heartbeat notes and comments are the lighter
+  // progress signal alongside it. Re-read the card while it's `running`
+  // so any of this actually reaches the page instead of sitting frozen
+  // at whatever the server rendered on load (found confusing in
+  // production: a running card showed no update at all).
   useCardLive(slug, card.id, card.status, (fresh) =>
     setCard((prev) => ({ ...prev, ...fresh })),
   );
@@ -77,6 +79,21 @@ export function CardDetailView({
   const isRunning = card.status === "running";
   const heartbeat = card.latest_heartbeat ?? null;
   const comments = card.comments ?? [];
+  const logTail = card.worker_log_tail ?? null;
+
+  // A ticking clock, only while running (matches the chat pane's own
+  // elapsed-time pattern) — the one thing that can always be shown, even
+  // before any heartbeat/log content has arrived.
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!isRunning) return;
+    const id = window.setInterval(() => setNow(Date.now()), 1_000);
+    return () => window.clearInterval(id);
+  }, [isRunning]);
+  const elapsedSeconds =
+    isRunning && card.started_at != null
+      ? Math.max(0, Math.floor(now / 1000) - card.started_at)
+      : null;
   const timing = [
     `created ${dateTimeLabel(card.created_at)}`,
     card.started_at != null ? `started ${dateTimeLabel(card.started_at)}` : null,
@@ -153,6 +170,11 @@ export function CardDetailView({
           <h2 className="flex items-center gap-1.5 text-xs uppercase tracking-wide text-[var(--color-muted)]">
             <Spinner className="text-[var(--color-accent)]" />
             What&apos;s happening
+            {elapsedSeconds != null ? (
+              <span className="ml-auto font-normal normal-case text-[var(--color-muted)]">
+                working for {durationLabel(elapsedSeconds)}
+              </span>
+            ) : null}
           </h2>
           {heartbeat ? (
             <p className="mt-2 whitespace-pre-wrap text-sm">
@@ -161,12 +183,20 @@ export function CardDetailView({
                 updated {agoLabel(heartbeat.created_at)}
               </span>
             </p>
-          ) : (
+          ) : null}
+          {logTail ? (
+            <pre
+              data-component="CardWorkerLog"
+              className="mt-2 max-h-72 overflow-y-auto whitespace-pre-wrap rounded-lg bg-[var(--color-surface-2)] p-2 text-xs text-[var(--color-muted)]"
+            >
+              {logTail}
+            </pre>
+          ) : !heartbeat ? (
             <p className="mt-2 text-sm text-[var(--color-muted)]">
-              A worker is on it, in its own process — its reasoning isn&apos;t
-              streamed here. Waiting for its first progress update&hellip;
+              A worker is on it, in its own process. Waiting for its first
+              progress update&hellip;
             </p>
-          )}
+          ) : null}
         </section>
       ) : null}
 

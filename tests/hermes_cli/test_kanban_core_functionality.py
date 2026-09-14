@@ -733,6 +733,56 @@ def test_read_worker_log_tail(kanban_home):
     assert kb.read_worker_log("t_missing") is None
 
 
+def test_worker_log_plain_tail_strips_terminal_noise(kanban_home):
+    """The closest thing a board-dispatched card has to a live reasoning
+    stream (§12): ANSI codes, a spinner frame re-drawn via bare `\\r`
+    (never `\\n`), and the decorative turn banner must not reach the
+    browser — the model's own sentence and the tool-call summary must."""
+    log_dir = kanban_home / "kanban" / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    p = log_dir / "t_noisy.log"
+    raw = (
+        "\x1b[1m╭─ ⚕ Hermes ───────────────────────╮\x1b[0m\r\n"
+        "    Let me check the requirements first.\r\n"
+        "  \u2514 \U0001f50d grep      pattern  0.0s\r"
+        "  \u2514 \U0001f50d grep      pattern  0.1s\r"
+        "  \u2514 \U0001f50d grep      pattern  0.4s\n"
+        "───────────────────────────────\n"
+    )
+    p.write_bytes(raw.encode("utf-8"))
+
+    cleaned = kb.worker_log_plain_tail("t_noisy")
+    assert cleaned is not None
+    assert "\x1b" not in cleaned
+    assert "Hermes" not in cleaned  # the turn banner, not the model's words
+    assert "Let me check the requirements first." in cleaned
+    # Only the settled (last) spinner frame survives, not all three.
+    assert cleaned.count("grep") == 1
+    assert "0.4s" in cleaned
+    # The pure box-drawing separator line is gone too.
+    assert "─" not in cleaned
+
+
+def test_worker_log_plain_tail_caps_to_the_requested_length(kanban_home):
+    log_dir = kanban_home / "kanban" / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    p = log_dir / "t_long.log"
+    p.write_text("\n".join(f"distinct reasoning line {i}" for i in range(500)))
+    cleaned = kb.worker_log_plain_tail("t_long", max_chars=200)
+    assert cleaned is not None
+    assert len(cleaned) <= 200
+    # A tail, not a head — the most recent line survives.
+    assert "distinct reasoning line 499" in cleaned
+
+
+def test_worker_log_plain_tail_is_none_for_a_missing_or_empty_log(kanban_home):
+    assert kb.worker_log_plain_tail("t_never_spawned") is None
+    log_dir = kanban_home / "kanban" / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    (log_dir / "t_blank.log").write_text("\x1b[0m\n───────\n\r\n")
+    assert kb.worker_log_plain_tail("t_blank") is None
+
+
 # ---------------------------------------------------------------------------
 # CLI bulk verbs
 # ---------------------------------------------------------------------------
