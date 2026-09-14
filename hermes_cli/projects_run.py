@@ -368,12 +368,25 @@ def checkpoint_wait_info(
     if not held:
         return None
     checkpoints = {s["key"] for s in steps if s.get("checkpoint")}
+    deps_of = {s["key"]: set(s.get("depends_on") or []) for s in steps}
     status_of = {c.get("step_key"): c.get("status") for c in cards}
     task_of = {c.get("step_key"): c.get("task_id") for c in cards}
     title_of = {c.get("step_key"): c.get("title") for c in cards}
-    if any(status_of.get(k) != "done" for k in checkpoints if k in status_of):
-        return None
-    held_now = [k for k in held if status_of.get(k) == "triage"]
+    # A held successor is waiting *right now* iff its OWN gating
+    # checkpoint(s) are done — an EARLIER regression here checked whether
+    # every checkpoint anywhere in the playbook was done before
+    # considering anything held, so a playbook with two checkpoints (this
+    # project's) had its first, already-finished checkpoint's hold masked
+    # by the second, still-open one — the run looked "not held" and got
+    # auto-failed as stale a second time even though a card was
+    # genuinely, correctly waiting on a human (2026-09-14 recurrence).
+    held_now = [
+        key
+        for key in held
+        if status_of.get(key) == "triage"
+        and (gating := deps_of.get(key, set()) & checkpoints)
+        and all(status_of.get(c) == "done" for c in gating)
+    ]
     if not held_now:
         return None
     # The specific checkpoint step(s) gating the currently-held successors
@@ -382,9 +395,7 @@ def checkpoint_wait_info(
         {
             dep
             for key in held_now
-            for step in steps
-            if step["key"] == key
-            for dep in (step.get("depends_on") or [])
+            for dep in deps_of.get(key, set())
             if dep in checkpoints
         }
     )
