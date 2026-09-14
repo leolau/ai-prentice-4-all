@@ -92,6 +92,14 @@ def _on_card_settled(bconn, task_id: str) -> List[str]:
             projects_run.notify_if_awaiting_checkpoint(
                 pconn, bconn, project=project, run=run
             )
+            # The other reason there's nothing left to promote: there's
+            # nothing left, full stop — every card settled. Close the run
+            # the instant that happens rather than leaving it `running`
+            # forever with nothing to do, which otherwise reads as
+            # "stalled" even though it's the success it is (§6.1).
+            projects_run.maybe_close_completed_run(
+                pconn, bconn, project=project, run=run
+            )
         return promoted
 
 
@@ -223,21 +231,30 @@ def _reconcile_one_run(
                 in_flight = True
                 break
 
-        # Nothing promoted, nothing in flight — that is also exactly what
-        # a run legitimately parked at a checkpoint looks like. A held
-        # checkpoint is not "orphaned"; it is correctly waiting on a
-        # human, for however long that takes, and must never be auto-
-        # failed for going quiet (§7.1). Re-notify here too (deduped) as
-        # the safety net for the case the completion hook's own notify
-        # never fired — e.g. a process restart landed between the card
-        # settling and the hook running.
-        if not in_flight and projects_run.notify_if_awaiting_checkpoint(
-            pconn, bconn, project=project, run=run
-        ):
-            return {
-                "project": project.slug, "run_no": run.get("run_no"),
-                "action": "awaiting_continue",
-            }
+        # Nothing promoted, nothing in flight — the same safety net the
+        # completion hook already runs (on_card_settled), for the case
+        # that hook never fired (a process restart landed between the
+        # last card settling and the hook running). Two different good
+        # reasons look identical from here: every card genuinely settled
+        # (close the run — §6.1), or a checkpoint is legitimately holding
+        # it open (not "orphaned"; waiting on a human for however long
+        # that takes, never auto-failed for going quiet — §7.1).
+        if not in_flight:
+            closed = projects_run.maybe_close_completed_run(
+                pconn, bconn, project=project, run=run
+            )
+            if closed:
+                return {
+                    "project": project.slug, "run_no": run.get("run_no"),
+                    "action": "completed",
+                }
+            if projects_run.notify_if_awaiting_checkpoint(
+                pconn, bconn, project=project, run=run
+            ):
+                return {
+                    "project": project.slug, "run_no": run.get("run_no"),
+                    "action": "awaiting_continue",
+                }
     if in_flight:
         return None
 

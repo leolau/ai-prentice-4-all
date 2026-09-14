@@ -1238,6 +1238,37 @@ def run_cards_brief(pconn, bconn, run: dict) -> List[dict]:
     return cards
 
 
+def run_cards_all_settled(cards: List[dict]) -> bool:
+    """True once every card linked to a run has left the working pipeline
+    (``done`` or ``archived``) — nothing left for this run to promote or
+    for a worker to still be doing."""
+    return bool(cards) and all(c.get("status") in ("done", "archived") for c in cards)
+
+
+def maybe_close_completed_run(
+    pconn, bconn, *, project: projects_db.Project, run: dict
+) -> Optional[dict]:
+    """Close a run as ``done`` the instant every one of its cards has
+    settled (§6.1).
+
+    Finishing the last card was never itself the event that closes the
+    run — nothing else does either, so a fully-finished run just sits
+    ``running`` forever with nothing left to promote. That reads as
+    *stalled* on the run page (`_run_stalled`, projects_api.py, correctly
+    says no worker is active — for once, the right reason: everything is
+    actually done), not as the success it is (found in production,
+    2026-09-14: "7 of 7 steps done" next to a red "Failed"/"Stalled"
+    badge). A no-op (``None``) unless the run is still ``running`` and
+    every one of its cards has genuinely settled.
+    """
+    if run.get("status") != "running":
+        return None
+    cards = run_cards_brief(pconn, bconn, run)
+    if not run_cards_all_settled(cards):
+        return None
+    return close_run(pconn, run=run)
+
+
 def notify_if_awaiting_checkpoint(
     pconn, bconn, *, project: projects_db.Project, run: dict
 ) -> bool:
