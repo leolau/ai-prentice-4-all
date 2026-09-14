@@ -13,8 +13,20 @@ export const RUN_POLL_INTERVAL_MS = 5_000;
 /** Statuses at which a run stops moving — polling has nothing left to see. */
 const TERMINAL = new Set(["done", "failed", "cancelled"]);
 
-export function isRunLive(status: string): boolean {
-  return !TERMINAL.has(status);
+/**
+ * A terminal run row can still have a card actively working: the stale-run
+ * sweep (Gap B) can fail a run while a card is only rate-limited, not truly
+ * dead, and a human can act on that card directly (`hermes kanban unblock`,
+ * or the new Resume action) without the run's own row ever reopening in the
+ * same instant. Without this, the page would freeze on "Failed" the moment
+ * the row closed and never show the card actually finishing — exactly the
+ * confusion a real run hit in production (see
+ * plans/2026-09-13-project-run-resilience-plan.md). So a terminal row is
+ * still "live" for polling purposes as long as something on it is running.
+ */
+export function isRunLive(status: string, hasActiveCard = false): boolean {
+  if (!TERMINAL.has(status)) return true;
+  return hasActiveCard;
 }
 
 /**
@@ -50,7 +62,10 @@ export function createRunPoller(
       const data = (await res.json().catch(() => null)) as ProjectRun | null;
       if (data == null || typeof data.status !== "string") return true;
       onRun(data);
-      return isRunLive(data.status);
+      const hasActiveCard = (data.cards ?? []).some(
+        (c) => c.status === "running",
+      );
+      return isRunLive(data.status, hasActiveCard);
     } catch {
       return true;
     }
@@ -72,6 +87,13 @@ export function useRunLive(
   runNo: number,
   status: string,
   onRun: (run: ProjectRun) => void,
+  /**
+   * Whether a card on this run is currently `running`, as of the caller's
+   * last-known state. Keeps polling alive across a terminal row with a
+   * card still working (see `isRunLive`'s doc) — omit for a run with no
+   * cards or when the caller doesn't track this.
+   */
+  hasActiveCard = false,
 ): void {
   // The callback changes identity on every render; hold it in a ref so the
   // effect depends on the run's identity and status, not on the closure.
@@ -81,7 +103,7 @@ export function useRunLive(
   }, [onRun]);
 
   useEffect(() => {
-    if (!isRunLive(status)) return;
+    if (!isRunLive(status, hasActiveCard)) return;
     let stopped = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
     const poller = createRunPoller(slug, runNo, (run) =>
@@ -97,5 +119,5 @@ export function useRunLive(
       stopped = true;
       if (timer) clearTimeout(timer);
     };
-  }, [slug, runNo, status]);
+  }, [slug, runNo, status, hasActiveCard]);
 }

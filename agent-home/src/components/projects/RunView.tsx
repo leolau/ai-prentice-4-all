@@ -243,11 +243,22 @@ export function RunView({
   const slugPath = `/api/projects/${encodeURIComponent(slug)}`;
   const runPath = `${slugPath}/runs/${run.run_no}`;
 
+  // A terminal row (e.g. auto-failed by the stale-run sweep) can still have
+  // a card actively working — a human can unblock/resume the underlying
+  // card without the run row reopening in the same instant. Keep polling
+  // in that case so the page doesn't freeze on a stale "Failed" banner
+  // while real work finishes (found confusing in production).
+  const hasActiveCard = (run.cards ?? []).some((c) => c.status === "running");
+
   // While the run is still moving, re-read it: the server derives the cards'
   // board state, the blocked set, `stalled`, cost and duration on read, so a
   // person watching the page sees the run move without reloading it.
-  useRunLive(slug, run.run_no, run.status, (fresh) =>
-    setRun((prev) => ({ ...prev, ...fresh })),
+  useRunLive(
+    slug,
+    run.run_no,
+    run.status,
+    (fresh) => setRun((prev) => ({ ...prev, ...fresh })),
+    hasActiveCard,
   );
 
   const post = async (
@@ -331,10 +342,77 @@ export function RunView({
   const canContinue =
     !archived &&
     (run.status === "waiting" || (live && run.awaiting_continue === true));
+  // A stopped run whose cards can pick up where they left off — the answer
+  // to "the automatic recovery gave up but the work already done is still
+  // good," as distinct from Repeat (a brand-new run, same method, redoes
+  // every step from scratch).
+  const canResume =
+    !archived && (run.status === "failed" || run.status === "cancelled");
   const activity = useRunActivity(slug, run.run_no, live);
   const style = stalled ? STALLED_STYLE : RUN_STYLE[run.status];
   const percent = completionOf(run, cards);
   const retried = cards.filter((c) => (c.failed_attempts ?? 0) > 0);
+  const blockedCard = cards.find((c) => c.status === "blocked");
+  const triageCard = cards.find((c) => c.status === "triage");
+
+  // One clear, plain-English line: what's happening, what to do about it if
+  // anything, ranked by how urgent it is. Rendered above every other banner
+  // so a person never has to piece the state together from several signals
+  // at once — the confusion a real run's "Failed" badge caused in
+  // production while a card kept working underneath it.
+  const nextAction = ((): { tone: "action" | "attention" | "ok"; text: string } | null => {
+    if (canContinue) {
+      return {
+        tone: "action",
+        text: "Review the checkpoint step's work below, then tap Continue to release the next step(s).",
+      };
+    }
+    if (canResume) {
+      return hasActiveCard
+        ? {
+            tone: "attention",
+            text: 'This run is marked "Failed", but a card is still actively working — the board below is live and up to date. Tap Resume once it settles to formally reopen the run, or just watch it finish.',
+          }
+        : {
+            tone: "action",
+            text: "This run stopped before finishing. Tap Resume to continue from exactly where it left off — nothing already done gets redone. \u201cStart over\u201d instead runs the whole method again from scratch.",
+          };
+    }
+    if (stalled) {
+      return {
+        tone: "attention",
+        text: "This run says Running, but no worker is actually active on it — it has stalled. Cancel or Stop it below, or open the blocked work to retry it.",
+      };
+    }
+    if (blockedCard) {
+      return {
+        tone: "attention",
+        text: `"${blockedCard.title ?? blockedCard.task_id}" is blocked and needs you — open it below to see why and what to do.`,
+      };
+    }
+    if (triageCard && live) {
+      return {
+        tone: "attention",
+        text: `"${triageCard.title ?? triageCard.task_id}" needs a decision after repeated retries — open it below to review.`,
+      };
+    }
+    if (run.status === "done") {
+      return {
+        tone: "ok",
+        text: "This run finished. Review what it delivered below, then score it.",
+      };
+    }
+    if (live) {
+      return {
+        tone: "ok",
+        text:
+          run.status === "running"
+            ? "Working — no action needed right now."
+            : "Waiting on the next step.",
+      };
+    }
+    return null;
+  })();
 
   return (
     <div data-component="RunView" className="flex flex-col gap-4">
@@ -357,6 +435,28 @@ export function RunView({
               live={live && !stalled}
               cards={cards}
             />
+            {nextAction ? (
+              <p
+                data-component="NextAction"
+                role="status"
+                className={`mt-2 rounded-lg border px-3 py-2 text-sm ${
+                  nextAction.tone === "action"
+                    ? "border-[var(--color-accent)]/40 bg-[var(--color-accent)]/10"
+                    : nextAction.tone === "attention"
+                      ? "border-amber-500/40 bg-amber-500/10 text-amber-200"
+                      : "border-[var(--color-border)] bg-[var(--color-surface-2)] text-[var(--color-muted)]"
+                }`}
+              >
+                <span className="font-medium">
+                  {nextAction.tone === "action"
+                    ? "Next: "
+                    : nextAction.tone === "attention"
+                      ? "Needs attention: "
+                      : ""}
+                </span>
+                {nextAction.text}
+              </p>
+            ) : null}
             <p className="mt-1 text-xs text-[var(--color-muted)]">
               {run.trigger} · on {run.profile} · started{" "}
               {dateTimeLabel(run.started_at)} ·{" "}
@@ -431,10 +531,28 @@ export function RunView({
                   Stop now
                 </button>
               ) : null}
+              {canResume ? (
+                <button
+                  type="button"
+                  onClick={() => void post(`${runPath}/resume`, undefined, true)}
+                  disabled={busy}
+                  className="rounded-xl bg-[var(--color-accent)] px-4 py-2 text-sm font-medium text-[var(--color-accent-fg)] disabled:opacity-50"
+                >
+                  Resume
+                </button>
+              ) : null}
               {(!live || stalled) && !archived ? (
                 <button
                   type="button"
-                  onClick={() =>
+                  onClick={() => {
+                    if (
+                      canResume &&
+                      !window.confirm(
+                        "Start a brand-new run on the same method? This redoes every step from scratch, including ones already done — Resume instead continues from exactly where this run left off.",
+                      )
+                    ) {
+                      return;
+                    }
                     void post(
                       `${slugPath}/runs`,
                       run.playbook_rev != null
@@ -442,12 +560,16 @@ export function RunView({
                         : {},
                     ).then((ok) => {
                       if (ok) router.push(`/projects/${encodeURIComponent(slug)}`);
-                    })
-                  }
+                    });
+                  }}
                   disabled={busy}
-                  className="rounded-xl border border-[var(--color-border)] px-4 py-2 text-sm disabled:opacity-50"
+                  className={
+                    canResume
+                      ? "rounded-xl border border-[var(--color-border)] px-3 py-2 text-xs text-[var(--color-muted)] disabled:opacity-50"
+                      : "rounded-xl border border-[var(--color-border)] px-4 py-2 text-sm disabled:opacity-50"
+                  }
                 >
-                  Repeat this run
+                  {canResume ? "Start over instead" : "Repeat this run"}
                 </button>
               ) : null}
             </div>

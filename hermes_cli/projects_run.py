@@ -991,6 +991,74 @@ def continue_run(
     return {"run": updated, "promoted": promoted, "budget_gate": None}
 
 
+def resume_run(
+    pconn, bconn, *, project: projects_db.Project, run: dict,
+) -> Dict[str, Any]:
+    """Continue a ``failed``/``cancelled`` run from wherever its cards
+    already are — never re-instantiates the playbook.
+
+    This is the human's answer to "the automatic recovery gave up (Gap B's
+    stale-run sweep, or a manual Stop) but the work already done is still
+    good — pick up where it left off," as distinct from "Repeat this run"
+    (``start_run()`` on the same method), which creates a brand-new run and
+    a brand-new card for every step, redoing completed work from scratch.
+    Found necessary in production: a run auto-failed after 2h of no card
+    activity while a card was genuinely just rate-limited (a third-party
+    API daily quota), and the only recovery available was to hand-edit the
+    kanban board — see plans/2026-09-13-project-run-resilience-plan.md.
+
+    What it does, and nothing else:
+    - Reopens the run row (``status`` -> ``running``, clears
+      ``outcome``/``error``/``ended_at``). Completed cards are untouched —
+      they are already ``done`` on the board and this never touches
+      ``instantiate_run_cards()``.
+    - Unblocks any of the run's cards still sitting ``blocked`` (a human
+      clicking Resume is exactly the "someone looked at this, retry it"
+      signal ``hermes kanban unblock`` requires).
+    - Re-runs the run's own promotion step (``promote_run_cards``) with
+      ``force_held=True`` — matching ``continue_run``'s own force, because
+      a card can reach ``triage`` a second time via the board's block-loop
+      breaker (``BLOCK_RECURRENCE_LIMIT``) even after its checkpoint was
+      already passed once; without forcing, the checkpoint-successor check
+      would refuse to re-promote a step that has every right to retry.
+
+    Refuses (``ValueError``) a run that is not ``failed``/``cancelled`` —
+    ``done`` has already delivered and reopening it has no defined next
+    step; ``running``/``waiting`` are already live and have their own
+    actions (Cancel/Stop, Continue).
+    """
+    if run.get("status") not in ("failed", "cancelled"):
+        raise ValueError(
+            f"run {run.get('run_no')} is '{run.get('status')}' — only a "
+            "failed or cancelled run can be resumed"
+        )
+    projects_db.update_project_run(
+        pconn, run["id"], status="running", outcome=None, error=None,
+        ended_at=None,
+    )
+    reopened = projects_db.get_project_run_by_id(pconn, run["id"])
+
+    for rc in projects_db.get_run_cards(pconn, reopened["id"]):
+        task = kanban_db.get_task(bconn, rc["task_id"])
+        if task is not None and task.status == "blocked":
+            kanban_db.unblock_task(bconn, rc["task_id"])
+
+    playbook = projects_db.get_playbook(
+        pconn, project.id, rev=reopened.get("playbook_rev")
+    )
+    steps = (playbook or {}).get("steps") or []
+    autonomy = project.autonomy or "supervised"
+    held = set() if autonomy == "autonomous" else held_step_keys(steps)
+    promoted = promote_run_cards(
+        bconn, pconn, project=project, run_id=reopened["id"], steps=steps,
+        autonomy=autonomy, held=held, force_held=True,
+    )
+    return {
+        "run": projects_db.get_project_run_by_id(pconn, reopened["id"]),
+        "promoted": promoted,
+    }
+
+
 def refill_run_cards(
     pconn, bconn, *, project: projects_db.Project, run: dict
 ) -> List[str]:

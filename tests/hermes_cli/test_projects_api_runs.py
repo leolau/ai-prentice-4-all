@@ -392,6 +392,58 @@ def test_continue_releases_the_checkpoint_and_cancel_never_kills(env):
     assert resp.status_code == 409
 
 
+def test_resume_route_continues_a_cancelled_run_without_redoing_done_work(env):
+    """POST .../resume: distinct from POST /runs ("Repeat this run") — the
+    run reopens and picks up from the board's real state; a completed card
+    is never redone, and a second resume on the now-running row is 409,
+    same contract as continue/cancel/stop."""
+    project = _active_project(env)
+    client, _state = env
+    resp = client.patch(
+        f"/api/registry/projects/{project['slug']}",
+        json={"max_in_progress": 3},
+    )
+    assert resp.status_code == 200, resp.text
+    _save_and_activate_playbook(env, project)
+    resp = client.post(f"/api/registry/projects/{project['slug']}/runs", json={})
+    started = resp.json()
+    gather_id = started["cards"]["gather"]
+
+    with kanban_db.connect_closing() as bconn:
+        assert kanban_db.complete_task(bconn, gather_id, result="done")
+
+    resp = client.post(
+        f"/api/registry/projects/{project['slug']}/runs/1/cancel", json={}
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["status"] == "cancelled"
+
+    resp = client.post(
+        f"/api/registry/projects/{project['slug']}/runs/1/resume", json={}
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["run"]["status"] == "running"
+
+    with kanban_db.connect_closing() as bconn:
+        assert kanban_db.get_task(bconn, gather_id).status == "done"
+
+    # A second resume on the now-running row is refused, like continue/
+    # cancel/stop on an already-answered run.
+    resp = client.post(
+        f"/api/registry/projects/{project['slug']}/runs/1/resume", json={}
+    )
+    assert resp.status_code == 409
+
+
+def test_resume_route_404s_an_unknown_run(env):
+    project = _active_project(env)
+    client, _state = env
+    resp = client.post(
+        f"/api/registry/projects/{project['slug']}/runs/99/resume", json={}
+    )
+    assert resp.status_code == 404
+
+
 def test_stop_kills_the_live_card_and_is_refused_twice(env):
     """The stop verb over HTTP: a running card ends blocked (reclaimed,
     then blocked so the dispatcher cannot respawn it), an unknown run is

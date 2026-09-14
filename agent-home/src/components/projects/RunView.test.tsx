@@ -273,3 +273,132 @@ describe("RunView live visuals", () => {
     ).toContain("Stopped");
   });
 });
+
+describe("RunView resume — continue, never restart from scratch", () => {
+  it("offers Resume (not just Repeat) on a failed run, and posts to the resume verb", async () => {
+    const fetchMock = vi.fn(
+      async () =>
+        ({
+          ok: true,
+          json: async () => ({ run: { status: "running" }, promoted: ["t_2"] }),
+        }) as unknown as Response,
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { getByRole } = render(
+      <RunView
+        slug="monday-digest"
+        run={RUN({ status: "failed", ended_at: NOW, error: "stalled" })}
+      />,
+    );
+    expect(getByRole("button", { name: "Resume" })).toBeTruthy();
+    // Repeat is still offered, just relabelled and de-emphasised so Resume
+    // reads as the primary choice.
+    expect(getByRole("button", { name: "Start over instead" })).toBeTruthy();
+
+    fireEvent.click(getByRole("button", { name: "Resume" }));
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(
+        "/api/projects/monday-digest/runs/1/resume",
+        expect.objectContaining({ method: "POST" }),
+      ),
+    );
+  });
+
+  it("offers Resume on a cancelled run too", () => {
+    const { getByRole } = render(
+      <RunView
+        slug="monday-digest"
+        run={RUN({ status: "cancelled", ended_at: NOW })}
+      />,
+    );
+    expect(getByRole("button", { name: "Resume" })).toBeTruthy();
+  });
+
+  it("does not offer Resume on a finished run — Repeat keeps its plain label", () => {
+    const { queryByRole, getByRole } = render(
+      <RunView
+        slug="monday-digest"
+        run={RUN({ status: "done", ended_at: NOW })}
+      />,
+    );
+    expect(queryByRole("button", { name: "Resume" })).toBeNull();
+    expect(getByRole("button", { name: "Repeat this run" })).toBeTruthy();
+  });
+
+  it("warns before starting over when Resume was also on offer", () => {
+    const confirmMock = vi.fn(() => false);
+    vi.stubGlobal("confirm", confirmMock);
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { getByRole } = render(
+      <RunView
+        slug="monday-digest"
+        run={RUN({ status: "failed", ended_at: NOW })}
+      />,
+    );
+    fireEvent.click(getByRole("button", { name: "Start over instead" }));
+    expect(confirmMock).toHaveBeenCalledWith(expect.stringMatching(/redoes every step/));
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("does not offer Resume on an archived project", () => {
+    const { queryByRole } = render(
+      <RunView
+        slug="monday-digest"
+        run={RUN({ status: "failed", ended_at: NOW })}
+        archived
+      />,
+    );
+    expect(queryByRole("button", { name: "Resume" })).toBeNull();
+  });
+});
+
+describe("RunView next-action clarity", () => {
+  it("flags a failed run with a still-active card instead of just saying Failed", () => {
+    const run = RUN({
+      status: "failed",
+      ended_at: NOW,
+      error: "no card or session progressed this run for over 2h",
+      cards: [
+        { task_id: "t_1", step_key: "slides", status: "running", title: "Execute prompts" },
+      ],
+    });
+    const { getByText, container } = render(
+      <RunView slug="monday-digest" run={run} />,
+    );
+    expect(container.querySelector('[data-component="RunStatusBadge"]')?.textContent).toContain(
+      "Failed",
+    );
+    expect(
+      getByText(/a card is still actively working/),
+    ).toBeTruthy();
+  });
+
+  it("tells you to tap Resume when a failed run has nothing left running", () => {
+    const run = RUN({ status: "failed", ended_at: NOW, cards: [] });
+    const { getByText } = render(<RunView slug="monday-digest" run={run} />);
+    expect(getByText(/continue from exactly where it left off/)).toBeTruthy();
+  });
+
+  it("points straight at a blocked card needing a decision", () => {
+    const run = RUN({
+      status: "running",
+      cards: [
+        { task_id: "t_1", step_key: "slides", status: "blocked", title: "Execute prompts in Canva" },
+      ],
+    });
+    const { getByText } = render(<RunView slug="monday-digest" run={run} />);
+    expect(getByText(/"Execute prompts in Canva" is blocked and needs you/)).toBeTruthy();
+  });
+
+  it("says no action is needed on a healthy running run", () => {
+    const run = RUN({
+      status: "running",
+      cards: [{ task_id: "t_1", step_key: "draft", status: "running", title: "Draft" }],
+    });
+    const { getByText } = render(<RunView slug="monday-digest" run={run} />);
+    expect(getByText(/no action needed right now/)).toBeTruthy();
+  });
+});
