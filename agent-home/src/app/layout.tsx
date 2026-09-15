@@ -1,6 +1,7 @@
 import type { Metadata, Viewport } from "next";
 import type { ReactNode } from "react";
 
+import { ChunkErrorListener } from "@/components/ChunkErrorListener";
 import { ServiceWorkerRegister } from "@/components/ServiceWorkerRegister";
 import { ThemeScript } from "@/components/ThemeScript";
 import "./globals.css";
@@ -37,6 +38,7 @@ export default function RootLayout({ children }: { children: ReactNode }) {
       <body data-component="RootLayout">
         {children}
         <ServiceWorkerRegister />
+        <ChunkErrorListener />
       </body>
     </html>
   );
