@@ -206,6 +206,7 @@ curl -s -m 30 -X POST http://127.0.0.1:8791/embed -H 'Content-Type: application/
 5. **Embed service** binds a single port 8791 (source previously ran multi-worker 7900-7903 layout); adjust callers if needed.
 6. Hetzner `hcloud` CLI quirks: no `--dry-run`; firewall rules via `firewall add-rule` (not `--rule`); `context create` needs a TTY — write `~/.config/hcloud/cli.toml` directly in automation.
 7. **Delta-apply TRUNCATE CASCADE ordering bug (fixed 2026-08-21)**: the cutover delta script applied `TRUNCATE x CASCADE; COPY x` per table alphabetically, so a later `TRUNCATE principals CASCADE` re-wiped already-copied child tables. 5 tables lost rows: `principal_aliases`, `channel_identities`, `goal_progress`, `profile_suggestion_audit`, `rag_chunks` — symptom was agent-home login 409 "no principal enrolled" (basic-auth subject `admin` unmapped). Rows re-inserted from `/tmp/app-delta.sql`. Lesson: when re-applying dumps, disable FK cascades or order parents-first; verify per-table row counts against the dump after any restore.
+8. **This box also runs an unrelated "Qoder" coding-agent daemon fleet** (~20+ `qoder-daemon-*.service` units, user `aicoder`, nothing to do with Hermes) that has been observed consuming ~4.5-5 GB RSS and driving swap to 100% while Hermes itself was healthy. Not part of this deploy or its service catalog — don't stop/start as part of a Hermes troubleshooting pass unless asked. See [`qoder-remote-control-daemons.md`](./qoder-remote-control-daemons.md) for status/stop/restart commands.
 
 ## 8. Cost & Account Notes
 
