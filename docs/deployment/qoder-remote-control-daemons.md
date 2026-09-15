@@ -24,38 +24,56 @@ Unit pattern    qoder-daemon-<repo>.service   (ai-prentice-4-all's is named plai
 Companion unit  qoder-ttyd.service            (ttyd web terminal onto a persistent tmux session)
 ```
 
-As of 2026-09-15 there are **21 per-repo daemons + 1 ttyd unit** (22 total),
+As of 2026-09-15 there were **21 per-repo daemons + 1 ttyd unit** (22 total),
 each daemon spawning 2 processes (a thin `qoder` launcher + the `qodercli.js`
 Node process it execs), so ~44 processes and roughly **4.5–5 GB RSS**
-combined when all are up. See `docs/deployment/PRODUCTION.md` for the box's
+combined when all were up. See `docs/deployment/PRODUCTION.md` for the box's
 overall memory picture.
 
-Full current list (get the live list any time with the command in "Checking
-status" below):
+**Status as of 2026-09-15: 18 of the 21 per-repo daemons were permanently
+disabled** at the operator's request to relieve swap pressure (dropped swap
+from 4.0/4.0 GiB used to 1.2/4.0 GiB). Only three units are still
+enabled/running:
 
 ```
-qoder-daemon-ai-and-i.service
-qoder-daemon-ar-fashion-designer.service
-qoder-daemon-arfd-portal.service
-qoder-daemon-class-intelligence.service
-qoder-daemon-diamondbox.service
-qoder-daemon-diy-client.service
-qoder-daemon-diy-portal.service
-qoder-daemon-ebid-mobile.service
-qoder-daemon-ebid-portal.service
-qoder-daemon-ebid-server.service
-qoder-daemon-greenfield.service
-qoder-daemon-learn-word-la-web.service
-qoder-daemon-learn-word-la.service
-qoder-daemon-next-supabase-cms-template.service
-qoder-daemon-P-Univ.service
-qoder-daemon-peeppop-server.service
-qoder-daemon-peeppop.service
-qoder-daemon-proxy-advisor.service
-qoder-daemon-snappop-portal.service
-qoder-daemon-storytellar-webar.service
-qoder-daemon.service                    # ai-prentice-4-all (this repo)
-qoder-ttyd.service                      # shared web terminal, no repo/envId
+qoder-daemon-ai-and-i.service     enabled, running   — keep
+qoder-daemon.service              enabled, running   — keep (ai-prentice-4-all, this repo)
+qoder-ttyd.service                enabled, running   — keep (shared web terminal)
+```
+
+The other 18 are `disabled` + `inactive` (stopped, and will **not** start on
+the next reboot either — this was a deliberate `systemctl disable`, not just
+a `stop`). Their unit files are still installed, so any of them can be
+re-enabled + started again in one step whenever needed (see "Restarting"
+below):
+
+```
+qoder-daemon-ar-fashion-designer.service         disabled
+qoder-daemon-arfd-portal.service                 disabled
+qoder-daemon-class-intelligence.service          disabled
+qoder-daemon-diamondbox.service                  disabled
+qoder-daemon-diy-client.service                   disabled
+qoder-daemon-diy-portal.service                  disabled
+qoder-daemon-ebid-mobile.service                  disabled
+qoder-daemon-ebid-portal.service                  disabled
+qoder-daemon-ebid-server.service                  disabled
+qoder-daemon-greenfield.service                   disabled
+qoder-daemon-learn-word-la-web.service            disabled
+qoder-daemon-learn-word-la.service                disabled
+qoder-daemon-next-supabase-cms-template.service   disabled
+qoder-daemon-P-Univ.service                       disabled
+qoder-daemon-peeppop-server.service               disabled
+qoder-daemon-peeppop.service                      disabled
+qoder-daemon-proxy-advisor.service                disabled
+qoder-daemon-snappop-portal.service                disabled
+qoder-daemon-storytellar-webar.service            disabled
+```
+
+Get the live, authoritative state at any time (don't trust this table forever
+— it's a snapshot):
+
+```bash
+systemctl list-unit-files 'qoder-daemon*' --no-legend
 ```
 
 Each unit file looks like this (example, `qoder-daemon.service`):
@@ -119,20 +137,36 @@ systemctl stop qoder-daemon-<repo>.service
 systemctl stop 'qoder-daemon*' qoder-ttyd.service
 ```
 
-This is a plain `stop`, not `disable` — it only affects the currently running
-process; the units remain enabled and **will start again on the next reboot**
-of the box unless you also `systemctl disable` them. That's deliberate: this
-runbook is for freeing RAM/swap on an already-running box, not decommissioning
-Qoder.
+A plain `stop` only affects the currently running process; the unit stays
+enabled and **will start again on the next reboot** unless you also
+`systemctl disable` it — see "Disabling permanently" below for the 18 units
+that were both stopped and disabled on 2026-09-15.
 
-## Restarting (this is what you came here for)
+## Disabling permanently
+
+This is what was done to the 18 units listed above:
 
 ```bash
-# Bring one repo's daemon back:
+systemctl disable qoder-daemon-<repo>.service   # after it's already stopped
+# or in one step from running:
+systemctl disable --now qoder-daemon-<repo>.service
+```
+
+`disable` removes the `multi-user.target.wants` symlink so it will not start
+on the next boot; the unit file itself is untouched, so this is fully
+reversible with `systemctl enable --now qoder-daemon-<repo>.service`.
+
+## Restarting / re-enabling (this is what you came here for)
+
+```bash
+# Bring one repo's daemon back for this boot only (it stays disabled after a reboot):
 systemctl start qoder-daemon-<repo>.service
 
+# Bring it back permanently (survives reboots too):
+systemctl enable --now qoder-daemon-<repo>.service
+
 # Bring everything back:
-systemctl start 'qoder-daemon*' qoder-ttyd.service
+systemctl enable --now 'qoder-daemon*' qoder-ttyd.service
 
 # Confirm it came up and grab its fresh session URL:
 systemctl is-active qoder-daemon-<repo>.service
@@ -158,9 +192,22 @@ systemctl daemon-reload
 
 ## Why this exists / when to reach for it
 
-This box has been observed with **swap fully used (4 GB/4 GB)** while Hermes
+This box was observed with **swap fully used (4 GB/4 GB)** while Hermes
 itself was healthy (no OOM kills) — the dominant swap consumer was these
-idle `aicoder`/Qoder daemons, not Hermes. If diagnosing memory/swap pressure
-again, check `ps -u aicoder -o pid,etime,rss,cmd` and the units above before
-assuming it's a Hermes regression. See `PRODUCTION.md` for how Hermes's own
-services are laid out on this same box.
+idle `aicoder`/Qoder daemons, not Hermes. On 2026-09-15, 18 of the 21
+per-repo daemons were stopped and disabled at the operator's request,
+dropping swap usage to 1.2/4.0 GiB. If diagnosing memory/swap pressure again,
+check `ps -u aicoder -o pid,etime,rss,cmd` and
+`systemctl list-unit-files 'qoder-daemon*'` before assuming it's a Hermes
+regression — most of the fleet is already off. See `PRODUCTION.md` for how
+Hermes's own services are laid out on this same box.
+
+## Listing repos on the box (not just the Qoder ones)
+
+```bash
+# Repos under the Qoder daemon fleet (one per line, matches the units 1:1):
+ls /opt/data/aicoding/repos/
+
+# All other git repos on the box (Hermes side):
+find /opt/data -maxdepth 2 -name '.git' -exec dirname {} \;
+```
