@@ -4,7 +4,6 @@ import { useEffect, useMemo, useRef, useState, useTransition } from "react";
 
 import { useRouter } from "next/navigation";
 
-import { AllConversationsSheet } from "@/components/chat/AllConversationsSheet";
 import { ApprovalModal } from "@/components/chat/ApprovalModal";
 import { ArchivedModal } from "@/components/chat/ArchivedModal";
 import { InSessionSearch } from "@/components/chat/InSessionSearch";
@@ -135,7 +134,6 @@ export function ChatPane({
   const [messages, setMessages] = useState<ChatMessage[]>(visible(initialMessages));
   const [detailsSession, setDetailsSession] = useState<SessionSummary | null>(null);
   const [archivedOpen, setArchivedOpen] = useState(false);
-  const [allConversationsOpen, setAllConversationsOpen] = useState(false);
   const [loadingThread, setLoadingThread] = useState(false);
   // Per-session state, keyed by session id (or NEW_KEY). Turns run per session
   // so the user can switch conversations at any time without cancelling or
@@ -223,15 +221,12 @@ export function ChatPane({
   useEffect(() => {
     chatHeaderActionsRef.current.startNew = startNewConversation;
     chatHeaderActionsRef.current.openArchived = () => setArchivedOpen(true);
-    chatHeaderActionsRef.current.openAllConversations = () =>
-      setAllConversationsOpen(true);
   });
   useEffect(() => {
     return () => {
       chatHeaderActionsRef.current = {
         startNew: () => {},
         openArchived: () => {},
-        openAllConversations: () => {},
       };
     };
   }, []);
@@ -589,6 +584,10 @@ export function ChatPane({
       // Match the first-paint fetch: a refresh must not shrink the picker to
       // the upstream's default page size.
       params.set("limit", String(CHAT_SESSION_LIST_LIMIT));
+      // The strip groups cron sessions into their own "Scheduled" row
+      // instead of hiding them — opt in to seeing them (see the BFF
+      // route's doc comment for the empty-string-vs-absent distinction).
+      params.set("exclude_sources", "");
       if (includeTags.length > 0) params.set("tags", includeTags.join(","));
       if (excludeTags.length > 0) params.set("exclude_tags", excludeTags.join(","));
       params.set("tag_match", matchMode);
@@ -1009,14 +1008,6 @@ export function ChatPane({
         <ArchivedModal
           onClose={() => setArchivedOpen(false)}
           onUnarchive={unarchiveSession}
-          profile={profile}
-        />
-      ) : null}
-
-      {allConversationsOpen ? (
-        <AllConversationsSheet
-          onClose={() => setAllConversationsOpen(false)}
-          onSelect={openConversation}
           profile={profile}
         />
       ) : null}

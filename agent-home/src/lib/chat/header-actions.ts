@@ -20,11 +20,10 @@
 export interface ChatHeaderActionsRef {
   startNew: () => void;
   openArchived: () => void;
-  openAllConversations: () => void;
 }
 
 const noop = () => {};
 
 export const chatHeaderActionsRef: { current: ChatHeaderActionsRef } = {
-  current: { startNew: noop, openArchived: noop, openAllConversations: noop },
+  current: { startNew: noop, openArchived: noop },
 };
