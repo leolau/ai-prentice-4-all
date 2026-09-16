@@ -197,6 +197,72 @@ so there is nothing to actually change by moving it.
 - Confirmed no leftover references to the deleted component/callback
   (`grep -rl "AllConversationsSheet\|openAllConversations" src/` — empty).
 
+## Addendum 2 (same day, follow-up PR): a real regression, fixed with a dropdown
+
+User report: a conversation titled "Andrew AL" had gone missing entirely
+— not miscategorized, just absent from the whole strip. Verified against
+production before assuming anything: it ranked **#65** by recency, past
+`CHAT_SESSION_LIST_LIMIT` (lowered to 50 in the first addendum's perf
+pass). That fetch limit was the actual bug — the session never reached
+the categorization logic at all, since it wasn't in the fetched set to
+begin with.
+
+Root cause traced to a genuine tension: the perf fix intentionally
+lowered the fetch size to keep first paint fast, on the assumption that
+the strip only ever shows a handful of chips. That assumption broke the
+moment grouping was added — grouping needs the *whole* recent set to
+sort correctly into categories, not just the top 50.
+
+**Fix, requested directly by the user: replace the four stacked rows with
+a "Category" dropdown that renders only the selected category's row.**
+This resolves the tension outright — a single visible row doesn't care
+how wide the underlying fetch is, so the limit could go back to 200 (the
+backend's own hard cap) without the page getting any taller. Categories
+with zero conversations aren't offered as dropdown options.
+
+The dropdown defaults to whichever category the *active* conversation is
+actually in (kanban session active → dropdown opens on "Kanban"), and
+re-syncs only when the active conversation itself changes (e.g. opened
+via a citation) — a manual dropdown switch is never fought by an
+unrelated re-render.
+
+### Files touched (this addendum)
+
+- `agent-home/src/lib/chat/session-limits.ts` — `CHAT_SESSION_LIST_LIMIT`
+  back to 200 (the BFF route's own ceiling), with the doc comment
+  rewritten to explain *why* 50 was wrong, not just what the value is —
+  the wrong assumption ("only ever shows a handful of chips") was the
+  actual bug, and a future editor re-lowering this for "perf" would
+  reintroduce the exact same missing-conversation report.
+- `agent-home/src/app/chat/page.tsx` — the `requested`-session fallback
+  fetch now reuses `CHAT_SESSION_LIST_LIMIT` instead of a second
+  hardcoded `200` (no behavior change, just one fewer place to forget to
+  update together).
+- `agent-home/src/components/chat/SessionTabs.tsx` — rewritten again:
+  `<select>` (styled to match `ProfilePicker`'s existing dropdown) plus
+  one row for the selected category only, instead of one row per
+  category stacked. Drag-to-reorder logic is unchanged in spirit (still
+  scoped to the visible category, still rebuilt by splicing into the
+  global order) — just operating on the single visible `items` array
+  instead of iterating every category.
+- `agent-home/src/components/chat/SessionTabs.test.tsx` — rewritten: the
+  category-membership assertions from before still apply, plus new
+  assertions that only the *selected* category's chips render (not
+  every category's, simultaneously) and that the dropdown itself is
+  absent when there is nothing to categorize.
+
+### Verification (this addendum)
+
+- `npx tsc --noEmit` — clean.
+- `npx vitest run` — 71 passed (7 for the rewritten `SessionTabs`, same
+  count of assertions reshaped for dropdown behavior), same single
+  pre-existing unrelated jsdom failure as both prior addenda.
+- `npx next build` — clean.
+- Verified the actual regression against production data directly (not
+  just reasoning about it): confirmed "Andrew AL"'s rank (65th) before
+  writing any fix, and that the fetch limit — not categorization — was
+  the mechanism.
+
 ## Not done / explicitly out of scope
 
 - Did not rewrite the recency query's recursive-CTE architecture. At

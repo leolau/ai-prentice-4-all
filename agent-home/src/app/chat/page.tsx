@@ -64,9 +64,14 @@ export default async function Page({
     profiles = profilesResult.profiles;
     sessions = list.sessions;
     if (requested && !sessions.some((s) => s.id === requested)) {
-      // A memory can cite a cron conversation or one past the first page:
-      // fetch wider and prepend it rather than silently opening another.
-      const all = await client.sessions({ order: "recent", limit: 200 });
+      // A memory can cite a session older than CHAT_SESSION_LIST_LIMIT (now
+      // the backend's own 200-row ceiling, so this only matters once total
+      // history exceeds that): fetch again and prepend it rather than
+      // silently opening another conversation instead.
+      const all = await client.sessions({
+        order: "recent",
+        limit: CHAT_SESSION_LIST_LIMIT,
+      });
       const match = all.sessions.find((s) => s.id === requested);
       if (match) sessions = [match, ...sessions];
     }
