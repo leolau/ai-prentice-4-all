@@ -62,7 +62,18 @@ settings screen built from our existing components"
 
 The prompt is passed through verbatim, so always include the Figma **file URL or
 selection link** — the MCP server is link-based and cannot guess the target file.
-Output is the bridge agent's final message (created node IDs, file URL, warnings).
+Output is the bridge agent's final message (created node IDs, file URL, warnings) —
+`claude -p` already defaults to `--output-format text`, i.e. Claude Code's own final
+response only, not a verbose tool-call trace.
+
+That output becomes one Hermes tool-call result verbatim, and this bridge is typically
+called *many times* in a row for anything with more than a few work items (see the 20 KB
+per-MCP-response cap under Procedure below) — so a chatty final response compounds fast
+across calls. Ask for a terse one, e.g. append `Respond with a one-line completion
+summary only (what was created/changed) — no narration of your process.` to the prompt.
+Found necessary after a token-collection setup card needed 22 context compressions in a
+single session — the individual bridge responses weren't oversized on their own, but
+many calls with even moderately chatty responses added up.
 
 One-time authentication on a headless host:
 
@@ -96,7 +107,15 @@ Useful tools the bridge agent has: `use_figma` (general create/edit/inspect),
 2. `figma_login.sh status` if you have not used the bridge in this session.
 3. Send one focused instruction per call. Large builds land better as several calls
    ("create the frame and layout", then "convert colors to variables") because each MCP
-   response is capped at 20 KB.
+   response is capped at 20 KB. That cap is a real ceiling, not just a style preference —
+   but "several calls" means grouping by natural work units (e.g. one call per token
+   *tier* — all Primitive collections together, then all Semantic, then all Component —
+   or one call per page section), not one call per individual variable/element. Splitting
+   finer than a call actually needs just multiplies round trips, and each round trip's
+   full instruction + response re-enters the calling agent's own context — the thing that
+   forced 22 compressions on one token-setup card was many small calls, not any single
+   oversized one. Start at the widest grouping you expect to fit under 20 KB and only
+   split further if a call actually fails or truncates.
 4. Report the returned file URL and node IDs back to the user so they can review.
 
 ## Pitfalls
