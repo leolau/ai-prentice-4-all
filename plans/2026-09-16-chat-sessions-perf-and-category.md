@@ -130,6 +130,73 @@ still "Kanban", not "Daily"; a cron session from today is still
   `SessionDB` shows `SEARCH s USING INDEX idx_sessions_archived_started
   (archived=?)` for the exact filter shape used by the chat list query.
 
+## Addendum (same day, follow-up PR): inline grouping, no modal
+
+User feedback after the above shipped: the "All conversations" modal
+worked, but wasn't user-friendly — an extra click and a whole separate
+window just to see conversations grouped, when the point was to make
+grouping visible immediately.
+
+**Replaced the modal with inline grouped rows in the strip itself.**
+`SessionTabs.tsx` now renders one labelled, independently
+horizontally-scrollable row per non-empty category (Kanban / Daily /
+Scheduled / Others) instead of a single flat row — no extra click, no
+separate surface. `AllConversationsSheet.tsx` and the "All" header button
+are removed; their purpose is now served by the strip directly.
+
+This required widening what the strip's own data actually contains: it
+was fetching with `excludeSources: "cron"` (both the server-side first
+paint in `chat/page.tsx`, and the client-side refresh in `ChatPane`, which
+goes through the `GET /api/chat/sessions` BFF route). The BFF route itself
+also *hardcoded* `excludeSources: "cron"` with no way for a caller to
+override it — found this while wiring the refresh path, not before. Fixed
+by making it caller-controlled: `exclude_sources` absent keeps the
+historical default (cron hidden) for the route's other two callers
+(`useChatUnread`'s badge count, `ArchivedModal`) who have no reason to
+care about scheduler noise; an explicit `exclude_sources=` (empty) opts
+in to seeing everything, which is what `ChatPane`'s refresh now sends.
+
+**Drag-to-reorder** is scoped to within a category's own row: dragging
+reorders that category's ids among themselves, then the new global order
+is rebuilt by splicing the reordered ids back into their original global
+positions (every other category's ids stay exactly where they were).
+Reordering a session *into* a different category isn't supported — the
+category is derived from the session's own data, not a manual grouping,
+so there is nothing to actually change by moving it.
+
+### Files touched (this addendum)
+
+- `agent-home/src/components/chat/SessionTabs.tsx` — rewritten to group
+  and render multiple rows; drag/drop reworked to be per-category.
+- `agent-home/src/components/chat/SessionTabs.test.tsx` — rewritten:
+  asserts `data-category="..."` markers per row, empty categories omitted
+  entirely, still no "Archived"/"+ New" leakage, still scrollable.
+- `agent-home/src/components/chat/AllConversationsSheet.tsx` — deleted.
+- `agent-home/src/lib/chat/header-actions.ts`,
+  `ChatHeaderActions.tsx` (+ its test) — `openAllConversations`/"All"
+  button removed.
+- `agent-home/src/components/chat/ChatPane.tsx` — removed the sheet's
+  state/ref-wiring/render; `refreshSessions()` now sends
+  `exclude_sources=` (empty) explicitly.
+- `agent-home/src/app/api/chat/sessions/route.ts` — `exclude_sources` is
+  now caller-controlled (absent = default "cron", present = caller's
+  value, including empty-string "include everything").
+- `agent-home/src/app/chat/page.tsx` — dropped `excludeSources: "cron"`
+  from the first-paint fetch (this one calls the Python API directly via
+  `apiClientForRequest`, not through the BFF route, so it needed its own
+  fix independent of the route change above).
+
+### Verification (this addendum)
+
+- `npx tsc --noEmit` — clean.
+- `npx vitest run` across `src/lib/chat/` + the touched chat components —
+  73 passed (up from 68; the two rewritten `SessionTabs` tests plus one
+  new "omits empty categories" test), same single pre-existing
+  unrelated jsdom failure as before.
+- `npx next build` — clean, `/chat` route still builds.
+- Confirmed no leftover references to the deleted component/callback
+  (`grep -rl "AllConversationsSheet\|openAllConversations" src/` — empty).
+
 ## Not done / explicitly out of scope
 
 - Did not rewrite the recency query's recursive-CTE architecture. At

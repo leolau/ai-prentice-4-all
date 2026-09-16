@@ -15,11 +15,12 @@ export const dynamic = "force-dynamic";
 
 /**
  * FG-20 Wave C1 — the one-brain chat tab. BFF: the server resolves the
- * principal and loads the principal's conversations (all sources except
- * cron, and the most recent one's transcript) from the Python API, then
- * hands them to the interactive {@link ChatPane}. Sending routes back
- * through `/api/chat/*` to the principal-scoped
- * `POST /api/sessions/{id}/chat` endpoint.
+ * principal and loads the principal's conversations (every source,
+ * including cron — see `categorizeSession`/`SessionTabs`, which groups
+ * them inline instead of hiding them, and the most recent one's
+ * transcript) from the Python API, then hands them to the interactive
+ * {@link ChatPane}. Sending routes back through `/api/chat/*` to the
+ * principal-scoped `POST /api/sessions/{id}/chat` endpoint.
  */
 export default async function Page({
   searchParams,
@@ -54,11 +55,9 @@ export default async function Page({
       // 404s upstream.
       client.profiles().catch(() => ({ profiles: [] })),
       client.sessions({
-        excludeSources: "cron",
         order: "recent",
         // Fast first paint for the strip — see CHAT_SESSION_LIST_LIMIT's
-        // doc comment. The "All conversations" view fetches the full
-        // history itself, on demand.
+        // doc comment.
         limit: CHAT_SESSION_LIST_LIMIT,
       }),
     ]);
