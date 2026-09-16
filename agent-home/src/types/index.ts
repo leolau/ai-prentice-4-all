@@ -362,6 +362,10 @@ export interface SessionSummary {
   ended_at: number | null;
   is_active?: boolean;
   archived?: boolean;
+  /** The working directory the session ran in (already returned by the
+   * Python API's `SELECT s.*`, just not previously typed here). Used to
+   * detect kanban-card-worker sessions — see `lib/chat/categorize.ts`. */
+  cwd?: string | null;
   /** Persisted token totals from the sessions table (used by context-window UI). */
   input_tokens?: number;
   output_tokens?: number;
