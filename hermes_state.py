@@ -842,6 +842,15 @@ CREATE INDEX IF NOT EXISTS idx_sessions_gateway_peer
     ON sessions(source, user_id, chat_id, chat_type, thread_id, started_at DESC);
 CREATE INDEX IF NOT EXISTS idx_sessions_handoff_state
     ON sessions(handoff_state, started_at);
+-- list_sessions_rich()'s recency queries filter WHERE archived = 0 (and
+-- often source NOT IN (...)) before ORDER BY started_at DESC. Without this,
+-- SQLite full-table-scans `sessions` for that filter (confirmed via EXPLAIN
+-- QUERY PLAN — see plans/2026-09-16-chat-sessions-perf-and-category.md);
+-- small today, but linear in total session count as history grows.
+-- Deferred (not in SCHEMA_SQL) because `archived` itself is a column
+-- _reconcile_columns() backfills on legacy databases that predate it.
+CREATE INDEX IF NOT EXISTS idx_sessions_archived_started
+    ON sessions(archived, started_at DESC);
 """
 
 FTS_SQL = """

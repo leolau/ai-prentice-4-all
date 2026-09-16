@@ -18,6 +18,15 @@ export function ChatHeaderActions() {
     <div data-component="ChatHeaderActions" className="flex items-center gap-2">
       <button
         type="button"
+        onClick={() => chatHeaderActionsRef.current.openAllConversations()}
+        aria-label="Browse all conversations, grouped by category"
+        title="All conversations"
+        className="shrink-0 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-1.5 text-sm text-[var(--color-muted)]"
+      >
+        All
+      </button>
+      <button
+        type="button"
         onClick={() => chatHeaderActionsRef.current.openArchived()}
         aria-label="Show archived conversations"
         title="Archived conversations"

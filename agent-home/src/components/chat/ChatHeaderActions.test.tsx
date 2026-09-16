@@ -20,4 +20,12 @@ describe("ChatHeaderActions", () => {
     expect(html).toContain("+ New");
     expect(html).toContain('aria-label="New conversation"');
   });
+
+  it("renders the All button with correct aria-label", () => {
+    const html = renderToStaticMarkup(<ChatHeaderActions />);
+    expect(html).toContain(">All<");
+    expect(html).toContain(
+      'aria-label="Browse all conversations, grouped by category"',
+    );
+  });
 });
