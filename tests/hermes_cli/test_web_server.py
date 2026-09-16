@@ -667,6 +667,9 @@ class TestWebServerEndpoints:
                 captured["count"] = min_message_count
                 return 0
 
+            def get_tags_for_sessions(self, session_ids):
+                return {}
+
             def close(self):
                 pass
 

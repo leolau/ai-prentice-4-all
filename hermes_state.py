@@ -3269,6 +3269,33 @@ class SessionDB:
             )
             return [dict(r) for r in cursor.fetchall()]
 
+    def get_tags_for_sessions(
+        self, session_ids: List[str]
+    ) -> Dict[str, List[Dict[str, Any]]]:
+        """Bulk variant of :meth:`get_session_tags` — one query for many
+        sessions instead of N, for list endpoints that need every row's
+        tags at once (e.g. the chat list's category-override check).
+        Sessions with no tags are simply absent from the returned dict.
+        """
+        if not session_ids:
+            return {}
+        with self._lock:
+            placeholders = ",".join("?" for _ in session_ids)
+            cursor = self._conn.execute(
+                f"SELECT m.session_id, t.id, t.name, t.color, m.assigned_at, m.source "
+                f"FROM session_tag_map m "
+                f"JOIN session_tags t ON t.id = m.tag_id "
+                f"WHERE m.session_id IN ({placeholders}) ORDER BY t.name",
+                session_ids,
+            )
+            rows = cursor.fetchall()
+        by_session: Dict[str, List[Dict[str, Any]]] = {}
+        for r in rows:
+            d = dict(r)
+            sid = d.pop("session_id")
+            by_session.setdefault(sid, []).append(d)
+        return by_session
+
     def add_tag_to_session(
         self,
         session_id: str,

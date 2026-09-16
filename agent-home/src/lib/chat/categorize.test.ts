@@ -8,9 +8,16 @@ import { describe, expect, it } from "vitest";
 
 import {
   categorizeSession,
+  categoryOverride,
+  categoryOverrideTagName,
   groupSessionsByCategory,
+  isCategoryOverrideTag,
 } from "@/lib/chat/categorize";
-import type { SessionSummary } from "@/types";
+import type { SessionSummary, SessionTag } from "@/types";
+
+function tag(name: string): SessionTag {
+  return { id: name, name, color: "blue" };
+}
 
 const NOW = new Date("2026-09-16T12:00:00Z");
 
@@ -104,6 +111,72 @@ describe("categorizeSession", () => {
       started_at: Math.floor(sameCalendarDay.getTime() / 1000),
     });
     expect(categorizeSession(s2, justAfterMidnight)).toBe("daily");
+  });
+
+  it("a manual override wins over every derived signal", () => {
+    const s = session({
+      source: "cron",
+      cwd: "/x/kanban/workspaces/t_1",
+      tags: [tag(categoryOverrideTagName("others"))],
+    });
+    expect(categorizeSession(s, NOW)).toBe("others");
+  });
+
+  it("an override to the session's own natural category still applies cleanly", () => {
+    const s = session({
+      source: "cli",
+      cwd: "/home/hermes",
+      tags: [tag(categoryOverrideTagName("daily"))],
+    });
+    expect(categorizeSession(s, NOW)).toBe("daily");
+  });
+
+  it("ignores unrelated tags and falls through to the derived category", () => {
+    const s = session({
+      source: "cli",
+      cwd: "/home/hermes",
+      tags: [tag("bug"), tag("urgent")],
+    });
+    expect(categorizeSession(s, NOW)).toBe("daily");
+  });
+});
+
+describe("categoryOverride", () => {
+  it("returns null when there are no tags", () => {
+    expect(categoryOverride(undefined)).toBeNull();
+    expect(categoryOverride(null)).toBeNull();
+    expect(categoryOverride([])).toBeNull();
+  });
+
+  it("returns null when no tag matches the reserved prefix", () => {
+    expect(categoryOverride([tag("bug"), tag("urgent")])).toBeNull();
+  });
+
+  it("extracts the category from a category:<value> tag", () => {
+    expect(categoryOverride([tag("category:kanban")])).toBe("kanban");
+    expect(categoryOverride([tag("bug"), tag("category:scheduled")])).toBe(
+      "scheduled",
+    );
+  });
+
+  it("ignores a category:<value> tag with an unknown value", () => {
+    expect(categoryOverride([tag("category:not-a-real-category")])).toBeNull();
+  });
+
+  it("is case-insensitive on the tag name", () => {
+    expect(categoryOverride([tag("Category:Kanban")])).toBe("kanban");
+  });
+});
+
+describe("isCategoryOverrideTag", () => {
+  it("recognizes reserved category tags", () => {
+    expect(isCategoryOverrideTag(tag("category:daily"))).toBe(true);
+    expect(isCategoryOverrideTag(tag("Category:Others"))).toBe(true);
+  });
+
+  it("does not flag ordinary user tags", () => {
+    expect(isCategoryOverrideTag(tag("bug"))).toBe(false);
+    expect(isCategoryOverrideTag(tag("categorized-thing"))).toBe(false);
   });
 });
 

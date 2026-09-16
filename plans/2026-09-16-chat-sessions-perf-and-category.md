@@ -263,6 +263,78 @@ unrelated re-render.
   writing any fix, and that the fetch limit — not categorization — was
   the mechanism.
 
+## Addendum 3 (same day, follow-up PR): manual category override
+
+User request: let the user actually move a conversation between
+categories from the conversation details popup (`SessionModal`), not just
+view its derived one.
+
+**Storage: reused the existing session-tags system rather than a new
+column.** A manual override is a reserved tag named `category:<value>`
+(e.g. `category:kanban`), attached/removed through the exact same
+`add_tag_to_session`/`remove_tag_from_session` machinery the Tags section
+already uses — no schema change, matching this repo's "extend existing
+code before adding a column" convention. `categorizeSession()` checks for
+this override first, before any of the derived signals (kanban `cwd`,
+`cron` source, same-day) — the whole point of a manual move is that it
+stops being auto-derived.
+
+These reserved tags are deliberately **hidden from the generic Tags UI**
+(`isCategoryOverrideTag()` filters them out of both the tag-chip list and
+the "Associate tag…" picker in `SessionModal`) — they're an
+implementation detail, surfaced only through the dedicated Category
+field, not something a user should see or manage as a regular tag.
+
+**A real gap found while wiring this up**: the bulk conversation list
+(`GET /api/sessions`, what `SessionTabs`'s grouping actually reads) never
+attached each row's tags — only the single-session detail fetch used by
+the modal did. Without fixing that, an override would only ever be
+visible *after* opening the modal for that specific conversation, never
+in the grouped strip itself. Added `SessionDB.get_tags_for_sessions()` (one
+bulk query, not N) and wired it into the list route so every row carries
+its `tags` from the start.
+
+### Files touched (this addendum)
+
+- `hermes_state.py` — new `get_tags_for_sessions(session_ids)`, a single
+  `WHERE session_id IN (...)` query; sessions with no tags are simply
+  absent from the returned dict rather than mapped to `[]`.
+- `hermes_cli/web_server.py` — `get_sessions` (`GET /api/sessions`) now
+  bulk-attaches `tags` to every row.
+- `tests/test_session_tags.py`, `tests/hermes_cli/test_web_server_tags.py`
+  — new tests for the bulk method and the route-level attach.
+- `tests/hermes_cli/test_web_server.py` — a pre-existing fake `SessionDB`
+  stub in `test_get_sessions_forwards_min_messages` needed a
+  `get_tags_for_sessions` method added; without it the route now 500s
+  against that stub. Found by running the full suite, not assumed.
+- `agent-home/src/lib/chat/categorize.ts` — new `categoryOverrideTagName`,
+  `isCategoryOverrideTag`, `categoryOverride`; `categorizeSession` checks
+  the override first.
+- `agent-home/src/components/chat/SessionModal.tsx` — new Category field
+  (a `<select>`, positioned right after Name); filters reserved tags out
+  of the Tags section and the tag-association picker.
+- `agent-home/src/components/chat/ChatPane.tsx` — new
+  `setSessionCategory()`: removes any existing override tag, adds the new
+  one, then refreshes the strip so it regroups immediately rather than
+  waiting for the next natural refresh. Computes the modal's `category`
+  prop from `categorizeSession()` over the currently-loaded session-tags
+  state, consistent with how the Tags section itself already sources its
+  data (same brief loading flash while that fetch resolves, no new
+  regression).
+
+### Verification (this addendum)
+
+- `pytest tests/test_session_tags.py tests/hermes_cli/test_web_server_tags.py
+  tests/test_hermes_state.py tests/hermes_cli/test_web_server.py
+  tests/hermes_cli/test_web_server_session_search.py` — 693 passed, 1
+  pre-existing unrelated failure (`croniter`).
+- `npx tsc --noEmit` — clean.
+- `npx vitest run` — 105 passed across the touched chat files (up from
+  71: 10 new `categorize.ts` tests for the override, 5 new `SessionModal`
+  tests for the Category field and tag-hiding), same single pre-existing
+  unrelated jsdom failure.
+- `npx next build` — clean.
+
 ## Not done / explicitly out of scope
 
 - Did not rewrite the recency query's recursive-CTE architecture. At
