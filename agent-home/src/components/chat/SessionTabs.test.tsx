@@ -2,7 +2,8 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
 // SessionTabs is "use client" but its initial render (no hooks that fire in
-// SSR besides useState/useMemo) is deterministic from props.
+// SSR besides useState/useMemo/useEffect, and useEffect never fires during
+// renderToStaticMarkup) is deterministic from props.
 import { SessionTabs } from "@/components/chat/SessionTabs";
 import type { SessionSummary } from "@/types";
 
@@ -68,25 +69,40 @@ describe("SessionTabs", () => {
     expect(html).toContain('data-component="SessionTabs"');
   });
 
-  it("renders all session titles as chips", () => {
+  it("renders a Category dropdown with one option per non-empty category", () => {
     const html = renderToStaticMarkup(<SessionTabs {...baseProps} />);
-    expect(html).toContain("First chat");
-    expect(html).toContain("Second chat");
-    expect(html).toContain("Third chat");
-    expect(html).toContain("Fourth chat");
+    expect(html).toContain('id="chat-category"');
+    // s1/s2 -> Daily, s3 (cron) -> Scheduled, s4 (kanban cwd) -> Kanban.
+    expect(html).toContain("Kanban (1)");
+    expect(html).toContain("Daily (2)");
+    expect(html).toContain("Scheduled (1)");
+    // No session in this set is old/non-kanban/non-cron.
+    expect(html).not.toContain("Others (");
   });
 
-  it("groups sessions into labelled category rows", () => {
-    const html = renderToStaticMarkup(<SessionTabs {...baseProps} />);
-    // s4 (kanban cwd) -> Kanban row; s3 (cron) -> Scheduled row; s1/s2 -> Daily row.
-    expect(html).toContain('data-category="kanban"');
-    expect(html).toContain('data-category="scheduled"');
-    expect(html).toContain('data-category="daily"');
-    // No "others" row, since no session in this set is old/non-kanban/non-cron.
-    expect(html).not.toContain('data-category="others"');
-    expect(html).toContain("Kanban");
-    expect(html).toContain("Scheduled");
-    expect(html).toContain("Daily");
+  it("defaults to the active session's own category (s1 is Daily)", () => {
+    const html = renderToStaticMarkup(<SessionTabs {...baseProps} activeId="s1" />);
+    expect(html).toContain("First chat");
+    expect(html).toContain("Second chat");
+    // Only the selected category's chips render — s3 (Scheduled) and s4
+    // (Kanban) must not appear alongside s1/s2 (Daily).
+    expect(html).not.toContain("Third chat");
+    expect(html).not.toContain("Fourth chat");
+  });
+
+  it("defaults to the kanban session's category when it is active", () => {
+    const html = renderToStaticMarkup(<SessionTabs {...baseProps} activeId="s4" />);
+    expect(html).toContain("Fourth chat");
+    expect(html).not.toContain("First chat");
+    expect(html).not.toContain("Second chat");
+    expect(html).not.toContain("Third chat");
+  });
+
+  it("omits the dropdown entirely when there is nothing to categorize", () => {
+    const html = renderToStaticMarkup(
+      <SessionTabs {...baseProps} sessions={[]} activeId={null} />,
+    );
+    expect(html).not.toContain('id="chat-category"');
   });
 
   it("does NOT render Archived or + New buttons (they moved to the header)", () => {
@@ -95,19 +111,8 @@ describe("SessionTabs", () => {
     expect(html).not.toContain("+ New");
   });
 
-  it("makes each category row independently horizontally scrollable", () => {
+  it("makes the visible row horizontally scrollable", () => {
     const html = renderToStaticMarkup(<SessionTabs {...baseProps} />);
     expect(html).toContain("overflow-x-auto");
-  });
-
-  it("omits empty categories entirely", () => {
-    const onlyDaily: SessionSummary[] = [sessions[0]];
-    const html = renderToStaticMarkup(
-      <SessionTabs {...baseProps} sessions={onlyDaily} />,
-    );
-    expect(html).toContain('data-category="daily"');
-    expect(html).not.toContain('data-category="kanban"');
-    expect(html).not.toContain('data-category="scheduled"');
-    expect(html).not.toContain('data-category="others"');
   });
 });
