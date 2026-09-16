@@ -164,4 +164,46 @@ describe("SessionModal", () => {
     expect(html).toContain("Archive");
     expect(html).toContain("Save");
   });
+
+  describe("Category", () => {
+    it("does not render the Category field when no category is provided", () => {
+      const html = render();
+      expect(html).not.toContain('id="session-category"');
+    });
+
+    it("renders a Category select with the current value pre-selected", () => {
+      const html = render({ category: "daily", onSetCategory: async () => {} });
+      expect(html).toContain('id="session-category"');
+      expect(html).toContain("Kanban");
+      expect(html).toContain("Daily");
+      expect(html).toContain("Scheduled");
+      expect(html).toContain("Others");
+      expect(html).toContain('<option value="daily" selected="">');
+    });
+
+    it("disables the Category select when onSetCategory is not provided", () => {
+      const html = render({ category: "kanban" });
+      // A disabled native <select> renders the disabled attribute.
+      expect(html).toMatch(/id="session-category"[^>]*disabled/);
+    });
+
+    it("hides reserved category:<value> tags from the visible Tags list", () => {
+      const html = render({
+        tags: [...TAGS, { id: "cat1", name: "category:kanban", color: "blue" }],
+        category: "kanban",
+      });
+      expect(html).toContain("bug");
+      expect(html).toContain("feature");
+      expect(html).not.toContain("category:kanban");
+    });
+
+    it("excludes reserved category tags from the tag-association picker too", () => {
+      const html = render({
+        tags: TAGS,
+        allTags: [...ALL_TAGS, { id: "cat1", name: "category:scheduled", color: "blue" }],
+        onAddTag: async () => {},
+      });
+      expect(html).not.toContain("category:scheduled");
+    });
+  });
 });

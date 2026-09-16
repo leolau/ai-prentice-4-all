@@ -3,6 +3,12 @@
 import { useState } from "react";
 
 import { Spinner } from "@/components/ui/Spinner";
+import {
+  CHAT_CATEGORY_LABELS,
+  CHAT_CATEGORY_ORDER,
+  isCategoryOverrideTag,
+  type ChatCategory,
+} from "@/lib/chat/categorize";
 import type { SessionSummary, SessionTag, TagSuggestion } from "@/types";
 
 function absolute(ts: number | null): string {
@@ -62,14 +68,18 @@ function tagBg(color: string): string {
 /**
  * The conversation details popup, opened by tapping the active session chip.
  * Lets the user edit the conversation name (persisted via the BFF rename route),
- * shows read-only statistics, a collapsible context-window breakdown, and a
- * tag management section with LLM-suggested tags.
+ * shows read-only statistics, a collapsible context-window breakdown, a
+ * Category field (which chat-list group this conversation belongs to — see
+ * `lib/chat/categorize.ts`), and a tag management section with LLM-suggested
+ * tags.
  */
 export function SessionModal({
   session,
   onClose,
   onRename,
   onArchive,
+  category,
+  onSetCategory,
   tags,
   allTags,
   tagSuggestions,
@@ -82,6 +92,10 @@ export function SessionModal({
   onClose: () => void;
   onRename: (title: string) => Promise<void>;
   onArchive: () => Promise<void>;
+  /** The category this conversation currently displays under (derived, or
+   * a manual override already applied) — see `categorizeSession`. */
+  category?: ChatCategory;
+  onSetCategory?: (category: ChatCategory) => Promise<void>;
   tags?: SessionTag[];
   allTags?: SessionTag[];
   tagSuggestions?: TagSuggestion[];
@@ -96,10 +110,30 @@ export function SessionModal({
   const [error, setError] = useState<string | null>(null);
   const [ctxCollapsed, setCtxCollapsed] = useState(false);
   const [tagBusy, setTagBusy] = useState(false);
+  const [categoryBusy, setCategoryBusy] = useState(false);
   // Every write here mutates the same conversation, so any one of them in flight
   // disables all of them: renaming a session while its archive request is still
   // applying would race two decisions about the same row.
-  const busy = saving || archiving || tagBusy;
+  const busy = saving || archiving || tagBusy || categoryBusy;
+
+  // The reserved category:<value> tags are how the override is actually
+  // stored, but they're an implementation detail — never show them in the
+  // generic Tags list, only through the dedicated Category field below.
+  const visibleTags = tags?.filter((t) => !isCategoryOverrideTag(t));
+  const visibleAllTags = allTags?.filter((t) => !isCategoryOverrideTag(t));
+
+  async function setCategory(next: ChatCategory) {
+    if (!onSetCategory || categoryBusy || next === category) return;
+    setCategoryBusy(true);
+    setError(null);
+    try {
+      await onSetCategory(next);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to change category.");
+    } finally {
+      setCategoryBusy(false);
+    }
+  }
 
   const inputTokens = session.input_tokens ?? 0;
   const outputTokens = session.output_tokens ?? 0;
@@ -234,6 +268,41 @@ export function SessionModal({
           </p>
         ) : null}
 
+        {/* ── Category ── */}
+        {category ? (
+          <div className="mt-4">
+            <label
+              htmlFor="session-category"
+              className="mb-1 flex items-center gap-2 text-xs uppercase tracking-wide text-[var(--color-muted)]"
+            >
+              Category
+              {categoryBusy ? (
+                <span
+                  role="status"
+                  aria-live="polite"
+                  className="inline-flex items-center gap-1 text-[var(--color-accent)] normal-case"
+                >
+                  <Spinner />
+                  Saving…
+                </span>
+              ) : null}
+            </label>
+            <select
+              id="session-category"
+              value={category}
+              disabled={!onSetCategory || categoryBusy}
+              onChange={(e) => void setCategory(e.target.value as ChatCategory)}
+              className="w-full rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm text-[var(--color-fg)] disabled:opacity-60"
+            >
+              {CHAT_CATEGORY_ORDER.map((c) => (
+                <option key={c} value={c}>
+                  {CHAT_CATEGORY_LABELS[c]}
+                </option>
+              ))}
+            </select>
+          </div>
+        ) : null}
+
         {/* ── Context Window (collapsible) ── */}
         <div className="mt-4">
           <button
@@ -332,7 +401,7 @@ export function SessionModal({
         </div>
 
         {/* ── Tags ── */}
-        {tags && (
+        {visibleTags && (
           <div className="mt-4">
             <h3 className="mb-1 flex items-center gap-2 text-xs uppercase tracking-wide text-[var(--color-muted)]">
               Tags
@@ -348,7 +417,7 @@ export function SessionModal({
               ) : null}
             </h3>
             <div className="flex flex-wrap gap-1.5">
-              {tags.map((tag) => (
+              {visibleTags.map((tag) => (
                 <span
                   key={tag.id}
                   className="flex items-center gap-1 rounded-full px-2 py-0.5 text-xs"
@@ -368,19 +437,21 @@ export function SessionModal({
                   )}
                 </span>
               ))}
-              {tags.length === 0 && (
+              {visibleTags.length === 0 && (
                 <span className="text-xs text-[var(--color-muted)]">No tags yet.</span>
               )}
             </div>
-            {onAddTag && allTags && (() => {
-              const associatedNames = new Set((tags ?? []).map((t) => t.name.toLowerCase()));
-              const available = allTags.filter(
+            {onAddTag && visibleAllTags && (() => {
+              const associatedNames = new Set(
+                (visibleTags ?? []).map((t) => t.name.toLowerCase()),
+              );
+              const available = visibleAllTags.filter(
                 (t) => !associatedNames.has(t.name.toLowerCase()),
               );
               if (available.length === 0) {
                 return (
                   <p className="mt-2 text-xs text-[var(--color-muted)]">
-                    {tags && tags.length > 0
+                    {visibleTags && visibleTags.length > 0
                       ? "All tags associated."
                       : "No tags defined yet. Create them in Settings."}
                   </p>

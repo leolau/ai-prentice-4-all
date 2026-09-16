@@ -19,6 +19,12 @@ import {
   type ChatActivity,
 } from "@/components/chat/StatusIndicator";
 import { TagFilterBar } from "@/components/chat/TagFilterBar";
+import {
+  categorizeSession,
+  categoryOverrideTagName,
+  isCategoryOverrideTag,
+  type ChatCategory,
+} from "@/lib/chat/categorize";
 import { chatHeaderActionsRef } from "@/lib/chat/header-actions";
 import { markSessionRead } from "@/lib/chat/last-read";
 import { CHAT_SESSION_LIST_LIMIT } from "@/lib/chat/session-limits";
@@ -728,6 +734,20 @@ export function ChatPane({
     void loadAllTags();
   }
 
+  /** Move the open conversation to a different category. Stored as a
+   * reserved `category:<value>` tag (see `lib/chat/categorize.ts`) — a
+   * session should carry at most one, so any existing override is removed
+   * before the new one is added. Refreshes the strip afterward so it
+   * regroups immediately instead of waiting for the next natural refresh. */
+  async function setSessionCategory(next: ChatCategory) {
+    const existing = sessionTags.find((t) => isCategoryOverrideTag(t));
+    if (existing) {
+      await removeTag(existing.id);
+    }
+    await addTag(categoryOverrideTagName(next));
+    void refreshSessions();
+  }
+
   async function suggestTags() {
     const s = detailsSession;
     if (!s) return;
@@ -994,6 +1014,8 @@ export function ChatPane({
           }}
           onRename={renameSession}
           onArchive={archiveSession}
+          category={categorizeSession({ ...detailsSession, tags: sessionTags })}
+          onSetCategory={setSessionCategory}
           tags={sessionTags}
           allTags={allTags}
           tagSuggestions={tagSuggestions}
