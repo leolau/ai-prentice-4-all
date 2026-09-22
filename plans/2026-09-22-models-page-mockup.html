@@ -89,6 +89,17 @@
   .actions .primary { background: var(--accent); color: #04211c;
     border: none; font-weight: 600; }
   .warn { font-size: 11px; color: var(--warn); margin-top: 10px; }
+  .keyfield { width: 100%; background: var(--surface); color: var(--text);
+    border: 1px solid var(--border); border-radius: 12px;
+    padding: 10px 12px; font-size: 13px; margin: 6px 0 10px;
+    font-family: ui-monospace, monospace; }
+  .danger { color: #f87171; }
+  .divider { border-top: 1px solid var(--border); margin: 14px 0 8px; }
+  .oauth-hint { font-size: 12px; color: var(--muted); padding: 10px 8px;
+    background: var(--surface); border-radius: 10px; }
+  .key-status { font-size: 11px; margin-top: 6px; }
+  .key-status.ok { color: var(--accent); }
+  .key-status.bad { color: #f87171; }
 </style>
 </head>
 <body>
@@ -186,6 +197,85 @@
     </div>
   </div>
   <div class="caption">Screen 2 — tap a role row → picker sheet</div>
+</div>
+
+<!-- Screen 3: unauthenticated provider → Add API key -->
+<div>
+  <div class="phone">
+    <h1>Models</h1>
+    <div class="card" style="opacity:.45">
+      <div class="sub">MAIN MODEL</div>
+      <div class="big" style="margin-top:6px">glm-5.2</div>
+      <div class="sub">alibaba · 1M context</div>
+    </div>
+
+    <div class="sheet">
+      <div class="grab"></div>
+      <div class="big" style="font-size:16px">Vision model</div>
+      <div class="sub">image analysis · currently qwen3.8-max</div>
+      <select class="sel"><option>alibaba</option>
+        <option selected>opencode-go</option><option>nous</option>
+        <option>anthropic</option></select>
+
+      <!-- Unauthenticated key-based provider -->
+      <div class="oauth-hint">
+        <b>opencode-go</b> isn't connected yet. Paste its API key — it's
+        validated, then stored in Hermes' <code>.env</code>.
+      </div>
+      <input class="keyfield" placeholder="OPENCODE_GO_API_KEY…"
+        value="sk-opg-••••••••••••••••">
+      <div class="key-status ok">✓ Key valid — 12 models available</div>
+      <div class="actions">
+        <span class="btn">Cancel</span>
+        <span class="btn primary" style="margin-left:auto">Save key</span>
+      </div>
+
+      <div class="divider"></div>
+      <div class="oauth-hint" style="background:none;padding:2px 8px">
+        OAuth providers (anthropic, nous…) connect from
+        <b>Getting started</b> instead.
+      </div>
+    </div>
+  </div>
+  <div class="caption">Screen 3 — unauthenticated provider → Add API key</div>
+</div>
+
+<!-- Screen 4: connected provider → disconnect affordance -->
+<div>
+  <div class="phone">
+    <h1>Models</h1>
+    <div class="card" style="opacity:.45">
+      <div class="sub">MAIN MODEL</div>
+      <div class="big" style="margin-top:6px">glm-5.2</div>
+      <div class="sub">alibaba · 1M context</div>
+    </div>
+
+    <div class="sheet">
+      <div class="grab"></div>
+      <div class="big" style="font-size:16px">Vision model</div>
+      <div class="sub">image analysis · currently qwen3.8-max</div>
+      <select class="sel"><option>alibaba</option><option>nous</option>
+        <option selected>opencode-go</option></select>
+      <div class="opt">gpt-5-codex <small>opencode-go</small></div>
+      <div class="opt">kimi-k2.5 <small>opencode-go</small></div>
+      <div class="opt">deepseek-v4 <small>opencode-go</small></div>
+      <div class="actions">
+        <span class="btn">Cancel</span>
+        <span class="btn primary" style="margin-left:auto">Set model</span>
+      </div>
+
+      <div class="divider"></div>
+      <div class="opt danger" style="font-size:13px">
+        Disconnect opencode-go
+        <small>removes key from .env</small>
+      </div>
+      <div class="warn" style="padding:0 8px">
+        ⚠ Vision + 2 other roles use this provider — they'll fall back to
+        the main model.
+      </div>
+    </div>
+  </div>
+  <div class="caption">Screen 4 — connected provider → Disconnect (with blast-radius warning)</div>
 </div>
 
 </body>

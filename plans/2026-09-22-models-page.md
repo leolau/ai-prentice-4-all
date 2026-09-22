@@ -14,6 +14,9 @@ launcher that answers two questions at a glance:
    inherit the default.
 2. **Let the user change a slot's model** without touching `config.yaml`.
 
+3. **Let the user connect / disconnect a provider account** (e.g. add an
+   OpenCode-Go API key) without leaving the page.
+
 It is deliberately a *simpler* version of the dashboard's Models Settings
 screen (`web/src/screens/ModelsPage.tsx`, ~1300 lines): same backend, a
 fraction of the surface.
@@ -35,7 +38,7 @@ fraction of the surface.
 | Period switcher 7/30/90d | Fixed 30d |
 | "Use as" menu on every model card | One row per *role*; tap → picker sheet |
 | MoA editor | **Out of scope** (advanced; stays on dashboard) |
-| Provider auth / OAuth | **Out of scope** (stays in onboarding/settings) |
+| Full provider management (OAuth flows, env editor) | Key-based providers only: "Add provider key" + "Disconnect provider" in the picker sheet. OAuth providers stay in onboarding/settings. |
 | Model reload confirm dialog | Inline note: "applies to new sessions" |
 | Full capability badge set | Compact chips on the main-model card only |
 
@@ -65,9 +68,21 @@ fraction of the surface.
 └──────────────────────────────┘
 ```
 
-- **Row tap** opens a bottom sheet: provider dropdown (only
-  *authenticated* providers, from `/api/model/options`) + model list for
-  that provider + "Set" / "Reset to auto" (aux slots only).
+- **Row tap** opens a bottom sheet: provider dropdown + model list for
+  the selected provider + "Set" / "Reset to auto" (aux slots only).
+- **Provider dropdown lists every catalog provider**, not just
+  authenticated ones:
+  - *Authenticated* provider → model list renders immediately.
+  - *Unauthenticated, key-based* provider (e.g. `opencode-go`) → sheet
+    shows an "Add API key" field: paste → `POST /api/providers/validate`
+    → `PUT /api/env` → model list appears inline, no page leave.
+  - *OAuth-only* provider → "Set up in onboarding" hint link instead of a
+    key field (OAuth flows stay out of scope).
+- **Disconnect provider** — a small action at the bottom of the picker
+  sheet for authenticated providers: confirm sheet → `DELETE /api/env`
+  for its key var. Warns when slots are currently pinned to that provider
+  (they'll fall back to `auto`/fail) — the "In use" list makes the blast
+  radius visible before confirming.
 - **`auto → main`** rows mean the slot inherits the main model
   (provider `"auto"` in `auxiliary.*` config — matches backend semantics).
 - **"In use"** is sorted by spend desc so the expensive models surface
@@ -83,6 +98,15 @@ fraction of the surface.
 | `GET /api/model/auxiliary` | Task-role rows (11 slots) + current `main` |
 | `POST /api/model/set` | Writes `model.provider/default` or `auxiliary.<task>.*` to config.yaml |
 | `GET /api/analytics/models?days=30` | "In use" list (tokens, cost, sessions per model) |
+| `POST /api/providers/validate` | Live-probe a pasted provider key before saving |
+| `PUT /api/env` | Persist a provider API key (e.g. `OPENCODE_GO_API_KEY`) to `.env` |
+| `DELETE /api/env` | Remove a provider key — disconnects the provider |
+
+Provider auth note: `opencode-go` is a **key-based** aggregator provider
+(`hermes_cli/providers.py` — `openai_chat` transport, `OPENCODE_GO_API_KEY`
++ optional `OPENCODE_GO_BASE_URL`), not OAuth — so "add an account" for it
+is just validate + `PUT /api/env`. OAuth-capable providers (anthropic,
+nous, openai-codex, xai…) keep their dedicated flows in onboarding.
 
 Known backend behavior to surface honestly in UI:
 
@@ -107,7 +131,11 @@ Known backend behavior to surface honestly in UI:
    to info + auxiliary + analytics in parallel server-side, one response),
    `src/app/api/models/options/route.ts` (GET passthrough),
    `src/app/api/models/set/route.ts` (POST passthrough with principal
-   check). Follows the `chat/sessions/route.ts` pattern exactly.
+   check), `src/app/api/models/provider-key/route.ts` (POST →
+   `/api/providers/validate` then `PUT /api/env`; DELETE → `DELETE
+   /api/env`). Follows the `chat/sessions/route.ts` pattern exactly.
+   Secrets pass straight through to the Python API — never logged,
+   never returned to the client.
 4. **Page** — `src/app/models/page.tsx`: server component, `force-dynamic`,
    `requirePrincipal`, `apiClientForRequest`, error-card pattern identical
    to `tools/page.tsx`; hands data to a client component.
@@ -121,9 +149,11 @@ Known backend behavior to surface honestly in UI:
 
 ## Out of scope (explicit)
 
-- MoA editing, provider OAuth/API-key management, per-card
-  `model_override` editing (kanban cards keep doing that on the card),
-  cost budgets, hot-swapping a running session's model.
+- MoA editing, OAuth provider flows (anthropic PKCE, nous/codex device
+  code, xai loopback — key-based providers only get add/disconnect here),
+  per-card `model_override` editing (kanban cards keep doing that on the
+  card; the page may later *display* pinned cards — see risks), cost
+  budgets, hot-swapping a running session's model.
 
 ## Risks / open questions
 
