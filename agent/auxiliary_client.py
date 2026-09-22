@@ -46,6 +46,7 @@ import logging
 import os
 import threading
 import time
+import uuid
 from pathlib import Path  # noqa: F401 — used by test mocks
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
@@ -562,6 +563,42 @@ def build_nvidia_nim_headers(base_url: str | None) -> dict:
     if base_url_host_matches(str(base_url or ""), "integrate.api.nvidia.com"):
         return dict(_NVIDIA_NIM_CLOUD_HEADERS)
     return {}
+
+
+# OpenCode Go/Zen rejects inference requests that arrive without a stable
+# per-conversation session id (HTTP 400 "Request is missing
+# x-opencode-session") — the gateway uses it to pin a conversation to one
+# backend so prompt-cache hits survive.  See NousResearch/hermes-agent#81584.
+_OPENCODE_PROVIDERS = frozenset({"opencode", "opencode-go", "opencode-zen"})
+
+# Process-stable fallback used when no Hermes session id is bound yet (e.g.
+# an aux call outside a conversation).  Opaque is fine — OpenCode only needs
+# a stable string, never anything derived from user data.
+_opencode_session_fallback: str = ""
+
+
+def build_opencode_session_headers(session_id: Optional[str] = None) -> dict:
+    """Return ``{"x-opencode-session": <id>}`` for requests to opencode.ai.
+
+    Resolution order: explicit *session_id*, then the Hermes session bound
+    to the current context (``HERMES_SESSION_ID`` via session_context /
+    os.environ), then a process-stable random token.  Never send this header
+    to non-opencode hosts.
+    """
+    sid = str(session_id or "").strip()
+    if not sid:
+        try:
+            from gateway.session_context import get_session_env
+
+            sid = (get_session_env("HERMES_SESSION_ID") or "").strip()
+        except Exception:
+            sid = (os.environ.get("HERMES_SESSION_ID") or "").strip()
+    if not sid:
+        global _opencode_session_fallback
+        if not _opencode_session_fallback:
+            _opencode_session_fallback = f"hermes-{uuid.uuid4().hex[:16]}"
+        sid = _opencode_session_fallback
+    return {"x-opencode-session": sid}
 
 
 
@@ -1714,6 +1751,8 @@ def _resolve_api_key_provider() -> Tuple[Optional[OpenAI], Optional[str]]:
                 extra["default_headers"] = copilot_default_headers()
             elif base_url_host_matches(base_url, "integrate.api.nvidia.com"):
                 extra["default_headers"] = build_nvidia_nim_headers(base_url)
+            elif base_url_host_matches(base_url, "opencode.ai"):
+                extra["default_headers"] = build_opencode_session_headers()
             else:
                 try:
                     from providers import get_provider_profile as _gpf_aux
@@ -1754,6 +1793,8 @@ def _resolve_api_key_provider() -> Tuple[Optional[OpenAI], Optional[str]]:
             extra["default_headers"] = copilot_default_headers()
         elif base_url_host_matches(base_url, "integrate.api.nvidia.com"):
             extra["default_headers"] = build_nvidia_nim_headers(base_url)
+        elif base_url_host_matches(base_url, "opencode.ai"):
+            extra["default_headers"] = build_opencode_session_headers()
         else:
             try:
                 from providers import get_provider_profile as _gpf_aux2
@@ -4477,6 +4518,8 @@ def resolve_provider_client(
             ))
         elif base_url_host_matches(base_url, "integrate.api.nvidia.com"):
             headers.update(build_nvidia_nim_headers(base_url))
+        elif base_url_host_matches(base_url, "opencode.ai"):
+            headers.update(build_opencode_session_headers())
         else:
             # Fall back to profile.default_headers for providers that declare
             # client-level attribution headers on their profile (e.g. GMI
@@ -5744,6 +5787,20 @@ def _build_call_kwargs(
         merged_extra.setdefault("tags", []).extend(_nous_portal_tags())
     if merged_extra:
         kwargs["extra_body"] = merged_extra
+
+    # OpenCode Go/Zen requires a stable per-conversation session header on
+    # every inference request.  Attach it per call — not only on the client —
+    # because aux clients are cached across conversations in long-lived
+    # processes and a cached client would otherwise carry a stale session id.
+    # Request-level extra_headers override client default_headers. (#81584)
+    if (
+        _normalize_aux_provider(provider) in _OPENCODE_PROVIDERS
+        or base_url_host_matches(str(base_url or ""), "opencode.ai")
+    ):
+        kwargs["extra_headers"] = {
+            **(kwargs.get("extra_headers") or {}),
+            **build_opencode_session_headers(),
+        }
 
     return kwargs
 
