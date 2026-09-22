@@ -312,6 +312,49 @@ describe("ModelPickerSheet", () => {
     });
   });
 
+  it("offers a retry when the initial options load fails", async () => {
+    // Safari's fetch rejection surfaces as TypeError("Load failed") — the
+    // picker must not sit on a dead spinner when it happens.
+    const fetchMock = vi
+      .fn()
+      .mockRejectedValueOnce(new TypeError("Load failed"))
+      .mockResolvedValueOnce(jsonResponse(200, OPTIONS));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { findByText, findByRole, queryByText } = renderSheet();
+
+    const retry = await findByRole("button", { name: "Try again" });
+    expect(queryByText("Loading providers…")).toBeNull();
+    fireEvent.click(retry);
+
+    await findByText("Anthropic — not connected");
+    expect(queryByText("Load failed")).toBeNull();
+  });
+
+  it("keeps the stale list usable when a key-save refetch fails", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse(200, OPTIONS))
+      .mockResolvedValueOnce(jsonResponse(200, { ok: true, verified: true }))
+      .mockRejectedValueOnce(new TypeError("Load failed"));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { findByText, findByPlaceholderText, container } = renderSheet();
+
+    await findByText("OpenCode Go — not connected");
+    fireEvent.change(container.querySelector("select")!, {
+      target: { value: "opencode-go" },
+    });
+    fireEvent.change(await findByPlaceholderText("OPENCODE_GO_API_KEY"), {
+      target: { value: "sk-go" },
+    });
+    fireEvent.click(await findByText("Save key"));
+
+    // Refetch failed: banner shows but the previously loaded list stays.
+    await findByText("Load failed");
+    await findByText("Anthropic — not connected");
+  });
+
   it("resets an auxiliary slot to auto through the same set route", async () => {
     const fetchMock = vi
       .fn()
