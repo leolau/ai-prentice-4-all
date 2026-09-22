@@ -253,3 +253,12 @@ class TestDefaultPlatformWebSearchCoverage:
 
     def test_hermes_api_server_toolset_includes_web_search(self):
         assert "web_search" in resolve_toolset("hermes-api-server")
+
+    def test_send_message_only_in_api_server_toolset(self):
+        """send_message is exposed solely to agent-home (api-server) sessions;
+        CLI/messaging toolsets must not get an agent-callable send tool."""
+        assert "send_message" in resolve_toolset("hermes-api-server")
+        for name in ("hermes-cli", "hermes-telegram", "hermes-cron", "hermes-whatsapp"):
+            ts = get_toolset(name)
+            if ts is not None:
+                assert "send_message" not in resolve_toolset(name), name

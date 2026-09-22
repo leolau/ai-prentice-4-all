@@ -3287,3 +3287,24 @@ class TestSendTelegramThreadNotFoundRetry:
         finally:
             if media_path and os.path.exists(media_path):
                 os.unlink(media_path)
+
+
+class TestSendMessageRegistration:
+    """send_message is registered (approval-gated api-server surface) but
+    gated on a connected platform via check_fn."""
+
+    def test_registered_with_check_fn(self):
+        import tools.send_message_tool  # noqa: F401 — module-level register()
+        from tools.registry import registry
+        entry = registry.get_entry("send_message")
+        assert entry is not None
+        assert entry.check_fn is not None
+        assert entry.toolset == "send_message"
+
+    def test_check_fn_false_without_platforms(self):
+        from tools.send_message_tool import _send_message_available
+        with patch(
+            "gateway.config.load_gateway_config",
+            side_effect=Exception("no config"),
+        ):
+            assert _send_message_available() is False

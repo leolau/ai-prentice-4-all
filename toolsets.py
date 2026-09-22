@@ -369,8 +369,10 @@ TOOLSETS = {
     # ==========================================================================
     # Full Hermes toolsets (CLI + messaging platforms)
     #
-    # All platforms share the same core tools. Note: agents do NOT get an
-    # agent-callable send_message tool — outbound platform messaging is handled
+    # All platforms share the same core tools. Note: only hermes-api-server
+    # gets an agent-callable send_message tool — it is gated behind
+    # approvals.tools in deployments that enable it, so every send prompts the
+    # user first. Everywhere else outbound platform messaging is handled
     # outside the agent loop (cron delivery, the gateway kanban notifier, and
     # the `hermes send` CLI), not by the model deciding to send on its own.
     # ==========================================================================
@@ -395,7 +397,7 @@ TOOLSETS = {
     },
 
     "hermes-api-server": {
-        "description": "OpenAI-compatible API server — full agent tools accessible via HTTP (no interactive UI tools like clarify or send_message)",
+        "description": "OpenAI-compatible API server — full agent tools accessible via HTTP (no interactive UI tools like clarify; send_message is approval-gated)",
         "tools": [
             # Web
             "web_search", "web_extract",
@@ -422,6 +424,9 @@ TOOLSETS = {
             "cronjob",
             # Home Assistant smart home control (gated on HASS_TOKEN via check_fn)
             "ha_list_entities", "ha_get_state", "ha_list_services", "ha_call_service",
+            # Cross-platform messaging (gated on a connected platform via check_fn;
+            # deployments should also list it in approvals.tools so sends confirm)
+            "send_message",
 
         ],
         "includes": []

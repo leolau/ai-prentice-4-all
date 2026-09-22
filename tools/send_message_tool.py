@@ -1781,16 +1781,33 @@ async def _send_yuanbao(chat_id, message, media_files=None):
 
 
 # --- Registry ---
-from tools.registry import tool_error
+from tools.registry import registry, tool_error
 
-# NOTE: ``send_message`` is intentionally NOT registered as an agent-callable
-# model tool. The agent should not decide on its own to fire off cross-platform
-# messages or reactions. The send engine in this module (``_send_to_platform``,
-# ``_send_via_adapter``, ``_parse_target_ref``, the per-platform ``_send_*``
-# helpers) remains the shared transport used by:
+
+def _send_message_available() -> bool:
+    """check_fn: expose the tool only when at least one platform is connected."""
+    try:
+        from gateway.config import load_gateway_config
+        return bool(load_gateway_config().get_connected_platforms())
+    except Exception:
+        return False
+
+
+# ``send_message`` is registered but kept out of every default toolset except
+# ``hermes-api-server`` (agent-home chat), where the deployment gates it behind
+# ``approvals.tools`` so every send prompts the user first.  The tool is NOT
+# in ``_HERMES_CORE_TOOLS`` — the model must not fire off cross-platform
+# messages unprompted on CLI/messaging sessions.  The send engine in this
+# module (``_send_to_platform``, ``_send_via_adapter``, ``_parse_target_ref``,
+# the per-platform ``_send_*`` helpers) also remains the shared transport used by:
 #   - cron delivery (cron/scheduler.py)
 #   - the ``hermes send`` CLI command (hermes_cli/send_cmd.py)
 #   - the gateway kanban notifier (dashboard-toggled, outside agent control)
 #   - the standalone MCP server (mcp_serve.py), which is an opt-in surface
-# Those callers import the helpers directly; none of them need the registry
-# entry.
+registry.register(
+    name="send_message",
+    toolset="send_message",
+    schema=SEND_MESSAGE_SCHEMA,
+    handler=lambda args, **kw: send_message_tool(args),
+    check_fn=_send_message_available,
+)
