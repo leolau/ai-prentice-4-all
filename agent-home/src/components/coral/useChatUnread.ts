@@ -10,7 +10,7 @@
 import { useEffect, useState } from "react";
 
 import { countUnreadSessions } from "@/lib/chat/last-read";
-import type { SessionSummary } from "@/types";
+import { fetchSessionList } from "@/lib/chat/session-list-fetch";
 
 const POLL_MS = 45_000;
 
@@ -21,21 +21,23 @@ export function useChatUnreadCount(): number {
     let cancelled = false;
 
     async function refresh() {
-      try {
-        const res = await fetch("/api/chat/sessions?limit=200", {
-          cache: "no-store",
-        });
-        if (!res.ok) return;
-        const data = (await res.json()) as { sessions?: SessionSummary[] };
-        if (!cancelled) setCount(countUnreadSessions(data.sessions ?? []));
-      } catch {
-        // Unreachable backend — the badge keeps its last value.
+      // Coalesced: focus + visibilitychange fire together on a resume, and a
+      // timer tick or a ChatPane refresh may already have one in flight —
+      // all of those join the same request instead of duplicating it.
+      const data = await fetchSessionList("/api/chat/sessions?limit=200");
+      if (data && !cancelled) {
+        setCount(countUnreadSessions(data.sessions ?? []));
       }
     }
 
     void refresh();
     const interval = window.setInterval(() => void refresh(), POLL_MS);
-    const onWake = () => void refresh();
+    // A resume fires BOTH focus and visibilitychange in the same tick (the
+    // coalescer folds them into one request); a hide fires visibilitychange
+    // alone, where polling is pointless.
+    const onWake = () => {
+      if (document.visibilityState === "visible") void refresh();
+    };
     window.addEventListener("focus", onWake);
     document.addEventListener("visibilitychange", onWake);
     return () => {
