@@ -3316,12 +3316,12 @@ class TestSendMessageRegistration:
         monkeypatch.setenv("WHATSAPP_BRIDGE_PORT", "3000")
         captured = {}
 
-        async def fake_send_via_adapter(platform, pconfig, chat_id, chunk, **kw):
+        async def fake_standalone_send(platform_name, pconfig, chat_id, message, thread_id=None):
             captured["pconfig"] = pconfig
             captured["chat_id"] = chat_id
             return {"success": True, "message_id": "m1"}
 
-        monkeypatch.setattr(smt, "_send_via_adapter", fake_send_via_adapter)
+        monkeypatch.setattr(smt, "_registry_standalone_send", fake_standalone_send)
         with patch("gateway.config.load_gateway_config") as mock_cfg:
             mock_cfg.return_value.platforms = {}
             out = json.loads(smt.send_message_tool({
