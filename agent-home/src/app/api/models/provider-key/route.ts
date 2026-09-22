@@ -38,18 +38,30 @@ function errorBody(err: unknown): NextResponse {
 async function readKeyBody(request: Request): Promise<{
   key: string;
   value: string;
+  extra_env?: Record<string, string>;
   profile?: string;
 } | null> {
   try {
     const body = (await request.json()) as {
       key?: unknown;
       value?: unknown;
+      extra_env?: unknown;
       profile?: unknown;
     };
     const key = typeof body.key === "string" ? body.key.trim() : "";
     const value = typeof body.value === "string" ? body.value : "";
     const profile = typeof body.profile === "string" ? body.profile : undefined;
-    return { key, value, profile };
+    // Companion writes (e.g. the provider's endpoint-URL env var) saved
+    // alongside the key so providers that need both activate in one step.
+    const extra_env: Record<string, string> = {};
+    if (body.extra_env && typeof body.extra_env === "object") {
+      for (const [k, v] of Object.entries(body.extra_env)) {
+        if (typeof v === "string" && v.trim() && ENV_KEY_RE.test(k)) {
+          extra_env[k] = v.trim();
+        }
+      }
+    }
+    return { key, value, extra_env, profile };
   } catch {
     return null;
   }
@@ -79,6 +91,9 @@ export async function POST(request: Request): Promise<NextResponse> {
       );
     }
     const saved = await client.setEnvVar(body.key, body.value.trim());
+    for (const [extraKey, extraValue] of Object.entries(body.extra_env ?? {})) {
+      await client.setEnvVar(extraKey, extraValue);
+    }
     return NextResponse.json({
       ...saved,
       verified: probe.reachable === true,

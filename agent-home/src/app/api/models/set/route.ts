@@ -25,6 +25,7 @@ export async function POST(request: Request): Promise<NextResponse> {
     model?: string;
     task?: string;
     base_url?: string;
+    api_key?: string;
     confirm_expensive_model?: boolean;
   };
   try {
@@ -47,6 +48,7 @@ export async function POST(request: Request): Promise<NextResponse> {
       model: (body.model ?? "").trim(),
       task: body.task?.trim() || undefined,
       base_url: body.base_url?.trim() || undefined,
+      api_key: body.api_key?.trim() || undefined,
       confirm_expensive_model: body.confirm_expensive_model === true,
     });
     return NextResponse.json(data);

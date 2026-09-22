@@ -88,6 +88,7 @@ describe("ModelPickerSheet", () => {
       "Alibaba",
       "OpenCode Go — not connected",
       "Anthropic — not connected",
+      "Custom endpoint (OpenAI-compatible)…",
     ]);
     // The authenticated provider's models render as selectable rows.
     expect((await findByText("qwen3.8-max")).textContent).toBe("qwen3.8-max");
@@ -105,8 +106,8 @@ describe("ModelPickerSheet", () => {
     const input = await findByPlaceholderText("OPENCODE_GO_API_KEY");
     expect(input).toBeTruthy();
     expect(await findByText("Save key")).toBeTruthy();
-    // No model list while unauthenticated.
-    expect(container.querySelectorAll("option").length).toBe(3);
+    // No model list while unauthenticated (3 providers + the custom-entry option).
+    expect(container.querySelectorAll("option").length).toBe(4);
   });
 
   it("points OAuth providers at onboarding instead of a key field", async () => {
@@ -188,6 +189,127 @@ describe("ModelPickerSheet", () => {
     expect(resend.confirm_expensive_model).toBe(true);
     expect(resend.provider).toBe("alibaba");
     expect(resend.model).toBe("qwen3.8-max");
+  });
+
+  it("sends a typed model ID that isn't in the provider's list", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse(200, OPTIONS))
+      .mockResolvedValueOnce(jsonResponse(200, { ok: true }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { findByPlaceholderText, findByText, props } = renderSheet();
+    await findByText("qwen3.8-max");
+    fireEvent.change(
+      await findByPlaceholderText("Or type a model ID not listed above…"),
+      { target: { value: "glm-6-preview" } },
+    );
+    fireEvent.click(await findByText("Set model"));
+
+    await waitFor(() => expect(props.onChanged).toHaveBeenCalled());
+    const call = JSON.parse(
+      (fetchMock.mock.calls[1][1] as RequestInit).body as string,
+    ) as { provider: string; model: string };
+    expect(call.provider).toBe("alibaba");
+    expect(call.model).toBe("glm-6-preview");
+  });
+
+  it("collects endpoint URL + optional key + model for a custom endpoint", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse(200, OPTIONS))
+      .mockResolvedValueOnce(jsonResponse(200, { ok: true }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { findByPlaceholderText, findByText, container, props } = renderSheet();
+    await findByText("Custom endpoint (OpenAI-compatible)…");
+    fireEvent.change(container.querySelector("select")!, {
+      target: { value: "__custom" },
+    });
+    fireEvent.change(
+      await findByPlaceholderText("Endpoint URL — https://host/v1"),
+      { target: { value: "https://litellm.internal/v1" } },
+    );
+    fireEvent.change(await findByPlaceholderText("API key (optional)"), {
+      target: { value: "sk-local" },
+    });
+    fireEvent.change(
+      await findByPlaceholderText("Model ID — e.g. meta-llama/Llama-3.3-70B"),
+      { target: { value: "qwen3-72b" } },
+    );
+    fireEvent.click(await findByText("Set model"));
+
+    await waitFor(() => expect(props.onChanged).toHaveBeenCalled());
+    const call = JSON.parse(
+      (fetchMock.mock.calls[1][1] as RequestInit).body as string,
+    ) as {
+      scope: string;
+      provider: string;
+      model: string;
+      base_url: string;
+      api_key: string;
+    };
+    expect(call).toEqual({
+      scope: "main",
+      provider: "custom",
+      model: "qwen3-72b",
+      base_url: "https://litellm.internal/v1",
+      api_key: "sk-local",
+      confirm_expensive_model: false,
+    });
+  });
+
+  it("writes a companion endpoint env var when the provider needs one", async () => {
+    const azureOptions = {
+      ...OPTIONS,
+      providers: [
+        ...OPTIONS.providers,
+        {
+          slug: "azure-foundry",
+          name: "Azure Foundry",
+          models: [],
+          authenticated: false,
+          auth_type: "api_key",
+          key_env: "AZURE_FOUNDRY_API_KEY",
+          base_url_env: "AZURE_FOUNDRY_BASE_URL",
+        },
+      ],
+    };
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse(200, azureOptions))
+      .mockResolvedValueOnce(jsonResponse(200, { ok: true, verified: false }))
+      .mockResolvedValueOnce(jsonResponse(200, OPTIONS));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { findByPlaceholderText, findByText, container } = renderSheet();
+    await findByText("Azure Foundry — not connected");
+    fireEvent.change(container.querySelector("select")!, {
+      target: { value: "azure-foundry" },
+    });
+    fireEvent.change(
+      await findByPlaceholderText("Endpoint URL (AZURE_FOUNDRY_BASE_URL)"),
+      { target: { value: "https://acct.openai.azure.com/v1" } },
+    );
+    fireEvent.change(await findByPlaceholderText("AZURE_FOUNDRY_API_KEY"), {
+      target: { value: "az-key" },
+    });
+    fireEvent.click(await findByText("Save key"));
+
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(
+        "/api/models/provider-key",
+        expect.objectContaining({ method: "POST" }),
+      ),
+    );
+    const keyCall = JSON.parse(
+      (fetchMock.mock.calls[1][1] as RequestInit).body as string,
+    ) as { key: string; value: string; extra_env: Record<string, string> };
+    expect(keyCall).toEqual({
+      key: "AZURE_FOUNDRY_API_KEY",
+      value: "az-key",
+      extra_env: { AZURE_FOUNDRY_BASE_URL: "https://acct.openai.azure.com/v1" },
+    });
   });
 
   it("resets an auxiliary slot to auto through the same set route", async () => {
