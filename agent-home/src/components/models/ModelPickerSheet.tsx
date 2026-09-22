@@ -75,6 +75,7 @@ export function ModelPickerSheet({
       const body = (await res.json()) as ModelOptionsResponse & { detail?: string };
       if (!res.ok) throw new Error(body.detail ?? "Failed to load model options.");
       setOptions(body);
+      setLoadError(null);
       return body;
     } catch (err) {
       setLoadError(err instanceof Error ? err.message : "Failed to load model options.");
@@ -82,27 +83,25 @@ export function ModelPickerSheet({
     }
   };
 
+  const loadInitial = async () => {
+    const body = await loadOptions();
+    if (!body) return;
+    // Seed the provider dropdown from the slot's current assignment.
+    const initial =
+      slot.kind === "main"
+        ? currentMain.provider || body.provider || body.providers[0]?.slug || ""
+        : currentAssignment && currentAssignment.provider !== "auto"
+          ? currentAssignment.provider
+          : body.provider || body.providers[0]?.slug || "";
+    setProviderSlug(initial);
+    setSelectedModel(
+      slot.kind === "main" ? currentMain.model : currentAssignment?.model ?? "",
+    );
+    setPhase({ kind: "ready" });
+  };
+
   useEffect(() => {
-    let active = true;
-    (async () => {
-      const body = await loadOptions();
-      if (!active || !body) return;
-      // Seed the provider dropdown from the slot's current assignment.
-      const initial =
-        slot.kind === "main"
-          ? currentMain.provider || body.provider || body.providers[0]?.slug || ""
-          : currentAssignment && currentAssignment.provider !== "auto"
-            ? currentAssignment.provider
-            : body.provider || body.providers[0]?.slug || "";
-      setProviderSlug(initial);
-      setSelectedModel(
-        slot.kind === "main" ? currentMain.model : currentAssignment?.model ?? "",
-      );
-      setPhase({ kind: "ready" });
-    })();
-    return () => {
-      active = false;
-    };
+    void loadInitial();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -325,14 +324,29 @@ export function ModelPickerSheet({
         ) : null}
 
         {phase.kind === "loading" ? (
-          <p
-            role="status"
-            aria-live="polite"
-            className="flex items-center justify-center gap-2 py-8 text-sm text-[var(--color-accent)]"
-          >
-            <Spinner size="md" />
-            Loading providers…
-          </p>
+          loadError && !options ? (
+            <div className="flex flex-col items-center gap-2 py-8">
+              <p className="text-sm text-[var(--color-muted)]">
+                Couldn't load providers.
+              </p>
+              <button
+                type="button"
+                onClick={() => void loadInitial()}
+                className="rounded-lg bg-[var(--color-accent)] px-4 py-2 text-sm text-white"
+              >
+                Try again
+              </button>
+            </div>
+          ) : (
+            <p
+              role="status"
+              aria-live="polite"
+              className="flex items-center justify-center gap-2 py-8 text-sm text-[var(--color-accent)]"
+            >
+              <Spinner size="md" />
+              Loading providers…
+            </p>
+          )
         ) : phase.kind === "confirm-expensive" ? (
           <div className="space-y-3">
             <p className="rounded-lg bg-amber-500/10 px-3 py-2 text-xs text-amber-300">
