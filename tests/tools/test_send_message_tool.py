@@ -3308,3 +3308,27 @@ class TestSendMessageRegistration:
             side_effect=Exception("no config"),
         ):
             assert _send_message_available() is False
+
+    def test_whatsapp_send_only_pconfig_from_env(self, monkeypatch):
+        """When the bridge runs outside platform config, WHATSAPP_BRIDGE_PORT
+        synthesises a send-only pconfig instead of 'not configured'."""
+        import tools.send_message_tool as smt
+        monkeypatch.setenv("WHATSAPP_BRIDGE_PORT", "3000")
+        captured = {}
+
+        async def fake_send_via_adapter(platform, pconfig, chat_id, chunk, **kw):
+            captured["pconfig"] = pconfig
+            captured["chat_id"] = chat_id
+            return {"success": True, "message_id": "m1"}
+
+        monkeypatch.setattr(smt, "_send_via_adapter", fake_send_via_adapter)
+        with patch("gateway.config.load_gateway_config") as mock_cfg:
+            mock_cfg.return_value.platforms = {}
+            out = json.loads(smt.send_message_tool({
+                "action": "send",
+                "target": "whatsapp:+85212345678",
+                "message": "hi",
+            }))
+        assert out.get("success") is True
+        assert captured["pconfig"].enabled is True
+        assert captured["pconfig"].extra["bridge_port"] == 3000

@@ -368,6 +368,23 @@ def _handle_send(args):
                 )
             else:
                 return tool_error(f"Platform '{platform_name}' is not configured. Set up credentials in ~/.hermes/config.yaml or environment variables.")
+        elif platform_name == "whatsapp":
+            # The bridge can run outside the gateway platform config (e.g. a
+            # standalone bridge service feeding a custom inbound pipeline).
+            # Enabling the platform in config.yaml would also start the
+            # gateway adapter, which races that pipeline on the bridge's
+            # drain-on-read /messages queue — so a send-only pconfig is
+            # synthesised from WHATSAPP_BRIDGE_PORT instead. The standalone
+            # sender posts straight to the bridge HTTP API; no adapter needed.
+            bridge_port = os.getenv("WHATSAPP_BRIDGE_PORT", "").strip()
+            if bridge_port:
+                from gateway.config import PlatformConfig
+                pconfig = PlatformConfig(
+                    enabled=True,
+                    extra={"bridge_port": int(bridge_port)},
+                )
+            else:
+                return tool_error(f"Platform '{platform_name}' is not configured. Set up credentials in ~/.hermes/config.yaml or environment variables.")
         else:
             return tool_error(f"Platform '{platform_name}' is not configured. Set up credentials in ~/.hermes/config.yaml or environment variables.")
 
