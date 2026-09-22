@@ -40,6 +40,7 @@ import {
   SESSION_ORDER_STORAGE_KEY,
 } from "@/lib/chat/session-order";
 import { withProfileBody, withProfileQuery } from "@/lib/chat/profile";
+import { fetchSessionList } from "@/lib/chat/session-list-fetch";
 import {
   attachChatStream,
   cancelChatTurn,
@@ -597,12 +598,14 @@ export function ChatPane({
       if (includeTags.length > 0) params.set("tags", includeTags.join(","));
       if (excludeTags.length > 0) params.set("exclude_tags", excludeTags.join(","));
       params.set("tag_match", matchMode);
-      const res = await fetch(path(`/api/chat/sessions?${params.toString()}`), {
-        cache: "no-store",
-      });
-      if (!res.ok) return;
-      const body = (await res.json()) as { sessions?: SessionSummary[] };
-      if (body.sessions) setSessions(body.sessions);
+      // `force`: every caller reaches here right after a mutation — a shared
+      // in-flight GET could answer with pre-mutation state, and the 2 s reuse
+      // window could replay it. A fresh request is the correct read here.
+      const body = await fetchSessionList(
+        path(`/api/chat/sessions?${params.toString()}`),
+        { force: true },
+      );
+      if (body?.sessions) setSessions(body.sessions);
     } catch {
       // A stale conversation list is non-fatal.
     }

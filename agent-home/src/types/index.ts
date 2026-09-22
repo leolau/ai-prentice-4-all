@@ -1760,6 +1760,9 @@ export interface ProjectBoardTask {
   /** Why a `blocked` card stopped (`kanban_db.VALID_BLOCK_KINDS`), or
    * `null` for a legacy/un-typed block. Absent for every other status. */
   block_kind?: "needs_input" | "capability" | "transient" | null;
+  /** Pinned model for this card's worker (`-m` at dispatch) — the card
+   * ignores the main model while this is set. Null/absent = follows main. */
+  model_override?: string | null;
   [extra: string]: unknown;
 }
 
@@ -2004,4 +2007,22 @@ export interface ProviderValidateResponse {
   reachable: boolean;
   message: string;
   models?: string[];
+}
+
+/**
+ * One card that overrides the configured model — `GET /api/models/pinned`.
+ * These cards run `model` regardless of what the main model is set to,
+ * which is exactly the blind spot the Models page exists to close.
+ */
+export interface PinnedModelCard {
+  project_slug: string;
+  project_name: string;
+  task_id: string;
+  title: string;
+  model: string;
+  status: string;
+}
+
+export interface PinnedCardsResponse {
+  pinned: PinnedModelCard[];
 }

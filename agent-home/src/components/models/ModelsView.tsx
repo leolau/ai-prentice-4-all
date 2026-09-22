@@ -1,6 +1,7 @@
 "use client";
 
-import { useCallback, useMemo, useState } from "react";
+import Link from "next/link";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { ModelPickerSheet } from "@/components/models/ModelPickerSheet";
 import { Pill } from "@/components/ui/Pill";
@@ -10,6 +11,7 @@ import type {
   AuxTaskAssignment,
   ModelsOverviewResponse,
   ModelUsageEntry,
+  PinnedModelCard,
 } from "@/types";
 
 /** Which slot the picker is editing — the main card or one aux role. */
@@ -93,6 +95,30 @@ export function ModelsView({
   const [showAllRoles, setShowAllRoles] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [pinned, setPinned] = useState<PinnedModelCard[] | null>(null);
+
+  // Lazy: the pinned-cards fan-out (projects list → per-project boards) is
+  // too heavy for first paint, so it loads after the page is up. `null`
+  // means "still loading or failed" — the section only renders when there
+  // are cards to warn about.
+  useEffect(() => {
+    let active = true;
+    (async () => {
+      try {
+        const res = await fetch(withProfileQuery("/api/models/pinned", profile), {
+          cache: "no-store",
+        });
+        if (!res.ok) return;
+        const body = (await res.json()) as { pinned?: PinnedModelCard[] };
+        if (active) setPinned(body.pinned ?? []);
+      } catch {
+        // Section stays hidden on failure — it's additive, not critical.
+      }
+    })();
+    return () => {
+      active = false;
+    };
+  }, [profile]);
 
   const refresh = useCallback(async () => {
     setRefreshing(true);
@@ -243,6 +269,37 @@ export function ModelsView({
           </div>
         )}
       </section>
+
+      {/* ── Pinned cards (model_override) — lazy, only when any exist ── */}
+      {pinned && pinned.length > 0 ? (
+        <section>
+          <h2 className="mb-2 px-1 text-xs font-semibold uppercase tracking-wide text-[var(--color-muted)]">
+            Pinned cards
+          </h2>
+          <div className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface)] px-3">
+            {pinned.map((c) => (
+              <Link
+                key={c.task_id}
+                href={`/projects/${c.project_slug}/cards/${c.task_id}`}
+                className="flex items-center gap-2 border-b border-[var(--color-border)] py-2.5 last:border-b-0"
+              >
+                <span className="min-w-0">
+                  <span className="block truncate text-sm">{c.title}</span>
+                  <span className="block text-[11px] text-[var(--color-muted)]">
+                    {c.project_name} · {c.status}
+                  </span>
+                </span>
+                <span className="ml-auto shrink-0 text-[13px] text-amber-300">
+                  {c.model}
+                </span>
+              </Link>
+            ))}
+          </div>
+          <p className="mt-1 px-1 text-[11px] text-[var(--color-muted)]">
+            These cards run their pinned model no matter what the slots above say.
+          </p>
+        </section>
+      ) : null}
 
       {error ? (
         <p className="rounded-lg bg-[var(--color-surface-2)] px-3 py-2 text-xs text-red-300">
