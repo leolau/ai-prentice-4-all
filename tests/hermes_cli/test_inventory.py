@@ -377,6 +377,65 @@ def test_picker_hints_api_key_warning_format():
     assert anthropic["warning"].startswith("paste ")
 
 
+def test_picker_hints_plugin_fallback_for_registry_skipped_provider():
+    """Providers deliberately absent from PROVIDER_REGISTRY (openrouter is
+    excluded because resolve_provider special-cases it) still carry env vars
+    in their plugin profile. The picker must surface that key_env — otherwise
+    the row is a dead end with no way to paste a key."""
+    rows = []
+    ctx = _empty_ctx()
+    with _list_auth_returning(rows):
+        payload = build_models_payload(
+            ctx, include_unconfigured=True, picker_hints=True,
+        )
+    openrouter = next(
+        r for r in payload["providers"] if r["slug"] == "openrouter"
+    )
+    assert openrouter["authenticated"] is False
+    assert openrouter["auth_type"] == "api_key"
+    assert openrouter["key_env"] == "OPENROUTER_API_KEY"
+    assert openrouter["warning"].startswith("paste ")
+
+
+def test_picker_hints_base_url_env_for_endpointless_provider():
+    """azure-foundry has no default inference URL — a key alone can't
+    activate it, so the row must carry base_url_env for the picker to
+    collect the endpoint alongside the key."""
+    rows = []
+    ctx = _empty_ctx()
+    with _list_auth_returning(rows):
+        payload = build_models_payload(
+            ctx, include_unconfigured=True, picker_hints=True,
+        )
+    azure = next(
+        r for r in payload["providers"] if r["slug"] == "azure-foundry"
+    )
+    assert azure["key_env"] == "AZURE_FOUNDRY_API_KEY"
+    assert azure["base_url_env"] == "AZURE_FOUNDRY_BASE_URL"
+    # Providers with a default endpoint emit no base_url_env hint.
+    anthropic = next(
+        r for r in payload["providers"] if r["slug"] == "anthropic"
+    )
+    assert anthropic["base_url_env"] == ""
+
+
+def test_picker_hints_authenticated_rows_carry_auth_metadata():
+    """Authenticated rows also get auth_type/key_env — the UI needs key_env
+    to offer Disconnect for key-based providers."""
+    rows = [
+        {"slug": "deepseek", "name": "DeepSeek", "models": ["deepseek-chat"],
+         "total_models": 1, "is_current": True, "is_user_defined": False,
+         "source": "built-in"},
+    ]
+    ctx = _empty_ctx(provider="deepseek", model="deepseek-chat")
+    with _list_auth_returning(rows):
+        payload = build_models_payload(ctx, picker_hints=True)
+    row = next(r for r in payload["providers"] if r["slug"] == "deepseek")
+    assert row["authenticated"] is True
+    assert row["auth_type"] == "api_key"
+    assert row["key_env"] == "DEEPSEEK_API_KEY"
+
+
 # ─── canonical_order ───────────────────────────────────────────────────
 
 

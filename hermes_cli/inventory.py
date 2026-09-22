@@ -295,6 +295,51 @@ def _append_unconfigured_rows(rows: list[dict], ctx: ConfigContext) -> list[dict
     return extras
 
 
+def _provider_auth_hints(slug: str) -> tuple[str, str, str]:
+    """Return ``(auth_type, key_env, base_url_env)`` for a provider slug.
+
+    ``PROVIDER_REGISTRY`` covers the built-ins; the plugin catalog fills the
+    gap for providers the registry deliberately skips — ``openrouter`` and
+    ``custom`` are handled outside ``resolve_provider`` and so never land in
+    the registry even though their plugin profiles carry the ``env_vars``
+    the picker needs to render a key field. Without this fallback those
+    providers surfaced as keyless skeletons with no way to paste a key.
+
+    ``base_url_env`` is non-empty only when the provider has no default
+    endpoint URL (e.g. Azure Foundry) — a key alone can't activate it, so
+    the picker must collect the endpoint URL alongside the key.
+    """
+    from hermes_cli.auth import PROVIDER_REGISTRY
+
+    cfg = PROVIDER_REGISTRY.get(slug)
+    if cfg is not None:
+        key_env = cfg.api_key_env_vars[0] if cfg.api_key_env_vars else ""
+        base_url_env = (
+            cfg.base_url_env_var
+            if cfg.auth_type == "api_key" and cfg.base_url_env_var and not cfg.inference_base_url
+            else ""
+        )
+        return cfg.auth_type, key_env, base_url_env
+    try:
+        from providers import get_provider_profile
+
+        profile = get_provider_profile(slug)
+    except Exception:
+        profile = None
+    if profile is None:
+        return "api_key", "", ""
+    key_vars = [
+        v for v in profile.env_vars
+        if not v.endswith("_BASE_URL") and not v.endswith("_URL")
+    ]
+    url_vars = [
+        v for v in profile.env_vars
+        if v.endswith("_BASE_URL") or v.endswith("_URL")
+    ]
+    base_url_env = url_vars[0] if url_vars and not profile.base_url else ""
+    return profile.auth_type or "api_key", (key_vars or [""])[0], base_url_env
+
+
 def _apply_picker_hints(rows: list[dict]) -> None:
     """Add ``authenticated``/``auth_type``/``key_env``/``warning`` per row.
 
@@ -302,10 +347,17 @@ def _apply_picker_hints(rows: list[dict]) -> None:
     ``list_authenticated_providers`` are marked ``authenticated=True``;
     the unconfigured skeleton rows from ``_append_unconfigured_rows`` get
     the picker's setup-hint shape.
-    """
-    from hermes_cli.auth import PROVIDER_REGISTRY
 
+    ``auth_type``/``key_env``/``base_url_env`` are emitted on every row that
+    lacks them — including authenticated rows, whose UI needs ``key_env`` to
+    offer Disconnect and user-defined skeletons, which previously fell
+    through to a "configure elsewhere" dead end with no key field.
+    """
     for row in rows:
+        auth_type, key_env, base_url_env = _provider_auth_hints(row["slug"])
+        row.setdefault("auth_type", auth_type)
+        row.setdefault("key_env", key_env)
+        row.setdefault("base_url_env", base_url_env)
         if "authenticated" in row:
             continue
         # Distinguish authenticated rows (returned by
@@ -315,17 +367,8 @@ def _apply_picker_hints(rows: list[dict]) -> None:
         # populated `models` OR a non-canonical source.
         is_skeleton = row.get("source") == "canonical" and not row.get("models")
         row["authenticated"] = not is_skeleton
-        if not is_skeleton or row.get("is_user_defined"):
+        if row["authenticated"]:
             continue
-        cfg = PROVIDER_REGISTRY.get(row["slug"])
-        auth_type = cfg.auth_type if cfg else "api_key"
-        key_env = (
-            cfg.api_key_env_vars[0]
-            if (cfg and cfg.api_key_env_vars)
-            else ""
-        )
-        row["auth_type"] = auth_type
-        row["key_env"] = key_env
         row["warning"] = (
             f"paste {key_env} to activate"
             if auth_type == "api_key" and key_env

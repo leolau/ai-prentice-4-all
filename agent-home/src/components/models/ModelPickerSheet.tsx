@@ -17,6 +17,9 @@ type Phase =
   | { kind: "confirm-expensive"; message: string }
   | { kind: "confirm-disconnect" };
 
+/** Pseudo-value for the provider dropdown's "custom endpoint" entry. */
+const CUSTOM_PROVIDER = "__custom";
+
 /**
  * The model picker bottom sheet, opened by tapping the main-model card or a
  * task-role row. Covers three provider states:
@@ -55,7 +58,11 @@ export function ModelPickerSheet({
   const [options, setOptions] = useState<ModelOptionsResponse | null>(null);
   const [providerSlug, setProviderSlug] = useState("");
   const [selectedModel, setSelectedModel] = useState("");
+  const [typedModel, setTypedModel] = useState("");
   const [keyValue, setKeyValue] = useState("");
+  const [endpointUrl, setEndpointUrl] = useState("");
+  const [customKey, setCustomKey] = useState("");
+  const [customModel, setCustomModel] = useState("");
   const [busy, setBusy] = useState<"set" | "key" | "reset" | "disconnect" | null>(null);
   const [note, setNote] = useState<string | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -103,11 +110,14 @@ export function ModelPickerSheet({
     () => options?.providers.find((p) => p.slug === providerSlug) ?? null,
     [options, providerSlug],
   );
+  const isCustomEndpoint = providerSlug === CUSTOM_PROVIDER;
   const authenticated = provider?.authenticated === true;
   const keyBased = provider?.auth_type === "api_key" && !!provider?.key_env;
+  const needsEndpoint = !!provider?.base_url_env;
 
   async function setModel(confirmExpensive: boolean) {
-    if (!provider || busy) return;
+    const model = typedModel.trim() || selectedModel;
+    if (!provider || !model || busy) return;
     setBusy("set");
     setNote(null);
     try {
@@ -120,7 +130,7 @@ export function ModelPickerSheet({
               scope: slot.kind === "main" ? "main" : "auxiliary",
               task: slot.kind === "aux" ? slot.task : undefined,
               provider: provider.slug,
-              model: selectedModel,
+              model,
               confirm_expensive_model: confirmExpensive,
             },
             profile,
@@ -172,8 +182,51 @@ export function ModelPickerSheet({
     }
   }
 
+  /** Point the main slot at an OpenAI-compatible endpoint not in the catalog. */
+  async function setCustomEndpoint(confirmExpensive: boolean) {
+    const url = endpointUrl.trim();
+    const model = customModel.trim();
+    if (!url || !model || busy) return;
+    setBusy("set");
+    setNote(null);
+    try {
+      const res = await fetch("/api/models/set", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(
+          withProfileBody(
+            {
+              scope: "main",
+              provider: "custom",
+              model,
+              base_url: url,
+              api_key: customKey.trim() || undefined,
+              confirm_expensive_model: confirmExpensive,
+            },
+            profile,
+          ),
+        ),
+      });
+      const body = (await res.json()) as ModelSetResponse;
+      if (!res.ok) throw new Error(body.detail ?? "Couldn't save the endpoint.");
+      if (body.confirm_required) {
+        setPhase({ kind: "confirm-expensive", message: body.confirm_message ?? "" });
+        return;
+      }
+      onChanged();
+    } catch (err) {
+      setNote(err instanceof Error ? err.message : "Couldn't save the endpoint.");
+    } finally {
+      setBusy(null);
+    }
+  }
+
   async function saveKey() {
     if (!provider?.key_env || busy) return;
+    if (needsEndpoint && !endpointUrl.trim()) {
+      setNote(`${provider.name} needs its endpoint URL too.`);
+      return;
+    }
     setBusy("key");
     setNote(null);
     try {
@@ -181,7 +234,17 @@ export function ModelPickerSheet({
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify(
-          withProfileBody({ key: provider.key_env, value: keyValue }, profile),
+          withProfileBody(
+            {
+              key: provider.key_env,
+              value: keyValue,
+              extra_env:
+                needsEndpoint && endpointUrl.trim()
+                  ? { [provider.base_url_env as string]: endpointUrl.trim() }
+                  : undefined,
+            },
+            profile,
+          ),
         ),
       });
       const body = (await res.json()) as {
@@ -288,7 +351,9 @@ export function ModelPickerSheet({
                 disabled={busy !== null}
                 onClick={() => {
                   setPhase({ kind: "ready" });
-                  void setModel(true);
+                  void (isCustomEndpoint
+                    ? setCustomEndpoint(true)
+                    : setModel(true));
                 }}
                 className="ml-auto rounded-full bg-[var(--color-accent)] px-4 py-1.5 text-xs font-semibold text-[var(--color-accent-fg)] disabled:opacity-60"
               >
@@ -329,6 +394,7 @@ export function ModelPickerSheet({
               onChange={(e) => {
                 setProviderSlug(e.target.value);
                 setSelectedModel("");
+                setTypedModel("");
                 setNote(null);
               }}
               className="mb-3 w-full rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2.5 text-sm"
@@ -339,15 +405,79 @@ export function ModelPickerSheet({
                   {p.authenticated ? "" : " — not connected"}
                 </option>
               ))}
+              {slot.kind === "main" ? (
+                <option value={CUSTOM_PROVIDER}>
+                  Custom endpoint (OpenAI-compatible)…
+                </option>
+              ) : null}
             </select>
 
-            {provider && !authenticated && keyBased ? (
+            {isCustomEndpoint ? (
+              <div>
+                <p className="mb-2 rounded-lg bg-[var(--color-surface)] px-3 py-2 text-xs text-[var(--color-muted)]">
+                  Point Hermes at any OpenAI-compatible endpoint — vLLM,
+                  Ollama, LiteLLM, a provider not in the catalog.
+                </p>
+                <input
+                  type="url"
+                  value={endpointUrl}
+                  onChange={(e) => setEndpointUrl(e.target.value)}
+                  placeholder="Endpoint URL — https://host/v1"
+                  autoComplete="off"
+                  className="mb-2 w-full rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2.5 font-mono text-xs"
+                />
+                <input
+                  type="password"
+                  value={customKey}
+                  onChange={(e) => setCustomKey(e.target.value)}
+                  placeholder="API key (optional)"
+                  autoComplete="off"
+                  className="mb-2 w-full rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2.5 font-mono text-xs"
+                />
+                <input
+                  type="text"
+                  value={customModel}
+                  onChange={(e) => setCustomModel(e.target.value)}
+                  placeholder="Model ID — e.g. meta-llama/Llama-3.3-70B"
+                  autoComplete="off"
+                  className="mb-2 w-full rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2.5 font-mono text-xs"
+                />
+                <div className="flex gap-2">
+                  <button
+                    type="button"
+                    onClick={onClose}
+                    className="rounded-full border border-[var(--color-border)] px-4 py-1.5 text-xs"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    disabled={!endpointUrl.trim() || !customModel.trim() || busy !== null}
+                    onClick={() => void setCustomEndpoint(false)}
+                    className="ml-auto inline-flex items-center gap-2 rounded-full bg-[var(--color-accent)] px-4 py-1.5 text-xs font-semibold text-[var(--color-accent-fg)] disabled:opacity-60"
+                  >
+                    {busy === "set" ? <Spinner /> : null}
+                    Set model
+                  </button>
+                </div>
+              </div>
+            ) : provider && !authenticated && keyBased ? (
               <div>
                 <p className="mb-2 rounded-lg bg-[var(--color-surface)] px-3 py-2 text-xs text-[var(--color-muted)]">
                   <span className="font-medium text-[var(--color-fg)]">{provider.name}</span>{" "}
                   isn&apos;t connected yet. Paste its API key — it&apos;s
                   validated, then stored in Hermes&apos; .env.
                 </p>
+                {needsEndpoint ? (
+                  <input
+                    type="url"
+                    value={endpointUrl}
+                    onChange={(e) => setEndpointUrl(e.target.value)}
+                    placeholder={`Endpoint URL (${provider.base_url_env})`}
+                    autoComplete="off"
+                    className="mb-2 w-full rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2.5 font-mono text-xs"
+                  />
+                ) : null}
                 <input
                   type="password"
                   value={keyValue}
@@ -393,19 +523,30 @@ export function ModelPickerSheet({
                       <button
                         key={m}
                         type="button"
-                        onClick={() => setSelectedModel(m)}
+                        onClick={() => {
+                          setSelectedModel(m);
+                          setTypedModel("");
+                        }}
                         className={`flex w-full items-center justify-between px-3 py-2.5 text-left text-sm ${
-                          selectedModel === m
+                          selectedModel === m && !typedModel
                             ? "bg-[var(--color-accent)]/10 text-[var(--color-accent)]"
                             : ""
                         }`}
                       >
                         <span className="min-w-0 truncate">{m}</span>
-                        {selectedModel === m ? <span>✓</span> : null}
+                        {selectedModel === m && !typedModel ? <span>✓</span> : null}
                       </button>
                     ))
                   )}
                 </div>
+                <input
+                  type="text"
+                  value={typedModel}
+                  onChange={(e) => setTypedModel(e.target.value)}
+                  placeholder="Or type a model ID not listed above…"
+                  autoComplete="off"
+                  className="mt-2 w-full rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2.5 font-mono text-xs"
+                />
                 <div className="mt-3 flex gap-2">
                   {slot.kind === "aux" ? (
                     <button
@@ -420,7 +561,7 @@ export function ModelPickerSheet({
                   ) : null}
                   <button
                     type="button"
-                    disabled={!selectedModel || busy !== null}
+                    disabled={(!selectedModel && !typedModel.trim()) || busy !== null}
                     onClick={() => void setModel(false)}
                     className="ml-auto inline-flex items-center gap-2 rounded-full bg-[var(--color-accent)] px-4 py-1.5 text-xs font-semibold text-[var(--color-accent-fg)] disabled:opacity-60"
                   >

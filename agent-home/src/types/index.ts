@@ -1938,6 +1938,8 @@ export interface ModelProviderOption {
   authenticated?: boolean;
   auth_type?: string;
   key_env?: string | null;
+  /** Env var for a required companion endpoint URL (e.g. Azure Foundry). */
+  base_url_env?: string | null;
   warning?: string | null;
 }
 

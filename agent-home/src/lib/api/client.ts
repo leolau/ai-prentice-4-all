@@ -2112,6 +2112,7 @@ export class HermesApiClient {
     model: string;
     task?: string;
     base_url?: string;
+    api_key?: string;
     confirm_expensive_model?: boolean;
   }): Promise<ModelSetResponse> {
     return this.request("/api/model/set", { method: "POST", json: body });
