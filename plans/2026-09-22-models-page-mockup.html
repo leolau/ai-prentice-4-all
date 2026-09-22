@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Models — agent-home mockup</title>
+<style>
+  :root {
+    --bg: #0b0d10;
+    --surface: #14171c;
+    --surface-2: #1b1f26;
+    --border: #262c36;
+    --text: #e8eaee;
+    --muted: #8b93a3;
+    --accent: #5eead4;
+    --accent-dim: rgba(94, 234, 212, .12);
+    --warn: #fbbf24;
+    --chip: #222834;
+  }
+  * { box-sizing: border-box; margin: 0; }
+  body {
+    background: #05060a;
+    font-family: -apple-system, "SF Pro", "Segoe UI", system-ui, sans-serif;
+    color: var(--text);
+    display: flex; gap: 40px; justify-content: center;
+    padding: 40px 16px; flex-wrap: wrap;
+  }
+  .phone {
+    width: 390px; background: var(--bg); border-radius: 28px;
+    border: 1px solid #1e242e; padding: 18px 16px 28px;
+  }
+  .caption { color: var(--muted); font-size: 12px; text-align: center;
+    width: 390px; margin-top: 8px; }
+  h1 { font-size: 20px; font-weight: 600; padding: 4px 4px 14px; }
+  h2 { font-size: 12px; font-weight: 600; letter-spacing: .08em;
+    text-transform: uppercase; color: var(--muted); padding: 18px 6px 8px; }
+  .card {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 18px; padding: 16px;
+  }
+  .row {
+    display: flex; align-items: center; gap: 12px;
+    padding: 12px 6px; border-bottom: 1px solid var(--border);
+  }
+  .row:last-child { border-bottom: none; }
+  .row .label { font-size: 14px; }
+  .row .hint { font-size: 11px; color: var(--muted); margin-top: 2px; }
+  .row .val { margin-left: auto; text-align: right; font-size: 13px;
+    color: var(--accent); }
+  .row .val.auto { color: var(--muted); }
+  .row .chev { color: var(--muted); font-size: 16px; }
+  .big { font-size: 19px; font-weight: 650; }
+  .sub { font-size: 12px; color: var(--muted); margin-top: 3px; }
+  .chips { display: flex; gap: 6px; margin-top: 10px; flex-wrap: wrap; }
+  .chip { font-size: 11px; background: var(--chip); color: var(--muted);
+    border-radius: 999px; padding: 3px 9px; }
+  .chip.on { background: var(--accent-dim); color: var(--accent); }
+  .btn {
+    margin-top: 12px; display: inline-block; font-size: 13px;
+    border: 1px solid var(--border); border-radius: 999px;
+    padding: 6px 14px; color: var(--text); background: var(--surface-2);
+  }
+  .use-row { display: flex; align-items: baseline; gap: 8px;
+    padding: 10px 6px; border-bottom: 1px solid var(--border);
+    font-size: 13px; }
+  .use-row:last-child { border-bottom: none; }
+  .use-row .m { font-weight: 600; }
+  .use-row .tag { font-size: 10px; background: var(--chip);
+    color: var(--muted); border-radius: 6px; padding: 1px 6px; }
+  .use-row .num { margin-left: auto; color: var(--muted); font-size: 11px; }
+  .note { font-size: 11px; color: var(--muted); padding: 10px 6px 0; }
+  /* picker sheet */
+  .sheet {
+    margin-top: 26px; border: 1px solid var(--border);
+    border-radius: 22px; background: var(--surface-2); padding: 14px;
+    position: relative;
+  }
+  .grab { width: 36px; height: 4px; border-radius: 2px;
+    background: var(--border); margin: 0 auto 12px; }
+  .sel { width: 100%; background: var(--surface); color: var(--text);
+    border: 1px solid var(--border); border-radius: 12px;
+    padding: 10px 12px; font-size: 14px; margin: 6px 0 10px; }
+  .opt { display: flex; justify-content: space-between; align-items: center;
+    padding: 10px 8px; border-radius: 10px; font-size: 14px; }
+  .opt.cur { background: var(--accent-dim); color: var(--accent); }
+  .opt small { color: var(--muted); }
+  .actions { display: flex; gap: 8px; margin-top: 12px; }
+  .actions .btn { margin-top: 0; }
+  .actions .primary { background: var(--accent); color: #04211c;
+    border: none; font-weight: 600; }
+  .warn { font-size: 11px; color: var(--warn); margin-top: 10px; }
+</style>
+</head>
+<body>
+
+<!-- Screen 1: the page -->
+<div>
+  <div class="phone">
+    <h1>Models</h1>
+
+    <div class="card">
+      <div class="sub">MAIN MODEL</div>
+      <div class="big" style="margin-top:6px">glm-5.2</div>
+      <div class="sub">alibaba · 1M context</div>
+      <div class="chips">
+        <span class="chip on">tools</span>
+        <span class="chip on">reasoning</span>
+        <span class="chip">vision</span>
+      </div>
+      <span class="btn">Change</span>
+    </div>
+
+    <h2>Task roles</h2>
+    <div class="card" style="padding:4px 12px">
+      <div class="row">
+        <div><div class="label">Vision</div>
+          <div class="hint">image analysis</div></div>
+        <div class="val">qwen3.8-max</div><div class="chev">›</div>
+      </div>
+      <div class="row">
+        <div><div class="label">Compression</div>
+          <div class="hint">context compaction</div></div>
+        <div class="val auto">auto → glm-5.2</div><div class="chev">›</div>
+      </div>
+      <div class="row">
+        <div><div class="label">Web extract</div>
+          <div class="hint">page summarization</div></div>
+        <div class="val auto">auto → glm-5.2</div><div class="chev">›</div>
+      </div>
+      <div class="row">
+        <div><div class="label">Title generation</div>
+          <div class="hint">session titles</div></div>
+        <div class="val auto">auto → glm-5.2</div><div class="chev">›</div>
+      </div>
+      <div class="row" style="color:var(--muted)">
+        <div class="label">+7 more roles</div>
+        <div class="val auto">all auto</div><div class="chev">⌄</div>
+      </div>
+    </div>
+
+    <h2>In use — last 30 days</h2>
+    <div class="card" style="padding:4px 12px">
+      <div class="use-row">
+        <span class="m">glm-5.2</span><span class="tag">main</span>
+        <span class="num">412 sessions · 8.4M tok · $3.12</span>
+      </div>
+      <div class="use-row">
+        <span class="m">qwen3.8-max</span><span class="tag">vision</span>
+        <span class="num">36 sessions · 1.1M tok · $0.41</span>
+      </div>
+      <div class="use-row">
+        <span class="m">deepseek-chat</span><span class="tag">not configured</span>
+        <span class="num">4 sessions · 0.2M tok · $0.02</span>
+      </div>
+    </div>
+    <div class="note">Changes apply to new sessions — running workers keep
+      their current model.</div>
+  </div>
+  <div class="caption">Screen 1 — the page</div>
+</div>
+
+<!-- Screen 2: picker sheet after tapping a role row -->
+<div>
+  <div class="phone">
+    <h1>Models</h1>
+    <div class="card" style="opacity:.45">
+      <div class="sub">MAIN MODEL</div>
+      <div class="big" style="margin-top:6px">glm-5.2</div>
+      <div class="sub">alibaba · 1M context</div>
+    </div>
+
+    <div class="sheet">
+      <div class="grab"></div>
+      <div class="big" style="font-size:16px">Vision model</div>
+      <div class="sub">image analysis · currently qwen3.8-max</div>
+      <select class="sel"><option>alibaba</option><option>nous</option>
+        <option>openrouter</option></select>
+      <div class="opt cur">qwen3.8-max <small>current</small></div>
+      <div class="opt">qwen3-vl-plus <small>vision</small></div>
+      <div class="opt">glm-5.2 <small>same as main</small></div>
+      <div class="warn">⚠ Selecting a costly model prompts a confirm before saving.</div>
+      <div class="actions">
+        <span class="btn">Reset to auto</span>
+        <span class="btn primary" style="margin-left:auto">Set model</span>
+      </div>
+    </div>
+  </div>
+  <div class="caption">Screen 2 — tap a role row → picker sheet</div>
+</div>
+
+</body>
+</html>
