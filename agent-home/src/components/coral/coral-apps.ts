@@ -163,6 +163,17 @@ registerApp({
 });
 
 registerApp({
+  id: "models",
+  name: "Models",
+  glyph: "◆",
+  hint: "Brains per slot",
+  kind: "next-route",
+  route: "/models",
+  category: "system",
+  order: 125,
+});
+
+registerApp({
   id: "core",
   name: "Core area",
   glyph: "▣",

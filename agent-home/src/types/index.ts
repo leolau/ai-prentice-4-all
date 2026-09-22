@@ -1892,3 +1892,116 @@ export interface CapacityResponse {
   unavailable: string[];
   collected_at: number;
 }
+
+/* ── Models page (System ▸ Models) ──────────────────────────────────────
+ * Shapes mirror the Python API exactly (`/api/model/*`,
+ * `/api/analytics/models`, `/api/providers/validate`, `/api/env`) — the BFF
+ * routes pass them through untouched. */
+
+/** Capability metadata resolved from models.dev (may be empty). */
+export interface ModelCapabilities {
+  supports_tools?: boolean;
+  supports_vision?: boolean;
+  supports_reasoning?: boolean;
+  context_window?: number;
+  max_output_tokens?: number;
+  model_family?: string;
+}
+
+/** `GET /api/model/info` — the configured main model, resolved. */
+export interface ModelInfo {
+  model: string;
+  provider: string;
+  auto_context_length: number;
+  config_context_length: number;
+  effective_context_length: number;
+  capabilities: ModelCapabilities;
+}
+
+/**
+ * One provider row from `GET /api/model/options`. `authenticated=false`
+ * rows are catalog skeletons: `key_env` names the env var a key-based
+ * provider needs (e.g. `OPENCODE_GO_API_KEY`), `auth_type` tells the UI
+ * whether a key field or an onboarding pointer is the right affordance.
+ */
+export interface ModelProviderOption {
+  slug: string;
+  name: string;
+  is_current?: boolean;
+  is_user_defined?: boolean;
+  models: string[];
+  total_models?: number;
+  source?: string;
+  authenticated?: boolean;
+  auth_type?: string;
+  key_env?: string | null;
+  warning?: string | null;
+}
+
+export interface ModelOptionsResponse {
+  providers: ModelProviderOption[];
+  /** Currently configured main model/provider (echoed by upstream). */
+  model: string;
+  provider: string;
+}
+
+/** One auxiliary task slot from `GET /api/model/auxiliary`. */
+export interface AuxTaskAssignment {
+  task: string;
+  /** "auto" means the slot inherits the main model. */
+  provider: string;
+  model: string;
+  base_url: string;
+}
+
+export interface AuxiliaryModelsResponse {
+  tasks: AuxTaskAssignment[];
+  main: { provider: string; model: string };
+}
+
+/** `POST /api/model/set` response — `confirm_required` means resend with `confirm_expensive_model`. */
+export interface ModelSetResponse {
+  ok: boolean;
+  scope?: string;
+  confirm_required?: boolean;
+  confirm_message?: string;
+  stale_aux?: { task: string; provider: string; model: string }[];
+  gateway_tools?: unknown;
+  detail?: string;
+}
+
+/** One model's usage row from `GET /api/analytics/models`. */
+export interface ModelUsageEntry {
+  model: string;
+  provider: string;
+  sessions: number;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  reasoning_tokens: number;
+  estimated_cost: number;
+  actual_cost: number;
+  last_used_at: number | null;
+  capabilities: ModelCapabilities;
+}
+
+export interface ModelsAnalyticsResponse {
+  models: ModelUsageEntry[];
+  totals: Record<string, number | null>;
+  period_days: number;
+}
+
+/** Aggregated payload the page's BFF route returns in one shot. */
+export interface ModelsOverviewResponse {
+  info: ModelInfo;
+  auxiliary: AuxiliaryModelsResponse;
+  usage: ModelUsageEntry[];
+}
+
+/** `POST /api/providers/validate` response. */
+export interface ProviderValidateResponse {
+  ok: boolean;
+  reachable: boolean;
+  message: string;
+  models?: string[];
+}

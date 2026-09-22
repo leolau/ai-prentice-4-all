@@ -1,6 +1,6 @@
 # Models page (agent-home, System section)
 
-**Status:** Proposed — awaiting review (plan + mockup only, no code yet)
+**Status:** Implemented (PR #419) — pending review
 **Companion mockup:** `plans/2026-09-22-models-page-mockup.html`
 **Date:** 2026-09-22
 
@@ -170,4 +170,31 @@ Known backend behavior to surface honestly in UI:
 
 ## Implementation status
 
-Proposed — not started. Plan + mockup for review.
+Implemented (PR #419) — pending review.
+
+- `coral-apps.ts` — `/models` registered in the System cluster (8 members, at cap).
+- `src/lib/api/client.ts` — `modelInfo` / `modelOptions` / `auxiliaryModels` /
+  `setModelAssignment` / `modelsAnalytics` / `validateProviderKey` /
+  `setEnvVar` / `deleteEnvVar`; matching response types in `src/types/index.ts`.
+- BFF routes — `GET /api/models/overview` (fan-out: info + auxiliary +
+  30-day analytics, analytics failure-tolerant), `GET /api/models/options`,
+  `POST /api/models/set` (replays `confirm_required` / `stale_aux`), and
+  `POST|DELETE /api/models/provider-key` (validate-then-save; a
+  confirmed-bad key is refused, an unreachable probe still saves and marks
+  `verified:false`; env-var name validated, value never echoed).
+- Page — `src/app/models/page.tsx` (RSC + `MobileShell`) renders
+  `ModelsView` (main-model card with capabilities, task-role list with
+  `auto → main` rows and a "+N more roles" expander, "In use — last 30
+  days" sorted by cost with per-slot tags including `not configured`) and
+  `ModelPickerSheet` (all catalog providers in the dropdown, inline key
+  entry for unauthenticated `api_key` providers, onboarding pointer for
+  OAuth providers, `confirm_expensive_model` inline confirm, `Reset to
+  auto` for aux slots, `Disconnect provider` with blast-radius confirm).
+- Tests — `ModelsView.test.tsx` (SSR render), `ModelPickerSheet.interaction.test.tsx`
+  (jsdom handlers: provider list, key-entry swap, save-then-refetch,
+  confirm-expensive resend, aux reset), `api/models/set/route.test.ts`,
+  `api/models/provider-key/route.test.ts`.
+- Verified — `tsc --noEmit` clean, `vitest` 819 passed, `next build` clean
+  (`/models` 6.44 kB). jsdom tests require Node ≥20.19 (repo toolchain:
+  `~/.nvm/versions/node/v20.19.6`; Node 20.13.1 breaks `html-encoding-sniffer`
+  and skips the rolldown arm64 binding).

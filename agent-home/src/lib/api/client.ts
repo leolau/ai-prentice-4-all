@@ -46,6 +46,12 @@ import type {
   MemberRoleResponse,
   MembersResponse,
   MemoryDocumentsResponse,
+  ModelInfo,
+  ModelOptionsResponse,
+  ModelSetResponse,
+  ModelsAnalyticsResponse,
+  AuxiliaryModelsResponse,
+  ProviderValidateResponse,
   MemoryProjection,
   MemoryQueryPlacement,
   MemoryRowsResponse,
@@ -2068,6 +2074,73 @@ export class HermesApiClient {
       `/api/credentials/google/${encodeURIComponent(name)}/refresh`,
       { method: "POST" },
     );
+  }
+
+  // ── Models page (System ▸ Models) ─────────────────────────────────────
+  // Thin forwards to the same `/api/model/*` endpoints the dashboard's
+  // Models Settings screen uses. Writes apply to new sessions only —
+  // upstream owns that contract, this just replays it.
+
+  /** Resolved main-model metadata (context length + capabilities). */
+  async modelInfo(): Promise<ModelInfo> {
+    return this.request("/api/model/info");
+  }
+
+  /**
+   * Every catalog provider (authenticated or not) with curated model lists
+   * and picker hints (`authenticated`/`auth_type`/`key_env`/`warning`) —
+   * the same payload the dashboard picker consumes.
+   */
+  async modelOptions(): Promise<ModelOptionsResponse> {
+    return this.request("/api/model/options");
+  }
+
+  /** Auxiliary task-slot assignments plus the current main model. */
+  async auxiliaryModels(): Promise<AuxiliaryModelsResponse> {
+    return this.request("/api/model/auxiliary");
+  }
+
+  /**
+   * Assign provider+model to the main slot or one auxiliary task.
+   * `scope: "auxiliary"` with `provider: "auto"` resets the slot to inherit
+   * the main model. `confirm_expensive_model` re-sends after the upstream
+   * `confirm_required` response.
+   */
+  async setModelAssignment(body: {
+    scope: "main" | "auxiliary";
+    provider: string;
+    model: string;
+    task?: string;
+    base_url?: string;
+    confirm_expensive_model?: boolean;
+  }): Promise<ModelSetResponse> {
+    return this.request("/api/model/set", { method: "POST", json: body });
+  }
+
+  /** Per-model usage/cost analytics for the "In use" list. */
+  async modelsAnalytics(days = 30): Promise<ModelsAnalyticsResponse> {
+    return this.request(`/api/analytics/models?days=${days}`);
+  }
+
+  /** Live-probe a provider credential before persisting it. */
+  async validateProviderKey(
+    key: string,
+    value: string,
+  ): Promise<ProviderValidateResponse> {
+    return this.request("/api/providers/validate", {
+      method: "POST",
+      json: { key, value },
+    });
+  }
+
+  /** Write a `.env` value (provider API keys live there). */
+  async setEnvVar(key: string, value: string): Promise<{ ok: boolean; key: string }> {
+    return this.request("/api/env", { method: "PUT", json: { key, value } });
+  }
+
+  /** Remove a `.env` value — disconnects a key-based provider. */
+  async deleteEnvVar(key: string): Promise<{ ok: boolean; key: string }> {
+    return this.request("/api/env", { method: "DELETE", json: { key } });
   }
 }
 
