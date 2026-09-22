@@ -4360,6 +4360,7 @@ class AIAgent:
     def _apply_client_headers_for_base_url(self, base_url: str) -> None:
         from agent.auxiliary_client import (
             build_nvidia_nim_headers,
+            build_opencode_session_headers,
             build_or_headers,
         )
 
@@ -4381,6 +4382,12 @@ class AIAgent:
             from agent.auxiliary_client import _codex_cloudflare_headers
             self._client_kwargs["default_headers"] = _codex_cloudflare_headers(
                 self._client_kwargs.get("api_key", "")
+            )
+        elif base_url_host_matches(base_url, "opencode.ai"):
+            # OpenCode Go/Zen rejects requests without a stable
+            # per-conversation session id (#81584).
+            self._client_kwargs["default_headers"] = build_opencode_session_headers(
+                getattr(self, "session_id", None)
             )
         else:
             # No URL-specific headers — check profile.default_headers before clearing.
