@@ -158,7 +158,7 @@ SEND_MESSAGE_SCHEMA = {
             },
             "target": {
                 "type": "string",
-                "description": "Delivery target. Format: 'platform' (uses home channel), 'platform:#channel-name', 'platform:chat_id', or 'platform:chat_id:thread_id' for Telegram topics and Discord threads. Examples: 'telegram', 'telegram:-1001234567890:17585', 'discord:999888777:555444333', 'discord:#bot-home', 'slack:#engineering', 'signal:+155****4567', 'matrix:!roomid:server.org', 'matrix:@user:server.org', 'ntfy:alerts-channel' (explicit ntfy topic), 'yuanbao:direct:<account_id>' (DM), 'yuanbao:group:<group_code>' (group chat)"
+                "description": "Delivery target. Format: 'platform' (uses home channel), 'platform:#channel-name', 'platform:chat_id', or 'platform:chat_id:thread_id' for Telegram topics and Discord threads. Examples: 'telegram', 'telegram:-1001234567890:17585', 'discord:999888777:555444333', 'discord:#bot-home', 'slack:#engineering', 'signal:+155****4567', 'matrix:!roomid:server.org', 'matrix:@user:server.org', 'ntfy:alerts-channel' (explicit ntfy topic), 'yuanbao:direct:<account_id>' (DM), 'yuanbao:group:<group_code>' (group chat). WhatsApp: 'whatsapp:<jid-or-+E164>' uses the default bridge; when several bridges are configured (WHATSAPP_BRIDGES), prefix with the bridge name — 'whatsapp:connectar:+852...' sends from that account."
             },
             "message": {
                 "type": "string",
@@ -295,6 +295,17 @@ def _handle_react(args, remove=False):
     return json.dumps({"success": bool(result)})
 
 
+def _whatsapp_bridge_map() -> dict:
+    """Parse ``WHATSAPP_BRIDGES`` (e.g. ``personal:3000,connectar:3001``) into
+    a ``{name: port}`` map for deployments running more than one bridge."""
+    out = {}
+    for part in os.getenv("WHATSAPP_BRIDGES", "").split(","):
+        name, sep, port = part.strip().partition(":")
+        if sep and name.strip() and port.strip().isdigit():
+            out[name.strip()] = int(port.strip())
+    return out
+
+
 def _handle_send(args):
     """Send a message to a platform target."""
     target = args.get("target", "")
@@ -307,6 +318,14 @@ def _handle_send(args):
     target_ref = parts[1].strip() if len(parts) > 1 else None
     chat_id = None
     thread_id = None
+    whatsapp_bridge_port = None
+
+    # Optional named-bridge selector: whatsapp:<bridge-name>:<target>
+    if platform_name == "whatsapp" and target_ref:
+        _name, _sep, _rest = target_ref.partition(":")
+        if _sep and _name.strip() in _whatsapp_bridge_map():
+            whatsapp_bridge_port = _whatsapp_bridge_map()[_name.strip()]
+            target_ref = _rest.strip() or None
 
     if target_ref:
         chat_id, thread_id, is_explicit = _parse_target_ref(platform_name, target_ref)
@@ -374,14 +393,25 @@ def _handle_send(args):
             # Enabling the platform in config.yaml would also start the
             # gateway adapter, which races that pipeline on the bridge's
             # drain-on-read /messages queue — so a send-only pconfig is
-            # synthesised from WHATSAPP_BRIDGE_PORT instead. The standalone
-            # sender posts straight to the bridge HTTP API; no adapter needed.
-            bridge_port = os.getenv("WHATSAPP_BRIDGE_PORT", "").strip()
-            if bridge_port:
+            # synthesised from env instead. The standalone sender posts
+            # straight to the bridge HTTP API; no adapter needed.
+            # Port resolution: named selector from the target
+            # (whatsapp:<name>:<target> via WHATSAPP_BRIDGES) →
+            # WHATSAPP_BRIDGE_PORT → first WHATSAPP_BRIDGES entry.
+            bridge_port = whatsapp_bridge_port
+            if bridge_port is None:
+                _env_port = os.getenv("WHATSAPP_BRIDGE_PORT", "").strip()
+                if _env_port.isdigit():
+                    bridge_port = int(_env_port)
+            if bridge_port is None:
+                _bridges = _whatsapp_bridge_map()
+                if _bridges:
+                    bridge_port = next(iter(_bridges.values()))
+            if bridge_port is not None:
                 from gateway.config import PlatformConfig
                 pconfig = PlatformConfig(
                     enabled=True,
-                    extra={"bridge_port": int(bridge_port)},
+                    extra={"bridge_port": bridge_port},
                 )
             else:
                 return tool_error(f"Platform '{platform_name}' is not configured. Set up credentials in ~/.hermes/config.yaml or environment variables.")
