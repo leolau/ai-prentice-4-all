@@ -244,6 +244,10 @@ function rememberSentId(id) {
 
 let sock = null;
 let connectionState = 'disconnected';
+// Consecutive failed connects, for exponential backoff. Reset on 'open'.
+// 515 restarts don't count — they're a normal part of the pairing
+// handshake, not failures.
+let reconnectAttempts = 0;
 
 async function startSocket() {
   const { state, saveCreds } = await useMultiFileAuthState(SESSION_DIR);
@@ -274,6 +278,11 @@ async function startSocket() {
     if (qr) {
       console.log('\n📱 Scan this QR code with WhatsApp on your phone:\n');
       qrcode.generate(qr, { small: true });
+      // Persist the raw payload so external tooling can render a scannable
+      // image (terminal ASCII art is unreliable for camera scanning).
+      try {
+        writeFileSync(path.join(SESSION_DIR, 'qr.txt'), qr);
+      } catch {}
       console.log('\nWaiting for scan...\n');
     }
 
@@ -284,17 +293,26 @@ async function startSocket() {
       if (reason === DisconnectReason.loggedOut) {
         console.log('❌ Logged out. Delete session and restart to re-authenticate.');
         process.exit(1);
-      } else {
+      } else if (reason === 515) {
         // 515 = restart requested (common after pairing). Always reconnect.
-        if (reason === 515) {
-          console.log('↻ WhatsApp requested restart (code 515). Reconnecting...');
-        } else {
-          console.log(`⚠️  Connection closed (reason: ${reason}). Reconnecting in 3s...`);
-        }
-        setTimeout(startSocket, reason === 515 ? 1000 : 3000);
+        console.log('↻ WhatsApp requested restart (code 515). Reconnecting...');
+        setTimeout(startSocket, 1000);
+      } else {
+        // Exponential backoff, capped at 60s. While unpaired, every close→
+        // reconnect cycle emits a new QR, so a fixed 3s retry becomes a
+        // connect storm that WhatsApp throttles (503 stream errors) — and
+        // rotating the QR faster than its ~60s lifetime makes it unscannable
+        // anyway. Slower refresh keeps a scannable code up while cutting
+        // connect attempts ~15x.
+        reconnectAttempts += 1;
+        const delay = Math.min(3000 * 2 ** (reconnectAttempts - 1), 60000);
+        console.log(`⚠️  Connection closed (reason: ${reason}). Reconnecting in ${delay / 1000}s (attempt ${reconnectAttempts})...`);
+        setTimeout(startSocket, delay);
       }
     } else if (connection === 'open') {
       connectionState = 'connected';
+      reconnectAttempts = 0;
+      try { unlinkSync(path.join(SESSION_DIR, 'qr.txt')); } catch {}
       console.log('✅ WhatsApp connected!');
       if (PAIR_ONLY) {
         console.log('✅ Pairing complete. Credentials saved.');
