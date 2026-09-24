@@ -50,7 +50,12 @@ def _load_config() -> Optional[dict]:
 def _write_config(doc: dict) -> None:
     path = _config_path()
     path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        mode = path.stat().st_mode & 0o777
+    except OSError:
+        mode = 0o600
     fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".config-")
+    os.chmod(tmp, mode)
     try:
         with os.fdopen(fd, "w") as fh:
             json.dump(doc, fh, indent=1)
