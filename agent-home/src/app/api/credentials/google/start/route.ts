@@ -1,7 +1,7 @@
 /**
  * POST /api/credentials/google/start — begin a Google OAuth connect.
  *
- * Body: { name?: email hint, services: ["email"|"calendar"|"workspace", …] }.
+ * Body: { name?: email hint, services: ["email"|"calendar"|"drive"|"workspace", …] }.
  * Returns the consent URL; the Python side holds the PKCE pending state.
  */
 import { NextResponse } from "next/server";

@@ -46,6 +46,7 @@ WORKSPACE_SCOPES: List[str] = [
 SCOPES_BY_SERVICE: Dict[str, List[str]] = {
     "email": ["https://mail.google.com/"],
     "calendar": ["https://www.googleapis.com/auth/calendar"],
+    "drive": ["https://www.googleapis.com/auth/drive"],
     "workspace": WORKSPACE_SCOPES,
 }
 

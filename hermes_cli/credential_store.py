@@ -47,7 +47,7 @@ CREDENTIALS_TABLE = "credentials"
 
 #: Opt-in service flags a credential entry can volunteer for. Background
 #: pollers consume an entry only when the matching flag is set (R5).
-SERVICES: Tuple[str, ...] = ("email", "calendar", "workspace")
+SERVICES: Tuple[str, ...] = ("email", "calendar", "drive", "workspace")
 
 _VALID_NAME = re.compile(r"^[^\s/\\]{1,254}$")
 
