@@ -31,7 +31,7 @@ were the last single-user island.
 - **R4** **Supabase is the source of truth** on deployments that have it; a file
   backend remains as the portable fallback (upstream skill users without Supabase).
 - **R5** Background pollers consume an entry **only when its owner opted it in**
-  via explicit `services` flags (`email`, `calendar`, `workspace`).
+  via explicit `services` flags (`email`, `calendar`, `drive`, `workspace`).
 - **R6** Per-user management UI = agent-home Settings → *Connected accounts*.
   The dashboard Keys page keeps managing profile-level service credentials.
 - **R7** This design doc is saved before any code.
@@ -67,7 +67,7 @@ CREATE TABLE IF NOT EXISTS credentials (
     kind TEXT NOT NULL,               -- 'google-oauth2'; registry-driven
     visibility TEXT NOT NULL DEFAULT 'shared'
         CHECK (visibility = 'shared' OR visibility LIKE 'private:%'),
-    services TEXT[] NOT NULL DEFAULT '{}',  -- opt-in: email, calendar, workspace
+    services TEXT[] NOT NULL DEFAULT '{}',  -- opt-in: email, calendar, drive, workspace
     payload JSONB NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -141,6 +141,7 @@ Scopes are **derived from the requested services** (`SCOPES_BY_SERVICE`):
 |---|---|
 | `email` | `https://mail.google.com/` (required for IMAP/SMTP XOAUTH2; `gmail.*` do NOT grant IMAP) |
 | `calendar` | `https://www.googleapis.com/auth/calendar` |
+| `drive` | `https://www.googleapis.com/auth/drive` |
 | `workspace` | the skill's existing 8 scopes (gmail.readonly/send/modify, calendar, drive, contacts.readonly, spreadsheets, documents) |
 
 Account email is fixed at exchange time via

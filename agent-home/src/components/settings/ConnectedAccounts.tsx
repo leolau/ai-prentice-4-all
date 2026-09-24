@@ -18,6 +18,7 @@ type ConnectPhase = "idle" | "consent" | "busy";
 const SERVICE_OPTIONS = [
   { id: "email", label: "Email (IMAP + Gmail API)" },
   { id: "calendar", label: "Calendar" },
+  { id: "drive", label: "Drive" },
   { id: "workspace", label: "Full workspace (Drive, Docs, Sheets)" },
 ] as const;
 
@@ -188,7 +189,7 @@ export function ConnectedAccounts() {
   );
 
   return (
-    <section>
+    <section data-component="ConnectedAccounts">
       <h2 className="text-sm font-semibold">Connected accounts</h2>
       <p className="mb-3 text-xs text-[var(--color-muted)]">
         Your own Google (and other) credentials, stored per login. Background

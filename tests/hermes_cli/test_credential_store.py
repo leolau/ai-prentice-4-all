@@ -93,6 +93,7 @@ def test_redaction_strips_secret_fields():
 
 def test_validate_services():
     assert validate_services(["email", "calendar"]) == ["calendar", "email"]
+    assert validate_services(["drive"]) == ["drive"]
     assert validate_services(None) == []
     with pytest.raises(CredentialError):
         validate_services(["coffee"])
@@ -298,6 +299,12 @@ def test_scopes_union_includes_imap_scope():
     assert "https://mail.google.com/" in scopes
     assert "https://www.googleapis.com/auth/calendar" in scopes
     assert scopes_for_services(["workspace"]) != scopes
+
+
+def test_scopes_drive_service():
+    scopes = scopes_for_services(["drive"])
+    assert scopes == ["https://www.googleapis.com/auth/drive"]
+    assert "https://mail.google.com/" not in scopes
 
 
 def test_pkce_challenge_is_s256_of_verifier():
