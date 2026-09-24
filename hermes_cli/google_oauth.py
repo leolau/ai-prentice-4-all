@@ -26,7 +26,13 @@ logger = logging.getLogger(__name__)
 AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 TOKEN_URI = "https://oauth2.googleapis.com/token"
 USERINFO_URL = "https://openidconnect.googleapis.com/v1/userinfo"
-REDIRECT_URI = "http://localhost:1"
+#: Loopback redirect for the manual code-paste flow. Port 1 is on every
+#: browser's restricted-port blocklist (Chrome: ERR_UNSAFE_PORT) and is
+#: privileged/unlistenable — some browsers hang on it indefinitely instead
+#: of erroring, so the ?code= URL never becomes copyable. Port 4321 is
+#: unblocked and unlistened, so the redirect fails fast with the code
+#: visible in the address bar.
+REDIRECT_URI = "http://localhost:4321"
 HTTP_TIMEOUT = 15.0
 
 #: The skill's historical full-workspace scope set.

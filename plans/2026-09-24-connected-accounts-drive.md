@@ -1,6 +1,6 @@
 # Settings → Connected accounts: add Google Drive as a service option
 
-Status: implemented.
+Status: implemented, plus follow-up fix for the consent redirect hang.
 
 ## Request
 
@@ -40,6 +40,21 @@ workspace-skill drive commands) without requesting mail/calendar scopes.
 - A Drive-only consent intentionally does NOT include
   `mail.google.com`/`auth/calendar` — narrower grants are the point of
   the separate option.
+
+## Follow-up: consent redirect hang (fixed)
+
+The manual code-paste flow used `redirect_uri=http://localhost:1`. Port 1
+is on browser restricted-port blocklists and is privileged/unlistenable —
+the post-consent redirect could hang forever instead of erroring, so the
+`?code=` URL never became copyable (reported on the box by the local
+agent, which worked around it with a port-4321 consent URL).
+
+`REDIRECT_URI` is now `http://localhost:4321` in both copies —
+`hermes_cli/google_oauth.py` (settings flow) and
+`skills/productivity/google-workspace/scripts/setup.py` — so the browser
+fails fast with the code visible in the address bar. The deployed OAuth
+client is `installed`-type, so any `http://localhost:<port>` redirect is
+accepted without console pre-registration. Design doc updated.
 
 ## Verification
 
