@@ -1,6 +1,14 @@
 # WhatsApp bridge controls + Settings scope display
 
-Status: implemented, pending deploy
+Status: deployed 2026-09-24 (316b3d54c, PR #439)
+
+- Sudoers entry for `wa-bridge-add.sh` added to `/etc/sudoers.d/hermes-agent`
+  (visudo-validated) — add-bridge provisioning works.
+- `wa-bridge-personal` rebound post-deploy: old logged-out session moved to
+  `session-personal.rebind-*`, fresh `qr.txt` emitted — awaiting a phone scan
+  via Settings → WhatsApp bridges → Show QR.
+- Verified on box: `/api/wa-bridges` mounted (401 unauthenticated), 7/7
+  pytest, agent-home rebuilt, all units active.
 
 ## Scope
 
