@@ -197,6 +197,10 @@ margin); refresh persists via `update_tokens` (single writer).
 
 - **email poller**: accounts = `config.json` accounts ∩ store entries with `email`
   service (config keeps host/port/folders/label; the secret moves to the store).
+  The per-account `enabled` flag is owner-managed from Settings → Connected
+  accounts via `hermes_cli/email_accounts_api.py` (`GET`/`PATCH
+  /api/email-accounts`); enabling an unknown address creates a Gmail-defaults
+  entry. The poller re-reads the config each cycle — no restart needed.
   Auth = `imaplib.IMAP4_SSL` + `authenticate("XOAUTH2", ...)` with
   `xoauth2_string(email, token)`; one retry on auth failure, then per-account
   error status + health field.

@@ -23,7 +23,7 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 from email.utils import parsedate_to_datetime
 
 DB_PATH = '/opt/data/whatsapp-messages/whatsapp_data.db'
-CONFIG_PATH = '/opt/data/email-messages/config.json'
+CONFIG_PATH = os.environ.get('EMAIL_CONFIG_PATH', '/opt/data/email-messages/config.json')
 HEALTH_PORT = 7901
 
 # Make custom/shared importable so the poller can register attachment files.

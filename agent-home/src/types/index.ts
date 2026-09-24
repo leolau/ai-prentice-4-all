@@ -1129,6 +1129,18 @@ export interface CredentialEntry {
   updated_at: string | null;
 }
 
+/**
+ * One account in the deployment email poller's config — separate axis from
+ * the credential's `email` service flag (that one marks the credential as
+ * usable for mail; this one controls whether the background poller runs).
+ */
+export interface EmailPollerAccount {
+  id: string;
+  address: string;
+  label: string | null;
+  enabled: boolean;
+}
+
 /** What the to-do filter chips can offer without leading to an empty list. */
 export interface TodosFacets {
   stages: { value: string; count: number }[];

@@ -135,6 +135,46 @@ describe("ConnectedAccounts", () => {
     );
   });
 
+  it("shows an email-polling toggle that patches the poller config", async () => {
+    const patches: unknown[] = [];
+    mockFetch((url, init) => {
+      if (url.endsWith("/api/email-accounts")) {
+        if (init?.method === "PATCH") {
+          patches.push(JSON.parse(String(init.body)));
+          return {
+            account: {
+              id: "email4",
+              address: "alice@gmail.com",
+              label: "gmail.com",
+              enabled: true,
+            },
+          };
+        }
+        return { config_present: true, accounts: [] };
+      }
+      return { credentials: [ENTRY] };
+    });
+    render(<ConnectedAccounts />);
+    await screen.findByText(/alice@gmail\.com/);
+    fireEvent.click(screen.getByLabelText(/Email polling/));
+    await waitFor(() =>
+      expect(patches).toEqual([
+        { address: "alice@gmail.com", enabled: true },
+      ]),
+    );
+  });
+
+  it("hides the polling toggle when the deployment has no poller config", async () => {
+    mockFetch((url) =>
+      url.endsWith("/api/email-accounts")
+        ? { config_present: false, accounts: [] }
+        : { credentials: [ENTRY] },
+    );
+    render(<ConnectedAccounts />);
+    await screen.findByText(/alice@gmail\.com/);
+    expect(screen.queryByLabelText(/Email polling/)).toBeNull();
+  });
+
   it("patches services when a toggle flips", async () => {
     const patches: unknown[] = [];
     mockFetch((_url, init) => {
