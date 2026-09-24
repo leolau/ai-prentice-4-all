@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Create email-specific tables in the unified SQLite DB."""
+"""Create email-specific tables in the email SQLite DB."""
 
+import os
 import sqlite3
 
-DB_PATH = '/opt/data/whatsapp-messages/whatsapp_data.db'
+DB_PATH = os.environ.get('EMAIL_DB_PATH', '/opt/data/email-messages/email_data.db')
 
 db = sqlite3.connect(DB_PATH, timeout=30)
 db.execute("PRAGMA journal_mode=WAL")

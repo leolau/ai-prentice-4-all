@@ -15,7 +15,7 @@ import uuid
 from datetime import datetime, timezone
 from collections import defaultdict
 
-DB_PATH = '/opt/data/whatsapp-messages/whatsapp_data.db'
+DB_PATH = os.environ.get('EMAIL_DB_PATH', '/opt/data/email-messages/email_data.db')
 CONFIG_PATH = '/opt/data/email-messages/config.json'
 BATCH_DIR = '/opt/data/email-messages/batches'
 PROCESSED_DIR = '/opt/data/email-messages/batches/processed'

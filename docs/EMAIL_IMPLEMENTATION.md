@@ -26,7 +26,8 @@ Gmail Account #N (IMAP) → Email Poller N  ──┘
                       merge/ask user)
                               │              │              │
                               ▼              ▼              ▼
-                         Single SQLite DB (whatsapp_data.db)
+                         Per-domain SQLite DBs (email_data.db +
+                         messaging_data.db attached for shared tables)
                               │
                      ┌────────┼────────┐
                      ▼        ▼        ▼
@@ -39,7 +40,7 @@ Gmail Account #N (IMAP) → Email Poller N  ──┘
 ## Key Design Decisions
 
 1. **Gmail via IMAP** — App Passwords for auth, polling every 60s
-2. **Single SQLite DB** (`whatsapp_data.db`) — email tables prefixed `email_`, shared escalations
+2. **Per-domain SQLite DBs** — email tables in `email_data.db`; shared tables (escalations, contacts) stay in `messaging_data.db` and are reached via `ATTACH`. (Supersedes the original single-DB `whatsapp_data.db` design — see `plans/` channel-split plan.)
 3. **Separate config file** — `/opt/data/email-messages/config.json`
 4. **Unified Contacts** — `contacts` + `contact_handles` tables replace old per-channel contact tables
 5. **Contact auto-management** — new contacts created automatically, correlation checked, auto-merge for high confidence, Telegram confirmation for medium confidence
@@ -681,7 +682,9 @@ When ignored:
 | Email MCP | `/opt/data/email-messages/email_mcp_server.py` | MCP server (port 8651) |
 | Contact Manager | `/opt/data/whatsapp-messages/contact_manager.py` | Contact auto-management |
 | Email Skills | `/opt/data/skills/email-triage/` | Email-specific triage skills |
-| Unified DB | `/opt/data/whatsapp-messages/whatsapp_data.db` | Single SQLite database |
+| Email DB | `/opt/data/email-messages/email_data.db` | Email tables (`email_*`) |
+| Messaging DB | `/opt/data/whatsapp-messages/messaging_data.db` | WhatsApp + shared tables (was `whatsapp_data.db`) |
+| Calendar DB | `/opt/data/calendar/calendar_data.db` | Calendar tables (`calendar_*`) |
 | Implementation Doc | `/opt/data/email-messages/IMPLEMENTATION.md` | This file (deployed copy) |
 
 ---

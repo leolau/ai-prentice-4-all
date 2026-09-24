@@ -15,7 +15,10 @@ from urllib.request import Request, urlopen
 
 # Config
 WA_CONFIG_PATH = '/opt/data/whatsapp-messages/config.json'
-DB_PATH = '/opt/data/whatsapp-messages/whatsapp_data.db'
+DB_PATH = os.environ.get('MESSAGING_DB_PATH', '/opt/data/whatsapp-messages/messaging_data.db')
+# Email tables live in email_data.db; get_db() attaches it so the
+# unqualified email_* queries below keep working.
+EMAIL_DB_PATH = os.environ.get('EMAIL_DB_PATH', '/opt/data/email-messages/email_data.db')
 TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN', '')
 TELEGRAM_USER_ID = os.environ.get('TELEGRAM_ALLOWED_USERS', '').split(',')[0]
 CHECK_INTERVAL = 5
@@ -45,6 +48,7 @@ def get_db():
     # with row.get(...), which sqlite3.Row does not implement.
     conn.row_factory = _dict_row
     conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("ATTACH DATABASE ? AS emaildb", (EMAIL_DB_PATH,))
     return conn
 
 
