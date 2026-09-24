@@ -86,6 +86,7 @@ import type {
   SessionCreateResponse,
   CredentialEntry,
   EmailPollerAccount,
+  WaBridge,
   SessionTag,
   SessionsResponse,
   TagSuggestion,
@@ -2061,6 +2062,41 @@ export class HermesApiClient {
     return this.request("/api/email-accounts", {
       method: "PATCH",
       json: { address, enabled },
+    });
+  }
+
+  /** WhatsApp bridge units (deployment sidecars; owner-gated). */
+  async waBridges(): Promise<{ bridges: WaBridge[] }> {
+    return this.request("/api/wa-bridges");
+  }
+
+  /** Pending pairing payload for an unpaired bridge (auth material). */
+  async waBridgeQr(name: string): Promise<{
+    payload: string;
+    age_seconds: number;
+    stale: boolean;
+  }> {
+    return this.request(
+      `/api/wa-bridges/${encodeURIComponent(name)}/qr`,
+    );
+  }
+
+  /** restart | stop | rebind (wipe session + restart for a fresh QR). */
+  async waBridgeAction(
+    name: string,
+    action: "restart" | "stop" | "rebind",
+  ): Promise<{ bridge: WaBridge }> {
+    return this.request(
+      `/api/wa-bridges/${encodeURIComponent(name)}/${action}`,
+      { method: "POST" },
+    );
+  }
+
+  /** Provision a new hermes-wa-bridge-<name> unit (needs host sudo grant). */
+  async waBridgeAdd(name: string): Promise<{ bridge: WaBridge }> {
+    return this.request("/api/wa-bridges", {
+      method: "POST",
+      json: { name },
     });
   }
 
