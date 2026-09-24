@@ -11,6 +11,7 @@
  */
 import { useCallback, useEffect, useState } from "react";
 
+import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import type { CredentialEntry } from "@/types";
 
 type ConnectPhase = "idle" | "consent" | "busy";
@@ -33,6 +34,9 @@ export function ConnectedAccounts() {
   const [authUrl, setAuthUrl] = useState<string | null>(null);
   const [pasted, setPasted] = useState("");
   const [result, setResult] = useState<string | null>(null);
+  const [confirmEntry, setConfirmEntry] = useState<CredentialEntry | null>(
+    null,
+  );
 
   const reload = useCallback(async () => {
     try {
@@ -222,7 +226,7 @@ export function ConnectedAccounts() {
               <button
                 type="button"
                 className="text-xs text-red-400"
-                onClick={() => void disconnect(entry)}
+                onClick={() => setConfirmEntry(entry)}
               >
                 Disconnect
               </button>
@@ -346,6 +350,20 @@ export function ConnectedAccounts() {
       )}
       {phase === "busy" && !authUrl && (
         <p className="text-xs text-[var(--color-muted)]">Working…</p>
+      )}
+
+      {confirmEntry && (
+        <ConfirmDialog
+          title="Disconnect account?"
+          body={`Disconnect ${confirmEntry.name}? Its stored credential is removed — services using it (email, calendar, Drive) stop working until you connect it again.`}
+          confirmLabel="Disconnect"
+          onCancel={() => setConfirmEntry(null)}
+          onConfirm={() => {
+            const entry = confirmEntry;
+            setConfirmEntry(null);
+            void disconnect(entry);
+          }}
+        />
       )}
     </section>
   );
