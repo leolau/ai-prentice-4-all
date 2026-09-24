@@ -50,6 +50,42 @@ const SERVICE_OPTIONS = [
   { id: "workspace", label: "Full workspace (Drive, Docs, Sheets)" },
 ] as const;
 
+/** Mirrors hermes_cli/google_oauth.SCOPES_BY_SERVICE — used to compare the
+ *  stored `services` flags against the OAuth scopes actually granted, so the
+ *  UI can flag "enabled but not consented" (e.g. a restored token that never
+ *  had the mail scope). */
+const SCOPES_BY_SERVICE: Record<string, string[]> = {
+  email: ["https://mail.google.com/"],
+  calendar: ["https://www.googleapis.com/auth/calendar"],
+  drive: ["https://www.googleapis.com/auth/drive"],
+  workspace: [
+    "https://www.googleapis.com/auth/gmail.readonly",
+    "https://www.googleapis.com/auth/gmail.send",
+    "https://www.googleapis.com/auth/gmail.modify",
+    "https://www.googleapis.com/auth/calendar",
+    "https://www.googleapis.com/auth/drive",
+    "https://www.googleapis.com/auth/contacts.readonly",
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/documents",
+  ],
+};
+
+export function grantedScopes(entry: CredentialEntry): string[] {
+  const scopes = entry.payload?.scopes;
+  return Array.isArray(scopes) ? scopes.filter((s) => typeof s === "string") : [];
+}
+
+/** Whether the granted OAuth scopes cover every scope a service needs. */
+export function serviceGranted(
+  entry: CredentialEntry,
+  service: string,
+): boolean {
+  const required = SCOPES_BY_SERVICE[service];
+  if (!required) return true;
+  const granted = new Set(grantedScopes(entry));
+  return required.every((s) => granted.has(s));
+}
+
 export function ConnectedAccounts() {
   const [entries, setEntries] = useState<CredentialEntry[]>([]);
   const [pollerAccounts, setPollerAccounts] = useState<
@@ -353,18 +389,34 @@ export function ConnectedAccounts() {
               </button>
             </div>
             <div className="mt-1 flex flex-wrap items-center gap-3 text-xs">
-              {SERVICE_OPTIONS.filter((s) => s.id !== "workspace").map((s) => (
-                <label key={s.id} className="flex items-center gap-1">
-                  <input
-                    type="checkbox"
-                    checked={entry.services.includes(s.id)}
-                    onChange={(e) =>
-                      void toggleService(entry, s.id, e.target.checked)
+              {SERVICE_OPTIONS.filter((s) => s.id !== "workspace").map((s) => {
+                const flagged = entry.services.includes(s.id);
+                const granted =
+                  entry.provider !== "google" || serviceGranted(entry, s.id);
+                return (
+                  <label
+                    key={s.id}
+                    className="flex items-center gap-1"
+                    title={
+                      flagged && !granted
+                        ? "Flag is set but the stored grant lacks this scope — reconnect to consent it."
+                        : undefined
                     }
-                  />
-                  {s.label}
-                </label>
-              ))}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={flagged}
+                      onChange={(e) =>
+                        void toggleService(entry, s.id, e.target.checked)
+                      }
+                    />
+                    {s.label}
+                    {flagged && !granted && (
+                      <span className="text-amber-400">(not granted)</span>
+                    )}
+                  </label>
+                );
+              })}
               {entry.provider === "google" && pollerConfigPresent && (
                 <label className="flex items-center gap-1">
                   <input
@@ -408,6 +460,18 @@ export function ConnectedAccounts() {
                 </select>
               </label>
             </div>
+            {entry.provider === "google" && grantedScopes(entry).length > 0 && (
+              <details className="mt-1 text-xs text-[var(--color-muted)]">
+                <summary className="cursor-pointer">
+                  {grantedScopes(entry).length} granted OAuth scopes
+                </summary>
+                <ul className="mt-1 list-inside list-disc break-all">
+                  {grantedScopes(entry).map((s) => (
+                    <li key={s}>{s}</li>
+                  ))}
+                </ul>
+              </details>
+            )}
           </li>
         ))}
       </ul>

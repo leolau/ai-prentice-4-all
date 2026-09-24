@@ -1141,6 +1141,24 @@ export interface EmailPollerAccount {
   enabled: boolean;
 }
 
+/**
+ * One WhatsApp bridge sidecar (hermes-wa-bridge-<name>.service) as seen by
+ * the deployment dashboard. `qr_pending`/`qr_age_seconds` describe the
+ * pairing QR written into the session dir while the bridge waits for a scan.
+ */
+export interface WaBridge {
+  name: string;
+  unit: string;
+  /** systemctl is-active output: active | activating | inactive | failed… */
+  active: string;
+  /** Session dir holds creds.json — the bridge has linked before. */
+  paired: boolean;
+  qr_pending: boolean;
+  qr_age_seconds: number | null;
+  /** qr.txt older than Baileys' ~60s rotation — almost certainly dead. */
+  qr_stale: boolean;
+}
+
 /** What the to-do filter chips can offer without leading to an empty list. */
 export interface TodosFacets {
   stages: { value: string; count: number }[];
