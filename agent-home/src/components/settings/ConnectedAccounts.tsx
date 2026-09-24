@@ -12,7 +12,7 @@
 import { useCallback, useEffect, useState } from "react";
 
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
-import type { CredentialEntry } from "@/types";
+import type { CredentialEntry, EmailPollerAccount } from "@/types";
 
 type ConnectPhase = "idle" | "consent" | "busy";
 
@@ -52,6 +52,10 @@ const SERVICE_OPTIONS = [
 
 export function ConnectedAccounts() {
   const [entries, setEntries] = useState<CredentialEntry[]>([]);
+  const [pollerAccounts, setPollerAccounts] = useState<
+    Record<string, EmailPollerAccount>
+  >({});
+  const [pollerConfigPresent, setPollerConfigPresent] = useState(false);
   const [loaded, setLoaded] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -79,6 +83,25 @@ export function ConnectedAccounts() {
       }
     } catch {
       setError("Could not load connected accounts.");
+    }
+    // The poller config is a deployment feature — a failed/absent endpoint
+    // just hides the toggle, it doesn't error the section.
+    try {
+      const res = await fetch("/api/email-accounts");
+      if (res.ok) {
+        const data = (await res.json()) as {
+          config_present: boolean;
+          accounts: EmailPollerAccount[];
+        };
+        setPollerConfigPresent(data.config_present);
+        setPollerAccounts(
+          Object.fromEntries(
+            data.accounts.map((a) => [a.address.toLowerCase(), a]),
+          ),
+        );
+      }
+    } catch {
+      /* poller toggle stays hidden */
     }
     setLoaded(true);
   }, []);
@@ -212,6 +235,40 @@ export function ConnectedAccounts() {
     [],
   );
 
+  const toggleEmailPolling = useCallback(
+    async (entry: CredentialEntry, on: boolean) => {
+      const key = entry.name.toLowerCase();
+      const previous = pollerAccounts[key];
+      setPollerAccounts((prev) => ({
+        ...prev,
+        [key]: {
+          id: previous?.id ?? "",
+          address: entry.name,
+          label: previous?.label ?? null,
+          enabled: on,
+        },
+      }));
+      const res = await fetch("/api/email-accounts", {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ address: entry.name, enabled: on }),
+      });
+      if (res.ok) {
+        const data = (await res.json()) as { account: EmailPollerAccount };
+        setPollerAccounts((prev) => ({ ...prev, [key]: data.account }));
+      } else {
+        setPollerAccounts((prev) => {
+          const next = { ...prev };
+          if (previous) next[key] = previous;
+          else delete next[key];
+          return next;
+        });
+        setError("Could not update email polling; reload to resync.");
+      }
+    },
+    [pollerAccounts],
+  );
+
   const setVisibility = useCallback(
     async (entry: CredentialEntry, visibility: string) => {
       const res = await fetch(
@@ -308,6 +365,31 @@ export function ConnectedAccounts() {
                   {s.label}
                 </label>
               ))}
+              {entry.provider === "google" && pollerConfigPresent && (
+                <label className="flex items-center gap-1">
+                  <input
+                    type="checkbox"
+                    checked={
+                      pollerAccounts[entry.name.toLowerCase()]?.enabled ?? false
+                    }
+                    onChange={(e) =>
+                      void toggleEmailPolling(entry, e.target.checked)
+                    }
+                  />
+                  Email polling
+                  {!entry.services.includes("email") ? (
+                    <span className="text-[var(--color-muted)]">
+                      (grant Email service too)
+                    </span>
+                  ) : (
+                    !pollerAccounts[entry.name.toLowerCase()] && (
+                      <span className="text-[var(--color-muted)]">
+                        (adds a Gmail poller entry)
+                      </span>
+                    )
+                  )}
+                </label>
+              )}
               <label className="flex items-center gap-1">
                 <select
                   value={entry.visibility.startsWith("private") ? "private" : "shared"}

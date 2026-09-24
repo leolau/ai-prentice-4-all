@@ -85,6 +85,7 @@ import type {
   Role,
   SessionCreateResponse,
   CredentialEntry,
+  EmailPollerAccount,
   SessionTag,
   SessionsResponse,
   TagSuggestion,
@@ -2041,6 +2042,26 @@ export class HermesApiClient {
       `/api/credentials/${encodeURIComponent(provider)}/${encodeURIComponent(name)}`,
       { method: "DELETE" },
     );
+  }
+
+  /** Email-poller account flags (deployment poller config; owner-gated). */
+  async emailAccounts(): Promise<{
+    config_present: boolean;
+    accounts: EmailPollerAccount[];
+  }> {
+    return this.request("/api/email-accounts");
+  }
+
+  /** Enable/disable polling for an address; creates a Gmail entry when
+   *  enabling an address the poller doesn't know yet. */
+  async setEmailPolling(
+    address: string,
+    enabled: boolean,
+  ): Promise<{ account: EmailPollerAccount }> {
+    return this.request("/api/email-accounts", {
+      method: "PATCH",
+      json: { address, enabled },
+    });
   }
 
   /** Begin a Google OAuth connect; returns the consent URL to open. */
