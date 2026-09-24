@@ -65,7 +65,9 @@ def get_db():
     # Table names are disjoint across domains — unqualified queries on shared
     # tables (escalations, contact_handles, unified_contacts) resolve to the
     # attached messaging DB.
-    conn.execute("ATTACH DATABASE ? AS msg", (MESSAGING_DB_PATH,))
+    if os.path.exists(MESSAGING_DB_PATH) or os.path.isdir(
+            os.path.dirname(MESSAGING_DB_PATH)):
+        conn.execute("ATTACH DATABASE ? AS msg", (MESSAGING_DB_PATH,))
     return conn
 
 

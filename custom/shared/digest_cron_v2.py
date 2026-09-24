@@ -41,7 +41,9 @@ def get_db():
     conn = sqlite3.connect(DB_PATH, timeout=10)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("ATTACH DATABASE ? AS emaildb", (EMAIL_DB_PATH,))
+    if os.path.exists(EMAIL_DB_PATH) or os.path.isdir(
+            os.path.dirname(EMAIL_DB_PATH)):
+        conn.execute("ATTACH DATABASE ? AS emaildb", (EMAIL_DB_PATH,))
     return conn
 
 
