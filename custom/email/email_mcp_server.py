@@ -14,7 +14,10 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 import uuid
 
-DB_PATH = '/opt/data/whatsapp-messages/whatsapp_data.db'
+DB_PATH = os.environ.get('EMAIL_DB_PATH', '/opt/data/email-messages/email_data.db')
+# Shared/cross-channel tables (escalations, unified_contacts, messages) stay
+# in the messaging DB; get_db() attaches it so unqualified queries keep working.
+MESSAGING_DB_PATH = os.environ.get('MESSAGING_DB_PATH', '/opt/data/whatsapp-messages/messaging_data.db')
 CONFIG_PATH = '/opt/data/email-messages/config.json'
 PORT = 8651
 
@@ -22,6 +25,10 @@ def get_db():
     conn = sqlite3.connect(DB_PATH, timeout=10)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
+    # Table names are disjoint across domains — unqualified queries on shared
+    # tables (escalations, unified_contacts, messages, …) resolve to the
+    # attached messaging DB.
+    conn.execute("ATTACH DATABASE ? AS msg", (MESSAGING_DB_PATH,))
     return conn
 
 def load_config():

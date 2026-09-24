@@ -30,7 +30,7 @@ from track_credit_helper import track_inference
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # Paths
-DB_PATH = os.environ.get('DB_PATH', '/opt/data/whatsapp-messages/whatsapp_data.db')
+DB_PATH = os.environ.get('CALENDAR_DB_PATH', '/opt/data/calendar/calendar_data.db')
 CONFIG_PATH = os.environ.get('CALENDAR_CONFIG_PATH', '/opt/data/calendar/config.json')
 SKILLS_DIR = '/opt/data/skills/calendar-triage'
 
