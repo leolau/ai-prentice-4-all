@@ -2047,7 +2047,7 @@ export class HermesApiClient {
   async googleStart(payload: {
     name?: string;
     services: string[];
-  }): Promise<{ auth_url: string; state: string }> {
+  }): Promise<{ auth_url: string; state: string; expires_in?: number }> {
     return this.request("/api/credentials/google/start", {
       method: "POST",
       json: payload,
