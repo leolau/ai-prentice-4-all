@@ -23,6 +23,9 @@ from hermes_cli.credential_store import (
 from hermes_cli.google_oauth import (
     GoogleOAuthError,
     authorized_user_payload,
+    build_authorization_url,
+    connect_scopes,
+    email_from_id_token,
     generate_pkce,
     parse_code_or_url,
     scopes_for_services,
@@ -305,6 +308,31 @@ def test_scopes_drive_service():
     scopes = scopes_for_services(["drive"])
     assert scopes == ["https://www.googleapis.com/auth/drive"]
     assert "https://mail.google.com/" not in scopes
+
+
+def test_connect_scopes_adds_identity_scopes():
+    scopes = connect_scopes(["drive"])
+    assert "https://www.googleapis.com/auth/drive" in scopes
+    assert "openid" in scopes
+    assert "https://www.googleapis.com/auth/userinfo.email" in scopes
+
+
+def test_build_authorization_url_forces_account_chooser():
+    url = build_authorization_url(
+        client_id="cid", scopes=["openid"], state="st", code_challenge="cc"
+    )
+    assert "prompt=select_account+consent" in url
+
+
+def test_email_from_id_token():
+    import json as _json
+
+    claims = base64.urlsafe_b64encode(
+        _json.dumps({"email": "carol@x.co"}).encode()
+    ).rstrip(b"=").decode()
+    assert email_from_id_token(f"h.{claims}.sig") == "carol@x.co"
+    assert email_from_id_token("not-a-jwt") is None
+    assert email_from_id_token("") is None
 
 
 def test_pkce_challenge_is_s256_of_verifier():

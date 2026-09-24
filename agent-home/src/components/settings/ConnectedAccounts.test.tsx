@@ -57,11 +57,12 @@ describe("ConnectedAccounts", () => {
     });
     render(<ConnectedAccounts />);
     fireEvent.click(await screen.findByText("Connect Google account"));
-    const link = await screen.findByText("consent link");
+    const link = await screen.findByText("Open Google sign-in");
     expect(link.getAttribute("href")).toContain("accounts.google.com");
-    fireEvent.change(screen.getByPlaceholderText("paste code or redirect URL"), {
-      target: { value: "http://localhost:1/?code=abc&state=s" },
-    });
+    fireEvent.change(
+      screen.getByPlaceholderText("http://localhost:4321/?code=…&state=…"),
+      { target: { value: "http://localhost:4321/?code=abc&state=s" } },
+    );
     fireEvent.click(screen.getByText("Complete"));
     await waitFor(() =>
       expect(screen.getByText(/Connected alice@gmail\.com/)).toBeTruthy(),
@@ -70,6 +71,41 @@ describe("ConnectedAccounts", () => {
     expect(
       calls.some(([m, u]) => m === "POST" && u.endsWith("/google/complete")),
     ).toBe(true);
+  });
+
+  it("rejects a redirect URL pasted into the email-hint field", async () => {
+    const calls: Array<[string, string]> = [];
+    mockFetch((url, init) => {
+      calls.push([init?.method ?? "GET", url]);
+      return { credentials: [] };
+    });
+    render(<ConnectedAccounts />);
+    await screen.findByText("Connect Google account");
+    fireEvent.change(
+      screen.getByPlaceholderText(/Google account email/),
+      { target: { value: "http://localhost:4321/?code=abc&state=s" } },
+    );
+    fireEvent.click(screen.getByText("Connect Google account"));
+    expect(
+      await screen.findByText(/belongs in step 3/),
+    ).toBeTruthy();
+    expect(calls.some(([m]) => m === "POST")).toBe(false);
+  });
+
+  it("rejects a non-URL value in the redirect-URL field", async () => {
+    mockFetch((url) =>
+      url.endsWith("/api/credentials/google/start")
+        ? { auth_url: "https://accounts.google.com/x", state: "s", expires_in: 600 }
+        : { credentials: [] },
+    );
+    render(<ConnectedAccounts />);
+    fireEvent.click(await screen.findByText("Connect Google account"));
+    fireEvent.change(
+      await screen.findByPlaceholderText("http://localhost:4321/?code=…&state=…"),
+      { target: { value: "alice@gmail.com" } },
+    );
+    fireEvent.click(screen.getByText("Complete"));
+    expect(await screen.findByText(/email-hint field/)).toBeTruthy();
   });
 
   it("asks for confirmation before disconnecting", async () => {

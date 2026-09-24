@@ -133,7 +133,9 @@ Mechanics live in `hermes_cli/google_oauth.py` (extracted from the skill's prove
 `setup.py`): PKCE, `redirect_uri=http://localhost:4321` (any unblocked,
 unlistened loopback port — port 1 is on browser blocklists and can hang),
 `access_type=offline`,
-`prompt=consent`, `login_hint=<email>`, pending state in
+`prompt=select_account consent` (the account chooser is forced so connecting an
+additional account can't silently reuse the signed-in one), `login_hint=<email>`,
+pending state in
 `$HERMES_HOME/credentials-pending/<user_id>/google.json` (0600, 10-min TTL),
 code-or-full-redirect-URL accepted, granted (possibly partial) scopes persisted.
 
@@ -146,8 +148,15 @@ Scopes are **derived from the requested services** (`SCOPES_BY_SERVICE`):
 | `drive` | `https://www.googleapis.com/auth/drive` |
 | `workspace` | the skill's existing 8 scopes (gmail.readonly/send/modify, calendar, drive, contacts.readonly, spreadsheets, documents) |
 
-Account email is fixed at exchange time via
-`https://openidconnect.googleapis.com/v1/userinfo`. **Re-consent is required** when
+Every connect also requests the identity scopes `openid` +
+`userinfo.email` (`connect_scopes()` = service scopes ∪ identity scopes), so the
+consenting account's email is always recoverable: `complete` tries the
+`id_token` `email` claim first, then the
+`https://openidconnect.googleapis.com/v1/userinfo` endpoint, then falls back to
+the start-time hint. The hint is only a `login_hint` convenience — the entry is
+named by the account that actually consented, so a wrong-account approval is
+visible (and correctly keyed) rather than silently stored under the hint.
+**Re-consent is required** when
 adding `email` to an existing consent — existing grants lack `mail.google.com`.
 
 HTTP surface: `hermes_cli/credentials_api.py` router `/api/credentials`
