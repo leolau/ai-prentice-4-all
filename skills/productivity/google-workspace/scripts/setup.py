@@ -59,8 +59,10 @@ REQUIRED_PACKAGES = ["google-api-python-client", "google-auth-oauthlib", "google
 
 # OAuth redirect for "out of band" manual code copy flow.
 # Google deprecated OOB, so we use a localhost redirect and tell the user to
-# copy the code from the browser's URL bar (or the page body).
-REDIRECT_URI = "http://localhost:1"
+# copy the code from the browser's URL bar (or the page body). The port must
+# not be on browser restricted-port blocklists (port 1 hangs/errors
+# opaquely) — 4321 fails fast with the code visible in the address bar.
+REDIRECT_URI = "http://localhost:4321"
 
 
 def _normalize_authorized_user_payload(payload: dict) -> dict:

@@ -130,7 +130,9 @@ for refresh persistence (the one sanctioned write, race-safe by construction).
 ## 7. OAuth2 flow (Google adapter)
 
 Mechanics live in `hermes_cli/google_oauth.py` (extracted from the skill's proven
-`setup.py`): PKCE, `redirect_uri=http://localhost:1`, `access_type=offline`,
+`setup.py`): PKCE, `redirect_uri=http://localhost:4321` (any unblocked,
+unlistened loopback port — port 1 is on browser blocklists and can hang),
+`access_type=offline`,
 `prompt=consent`, `login_hint=<email>`, pending state in
 `$HERMES_HOME/credentials-pending/<user_id>/google.json` (0600, 10-min TTL),
 code-or-full-redirect-URL accepted, granted (possibly partial) scopes persisted.
