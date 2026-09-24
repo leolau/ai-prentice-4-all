@@ -56,6 +56,23 @@ fails fast with the code visible in the address bar. The deployed OAuth
 client is `installed`-type, so any `http://localhost:<port>` redirect is
 accepted without console pre-registration. Design doc updated.
 
+## Follow-up 2: confirm dialog on destructive settings actions (done)
+
+User request: "any disconnect or sign out or logout — add a pop up window
+to double confirm."
+
+- New shared `agent-home/src/components/ui/ConfirmDialog.tsx` — modal
+  (bottom sheet on phones, centred dialog from `sm` up) matching
+  `ApprovalModal`'s shape; dismissible via backdrop/Esc/Cancel (unlike
+  ApprovalModal, nothing is paused awaiting an answer).
+- `ConnectedAccounts` Disconnect now opens the dialog before DELETE.
+- `LogoutButton` Sign out now opens the dialog before POST /logout.
+- Already-covered surfaces left as-is: model-picker disconnect (built-in
+  confirm phase), tag delete (native `confirm()`), folder-bridge
+  disconnect (lives on Files, not Settings).
+- Tests: `ConnectedAccounts.test.tsx` gained a confirm-flow test;
+  new `LogoutButton.test.tsx` covers confirm + cancel paths.
+
 ## Verification
 
 - `npx vitest run ConnectedAccounts.test.tsx` — 3 pass.
