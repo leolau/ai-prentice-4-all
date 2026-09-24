@@ -22,8 +22,10 @@ from datetime import datetime, timezone, timedelta
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from email.utils import parsedate_to_datetime
 
-DB_PATH = '/opt/data/whatsapp-messages/whatsapp_data.db'
-CONFIG_PATH = '/opt/data/email-messages/config.json'
+DB_PATH = os.environ.get('EMAIL_DB_PATH', '/opt/data/email-messages/email_data.db')
+CONFIG_PATH = os.environ.get('EMAIL_CONFIG_PATH', '/opt/data/email-messages/config.json')
+# Email data lives in its own DB (split from the shared whatsapp_data.db to
+# end write-lock contention across channels).
 HEALTH_PORT = 7901
 
 # Make custom/shared importable so the poller can register attachment files.

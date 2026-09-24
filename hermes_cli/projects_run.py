@@ -338,6 +338,83 @@ def held_step_keys(steps: Sequence[dict]) -> set:
     }
 
 
+def checkpoint_wait_info(
+    conn, project: projects_db.Project, run: dict, cards: List[dict]
+) -> Optional[dict]:
+    """Which checkpoint is holding this run right now, if any (§7.1).
+
+    A supervised run whose checkpoint step(s) are done while their
+    successors still sit in triage is held on the human's continue — the
+    row itself keeps saying ``running`` (nothing turns it to ``waiting``
+    when a checkpoint card finishes), so both *whether* it's held and
+    *which* card is causing it are derived here from the playbook + board
+    state, never stored. ``cards`` is the run's own card list, each with
+    at least ``step_key``, ``task_id``, ``status``, ``title`` — the same
+    shape ``_run_payload`` (projects_api.py) and the reconcile sweep
+    already build.
+
+    Returns ``None`` when nothing is currently held, otherwise the
+    checkpoint card (the one a human needs to look at) plus every
+    successor step still waiting on it — a playbook can chain more than
+    one checkpoint, though one is the common case.
+    """
+    if run.get("status") not in ("running", "waiting") or not cards:
+        return None
+    if (getattr(project, "autonomy", None) or "supervised") != "supervised":
+        return None
+    playbook = projects_db.get_playbook(conn, project.id, rev=run.get("playbook_rev"))
+    steps = (playbook or {}).get("steps") or []
+    held = held_step_keys(steps)
+    if not held:
+        return None
+    checkpoints = {s["key"] for s in steps if s.get("checkpoint")}
+    deps_of = {s["key"]: set(s.get("depends_on") or []) for s in steps}
+    status_of = {c.get("step_key"): c.get("status") for c in cards}
+    task_of = {c.get("step_key"): c.get("task_id") for c in cards}
+    title_of = {c.get("step_key"): c.get("title") for c in cards}
+    # A held successor is waiting *right now* iff its OWN gating
+    # checkpoint(s) are done — an EARLIER regression here checked whether
+    # every checkpoint anywhere in the playbook was done before
+    # considering anything held, so a playbook with two checkpoints (this
+    # project's) had its first, already-finished checkpoint's hold masked
+    # by the second, still-open one — the run looked "not held" and got
+    # auto-failed as stale a second time even though a card was
+    # genuinely, correctly waiting on a human (2026-09-14 recurrence).
+    held_now = [
+        key
+        for key in held
+        if status_of.get(key) == "triage"
+        and (gating := deps_of.get(key, set()) & checkpoints)
+        and all(status_of.get(c) == "done" for c in gating)
+    ]
+    if not held_now:
+        return None
+    # The specific checkpoint step(s) gating the currently-held successors
+    # — the thing a human actually needs to go look at.
+    causing = sorted(
+        {
+            dep
+            for key in held_now
+            for dep in deps_of.get(key, set())
+            if dep in checkpoints
+        }
+    )
+    checkpoint_key = causing[0] if causing else None
+    return {
+        "checkpoint_step_key": checkpoint_key,
+        "checkpoint_task_id": task_of.get(checkpoint_key),
+        "checkpoint_title": title_of.get(checkpoint_key),
+        "held_step_keys": held_now,
+        "held_task_ids": [task_of[k] for k in held_now if task_of.get(k)],
+    }
+
+
+def run_awaits_continue(conn, project, run: dict, cards: List[dict]) -> bool:
+    """Cheap boolean form of :func:`checkpoint_wait_info` — what the run
+    page's existing ``awaiting_continue`` flag has always meant."""
+    return checkpoint_wait_info(conn, project, run, cards) is not None
+
+
 def host_profile_name(pconn, project_id: str) -> Optional[str]:
     profiles = projects_db.get_project_profiles(pconn, project_id)
     for p in profiles:
@@ -588,19 +665,53 @@ def _approval_store(app_store, *, config):
     return NotificationStore(app_store, config=config)
 
 
+async def _push_approval(*, title: str, body: str, url: str, tag: str) -> None:
+    """Best-effort Web Push for a just-raised approval (§7.1/§12).
+
+    The in-app notification bell already has the item the moment
+    ``store.create`` returns — this is the *courtesy* that means a person
+    doesn't have to have the app open to find out. Reuses the app
+    platform's existing push sender (VAPID keys + device subscriptions
+    already live there for chat delivery); a missing/unconfigured plugin,
+    no enrolled devices, or a transport failure is never an error here —
+    the approval itself is already durably stored either way.
+    """
+    try:
+        from plugins.platforms.app.push import send_push
+    except Exception:
+        return  # the app platform plugin isn't installed on this box
+    try:
+        await send_push(tag, title=title, body=body, url=url)
+    except Exception:
+        log.debug("projects: push notification for %r failed", tag, exc_info=True)
+
+
 def raise_approval(
     project: projects_db.Project,
     run: dict,
     reason: str,
     *,
     kind: str = "checkpoint",
+    dedupe_suffix: Optional[str] = None,
+    url: Optional[str] = None,
 ) -> None:
-    """Checkpoint / budget-stop approval through the shipped FG-10 surface.
+    """Checkpoint / budget-stop approval through the shipped FG-10 surface,
+    with a best-effort push notification alongside it.
 
     Raised with ``reversible=False`` so C6 never auto-answers it (§4: a
     supervised run holds until a human passes the checkpoint). There is no
-    fail-open here: a swallowed approval is worse than a failed start, so a
-    store failure logs at ERROR and propagates.
+    fail-open on the *approval* itself — a swallowed approval is worse
+    than a failed start, so a store failure logs at ERROR and propagates.
+    The push is a courtesy on top and never raises: a person who never
+    enrolled a device (or is offline) still has the durable approval row
+    and the run page itself, which is why §12's UI must never depend on
+    the push having been delivered.
+
+    ``dedupe_suffix`` distinguishes more than one hold of the same
+    ``kind`` within a run (e.g. a playbook with two checkpoints) — without
+    it every hold of that kind in the run collapses onto one dedupe key.
+    ``url`` is the deep link the push opens straight into; defaults to the
+    run's own page.
     """
     target = project.owner_user_id
     if not target:
@@ -608,6 +719,12 @@ def raise_approval(
             f"project '{project.slug}' has no owner_user_id — cannot raise "
             "a run approval"
         )
+    run_no = run.get("run_no")
+    link = url or f"/projects/{project.slug}/runs/{run_no}"
+    dedupe_key = f"proj:{project.slug}:run:{run_no}:{kind}"
+    if dedupe_suffix:
+        dedupe_key = f"{dedupe_key}:{dedupe_suffix}"
+    title = f"Project '{project.name}' run {run_no} needs you ({kind})"
 
     async def _raise() -> None:
         from hermes_cli.config import load_config
@@ -617,17 +734,19 @@ def raise_approval(
         app_store = get_store("supabase-app", "prod", config=resolved)
         store = _approval_store(app_store, config=resolved)
         await store.initialize()
-        await store.create(
+        result = await store.create(
             kind="approval",
             target_user_id=target,
-            title=(
-                f"Project '{project.name}' run {run.get('run_no')} "
-                f"needs you ({kind})"
-            ),
+            title=title,
             body=reason,
             reversible=False,
-            dedupe_key=f"proj:{project.slug}:run:{run.get('run_no')}:{kind}",
+            dedupe_key=dedupe_key,
         )
+        # A re-raise onto an already-pending item is not a new event — the
+        # human already has one notification for it; pushing again would
+        # just be noise for something they haven't acted on yet.
+        if getattr(result, "created", True):
+            await _push_approval(title=title, body=reason, url=link, tag=dedupe_key)
 
     try:
         asyncio.run(_raise())
@@ -991,6 +1110,74 @@ def continue_run(
     return {"run": updated, "promoted": promoted, "budget_gate": None}
 
 
+def resume_run(
+    pconn, bconn, *, project: projects_db.Project, run: dict,
+) -> Dict[str, Any]:
+    """Continue a ``failed``/``cancelled`` run from wherever its cards
+    already are — never re-instantiates the playbook.
+
+    This is the human's answer to "the automatic recovery gave up (Gap B's
+    stale-run sweep, or a manual Stop) but the work already done is still
+    good — pick up where it left off," as distinct from "Repeat this run"
+    (``start_run()`` on the same method), which creates a brand-new run and
+    a brand-new card for every step, redoing completed work from scratch.
+    Found necessary in production: a run auto-failed after 2h of no card
+    activity while a card was genuinely just rate-limited (a third-party
+    API daily quota), and the only recovery available was to hand-edit the
+    kanban board — see plans/2026-09-13-project-run-resilience-plan.md.
+
+    What it does, and nothing else:
+    - Reopens the run row (``status`` -> ``running``, clears
+      ``outcome``/``error``/``ended_at``). Completed cards are untouched —
+      they are already ``done`` on the board and this never touches
+      ``instantiate_run_cards()``.
+    - Unblocks any of the run's cards still sitting ``blocked`` (a human
+      clicking Resume is exactly the "someone looked at this, retry it"
+      signal ``hermes kanban unblock`` requires).
+    - Re-runs the run's own promotion step (``promote_run_cards``) with
+      ``force_held=True`` — matching ``continue_run``'s own force, because
+      a card can reach ``triage`` a second time via the board's block-loop
+      breaker (``BLOCK_RECURRENCE_LIMIT``) even after its checkpoint was
+      already passed once; without forcing, the checkpoint-successor check
+      would refuse to re-promote a step that has every right to retry.
+
+    Refuses (``ValueError``) a run that is not ``failed``/``cancelled`` —
+    ``done`` has already delivered and reopening it has no defined next
+    step; ``running``/``waiting`` are already live and have their own
+    actions (Cancel/Stop, Continue).
+    """
+    if run.get("status") not in ("failed", "cancelled"):
+        raise ValueError(
+            f"run {run.get('run_no')} is '{run.get('status')}' — only a "
+            "failed or cancelled run can be resumed"
+        )
+    projects_db.update_project_run(
+        pconn, run["id"], status="running", outcome=None, error=None,
+        ended_at=None,
+    )
+    reopened = projects_db.get_project_run_by_id(pconn, run["id"])
+
+    for rc in projects_db.get_run_cards(pconn, reopened["id"]):
+        task = kanban_db.get_task(bconn, rc["task_id"])
+        if task is not None and task.status == "blocked":
+            kanban_db.unblock_task(bconn, rc["task_id"])
+
+    playbook = projects_db.get_playbook(
+        pconn, project.id, rev=reopened.get("playbook_rev")
+    )
+    steps = (playbook or {}).get("steps") or []
+    autonomy = project.autonomy or "supervised"
+    held = set() if autonomy == "autonomous" else held_step_keys(steps)
+    promoted = promote_run_cards(
+        bconn, pconn, project=project, run_id=reopened["id"], steps=steps,
+        autonomy=autonomy, held=held, force_held=True,
+    )
+    return {
+        "run": projects_db.get_project_run_by_id(pconn, reopened["id"]),
+        "promoted": promoted,
+    }
+
+
 def refill_run_cards(
     pconn, bconn, *, project: projects_db.Project, run: dict
 ) -> List[str]:
@@ -1029,6 +1216,109 @@ def refill_run_cards(
         autonomy=autonomy,
         held=held,
     )
+
+
+def run_cards_brief(pconn, bconn, run: dict) -> List[dict]:
+    """The minimal ``{step_key, task_id, status, title}`` shape
+    :func:`checkpoint_wait_info` needs, built straight from the board —
+    the same join ``_run_payload`` (projects_api.py) does at fuller detail,
+    factored out here so the reconcile sweep and the completion hook don't
+    need the HTTP layer to check a checkpoint hold."""
+    cards = []
+    for rc in projects_db.get_run_cards(pconn, run["id"]):
+        task = kanban_db.get_task(bconn, rc["task_id"])
+        cards.append(
+            {
+                "step_key": rc.get("step_key"),
+                "task_id": rc["task_id"],
+                "status": task.status if task else None,
+                "title": task.title if task else None,
+            }
+        )
+    return cards
+
+
+def run_cards_all_settled(cards: List[dict]) -> bool:
+    """True once every card linked to a run has left the working pipeline
+    (``done`` or ``archived``) — nothing left for this run to promote or
+    for a worker to still be doing."""
+    return bool(cards) and all(c.get("status") in ("done", "archived") for c in cards)
+
+
+def maybe_close_completed_run(
+    pconn, bconn, *, project: projects_db.Project, run: dict
+) -> Optional[dict]:
+    """Close a run as ``done`` the instant every one of its cards has
+    settled (§6.1).
+
+    Finishing the last card was never itself the event that closes the
+    run — nothing else does either, so a fully-finished run just sits
+    ``running`` forever with nothing left to promote. That reads as
+    *stalled* on the run page (`_run_stalled`, projects_api.py, correctly
+    says no worker is active — for once, the right reason: everything is
+    actually done), not as the success it is (found in production,
+    2026-09-14: "7 of 7 steps done" next to a red "Failed"/"Stalled"
+    badge). A no-op (``None``) unless the run is still ``running`` and
+    every one of its cards has genuinely settled.
+    """
+    if run.get("status") != "running":
+        return None
+    cards = run_cards_brief(pconn, bconn, run)
+    if not run_cards_all_settled(cards):
+        return None
+    return close_run(pconn, run=run)
+
+
+def notify_if_awaiting_checkpoint(
+    pconn, bconn, *, project: projects_db.Project, run: dict
+) -> bool:
+    """Fire the *live* "waiting on you" notification the moment this run's
+    checkpoint actually engages (§7.1/§12) — as opposed to the generic
+    notice ``start_run()`` raises once when the playbook is instantiated,
+    long before anyone knows whether or when a checkpoint will actually be
+    reached. Quotes the checkpoint card's own comment (the worker's
+    findings/questions) so the push and the in-app item carry the real
+    content, not just "there's a checkpoint somewhere in this playbook."
+
+    Safe to call on every refill and every sweep tick: ``raise_approval``'s
+    dedupe key is per run *and* per checkpoint step, so re-detecting the
+    same hold is a no-op after the first call. Returns whether a
+    checkpoint is currently held, regardless of who raised it.
+    """
+    info = checkpoint_wait_info(pconn, project, run, run_cards_brief(pconn, bconn, run))
+    if info is None:
+        return False
+    comment = _latest_card_note(bconn, info.get("checkpoint_task_id"))
+    reason = f"Checkpoint step \"{info.get('checkpoint_title')}\" is done and waiting on your review before its next step(s) proceed."
+    if comment:
+        reason = f"{reason}\n\n{comment}"
+    try:
+        raise_approval(
+            project, run, reason, kind="checkpoint",
+            dedupe_suffix=info.get("checkpoint_step_key"),
+            url=f"/projects/{project.slug}/runs/{run.get('run_no')}",
+        )
+    except Exception:  # noqa: BLE001 — a failed-open notify must not break refill
+        log.warning(
+            "projects: could not raise live checkpoint approval for %s run %s",
+            project.slug, run.get("run_no"), exc_info=True,
+        )
+    return True
+
+
+def _latest_card_note(bconn, task_id: Optional[str]) -> Optional[str]:
+    """The most recent thing the checkpoint card's worker said — its own
+    comment if it left one, else the run summary. `None` if it left
+    neither (nothing to quote)."""
+    if not task_id:
+        return None
+    try:
+        comments = kanban_db.list_comments(bconn, task_id)
+        if comments:
+            return comments[-1].body
+        return kanban_db.latest_summary(bconn, task_id)
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def cancel_run(pconn, bconn, *, project: projects_db.Project, run: dict) -> dict:

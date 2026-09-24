@@ -28,7 +28,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # Paths
 CONFIG_PATH = '/opt/data/whatsapp-messages/config.json'
-DB_PATH = '/opt/data/whatsapp-messages/whatsapp_data.db'
+DB_PATH = os.environ.get('MESSAGING_DB_PATH', '/opt/data/whatsapp-messages/messaging_data.db')
 MEDIA_DIR = '/opt/data/whatsapp-messages/media'
 BATCH_OUTPUT_DIR = '/opt/data/whatsapp-messages/batches'
 

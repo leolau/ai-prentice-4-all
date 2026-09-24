@@ -77,10 +77,10 @@ describe("CoralHost grid panel", () => {
     expect(menu.querySelector(".coral-section--system")).toBeTruthy();
   });
 
-  it("renders one menuitem per destination (17 tiles)", () => {
+  it("renders one menuitem per destination (18 tiles)", () => {
     render(<CoralHost />);
     openCoral();
-    expect(screen.getAllByRole("menuitem")).toHaveLength(17);
+    expect(screen.getAllByRole("menuitem")).toHaveLength(18);
   });
 
   it("marks the active route with aria-current", () => {

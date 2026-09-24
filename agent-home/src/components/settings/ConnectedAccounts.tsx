@@ -11,18 +11,51 @@
  */
 import { useCallback, useEffect, useState } from "react";
 
-import type { CredentialEntry } from "@/types";
+import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
+import type { CredentialEntry, EmailPollerAccount } from "@/types";
 
 type ConnectPhase = "idle" | "consent" | "busy";
+
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const REDIRECT_URL_RE = /^https?:\/\/localhost:\d+/;
+const BARE_CODE_RE = /^4\//;
+
+/** Explain why a hint was rejected — the common mistake is pasting the
+ *  step-3 redirect URL here, which re-runs start and clobbers the pending
+ *  authorization. */
+function hintError(hint: string): string | null {
+  if (REDIRECT_URL_RE.test(hint) || hint.includes("code=")) {
+    return "That looks like the redirect URL — it belongs in step 3, after you approve in Google.";
+  }
+  if (!EMAIL_RE.test(hint)) {
+    return "Enter the Google account's email address, or leave it blank.";
+  }
+  return null;
+}
+
+/** The pasted value must be the localhost redirect URL or a bare code. */
+function pastedError(pasted: string): string | null {
+  if (REDIRECT_URL_RE.test(pasted) && pasted.includes("code=")) return null;
+  if (BARE_CODE_RE.test(pasted)) return null;
+  if (EMAIL_RE.test(pasted)) {
+    return "That's the email-hint field's job — here paste the redirect URL the browser lands on after you approve.";
+  }
+  return "Paste the full redirect URL (starts with http://localhost:4321 and contains code=) or the bare code.";
+}
 
 const SERVICE_OPTIONS = [
   { id: "email", label: "Email (IMAP + Gmail API)" },
   { id: "calendar", label: "Calendar" },
+  { id: "drive", label: "Drive" },
   { id: "workspace", label: "Full workspace (Drive, Docs, Sheets)" },
 ] as const;
 
 export function ConnectedAccounts() {
   const [entries, setEntries] = useState<CredentialEntry[]>([]);
+  const [pollerAccounts, setPollerAccounts] = useState<
+    Record<string, EmailPollerAccount>
+  >({});
+  const [pollerConfigPresent, setPollerConfigPresent] = useState(false);
   const [loaded, setLoaded] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -30,8 +63,13 @@ export function ConnectedAccounts() {
   const [services, setServices] = useState<string[]>(["email", "calendar"]);
   const [hint, setHint] = useState("");
   const [authUrl, setAuthUrl] = useState<string | null>(null);
+  const [expiresIn, setExpiresIn] = useState<number | null>(null);
+  const [startedFor, setStartedFor] = useState<string | null>(null);
   const [pasted, setPasted] = useState("");
   const [result, setResult] = useState<string | null>(null);
+  const [confirmEntry, setConfirmEntry] = useState<CredentialEntry | null>(
+    null,
+  );
 
   const reload = useCallback(async () => {
     try {
@@ -46,6 +84,25 @@ export function ConnectedAccounts() {
     } catch {
       setError("Could not load connected accounts.");
     }
+    // The poller config is a deployment feature — a failed/absent endpoint
+    // just hides the toggle, it doesn't error the section.
+    try {
+      const res = await fetch("/api/email-accounts");
+      if (res.ok) {
+        const data = (await res.json()) as {
+          config_present: boolean;
+          accounts: EmailPollerAccount[];
+        };
+        setPollerConfigPresent(data.config_present);
+        setPollerAccounts(
+          Object.fromEntries(
+            data.accounts.map((a) => [a.address.toLowerCase(), a]),
+          ),
+        );
+      }
+    } catch {
+      /* poller toggle stays hidden */
+    }
     setLoaded(true);
   }, []);
 
@@ -54,6 +111,14 @@ export function ConnectedAccounts() {
   }, [reload]);
 
   const start = useCallback(async () => {
+    const trimmedHint = hint.trim();
+    if (trimmedHint) {
+      const problem = hintError(trimmedHint);
+      if (problem) {
+        setError(problem);
+        return;
+      }
+    }
     setPhase("busy");
     setError(null);
     try {
@@ -61,7 +126,7 @@ export function ConnectedAccounts() {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
-          name: hint.trim() || undefined,
+          name: trimmedHint || undefined,
           services,
         }),
       });
@@ -71,8 +136,13 @@ export function ConnectedAccounts() {
         setPhase("idle");
         return;
       }
-      const data = (await res.json()) as { auth_url: string };
+      const data = (await res.json()) as {
+        auth_url: string;
+        expires_in?: number;
+      };
       setAuthUrl(data.auth_url);
+      setExpiresIn(data.expires_in ?? null);
+      setStartedFor(trimmedHint || null);
       setPasted("");
       setResult(null);
       setPhase("consent");
@@ -83,6 +153,11 @@ export function ConnectedAccounts() {
   }, [hint, services]);
 
   const complete = useCallback(async () => {
+    const problem = pastedError(pasted.trim());
+    if (problem) {
+      setError(problem);
+      return;
+    }
     setPhase("busy");
     setError(null);
     try {
@@ -96,6 +171,14 @@ export function ConnectedAccounts() {
         account_email?: string | null;
         granted_scopes?: string[];
       };
+      if (res.status === 409) {
+        // Pending state expired or was replaced — only a fresh start helps.
+        setError("The sign-in link expired — start again below.");
+        setPhase("idle");
+        setAuthUrl(null);
+        setExpiresIn(null);
+        return;
+      }
       if (!res.ok) {
         setError(data.detail ?? "Google rejected the code; try again.");
         setPhase("consent");
@@ -104,19 +187,28 @@ export function ConnectedAccounts() {
       const hasMail = (data.granted_scopes ?? []).includes(
         "https://mail.google.com/",
       );
+      const wrongAccount =
+        startedFor &&
+        data.account_email &&
+        data.account_email.toLowerCase() !== startedFor.toLowerCase();
       setResult(
         `Connected ${data.account_email ?? "account"}` +
+          (wrongAccount
+            ? ` — note: Google approved a different account than the ${startedFor} hint`
+            : "") +
           (hasMail ? "" : " — without the Mail scope, email polling stays off"),
       );
       setPhase("idle");
       setAuthUrl(null);
+      setExpiresIn(null);
+      setStartedFor(null);
       setPasted("");
       await reload();
     } catch {
       setError("Could not finish the Google connection.");
       setPhase("idle");
     }
-  }, [pasted, reload]);
+  }, [pasted, startedFor, reload]);
 
   const toggleService = useCallback(
     async (entry: CredentialEntry, service: string, on: boolean) => {
@@ -141,6 +233,40 @@ export function ConnectedAccounts() {
       if (!res.ok) setError("Could not update the account; reload to resync.");
     },
     [],
+  );
+
+  const toggleEmailPolling = useCallback(
+    async (entry: CredentialEntry, on: boolean) => {
+      const key = entry.name.toLowerCase();
+      const previous = pollerAccounts[key];
+      setPollerAccounts((prev) => ({
+        ...prev,
+        [key]: {
+          id: previous?.id ?? "",
+          address: entry.name,
+          label: previous?.label ?? null,
+          enabled: on,
+        },
+      }));
+      const res = await fetch("/api/email-accounts", {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ address: entry.name, enabled: on }),
+      });
+      if (res.ok) {
+        const data = (await res.json()) as { account: EmailPollerAccount };
+        setPollerAccounts((prev) => ({ ...prev, [key]: data.account }));
+      } else {
+        setPollerAccounts((prev) => {
+          const next = { ...prev };
+          if (previous) next[key] = previous;
+          else delete next[key];
+          return next;
+        });
+        setError("Could not update email polling; reload to resync.");
+      }
+    },
+    [pollerAccounts],
   );
 
   const setVisibility = useCallback(
@@ -188,7 +314,7 @@ export function ConnectedAccounts() {
   );
 
   return (
-    <section>
+    <section data-component="ConnectedAccounts">
       <h2 className="text-sm font-semibold">Connected accounts</h2>
       <p className="mb-3 text-xs text-[var(--color-muted)]">
         Your own Google (and other) credentials, stored per login. Background
@@ -221,7 +347,7 @@ export function ConnectedAccounts() {
               <button
                 type="button"
                 className="text-xs text-red-400"
-                onClick={() => void disconnect(entry)}
+                onClick={() => setConfirmEntry(entry)}
               >
                 Disconnect
               </button>
@@ -239,6 +365,31 @@ export function ConnectedAccounts() {
                   {s.label}
                 </label>
               ))}
+              {entry.provider === "google" && pollerConfigPresent && (
+                <label className="flex items-center gap-1">
+                  <input
+                    type="checkbox"
+                    checked={
+                      pollerAccounts[entry.name.toLowerCase()]?.enabled ?? false
+                    }
+                    onChange={(e) =>
+                      void toggleEmailPolling(entry, e.target.checked)
+                    }
+                  />
+                  Email polling
+                  {!entry.services.includes("email") ? (
+                    <span className="text-[var(--color-muted)]">
+                      (grant Email service too)
+                    </span>
+                  ) : (
+                    !pollerAccounts[entry.name.toLowerCase()] && (
+                      <span className="text-[var(--color-muted)]">
+                        (adds a Gmail poller entry)
+                      </span>
+                    )
+                  )}
+                </label>
+              )}
               <label className="flex items-center gap-1">
                 <select
                   value={entry.visibility.startsWith("private") ? "private" : "shared"}
@@ -263,6 +414,7 @@ export function ConnectedAccounts() {
 
       {phase === "idle" && (
         <div className="space-y-2">
+          <p className="text-xs font-semibold">1. Pick services &amp; start</p>
           <div className="flex flex-wrap gap-3 text-xs">
             {SERVICE_OPTIONS.map((s) => (
               <label key={s.id} className="flex items-center gap-1">
@@ -284,7 +436,7 @@ export function ConnectedAccounts() {
           <input
             value={hint}
             onChange={(e) => setHint(e.target.value)}
-            placeholder="Google account email (optional hint)"
+            placeholder="Google account email (optional — pre-fills Google's sign-in)"
             className="w-full rounded border border-[var(--color-surface-2)] bg-transparent px-2 py-1 text-xs"
           />
           <button
@@ -299,52 +451,83 @@ export function ConnectedAccounts() {
       )}
 
       {phase !== "idle" && authUrl && (
-        <div className="space-y-2 text-xs">
-          <p>
-            1. Open the consent link and approve (keep every checked service
-            selected):{" "}
-            <a
-              href={authUrl}
-              target="_blank"
-              rel="noreferrer"
-              className="underline text-[var(--color-accent)] break-all"
-            >
-              consent link
-            </a>
-          </p>
-          <p>2. The browser lands on an unreachable localhost page — copy the
-            code (or the whole URL) from its address bar:</p>
-          <input
-            value={pasted}
-            onChange={(e) => setPasted(e.target.value)}
-            placeholder="paste code or redirect URL"
-            className="w-full rounded border border-[var(--color-surface-2)] bg-transparent px-2 py-1"
-          />
-          <div className="flex gap-2">
-            <button
-              type="button"
-              disabled={phase === "busy" || !pasted.trim()}
-              onClick={() => void complete()}
-              className="rounded bg-[var(--color-accent)] px-2 py-1 font-semibold text-black"
-            >
-              {phase === "busy" ? "Working…" : "Complete"}
-            </button>
-            <button
-              type="button"
-              disabled={phase === "busy"}
-              onClick={() => {
-                setPhase("idle");
-                setAuthUrl(null);
-              }}
-              className="rounded px-2 py-1"
-            >
-              Cancel
-            </button>
+        <div className="space-y-3 text-xs">
+          <div className="space-y-1">
+            <p className="font-semibold">2. Approve in Google</p>
+            <p>
+              <a
+                href={authUrl}
+                target="_blank"
+                rel="noreferrer"
+                className="inline-block rounded bg-[var(--color-accent)] px-2 py-1 font-semibold text-black"
+              >
+                Open Google sign-in
+              </a>
+            </p>
+            <p className="text-[var(--color-muted)]">
+              Google shows an account chooser — pick the account to connect
+              {startedFor ? ` (expecting ${startedFor})` : ""} and approve
+              every checked service.
+              {expiresIn
+                ? ` Link expires in about ${Math.round(expiresIn / 60)} minutes.`
+                : ""}
+            </p>
+          </div>
+          <div className="space-y-1">
+            <p className="font-semibold">3. Paste the redirect URL</p>
+            <p className="text-[var(--color-muted)]">
+              After approving, the browser lands on a localhost page that says
+              it can&apos;t be reached — that&apos;s expected. Copy the
+              address-bar URL here:
+            </p>
+            <input
+              value={pasted}
+              onChange={(e) => setPasted(e.target.value)}
+              placeholder="http://localhost:4321/?code=…&state=…"
+              className="w-full rounded border border-[var(--color-surface-2)] bg-transparent px-2 py-1"
+            />
+            <div className="flex gap-2">
+              <button
+                type="button"
+                disabled={phase === "busy" || !pasted.trim()}
+                onClick={() => void complete()}
+                className="rounded bg-[var(--color-accent)] px-2 py-1 font-semibold text-black"
+              >
+                {phase === "busy" ? "Working…" : "Complete"}
+              </button>
+              <button
+                type="button"
+                disabled={phase === "busy"}
+                onClick={() => {
+                  setPhase("idle");
+                  setAuthUrl(null);
+                  setExpiresIn(null);
+                  setStartedFor(null);
+                }}
+                className="rounded px-2 py-1"
+              >
+                Cancel
+              </button>
+            </div>
           </div>
         </div>
       )}
       {phase === "busy" && !authUrl && (
         <p className="text-xs text-[var(--color-muted)]">Working…</p>
+      )}
+
+      {confirmEntry && (
+        <ConfirmDialog
+          title="Disconnect account?"
+          body={`Disconnect ${confirmEntry.name}? Its stored credential is removed — services using it (email, calendar, Drive) stop working until you connect it again.`}
+          confirmLabel="Disconnect"
+          onCancel={() => setConfirmEntry(null)}
+          onConfirm={() => {
+            const entry = confirmEntry;
+            setConfirmEntry(null);
+            void disconnect(entry);
+          }}
+        />
       )}
     </section>
   );

@@ -8,6 +8,8 @@ project view never leaks another user's ``private:`` card.
 
 from __future__ import annotations
 
+import json
+
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -654,6 +656,162 @@ def test_card_detail_surfaces_the_block_reason(env):
     assert card["status"] == "blocked"
     assert card["latest_summary"] == "Which Canva template should I use?"
     assert card["block_kind"] == "needs_input"
+
+
+def test_card_detail_surfaces_live_progress_while_running(env):
+    """A card's worker runs in another process with no reasoning stream —
+    heartbeat notes and comments are the equivalent progress signal, and
+    the card page must actually receive them (found missing: the page
+    showed a running card with no update at all, not even a stale one)."""
+    project = _create(env)
+    _activate(env, project)
+    client, _state = env
+    slug = project["slug"]
+    tid = client.post(
+        f"/api/registry/projects/{slug}/cards", json={"title": "Draft"}
+    ).json()["task_id"]
+    with kanban_db.connect_closing() as bconn:
+        kanban_db.specify_triage_task(bconn, tid)
+        bconn.execute(
+            "UPDATE tasks SET status = 'running' WHERE id = ?", (tid,)
+        )
+        assert kanban_db.heartbeat_worker(bconn, tid, note="42/100 done")
+        # A later heartbeat with no note must not blank out the last real
+        # one — the card should keep showing the most recent *note*.
+        assert kanban_db.heartbeat_worker(bconn, tid, note=None)
+        kanban_db.add_comment(bconn, tid, "default", "Halfway through the batch.")
+
+    card = client.get(f"/api/registry/projects/{slug}/cards/{tid}").json()
+    assert card["status"] == "running"
+    assert card["latest_heartbeat"]["note"] == "42/100 done"
+    assert len(card["comments"]) == 1
+    assert card["comments"][0]["body"] == "Halfway through the batch."
+    assert card["comments"][0]["author"] == "default"
+
+
+def test_card_detail_surfaces_the_workers_own_log_cleaned_of_terminal_noise(
+    env, tmp_path, monkeypatch,
+):
+    """A board-dispatched card's worker has no in-memory reasoning buffer
+    to tail (that's `run_activity.py`, for inline sessions only) — but its
+    stdout/stderr is captured to a durable log file any process can read.
+    The card page must surface it, with the terminal-only noise (ANSI
+    codes, spinner-frame repeats) stripped."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+    project = _create(env)
+    _activate(env, project)
+    client, _state = env
+    slug = project["slug"]
+    tid = client.post(
+        f"/api/registry/projects/{slug}/cards", json={"title": "Draft"}
+    ).json()["task_id"]
+    with kanban_db.connect_closing() as bconn:
+        kanban_db.specify_triage_task(bconn, tid)
+        bconn.execute("UPDATE tasks SET status = 'running' WHERE id = ?", (tid,))
+
+    log_path = kanban_db.worker_log_path(tid)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_path.write_bytes(
+        "\x1b[1m╭─ ⚕ Hermes ─╮\x1b[0m\r\n"
+        "Reading the tender document now.\r\n"
+        "───────\n".encode("utf-8")
+    )
+
+    card = client.get(f"/api/registry/projects/{slug}/cards/{tid}").json()
+    assert card["worker_log_tail"] is not None
+    assert "Reading the tender document now." in card["worker_log_tail"]
+    assert "\x1b" not in card["worker_log_tail"]
+    assert "Hermes" not in card["worker_log_tail"]
+
+
+def test_card_detail_has_no_heartbeat_or_comments_when_there_are_none(env):
+    project = _create(env)
+    _activate(env, project)
+    client, _state = env
+    slug = project["slug"]
+    tid = client.post(
+        f"/api/registry/projects/{slug}/cards", json={"title": "Draft"}
+    ).json()["task_id"]
+    card = client.get(f"/api/registry/projects/{slug}/cards/{tid}").json()
+    assert card["latest_heartbeat"] is None
+    assert card["comments"] == []
+
+
+def _parse_sse(text: str) -> list[tuple[str, dict]]:
+    """Minimal SSE reader for a fully-drained `TestClient` response — only
+    safe to call for a stream that terminates on its own (a `gone`/`end`
+    frame), since `TestClient.get()` reads the whole body before returning."""
+    frames: list[tuple[str, dict]] = []
+    for block in text.strip("\n").split("\n\n"):
+        if not block.strip() or block.startswith(":"):
+            continue
+        event, data_lines = "message", []
+        for line in block.split("\n"):
+            if line.startswith("event:"):
+                event = line[len("event:"):].strip()
+            elif line.startswith("data:"):
+                data_lines.append(line[len("data:"):].strip())
+        if data_lines:
+            frames.append((event, json.loads("\n".join(data_lines))))
+    return frames
+
+
+def test_card_stream_pushes_the_row_then_ends_once_it_leaves_running(env):
+    """A card page no longer has to poll for this (§12 push edition): the
+    stream is only live while `running`, so a card that isn't (or just
+    stopped) is a one-frame stream — a real `running` card's browser tab
+    would instead see repeated `update` frames as its heartbeat/comments
+    change, up to the tick this test doesn't wait out."""
+    project = _create(env)
+    _activate(env, project)
+    client, _state = env
+    slug = project["slug"]
+    tid = client.post(
+        f"/api/registry/projects/{slug}/cards", json={"title": "Draft"}
+    ).json()["task_id"]
+    with kanban_db.connect_closing() as bconn:
+        kanban_db.specify_triage_task(bconn, tid)
+        bconn.execute("UPDATE tasks SET status = 'running' WHERE id = ?", (tid,))
+        assert kanban_db.heartbeat_worker(bconn, tid, note="10/20 done")
+        bconn.execute("UPDATE tasks SET status = 'done' WHERE id = ?", (tid,))
+
+    resp = client.get(f"/api/registry/projects/{slug}/cards/{tid}/stream")
+    assert resp.status_code == 200
+    frames = _parse_sse(resp.text)
+    assert frames[0][0] == "update"
+    assert frames[0][1]["status"] == "done"
+    assert frames[0][1]["latest_heartbeat"]["note"] == "10/20 done"
+    assert frames[-1][0] == "end"
+
+
+def test_card_stream_is_404_for_an_unknown_card(env):
+    project = _create(env)
+    _activate(env, project)
+    client, _state = env
+    resp = client.get(
+        f"/api/registry/projects/{project['slug']}/cards/task_missing/stream"
+    )
+    assert resp.status_code == 404
+
+
+def test_card_stream_hides_another_users_private_card(env):
+    project = _create(env)
+    _activate(env, project)
+    client, state = env
+    slug = project["slug"]
+    with kanban_db.connect_closing() as bconn:
+        private_tid = kanban_db.create_task(
+            bconn,
+            title="Someone else's private card",
+            project_id=project["id"],
+            owner_user_id="mallory",
+            visibility="private:mallory",
+            triage=True,
+        )
+    _member(project["id"], "ada", "lead")
+    state["actor"] = MEMBER_P
+    resp = client.get(f"/api/registry/projects/{slug}/cards/{private_tid}/stream")
+    assert resp.status_code == 404
 
 
 def test_card_create_lands_in_triage_on_the_project(env):

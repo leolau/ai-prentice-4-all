@@ -222,6 +222,19 @@ class TestSessionsTagFilter:
         assert "s1" in ids
         assert "s2" not in ids
 
+    def test_sessions_list_includes_each_rows_own_tags(self, client):
+        """GET /api/sessions attaches every row's tags in bulk (not just
+        the tag-filtered subset) — agent-home's category-override check
+        needs this without a separate per-session fetch."""
+        _seed_session(client, "s1", title="Tagged")
+        _seed_session(client, "s2", title="Untagged")
+        client.post("/api/sessions/s1/tags", json={"name": "category:kanban"})
+        res = client.get("/api/sessions")
+        assert res.status_code == 200
+        sessions = {s["id"]: s for s in res.json()["sessions"]}
+        assert [t["name"] for t in sessions["s1"]["tags"]] == ["category:kanban"]
+        assert sessions["s2"]["tags"] == []
+
 
 class TestSuggestTags:
     def test_suggest_tags_returns_suggestions(self, client, monkeypatch):

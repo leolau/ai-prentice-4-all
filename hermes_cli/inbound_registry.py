@@ -2,7 +2,8 @@
 
 WhatsApp messages, emails and calendar events all reach Hermes today and all
 land somewhere private to the box that received them — the custom pipeline's
-SQLite (``whatsapp_data.db``), reachable from MCP tools and the Telegram digest
+SQLite files (``messaging_data.db`` / ``email_data.db`` / ``calendar_data.db``),
+reachable from MCP tools and the Telegram digest
 and nowhere else. ``/inbox`` cannot list them because there is nothing shared
 to list: the page shows FG-10 approvals and the FG-12 change log, which is why
 it looks empty of the mail that actually arrived.

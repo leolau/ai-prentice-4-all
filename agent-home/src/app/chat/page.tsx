@@ -2,6 +2,7 @@ import { ChatHeaderActions } from "@/components/chat/ChatHeaderActions";
 import { ChatPane } from "@/components/chat/ChatPane";
 import { MobileShell } from "@/components/MobileShell";
 import { apiClientForRequest, requirePrincipal } from "@/lib/auth/principal";
+import { CHAT_SESSION_LIST_LIMIT } from "@/lib/chat/session-limits";
 import { storageConfigured } from "@/lib/env";
 import type { ChatMessage, ProfileSummary, SessionSummary } from "@/types";
 
@@ -14,11 +15,12 @@ export const dynamic = "force-dynamic";
 
 /**
  * FG-20 Wave C1 — the one-brain chat tab. BFF: the server resolves the
- * principal and loads the principal's conversations (all sources except
- * cron, and the most recent one's transcript) from the Python API, then
- * hands them to the interactive {@link ChatPane}. Sending routes back
- * through `/api/chat/*` to the principal-scoped
- * `POST /api/sessions/{id}/chat` endpoint.
+ * principal and loads the principal's conversations (every source,
+ * including cron — see `categorizeSession`/`SessionTabs`, which groups
+ * them inline instead of hiding them, and the most recent one's
+ * transcript) from the Python API, then hands them to the interactive
+ * {@link ChatPane}. Sending routes back through `/api/chat/*` to the
+ * principal-scoped `POST /api/sessions/{id}/chat` endpoint.
  */
 export default async function Page({
   searchParams,
@@ -45,20 +47,31 @@ export default async function Page({
   let error: string | null = null;
   try {
     const client = await apiClientForRequest({ profile });
-    // A profile that no longer exists must not silently answer as the default:
-    // the list is what the picker offers, and an unknown name 404s upstream.
-    profiles = (await client.profiles().catch(() => ({ profiles: [] }))).profiles;
-    const list = await client.sessions({
-      excludeSources: "cron",
-      order: "recent",
-      // The picker offers every conversation, not a 30-row window.
-      limit: 200,
-    });
+    // `profiles()` and `sessions()` don't depend on each other — awaiting
+    // them sequentially was pure added latency on every page load.
+    const [profilesResult, list] = await Promise.all([
+      // A profile that no longer exists must not silently answer as the
+      // default: the list is what the picker offers, and an unknown name
+      // 404s upstream.
+      client.profiles().catch(() => ({ profiles: [] })),
+      client.sessions({
+        order: "recent",
+        // Fast first paint for the strip — see CHAT_SESSION_LIST_LIMIT's
+        // doc comment.
+        limit: CHAT_SESSION_LIST_LIMIT,
+      }),
+    ]);
+    profiles = profilesResult.profiles;
     sessions = list.sessions;
     if (requested && !sessions.some((s) => s.id === requested)) {
-      // A memory can cite a cron conversation or one past the first page:
-      // fetch wider and prepend it rather than silently opening another.
-      const all = await client.sessions({ order: "recent", limit: 200 });
+      // A memory can cite a session older than CHAT_SESSION_LIST_LIMIT (now
+      // the backend's own 200-row ceiling, so this only matters once total
+      // history exceeds that): fetch again and prepend it rather than
+      // silently opening another conversation instead.
+      const all = await client.sessions({
+        order: "recent",
+        limit: CHAT_SESSION_LIST_LIMIT,
+      });
       const match = all.sessions.find((s) => s.id === requested);
       if (match) sessions = [match, ...sessions];
     }

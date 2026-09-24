@@ -362,6 +362,10 @@ export interface SessionSummary {
   ended_at: number | null;
   is_active?: boolean;
   archived?: boolean;
+  /** The working directory the session ran in (already returned by the
+   * Python API's `SELECT s.*`, just not previously typed here). Used to
+   * detect kanban-card-worker sessions — see `lib/chat/categorize.ts`. */
+  cwd?: string | null;
   /** Persisted token totals from the sessions table (used by context-window UI). */
   input_tokens?: number;
   output_tokens?: number;
@@ -1125,6 +1129,18 @@ export interface CredentialEntry {
   updated_at: string | null;
 }
 
+/**
+ * One account in the deployment email poller's config — separate axis from
+ * the credential's `email` service flag (that one marks the credential as
+ * usable for mail; this one controls whether the background poller runs).
+ */
+export interface EmailPollerAccount {
+  id: string;
+  address: string;
+  label: string | null;
+  enabled: boolean;
+}
+
 /** What the to-do filter chips can offer without leading to an empty list. */
 export interface TodosFacets {
   stages: { value: string; count: number }[];
@@ -1506,6 +1522,22 @@ export interface ProjectRunBlockedTask {
   error: string | null;
 }
 
+/**
+ * What a supervised run's checkpoint hold is actually waiting on (§7.1,
+ * §12 push edition) — the checkpoint card's own comment, not just a
+ * boolean, so the run page can show a person what to look at instead of
+ * a generic "there's a checkpoint" sentence.
+ */
+export interface ProjectRunCheckpointWait {
+  checkpoint_task_id: string | null;
+  checkpoint_title: string | null;
+  /** The checkpoint card's most recent comment (or run summary if it left
+   * no comment) — the worker's findings/questions, verbatim. */
+  comment: string | null;
+  /** The successor card(s) still held in triage until Continue. */
+  held_task_ids: string[];
+}
+
 /** The full run row (§6) as the detail/list reads return it. */
 export interface ProjectRun {
   id: string;
@@ -1550,6 +1582,8 @@ export interface ProjectRun {
    * their successors still wait in triage — held on the human's Continue.
    */
   awaiting_continue?: boolean;
+  /** `null` while `awaiting_continue` is false; the detail when it's true. */
+  checkpoint_wait?: ProjectRunCheckpointWait | null;
 }
 
 /** The method, one revision (§7). `steps` is parsed JSON on the detail read. */
@@ -1738,6 +1772,9 @@ export interface ProjectBoardTask {
   /** Why a `blocked` card stopped (`kanban_db.VALID_BLOCK_KINDS`), or
    * `null` for a legacy/un-typed block. Absent for every other status. */
   block_kind?: "needs_input" | "capability" | "transient" | null;
+  /** Pinned model for this card's worker (`-m` at dispatch) — the card
+   * ignores the main model while this is set. Null/absent = follows main. */
+  model_override?: string | null;
   [extra: string]: unknown;
 }
 
@@ -1754,14 +1791,43 @@ export interface ProjectCardAge {
   time_to_complete_seconds: number | null;
 }
 
+/** One entry in a card's comment thread — the worker's own narrated
+ * progress updates land here (`kanban_comment`), same table a human's
+ * card-page reply would use. */
+export interface ProjectCardComment {
+  author: string;
+  body: string;
+  created_at: number;
+}
+
+/** The most recent `heartbeat` event that carried a `note` — a running
+ * card's lightweight liveness + progress signal (e.g. "93/131 done").
+ * `null` when the card has never heartbeat-noted (not yet started, or a
+ * worker that never calls out progress). */
+export interface ProjectCardHeartbeat {
+  note: string;
+  created_at: number;
+}
+
 /**
  * `GET /{slug}/cards/{task_id}` — `kanban_view.task_dict` verbatim: the
- * board row plus the age metrics and (when the caller passes one) the
- * latest run summary.
+ * board row plus the age metrics, the latest run summary, the comment
+ * thread and the latest heartbeat note (when the caller passes one/exist).
  */
 export interface ProjectCardDetail extends ProjectBoardTask {
   age?: ProjectCardAge | null;
   latest_summary?: string | null;
+  comments?: ProjectCardComment[];
+  latest_heartbeat?: ProjectCardHeartbeat | null;
+  /**
+   * The worker's own log, cleaned of terminal-only noise (ANSI codes,
+   * spinner-frame repeats, decorative borders) down to its reasoning
+   * sentences and tool-call summaries — the closest thing a
+   * board-dispatched card has to a live reasoning stream. `null` before
+   * the worker has written anything (or once it's been garbage
+   * collected).
+   */
+  worker_log_tail?: string | null;
 }
 
 export interface ProjectBoardView {
@@ -1840,4 +1906,137 @@ export interface CapacityResponse {
   /** Indicators that could not be read — shown as unknown, never as zero. */
   unavailable: string[];
   collected_at: number;
+}
+
+/* ── Models page (System ▸ Models) ──────────────────────────────────────
+ * Shapes mirror the Python API exactly (`/api/model/*`,
+ * `/api/analytics/models`, `/api/providers/validate`, `/api/env`) — the BFF
+ * routes pass them through untouched. */
+
+/** Capability metadata resolved from models.dev (may be empty). */
+export interface ModelCapabilities {
+  supports_tools?: boolean;
+  supports_vision?: boolean;
+  supports_reasoning?: boolean;
+  context_window?: number;
+  max_output_tokens?: number;
+  model_family?: string;
+}
+
+/** `GET /api/model/info` — the configured main model, resolved. */
+export interface ModelInfo {
+  model: string;
+  provider: string;
+  auto_context_length: number;
+  config_context_length: number;
+  effective_context_length: number;
+  capabilities: ModelCapabilities;
+}
+
+/**
+ * One provider row from `GET /api/model/options`. `authenticated=false`
+ * rows are catalog skeletons: `key_env` names the env var a key-based
+ * provider needs (e.g. `OPENCODE_GO_API_KEY`), `auth_type` tells the UI
+ * whether a key field or an onboarding pointer is the right affordance.
+ */
+export interface ModelProviderOption {
+  slug: string;
+  name: string;
+  is_current?: boolean;
+  is_user_defined?: boolean;
+  models: string[];
+  total_models?: number;
+  source?: string;
+  authenticated?: boolean;
+  auth_type?: string;
+  key_env?: string | null;
+  /** Env var for a required companion endpoint URL (e.g. Azure Foundry). */
+  base_url_env?: string | null;
+  warning?: string | null;
+}
+
+export interface ModelOptionsResponse {
+  providers: ModelProviderOption[];
+  /** Currently configured main model/provider (echoed by upstream). */
+  model: string;
+  provider: string;
+}
+
+/** One auxiliary task slot from `GET /api/model/auxiliary`. */
+export interface AuxTaskAssignment {
+  task: string;
+  /** "auto" means the slot inherits the main model. */
+  provider: string;
+  model: string;
+  base_url: string;
+}
+
+export interface AuxiliaryModelsResponse {
+  tasks: AuxTaskAssignment[];
+  main: { provider: string; model: string };
+}
+
+/** `POST /api/model/set` response — `confirm_required` means resend with `confirm_expensive_model`. */
+export interface ModelSetResponse {
+  ok: boolean;
+  scope?: string;
+  confirm_required?: boolean;
+  confirm_message?: string;
+  stale_aux?: { task: string; provider: string; model: string }[];
+  gateway_tools?: unknown;
+  detail?: string;
+}
+
+/** One model's usage row from `GET /api/analytics/models`. */
+export interface ModelUsageEntry {
+  model: string;
+  provider: string;
+  sessions: number;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  reasoning_tokens: number;
+  estimated_cost: number;
+  actual_cost: number;
+  last_used_at: number | null;
+  capabilities: ModelCapabilities;
+}
+
+export interface ModelsAnalyticsResponse {
+  models: ModelUsageEntry[];
+  totals: Record<string, number | null>;
+  period_days: number;
+}
+
+/** Aggregated payload the page's BFF route returns in one shot. */
+export interface ModelsOverviewResponse {
+  info: ModelInfo;
+  auxiliary: AuxiliaryModelsResponse;
+  usage: ModelUsageEntry[];
+}
+
+/** `POST /api/providers/validate` response. */
+export interface ProviderValidateResponse {
+  ok: boolean;
+  reachable: boolean;
+  message: string;
+  models?: string[];
+}
+
+/**
+ * One card that overrides the configured model — `GET /api/models/pinned`.
+ * These cards run `model` regardless of what the main model is set to,
+ * which is exactly the blind spot the Models page exists to close.
+ */
+export interface PinnedModelCard {
+  project_slug: string;
+  project_name: string;
+  task_id: string;
+  title: string;
+  model: string;
+  status: string;
+}
+
+export interface PinnedCardsResponse {
+  pinned: PinnedModelCard[];
 }

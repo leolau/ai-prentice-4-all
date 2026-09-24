@@ -5028,3 +5028,69 @@ class TestCompressionFallbackContextFilter:
         # Empty / unknown tasks have no minimum
         assert _task_minimum_context_length("") is None
         assert _task_minimum_context_length(None) is None
+
+
+class TestOpencodeSessionHeader:
+    """OpenCode Go/Zen rejects inference requests without a stable
+    per-conversation ``x-opencode-session`` id (HTTP 400 MissingSessionID).
+    aux kwargs get it via ``extra_headers`` — evaluated per call so a client
+    cached across conversations never carries a stale id. (#81584)"""
+
+    def test_extra_headers_injected_for_opencode_provider(self):
+        from agent.auxiliary_client import _build_call_kwargs
+
+        kwargs = _build_call_kwargs(
+            provider="opencode-go",
+            model="deepseek-v4.1-flash",
+            messages=[{"role": "user", "content": "hi"}],
+            base_url="https://opencode.ai/zen/go/v1",
+        )
+        assert kwargs["extra_headers"]["x-opencode-session"]
+
+    def test_extra_headers_injected_for_opencode_host(self):
+        from agent.auxiliary_client import _build_call_kwargs
+
+        kwargs = _build_call_kwargs(
+            provider="custom",
+            model="deepseek-v4.1-flash",
+            messages=[{"role": "user", "content": "hi"}],
+            base_url="https://opencode.ai/zen/go/v1",
+        )
+        assert kwargs["extra_headers"]["x-opencode-session"]
+
+    def test_no_session_header_for_other_providers(self):
+        from agent.auxiliary_client import _build_call_kwargs
+
+        kwargs = _build_call_kwargs(
+            provider="openrouter",
+            model="anthropic/claude-sonnet-4.6",
+            messages=[{"role": "user", "content": "hi"}],
+            base_url="https://openrouter.ai/api/v1",
+        )
+        assert "extra_headers" not in kwargs
+
+    def test_session_header_uses_bound_session_id(self, monkeypatch):
+        import agent.auxiliary_client as aux
+
+        monkeypatch.setenv("HERMES_SESSION_ID", "sess-abc-123")
+        assert aux.build_opencode_session_headers() == {
+            "x-opencode-session": "sess-abc-123"
+        }
+
+    def test_session_header_prefers_explicit_id(self, monkeypatch):
+        import agent.auxiliary_client as aux
+
+        monkeypatch.setenv("HERMES_SESSION_ID", "sess-env")
+        assert aux.build_opencode_session_headers("sess-explicit") == {
+            "x-opencode-session": "sess-explicit"
+        }
+
+    def test_session_header_falls_back_to_stable_token(self, monkeypatch):
+        import agent.auxiliary_client as aux
+
+        monkeypatch.delenv("HERMES_SESSION_ID", raising=False)
+        monkeypatch.setattr(aux, "_opencode_session_fallback", "")
+        first = aux.build_opencode_session_headers()["x-opencode-session"]
+        second = aux.build_opencode_session_headers()["x-opencode-session"]
+        assert first.startswith("hermes-")
+        assert first == second

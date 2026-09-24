@@ -18,6 +18,7 @@ Behaviour contracts:
 
 from __future__ import annotations
 
+import json
 import time
 import pytest
 from fastapi import FastAPI
@@ -213,6 +214,59 @@ def test_playbook_assignee_must_be_a_project_profile(env):
     assert "ghost-profile" in resp.json()["detail"]
 
 
+def _parse_sse(text: str) -> list[tuple[str, dict]]:
+    """Minimal SSE reader for a fully-drained `TestClient` response — only
+    safe for a stream that terminates on its own (an `end`/`gone` frame),
+    since `TestClient.get()` reads the whole body before returning."""
+    frames: list[tuple[str, dict]] = []
+    for block in text.strip("\n").split("\n\n"):
+        if not block.strip() or block.startswith(":"):
+            continue
+        event, data_lines = "message", []
+        for line in block.split("\n"):
+            if line.startswith("event:"):
+                event = line[len("event:"):].strip()
+            elif line.startswith("data:"):
+                data_lines.append(line[len("data:"):].strip())
+        if data_lines:
+            frames.append((event, json.loads("\n".join(data_lines))))
+    return frames
+
+
+def test_run_stream_pushes_the_row_then_ends_once_it_is_terminal(env):
+    """A run page no longer has to poll for this (§12 push edition): once
+    the run is `done`/`failed`/`cancelled` the stream is a single frame —
+    a still-live run's browser tab would instead see repeated `update`
+    frames as cards/status change, up to the tick this test doesn't wait
+    out."""
+    project = _active_project(env)
+    client, _state = env
+    _save_and_activate_playbook(env, project)
+    run = client.post(
+        f"/api/registry/projects/{project['slug']}/runs", json={}
+    ).json()["run"]
+    with projects_db.connect_closing() as conn:
+        projects_db.update_project_run(
+            conn, run["id"], status="done", ended_at=int(time.time())
+        )
+
+    resp = client.get(
+        f"/api/registry/projects/{project['slug']}/runs/{run['run_no']}/stream"
+    )
+    assert resp.status_code == 200
+    frames = _parse_sse(resp.text)
+    assert frames[0][0] == "update"
+    assert frames[0][1]["status"] == "done"
+    assert frames[-1][0] == "end"
+
+
+def test_run_stream_is_404_for_an_unknown_run(env):
+    project = _active_project(env)
+    client, _state = env
+    resp = client.get(f"/api/registry/projects/{project['slug']}/runs/99/stream")
+    assert resp.status_code == 404
+
+
 def test_run_pins_its_rev_so_activation_mid_flight_is_safe(env):
     """Rev 2 activates while run 1 is mid-flight: the run keeps rev 1."""
     project = _active_project(env)
@@ -390,6 +444,58 @@ def test_continue_releases_the_checkpoint_and_cancel_never_kills(env):
         f"/api/registry/projects/{project['slug']}/runs/1/cancel", json={}
     )
     assert resp.status_code == 409
+
+
+def test_resume_route_continues_a_cancelled_run_without_redoing_done_work(env):
+    """POST .../resume: distinct from POST /runs ("Repeat this run") — the
+    run reopens and picks up from the board's real state; a completed card
+    is never redone, and a second resume on the now-running row is 409,
+    same contract as continue/cancel/stop."""
+    project = _active_project(env)
+    client, _state = env
+    resp = client.patch(
+        f"/api/registry/projects/{project['slug']}",
+        json={"max_in_progress": 3},
+    )
+    assert resp.status_code == 200, resp.text
+    _save_and_activate_playbook(env, project)
+    resp = client.post(f"/api/registry/projects/{project['slug']}/runs", json={})
+    started = resp.json()
+    gather_id = started["cards"]["gather"]
+
+    with kanban_db.connect_closing() as bconn:
+        assert kanban_db.complete_task(bconn, gather_id, result="done")
+
+    resp = client.post(
+        f"/api/registry/projects/{project['slug']}/runs/1/cancel", json={}
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["status"] == "cancelled"
+
+    resp = client.post(
+        f"/api/registry/projects/{project['slug']}/runs/1/resume", json={}
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["run"]["status"] == "running"
+
+    with kanban_db.connect_closing() as bconn:
+        assert kanban_db.get_task(bconn, gather_id).status == "done"
+
+    # A second resume on the now-running row is refused, like continue/
+    # cancel/stop on an already-answered run.
+    resp = client.post(
+        f"/api/registry/projects/{project['slug']}/runs/1/resume", json={}
+    )
+    assert resp.status_code == 409
+
+
+def test_resume_route_404s_an_unknown_run(env):
+    project = _active_project(env)
+    client, _state = env
+    resp = client.post(
+        f"/api/registry/projects/{project['slug']}/runs/99/resume", json={}
+    )
+    assert resp.status_code == 404
 
 
 def test_stop_kills_the_live_card_and_is_refused_twice(env):
@@ -637,23 +743,36 @@ def test_run_reports_awaiting_continue_once_checkpoint_is_done(env):
     gather_id, approve_id = started["cards"]["gather"], started["cards"]["approve"]
 
     resp = client.get(f"/api/registry/projects/{project['slug']}/runs/1")
-    assert resp.json()["awaiting_continue"] is False  # checkpoint not done yet
+    body = resp.json()
+    assert body["awaiting_continue"] is False  # checkpoint not done yet
+    assert body["checkpoint_wait"] is None
 
     with kanban_db.connect_closing() as bconn:
         assert kanban_db.complete_task(bconn, gather_id, result="ok")
+        bconn.execute("UPDATE tasks SET status = 'running' WHERE id = ?", (approve_id,))
+        kanban_db.add_comment(
+            bconn, approve_id, "default", "Ready to ship — confirm the subject line?"
+        )
         assert kanban_db.complete_task(bconn, approve_id, result="looks good")
 
     resp = client.get(f"/api/registry/projects/{project['slug']}/runs/1")
     body = resp.json()
     assert body["status"] == "running"
     assert body["awaiting_continue"] is True
+    # The whole point (§12): the page must show *what* it's waiting on,
+    # quoting the checkpoint card's own comment, not just a boolean.
+    wait = body["checkpoint_wait"]
+    assert wait["checkpoint_task_id"] == approve_id
+    assert "confirm the subject line" in wait["comment"]
 
     resp = client.post(
         f"/api/registry/projects/{project['slug']}/runs/1/continue", json={}
     )
     assert resp.status_code == 200, resp.text
     resp = client.get(f"/api/registry/projects/{project['slug']}/runs/1")
-    assert resp.json()["awaiting_continue"] is False
+    body = resp.json()
+    assert body["awaiting_continue"] is False
+    assert body["checkpoint_wait"] is None
 
 
 def test_run_reports_completion_and_card_attempt_history(env):

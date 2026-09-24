@@ -268,6 +268,38 @@ class TestFilterSessionIdsByTags:
         db.close()
 
 
+class TestGetTagsForSessions:
+    def test_bulk_matches_per_session_lookup(self, tmp_path):
+        db = _make_db(tmp_path)
+        _seed_session(db, "s1")
+        _seed_session(db, "s2")
+        _seed_session(db, "s3")
+        db.add_tag_to_session("s1", "bug", color="red")
+        db.add_tag_to_session("s1", "urgent")
+        db.add_tag_to_session("s2", "bug", color="red")
+        # s3 has no tags at all.
+        by_session = db.get_tags_for_sessions(["s1", "s2", "s3"])
+        assert {t["name"] for t in by_session["s1"]} == {"bug", "urgent"}
+        assert {t["name"] for t in by_session["s2"]} == {"bug"}
+        # A session with no tags is simply absent, not an empty list.
+        assert "s3" not in by_session
+        db.close()
+
+    def test_empty_input_returns_empty_dict(self, tmp_path):
+        db = _make_db(tmp_path)
+        assert db.get_tags_for_sessions([]) == {}
+        db.close()
+
+    def test_unknown_session_id_is_absent_not_erroring(self, tmp_path):
+        db = _make_db(tmp_path)
+        _seed_session(db, "s1")
+        db.add_tag_to_session("s1", "bug")
+        by_session = db.get_tags_for_sessions(["s1", "does-not-exist"])
+        assert "s1" in by_session
+        assert "does-not-exist" not in by_session
+        db.close()
+
+
 class TestSchemaMigration:
     def test_tag_tables_exist_after_init(self, tmp_path):
         """Tag tables are created on a fresh DB."""

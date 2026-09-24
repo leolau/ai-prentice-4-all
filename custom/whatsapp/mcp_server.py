@@ -15,7 +15,7 @@ from urllib.parse import urlparse, parse_qs
 import threading
 import uuid
 
-DB_PATH = '/opt/data/whatsapp-messages/whatsapp_data.db'
+DB_PATH = os.environ.get('MESSAGING_DB_PATH', '/opt/data/whatsapp-messages/messaging_data.db')
 CONFIG_PATH = '/opt/data/whatsapp-messages/config.json'
 PORT = 8650
 

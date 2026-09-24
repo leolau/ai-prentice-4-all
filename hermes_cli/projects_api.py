@@ -49,7 +49,7 @@ import logging
 import re
 import threading
 import time
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
@@ -1903,38 +1903,101 @@ async def create_card(request: Request) -> dict[str, Any]:
     return result
 
 
+def _card_payload(bconn, project: projects_db.Project, task_id: str, *, principal) -> Optional[dict]:
+    """One card, joined with the worker's live progress signal.
+
+    Shared by the plain GET and the push stream so the two can never drift.
+    Re-checks visibility under ``principal`` on every call (not just once at
+    connection-open) — a ``private:`` card owned by someone else is a 404
+    through the project surface, and a card's visibility can itself change
+    mid-stream (an edit). Returns ``None`` for "no such card here", which
+    the GET route turns into 404 and the stream turns into a ``gone`` frame.
+    """
+    task = kanban_db.get_task(bconn, task_id)
+    if task is None or getattr(task, "project_id", None) != project.id:
+        return None
+    visibility = getattr(task, "visibility", None) or ""
+    owner = getattr(task, "owner_user_id", None)
+    if (
+        visibility.startswith("private:")
+        and owner != principal.user_id
+        and not _instance_admin(principal)
+    ):
+        return None
+    # The board-list endpoint attaches each card's latest run summary
+    # (kanban_db.latest_summaries, batched) so a blocked/handed-off
+    # card isn't a blank drawer; this single-card endpoint used to
+    # call task_dict() with no summary at all, so `kanban_block`'s
+    # required `reason` — the one thing a human needs to see to know
+    # what to do — never reached the card detail page.
+    summary = kanban_db.latest_summary(bconn, task_id)
+    payload = kanban_view.task_dict(task, latest_summary=summary)
+    # A card's worker runs in its own process — there is no *in-memory*
+    # reasoning/tool-call buffer to tail the way an inline Projects run's
+    # session has (run_activity.py). But `_default_spawn` (kanban_db.py)
+    # redirects the worker's stdout/stderr to a durable per-task log file
+    # any process can read; `worker_log_plain_tail` strips the
+    # terminal-only noise (ANSI codes, spinner-frame repeats, decorative
+    # borders) down to the model's own sentences and its tool-call
+    # summaries — the closest thing to a live stream this surface has.
+    # Heartbeat notes and comments are the lighter-weight progress signal
+    # a worker also posts (e.g. "93/131 slides completed…").
+    payload["comments"] = [
+        {"author": c.author, "body": c.body, "created_at": c.created_at}
+        for c in kanban_db.list_comments(bconn, task_id)
+    ]
+    heartbeat_notes = [
+        {"note": e.payload["note"], "created_at": e.created_at}
+        for e in kanban_db.list_events(bconn, task_id)
+        if e.kind == "heartbeat"
+        and isinstance(e.payload, dict)
+        and e.payload.get("note")
+    ]
+    payload["latest_heartbeat"] = heartbeat_notes[-1] if heartbeat_notes else None
+    payload["worker_log_tail"] = kanban_db.worker_log_plain_tail(
+        task_id, board=project.board_slug or None
+    )
+    return payload
+
+
 @router.get("/{slug}/cards/{task_id}")
 async def get_card(request: Request, task_id: str) -> dict[str, Any]:
     """One card, re-checked under the caller's principal: a ``private:``
     card owned by someone else is a 404 through the project surface too."""
     project, _role, _profiles, principal = await _require_read(request)
 
-    def _get_sync() -> dict:
+    def _get_sync() -> Optional[dict]:
         with _board_conn(project) as bconn:
-            task = kanban_db.get_task(bconn, task_id)
-            if task is None or getattr(task, "project_id", None) != project.id:
-                raise KeyError(task_id)
-            visibility = getattr(task, "visibility", None) or ""
-            owner = getattr(task, "owner_user_id", None)
-            if (
-                visibility.startswith("private:")
-                and owner != principal.user_id
-                and not _instance_admin(principal)
-            ):
-                raise KeyError(task_id)
-            # The board-list endpoint attaches each card's latest run summary
-            # (kanban_db.latest_summaries, batched) so a blocked/handed-off
-            # card isn't a blank drawer; this single-card endpoint used to
-            # call task_dict() with no summary at all, so `kanban_block`'s
-            # required `reason` — the one thing a human needs to see to know
-            # what to do — never reached the card detail page.
-            summary = kanban_db.latest_summary(bconn, task_id)
-            return kanban_view.task_dict(task, latest_summary=summary)
+            return _card_payload(bconn, project, task_id, principal=principal)
 
-    try:
-        return await asyncio.to_thread(_get_sync)
-    except KeyError:
+    payload = await asyncio.to_thread(_get_sync)
+    if payload is None:
         raise HTTPException(status_code=404, detail="card not found")
+    return payload
+
+
+@router.get("/{slug}/cards/{task_id}/stream")
+async def card_stream_route(request: Request, task_id: str) -> StreamingResponse:
+    """Push one card's row live while a worker is on it (§12 live updates,
+    push edition): the same payload ``GET /cards/{task_id}`` returns —
+    including its heartbeat note and comment thread — re-diffed on a short
+    server-side tick instead of the browser polling for it. Ends once the
+    card leaves ``running``, since nothing else moves it on its own."""
+    project, _role, _profiles, principal = await _require_read(request)
+
+    def _produce() -> Optional[dict]:
+        with _board_conn(project) as bconn:
+            return _card_payload(bconn, project, task_id, principal=principal)
+
+    # A truly unknown/invisible card is a 404, same as the plain GET —
+    # see run_stream_route for why this check happens before, not inside,
+    # the stream.
+    if await asyncio.to_thread(_produce) is None:
+        raise HTTPException(status_code=404, detail="card not found")
+
+    return await _watch_stream(
+        request, _produce, is_terminal=lambda row: row.get("status") != "running"
+    )
 
 
 _CARD_STATUS_MOVES = ("ready", "blocked", "done", "archived")
@@ -2689,32 +2752,28 @@ def _run_blocked_tasks(bconn, cards: list[dict]) -> list[dict]:
     return blocked
 
 
-def _run_awaits_continue(
-    conn, project: projects_db.Project, run: dict, cards: list[dict]
-) -> bool:
-    """A supervised run whose checkpoint step(s) are done while their
-    successors still sit in triage is held on the human's continue (§7.1).
-
-    The row keeps saying ``running`` (nothing turns it to ``waiting`` when a
-    checkpoint card finishes), so the hold is derived here from the
-    playbook + board state; the run page turns it into a Continue button.
+def _checkpoint_wait_payload(conn, bconn, project, run: dict, cards: list[dict]) -> Optional[dict]:
+    """The UI-facing form of `projects_run.checkpoint_wait_info` — adds the
+    checkpoint card's own comment/summary (its findings/questions) so the
+    run page can show *what* it's waiting on, not just *that* it is (§12).
     """
-    if run.get("status") not in ("running", "waiting") or not cards:
-        return False
-    if (getattr(project, "autonomy", None) or "supervised") != "supervised":
-        return False
-    playbook = projects_db.get_playbook(
-        conn, project.id, rev=run.get("playbook_rev")
-    )
-    steps = (playbook or {}).get("steps") or []
-    held = projects_run.held_step_keys(steps)
-    if not held:
-        return False
-    checkpoints = {s["key"] for s in steps if s.get("checkpoint")}
-    status_of = {c.get("step_key"): c.get("status") for c in cards}
-    if any(status_of.get(k) != "done" for k in checkpoints if k in status_of):
-        return False
-    return any(status_of.get(k) == "triage" for k in held)
+    info = projects_run.checkpoint_wait_info(conn, project, run, cards)
+    if info is None:
+        return None
+    task_id = info.get("checkpoint_task_id")
+    comment = None
+    if task_id:
+        try:
+            comments = kanban_db.list_comments(bconn, task_id)
+            comment = comments[-1].body if comments else kanban_db.latest_summary(bconn, task_id)
+        except Exception:  # noqa: BLE001 — the hold itself is still real without this
+            comment = None
+    return {
+        "checkpoint_task_id": task_id,
+        "checkpoint_title": info.get("checkpoint_title"),
+        "comment": comment,
+        "held_task_ids": info.get("held_task_ids") or [],
+    }
 
 
 def _run_payload(
@@ -2738,7 +2797,9 @@ def _run_payload(
     blocked = _run_blocked_tasks(bconn, cards)
     payload["blocked_tasks"] = blocked
     payload["stalled"] = _run_stalled(run, cards, blocked)
-    payload["awaiting_continue"] = _run_awaits_continue(conn, project, run, cards)
+    checkpoint_wait = _checkpoint_wait_payload(conn, bconn, project, run, cards)
+    payload["awaiting_continue"] = checkpoint_wait is not None
+    payload["checkpoint_wait"] = checkpoint_wait
     payload["cost"] = projects_run.run_cost(
         run.get("trace_id"), principal=principal
     )
@@ -2868,6 +2929,35 @@ async def continue_run_route(request: Request, run_no: int) -> dict[str, Any]:
         raise HTTPException(status_code=404, detail="run not found")
 
 
+@router.post("/{slug}/runs/{run_no}/resume")
+async def resume_run_route(request: Request, run_no: int) -> dict[str, Any]:
+    """Continue a ``failed``/``cancelled`` run from wherever its cards
+    already are — distinct from ``POST /runs`` ("Repeat this run"), which
+    starts a brand-new run on the same method and redoes every step."""
+    project, _role, _profiles, _principal = await _require_write(
+        request, judgement=True
+    )
+    _refuse_if_archived(project, "resuming a run")
+
+    def _resume_sync() -> dict:
+        with projects_db.connect_closing() as conn:
+            run = projects_db.get_project_run(conn, project.id, run_no)
+            if run is None:
+                raise KeyError(run_no)
+            with _board_conn(project) as bconn:
+                try:
+                    return projects_run.resume_run(
+                        conn, bconn, project=project, run=run
+                    )
+                except ValueError as exc:
+                    raise HTTPException(status_code=409, detail=str(exc))
+
+    try:
+        return await asyncio.to_thread(_resume_sync)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="run not found")
+
+
 @router.post("/{slug}/runs/{run_no}/cancel")
 async def cancel_run_route(request: Request, run_no: int) -> dict[str, Any]:
     """Stop promoting and archive the run's un-started cards; a running
@@ -2899,6 +2989,150 @@ async def cancel_run_route(request: Request, run_no: int) -> dict[str, Any]:
 #: bursts, so a short poll of an in-memory buffer reads as live without
 #: coupling the agent thread to this request's event loop.
 _ACTIVITY_TICK_SECONDS = 0.4
+
+#: How often the row-level live streams (run, card, project cursor) re-read
+#: their row and check for a change. Most of a tick's cost is a local
+#: SQLite read, so this can run tighter than the old client polls
+#: (RUN_POLL_INTERVAL_MS / CARD_POLL_INTERVAL_MS were 5s, the project page's
+#: was 15s) without adding real load — a change now reaches the browser in
+#: about one tick instead of averaging half the old interval.
+_ROW_TICK_SECONDS = 1.0
+
+#: Send a bare SSE comment this often when nothing has changed, so a
+#: reverse proxy's idle-connection timeout never closes a quiet stream out
+#: from under a long-open tab. A comment line (leading ``:``) is invisible
+#: to `readSseFrames` — it never reaches a frame handler.
+_ROW_HEARTBEAT_SECONDS = 20.0
+
+
+async def _watch_stream(
+    request: Request,
+    produce: Callable[[], Optional[dict]],
+    *,
+    is_terminal: Callable[[dict], bool],
+    tick_seconds: float = _ROW_TICK_SECONDS,
+) -> StreamingResponse:
+    """Shared tick-and-diff loop behind the run/card/project-cursor live
+    streams (§12 live updates, push edition).
+
+    Re-reads ``produce()`` on a short local interval and emits an
+    ``update`` frame only when the serialised row actually changed, so a
+    quiet run doesn't spam frames and a real change reaches the browser
+    within one tick. Emits ``gone`` and ends if ``produce()`` returns
+    ``None`` (the row disappeared or became unreadable under the caller's
+    principal); emits ``end`` and ends once ``is_terminal`` says there is
+    nothing left to watch; ends silently on client disconnect. A read
+    failure is never surfaced here — same contract as the plain GET routes
+    this mirrors and `run_activity_route`.
+    """
+
+    async def _events():
+        last: Optional[str] = None
+        idle = 0.0
+        while True:
+            row = await asyncio.to_thread(produce)
+            if row is None:
+                yield _sse("gone", {})
+                return
+            serialized = json.dumps(row, sort_keys=True, default=str)
+            if serialized != last:
+                last = serialized
+                idle = 0.0
+                yield _sse("update", row)
+                if is_terminal(row):
+                    yield _sse("end", {})
+                    return
+            else:
+                idle += tick_seconds
+                if idle >= _ROW_HEARTBEAT_SECONDS:
+                    idle = 0.0
+                    yield b": keep-alive\n\n"
+            if await request.is_disconnected():
+                return
+            await asyncio.sleep(tick_seconds)
+
+    return StreamingResponse(
+        _events(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+#: Matches `useRunLive.ts`'s TERMINAL set exactly: once a run reaches one of
+#: these there is nothing left for the stream to watch — unless a card is
+#: still actively running (see `_run_is_terminal` below).
+_RUN_TERMINAL_STATUSES = {"done", "failed", "cancelled"}
+
+
+def _run_is_terminal(row: dict) -> bool:
+    """Mirrors `useRunLive.ts`'s `isRunLive(status, hasActiveCard)` exactly:
+    a terminal run row (e.g. auto-failed by the stale-run sweep) can still
+    have a card actively working, and a human can act on that card directly
+    without the run row ever reopening in the same instant. Ending the
+    stream the moment the row closes would freeze the page on a stale
+    "Failed" banner instead of showing that card actually finish — the
+    confusion PR #403 was built to fix. So a terminal row keeps the stream
+    open for as long as any of its cards is still `running`."""
+    if row.get("status") not in _RUN_TERMINAL_STATUSES:
+        return False
+    return not any(c.get("status") == "running" for c in row.get("cards") or [])
+
+
+@router.get("/{slug}/runs/{run_no}/stream")
+async def run_stream_route(request: Request, run_no: int) -> StreamingResponse:
+    """Push the run row live instead of making the browser poll for it
+    (§12 live updates, push edition): the same payload ``GET
+    /runs/{run_no}`` returns, re-diffed on a short server-side tick so a
+    status/board/card change reaches the page in about a second instead of
+    waiting out the old poll interval. Ends once the run reaches a
+    terminal status with no card still running."""
+    project, _role, _profiles, principal = await _require_read(request)
+
+    def _produce() -> Optional[dict]:
+        with projects_db.connect_closing() as conn:
+            run = projects_db.get_project_run(conn, project.id, run_no)
+            if run is None:
+                return None
+            deliveries = projects_db.get_output_deliveries(conn, run_id=run["id"])
+            with _board_conn(project) as bconn:
+                payload = _run_payload(
+                    conn, bconn, run, principal=principal, project=project
+                )
+        payload["deliveries"] = deliveries
+        return payload
+
+    # A truly unknown run is a 404, same as the plain GET — matching
+    # run_activity_route's convention of checking existence before opening
+    # the stream. `_produce` returning None once the stream is already open
+    # (the run vanished mid-watch, which should not happen in practice) is
+    # instead a `gone` frame, since an HTTP status can no longer change.
+    if await asyncio.to_thread(_produce) is None:
+        raise HTTPException(status_code=404, detail="run not found")
+
+    return await _watch_stream(request, _produce, is_terminal=_run_is_terminal)
+
+
+@router.get("/{slug}/events/stream")
+async def project_events_stream(request: Request) -> StreamingResponse:
+    """Push the project's event cursor live (§12): the same
+    ``latest_event_id`` ``GET /events`` returns, so the project page's tail
+    can react to a movement immediately instead of on its next poll. A
+    project has no terminal state, so this stream only ends on client
+    disconnect — a reverse proxy's idle timeout is covered by the shared
+    heartbeat, same as the run/card streams."""
+    project, _role, _profiles, principal = await _require_read(request)
+
+    def _produce() -> dict:
+        with _board_conn(project) as bconn:
+            latest, _events = kanban_db.project_events_tail(
+                bconn, project.id, principal=principal, since_id=0, limit=1
+            )
+        return {"latest_event_id": latest}
+
+    return await _watch_stream(request, _produce, is_terminal=lambda _row: False)
 
 
 @router.get("/{slug}/runs/{run_no}/activity")

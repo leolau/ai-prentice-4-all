@@ -3287,3 +3287,95 @@ class TestSendTelegramThreadNotFoundRetry:
         finally:
             if media_path and os.path.exists(media_path):
                 os.unlink(media_path)
+
+
+class TestSendMessageRegistration:
+    """send_message is registered (approval-gated api-server surface) but
+    gated on a connected platform via check_fn."""
+
+    def test_registered_with_check_fn(self):
+        import tools.send_message_tool  # noqa: F401 — module-level register()
+        from tools.registry import registry
+        entry = registry.get_entry("send_message")
+        assert entry is not None
+        assert entry.check_fn is not None
+        assert entry.toolset == "send_message"
+
+    def test_check_fn_false_without_platforms(self):
+        from tools.send_message_tool import _send_message_available
+        with patch(
+            "gateway.config.load_gateway_config",
+            side_effect=Exception("no config"),
+        ):
+            assert _send_message_available() is False
+
+    def test_whatsapp_send_only_pconfig_from_env(self, monkeypatch):
+        """When the bridge runs outside platform config, WHATSAPP_BRIDGE_PORT
+        synthesises a send-only pconfig instead of 'not configured'."""
+        import tools.send_message_tool as smt
+        monkeypatch.setenv("WHATSAPP_BRIDGE_PORT", "3000")
+        captured = {}
+
+        async def fake_standalone_send(platform_name, pconfig, chat_id, message, thread_id=None):
+            captured["pconfig"] = pconfig
+            captured["chat_id"] = chat_id
+            return {"success": True, "message_id": "m1"}
+
+        monkeypatch.setattr(smt, "_registry_standalone_send", fake_standalone_send)
+        with patch("gateway.config.load_gateway_config") as mock_cfg:
+            mock_cfg.return_value.platforms = {}
+            out = json.loads(smt.send_message_tool({
+                "action": "send",
+                "target": "whatsapp:+85212345678",
+                "message": "hi",
+            }))
+        assert out.get("success") is True
+        assert captured["pconfig"].enabled is True
+        assert captured["pconfig"].extra["bridge_port"] == 3000
+
+    def test_whatsapp_named_bridge_selector(self, monkeypatch):
+        """whatsapp:<name>:<target> routes to that bridge's port."""
+        import tools.send_message_tool as smt
+        monkeypatch.setenv("WHATSAPP_BRIDGES", "personal:3000,connectar:3001")
+        monkeypatch.delenv("WHATSAPP_BRIDGE_PORT", raising=False)
+        captured = {}
+
+        async def fake_standalone_send(platform_name, pconfig, chat_id, message, thread_id=None):
+            captured["pconfig"] = pconfig
+            captured["chat_id"] = chat_id
+            return {"success": True, "message_id": "m1"}
+
+        monkeypatch.setattr(smt, "_registry_standalone_send", fake_standalone_send)
+        with patch("gateway.config.load_gateway_config") as mock_cfg:
+            mock_cfg.return_value.platforms = {}
+            out = json.loads(smt.send_message_tool({
+                "action": "send",
+                "target": "whatsapp:connectar:+85212345678",
+                "message": "hi",
+            }))
+        assert out.get("success") is True
+        assert captured["pconfig"].extra["bridge_port"] == 3001
+        assert captured["chat_id"] == "+85212345678"
+
+    def test_whatsapp_default_bridge_first_named(self, monkeypatch):
+        """Without a selector, the default falls back to WHATSAPP_BRIDGE_PORT,
+        then the first WHATSAPP_BRIDGES entry."""
+        import tools.send_message_tool as smt
+        monkeypatch.setenv("WHATSAPP_BRIDGES", "personal:3000,connectar:3001")
+        monkeypatch.delenv("WHATSAPP_BRIDGE_PORT", raising=False)
+        captured = {}
+
+        async def fake_standalone_send(platform_name, pconfig, chat_id, message, thread_id=None):
+            captured["pconfig"] = pconfig
+            return {"success": True, "message_id": "m1"}
+
+        monkeypatch.setattr(smt, "_registry_standalone_send", fake_standalone_send)
+        with patch("gateway.config.load_gateway_config") as mock_cfg:
+            mock_cfg.return_value.platforms = {}
+            out = json.loads(smt.send_message_tool({
+                "action": "send",
+                "target": "whatsapp:+85212345678",
+                "message": "hi",
+            }))
+        assert out.get("success") is True
+        assert captured["pconfig"].extra["bridge_port"] == 3000

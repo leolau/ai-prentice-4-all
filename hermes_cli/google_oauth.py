@@ -26,8 +26,25 @@ logger = logging.getLogger(__name__)
 AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 TOKEN_URI = "https://oauth2.googleapis.com/token"
 USERINFO_URL = "https://openidconnect.googleapis.com/v1/userinfo"
-REDIRECT_URI = "http://localhost:1"
+#: Loopback redirect for the manual code-paste flow. Port 1 is on every
+#: browser's restricted-port blocklist (Chrome: ERR_UNSAFE_PORT) and is
+#: privileged/unlistenable — some browsers hang on it indefinitely instead
+#: of erroring, so the ?code= URL never becomes copyable. Port 4321 is
+#: unblocked and unlistened, so the redirect fails fast with the code
+#: visible in the address bar.
+REDIRECT_URI = "http://localhost:4321"
 HTTP_TIMEOUT = 15.0
+
+#: Identity scopes requested on every connect (not tied to a service flag):
+#: ``openid`` makes the token endpoint return an ``id_token`` and unlocks the
+#: userinfo endpoint; ``userinfo.email`` puts the consenting account's email
+#: in both. Without them neither id_token nor userinfo carries an email, so
+#: the entry name fell back entirely to the optional hint — and a missing
+#: hint failed *after* the single-use code was already consumed.
+IDENTITY_SCOPES: List[str] = [
+    "openid",
+    "https://www.googleapis.com/auth/userinfo.email",
+]
 
 #: The skill's historical full-workspace scope set.
 WORKSPACE_SCOPES: List[str] = [
@@ -46,6 +63,7 @@ WORKSPACE_SCOPES: List[str] = [
 SCOPES_BY_SERVICE: Dict[str, List[str]] = {
     "email": ["https://mail.google.com/"],
     "calendar": ["https://www.googleapis.com/auth/calendar"],
+    "drive": ["https://www.googleapis.com/auth/drive"],
     "workspace": WORKSPACE_SCOPES,
 }
 
@@ -60,6 +78,11 @@ def scopes_for_services(services: List[str]) -> List[str]:
     for service in services:
         union.update(SCOPES_BY_SERVICE.get(service, []))
     return sorted(union)
+
+
+def connect_scopes(services: List[str]) -> List[str]:
+    """Scopes to request at consent: service scopes plus identity scopes."""
+    return sorted(set(scopes_for_services(services)) | set(IDENTITY_SCOPES))
 
 
 def generate_pkce() -> Dict[str, str]:
@@ -90,7 +113,10 @@ def build_authorization_url(
         "response_type": "code",
         "scope": " ".join(scopes),
         "access_type": "offline",
-        "prompt": "consent",
+        # select_account forces the account chooser — without it Google can
+        # silently reuse the signed-in account, which mis-keys the entry when
+        # connecting a second/third/fourth account in the same browser.
+        "prompt": "select_account consent",
         "state": state,
         "code_challenge": code_challenge,
         "code_challenge_method": "S256",
@@ -176,6 +202,23 @@ def refresh_access_token(
             "client_secret": client_secret,
         },
     )
+
+
+def email_from_id_token(id_token: str) -> Optional[str]:
+    """The consenting account's email from the ``id_token`` claims.
+
+    The JWT is trusted unsigned here because it arrives directly from
+    Google's token endpoint over TLS in the code-exchange response (the
+    documented case where verification may be skipped).
+    """
+    try:
+        payload_b64 = id_token.split(".")[1]
+        padded = payload_b64 + "=" * (-len(payload_b64) % 4)
+        claims = json.loads(base64.urlsafe_b64decode(padded))
+    except (ValueError, IndexError):
+        return None
+    email = claims.get("email")
+    return str(email) if email else None
 
 
 def fetch_userinfo_email(access_token: str) -> Optional[str]:

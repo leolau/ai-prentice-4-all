@@ -884,6 +884,13 @@ def init_agent(
             elif base_url_host_matches(effective_base, "chatgpt.com"):
                 from agent.auxiliary_client import _codex_cloudflare_headers
                 client_kwargs["default_headers"] = _codex_cloudflare_headers(api_key)
+            elif base_url_host_matches(effective_base, "opencode.ai"):
+                # OpenCode Go/Zen rejects requests without a stable
+                # per-conversation session id (#81584).  session_id may
+                # still be None here — it is finalised a few lines below
+                # and the header is refreshed there.
+                from agent.auxiliary_client import build_opencode_session_headers
+                client_kwargs["default_headers"] = build_opencode_session_headers(session_id)
             elif "default_headers" not in client_kwargs:
                 # Fall back to profile.default_headers for providers that
                 # declare custom headers (e.g. Kimi User-Agent on non-kimi.com
@@ -1171,6 +1178,24 @@ def init_agent(
         set_current_session_id(agent.session_id)
     except Exception:
         os.environ["HERMES_SESSION_ID"] = agent.session_id
+
+    # OpenCode Go/Zen session-affinity header: when session_id was generated
+    # above rather than passed in, the client built earlier holds a fallback
+    # token.  The OpenAI SDK stores caller-provided default_headers by
+    # reference in ``client._custom_headers``, and agent._client_kwargs is
+    # reused verbatim by the interrupt-rebuild path, so mutating the shared
+    # dict updates the live client and every future rebuild at once. (#81584)
+    _dh = getattr(agent, "_client_kwargs", None)
+    if isinstance(_dh, dict):
+        _dh = _dh.get("default_headers")
+    if isinstance(_dh, dict) and "x-opencode-session" in _dh:
+        _dh["x-opencode-session"] = agent.session_id
+    # Anthropic-wire opencode clients store headers on the SDK client's
+    # ``_custom_headers`` (there is no _client_kwargs in that mode).
+    _ac = getattr(agent, "_anthropic_client", None)
+    _ach = getattr(_ac, "_custom_headers", None)
+    if isinstance(_ach, dict) and "x-opencode-session" in _ach:
+        _ach["x-opencode-session"] = agent.session_id
 
     # Session logs go into ~/.hermes/sessions/ alongside gateway sessions
     hermes_home = get_hermes_home()

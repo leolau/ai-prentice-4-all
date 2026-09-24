@@ -1,8 +1,14 @@
 /**
  * GET /api/chat/sessions — BFF conversation list (FG-20 Wave C1). Forwards to
- * the Python API `GET /api/sessions` (recent-first, all sources except cron)
- * under the bridged C1 principal so the mobile chat list can refresh after a
- * send.
+ * the Python API `GET /api/sessions` (recent-first) under the bridged C1
+ * principal so the mobile chat list can refresh after a send.
+ *
+ * Defaults to excluding cron sessions (unchanged behaviour for existing
+ * callers like the unread-count badge and the archived-conversations modal,
+ * neither of which want scheduler noise). Pass `exclude_sources=` (empty) to
+ * include everything — `ChatPane`'s own refresh does this now that the
+ * session strip groups cron sessions into their own "Scheduled" row instead
+ * of hiding them.
  */
 import { NextResponse } from "next/server";
 
@@ -26,10 +32,15 @@ export async function GET(request: Request): Promise<NextResponse> {
     rawLimit !== null && Number.isFinite(Number(rawLimit))
       ? Math.min(200, Math.max(1, Math.floor(Number(rawLimit))))
       : undefined;
+  // `null` (param absent) keeps the historical default of excluding cron;
+  // an explicit (even empty) value lets a caller opt in to seeing it.
+  const rawExcludeSources = url.searchParams.get("exclude_sources");
+  const excludeSources =
+    rawExcludeSources === null ? "cron" : rawExcludeSources || undefined;
   try {
     const client = await apiClientForRequest({ profile: profileFromUrl(request.url) });
     const data = await client.sessions({
-      excludeSources: "cron",
+      excludeSources,
       order: "recent",
       limit,
       archived,

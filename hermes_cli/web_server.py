@@ -277,6 +277,7 @@ from hermes_cli.files_api import router as _files_router  # noqa: E402
 from hermes_cli.incomings_api import router as _incomings_router  # noqa: E402
 from hermes_cli.todos_api import router as _todos_router  # noqa: E402
 from hermes_cli.credentials_api import router as _credentials_router  # noqa: E402
+from hermes_cli.email_accounts_api import router as _email_accounts_router  # noqa: E402
 from hermes_cli.goals_api import router as _goals_router  # noqa: E402
 from hermes_cli.projects_api import router as _projects_router  # noqa: E402
 
@@ -286,6 +287,7 @@ app.include_router(_files_router)
 app.include_router(_incomings_router)
 app.include_router(_todos_router)
 app.include_router(_credentials_router)
+app.include_router(_email_accounts_router)
 app.include_router(_goals_router)
 app.include_router(_projects_router)
 
@@ -5354,6 +5356,11 @@ async def get_sessions(
                 exclude_children=True,
             )
             now = time.time()
+            # Bulk-attach each row's tags (one query for the whole page, not
+            # one per row) so a client-side category-override check (see
+            # agent-home's `categorize.ts`) doesn't need a separate fetch per
+            # session before it can group correctly.
+            tags_by_session = db.get_tags_for_sessions([s["id"] for s in sessions])
             for s in sessions:
                 s["is_active"] = (
                     s.get("ended_at") is None
@@ -5364,6 +5371,7 @@ async def get_sessions(
                     s["is_default_profile"] = profile_name == "default"
                 # SQLite stores the flag as 0/1; expose a real JSON boolean.
                 s["archived"] = bool(s.get("archived"))
+                s["tags"] = tags_by_session.get(s["id"], [])
             return {"sessions": sessions, "total": total, "limit": limit, "offset": offset}
         finally:
             db.close()

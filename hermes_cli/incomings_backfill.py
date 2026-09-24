@@ -25,10 +25,17 @@ from hermes_cli.access import Principal, PrincipalStore
 from hermes_cli.datastore import get_store
 from hermes_cli.inbound_registry import InboundRegistry
 
-#: Where the standalone pipeline keeps its store. The three services agree on
-#: this path (and honour ``DB_PATH``), so the backfill honours it too.
+#: Where the standalone pipeline keeps its store. The channel split moved
+#: email/calendar tables into their own files; the backfill attaches all
+#: three read-only so every surface stays reachable from one connection.
 DEFAULT_DB_PATH = os.environ.get(
-    "DB_PATH", "/opt/data/whatsapp-messages/whatsapp_data.db"
+    "MESSAGING_DB_PATH", "/opt/data/whatsapp-messages/messaging_data.db"
+)
+_EMAIL_DB_PATH = os.environ.get(
+    "EMAIL_DB_PATH", "/opt/data/email-messages/email_data.db"
+)
+_CALENDAR_DB_PATH = os.environ.get(
+    "CALENDAR_DB_PATH", "/opt/data/calendar/calendar_data.db"
 )
 
 SURFACES = ("whatsapp", "email", "calendar")
@@ -37,6 +44,11 @@ SURFACES = ("whatsapp", "email", "calendar")
 def _open_db(path: str) -> sqlite3.Connection:
     """Open the pipeline store read-only, so a backfill cannot corrupt it."""
     conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=30)
+    for alias, aux in (("emaildb", _EMAIL_DB_PATH), ("caldb", _CALENDAR_DB_PATH)):
+        if os.path.exists(aux):
+            conn.execute(
+                f"ATTACH DATABASE 'file:{aux}?mode=ro' AS {alias}"
+            )
     conn.row_factory = sqlite3.Row
     return conn
 

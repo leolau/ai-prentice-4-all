@@ -49,16 +49,22 @@ EOF
 fi
 
 # Claude Code is used purely as the transport to Figma's MCP server, so any
-# Anthropic-compatible backend works. DeepSeek exposes one and is already
-# configured for Hermes on most hosts.
+# Anthropic-compatible backend works. The host runs glm-5.2 via DashScope's
+# token-plan (Singapore), which exposes an Anthropic Messages endpoint at
+# /apps/anthropic. DeepSeek is kept as a secondary fallback.
 if [ -z "${ANTHROPIC_API_KEY:-}" ] && [ -z "${ANTHROPIC_AUTH_TOKEN:-}" ]; then
-  if [ -n "${DEEPSEEK_API_KEY:-}" ]; then
+  if [ -n "${DASHSCOPE_API_KEY:-}" ]; then
+    export ANTHROPIC_BASE_URL="${ANTHROPIC_BASE_URL:-https://token-plan.ap-southeast-1.maas.aliyuncs.com/apps/anthropic}"
+    export ANTHROPIC_AUTH_TOKEN="${DASHSCOPE_API_KEY}"
+    export ANTHROPIC_MODEL="${ANTHROPIC_MODEL:-glm-5.2}"
+    export ANTHROPIC_SMALL_FAST_MODEL="${ANTHROPIC_SMALL_FAST_MODEL:-glm-5.2}"
+  elif [ -n "${DEEPSEEK_API_KEY:-}" ]; then
     export ANTHROPIC_BASE_URL="${ANTHROPIC_BASE_URL:-https://api.deepseek.com/anthropic}"
     export ANTHROPIC_AUTH_TOKEN="${DEEPSEEK_API_KEY}"
     export ANTHROPIC_MODEL="${ANTHROPIC_MODEL:-deepseek-chat}"
     export ANTHROPIC_SMALL_FAST_MODEL="${ANTHROPIC_SMALL_FAST_MODEL:-deepseek-chat}"
   else
-    echo "figma_write: no model backend — set ANTHROPIC_AUTH_TOKEN or DEEPSEEK_API_KEY" >&2
+    echo "figma_write: no model backend — set ANTHROPIC_AUTH_TOKEN, DASHSCOPE_API_KEY, or DEEPSEEK_API_KEY" >&2
     exit 78
   fi
 fi

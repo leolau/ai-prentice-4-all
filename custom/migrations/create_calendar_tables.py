@@ -13,7 +13,7 @@ import os
 import sqlite3
 from datetime import datetime, timezone
 
-DB_PATH = os.environ.get('DB_PATH', '/opt/data/whatsapp-messages/whatsapp_data.db')
+DB_PATH = os.environ.get('CALENDAR_DB_PATH', '/opt/data/calendar/calendar_data.db')
 
 
 def get_db():

@@ -6,10 +6,15 @@ import json
 import os
 import subprocess
 
-DB_PATH = '/opt/data/whatsapp-messages/whatsapp_data.db'
+DB_PATH = '/opt/data/whatsapp-messages/messaging_data.db'
+EMAIL_DB_PATH = '/opt/data/email-messages/email_data.db'
 
 db = sqlite3.connect(DB_PATH, timeout=10)
 db.row_factory = sqlite3.Row
+# Channel split: email_* tables live in their own DB — attach so the
+# unqualified queries below keep working.
+if os.path.exists(EMAIL_DB_PATH):
+    db.execute("ATTACH DATABASE ? AS emaildb", (EMAIL_DB_PATH,))
 
 # TEST 7.1: Email triage agent running
 print("TEST 7.1: Email triage agent running")

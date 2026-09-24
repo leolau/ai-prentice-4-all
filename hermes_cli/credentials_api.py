@@ -30,6 +30,8 @@ from hermes_cli.google_oauth import (
     GoogleOAuthError,
     authorized_user_payload,
     build_authorization_url,
+    connect_scopes,
+    email_from_id_token,
     exchange_code,
     fetch_userinfo_email,
     generate_pkce,
@@ -182,12 +184,14 @@ async def google_start(request: Request):
     except (CredentialError, GoogleOAuthError) as exc:
         raise HTTPException(400, str(exc))
     pkce = generate_pkce()
+    requested_scopes = connect_scopes(clean_services)
     _write_pending(
         principal.user_id,
         {
             "state": pkce["state"],
             "code_verifier": pkce["code_verifier"],
             "services": clean_services,
+            "scopes": requested_scopes,
             "name": name,
             "client_id": client_id,
             "created_at": time.time(),
@@ -195,12 +199,16 @@ async def google_start(request: Request):
     )
     auth_url = build_authorization_url(
         client_id=client_id,
-        scopes=scopes_for_services(clean_services),
+        scopes=requested_scopes,
         state=pkce["state"],
         code_challenge=pkce["code_challenge"],
         login_hint=name,
     )
-    return {"auth_url": auth_url, "state": pkce["state"]}
+    return {
+        "auth_url": auth_url,
+        "state": pkce["state"],
+        "expires_in": _PENDING_TTL_SECONDS,
+    }
 
 
 @router.post("/google/complete")
@@ -230,7 +238,9 @@ async def google_complete(request: Request):
             400, "Google returned no refresh token; re-run start and approve "
             "offline access"
         )
-    email = fetch_userinfo_email(str(token_doc.get("access_token") or ""))
+    email = email_from_id_token(str(token_doc.get("id_token") or ""))
+    if email is None:
+        email = fetch_userinfo_email(str(token_doc.get("access_token") or ""))
     name = email or str(pending.get("name") or "").strip()
     if not name:
         raise HTTPException(
@@ -242,7 +252,7 @@ async def google_complete(request: Request):
         token_doc=token_doc,
         client_id=client_id,
         client_secret=client_secret,
-        scopes=scopes_for_services(services),
+        scopes=list(pending.get("scopes") or scopes_for_services(services)),
     )
     try:
         entry = await _store().put(

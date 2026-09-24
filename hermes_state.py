@@ -842,6 +842,15 @@ CREATE INDEX IF NOT EXISTS idx_sessions_gateway_peer
     ON sessions(source, user_id, chat_id, chat_type, thread_id, started_at DESC);
 CREATE INDEX IF NOT EXISTS idx_sessions_handoff_state
     ON sessions(handoff_state, started_at);
+-- list_sessions_rich()'s recency queries filter WHERE archived = 0 (and
+-- often source NOT IN (...)) before ORDER BY started_at DESC. Without this,
+-- SQLite full-table-scans `sessions` for that filter (confirmed via EXPLAIN
+-- QUERY PLAN — see plans/2026-09-16-chat-sessions-perf-and-category.md);
+-- small today, but linear in total session count as history grows.
+-- Deferred (not in SCHEMA_SQL) because `archived` itself is a column
+-- _reconcile_columns() backfills on legacy databases that predate it.
+CREATE INDEX IF NOT EXISTS idx_sessions_archived_started
+    ON sessions(archived, started_at DESC);
 """
 
 FTS_SQL = """
@@ -3259,6 +3268,33 @@ class SessionDB:
                 (session_id,)
             )
             return [dict(r) for r in cursor.fetchall()]
+
+    def get_tags_for_sessions(
+        self, session_ids: List[str]
+    ) -> Dict[str, List[Dict[str, Any]]]:
+        """Bulk variant of :meth:`get_session_tags` — one query for many
+        sessions instead of N, for list endpoints that need every row's
+        tags at once (e.g. the chat list's category-override check).
+        Sessions with no tags are simply absent from the returned dict.
+        """
+        if not session_ids:
+            return {}
+        with self._lock:
+            placeholders = ",".join("?" for _ in session_ids)
+            cursor = self._conn.execute(
+                f"SELECT m.session_id, t.id, t.name, t.color, m.assigned_at, m.source "
+                f"FROM session_tag_map m "
+                f"JOIN session_tags t ON t.id = m.tag_id "
+                f"WHERE m.session_id IN ({placeholders}) ORDER BY t.name",
+                session_ids,
+            )
+            rows = cursor.fetchall()
+        by_session: Dict[str, List[Dict[str, Any]]] = {}
+        for r in rows:
+            d = dict(r)
+            sid = d.pop("session_id")
+            by_session.setdefault(sid, []).append(d)
+        return by_session
 
     def add_tag_to_session(
         self,

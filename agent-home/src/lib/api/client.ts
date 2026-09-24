@@ -46,6 +46,12 @@ import type {
   MemberRoleResponse,
   MembersResponse,
   MemoryDocumentsResponse,
+  ModelInfo,
+  ModelOptionsResponse,
+  ModelSetResponse,
+  ModelsAnalyticsResponse,
+  AuxiliaryModelsResponse,
+  ProviderValidateResponse,
   MemoryProjection,
   MemoryQueryPlacement,
   MemoryRowsResponse,
@@ -79,6 +85,7 @@ import type {
   Role,
   SessionCreateResponse,
   CredentialEntry,
+  EmailPollerAccount,
   SessionTag,
   SessionsResponse,
   TagSuggestion,
@@ -1843,6 +1850,18 @@ export class HermesApiClient {
   }
 
   /**
+   * Continue a `failed`/`cancelled` run from wherever its cards already
+   * are — distinct from `startProjectRun` ("Repeat this run"), which
+   * starts a brand-new run on the same method and redoes every step.
+   */
+  async resumeProjectRun(slug: string, runNo: number): Promise<ProjectRun> {
+    return this.request(
+      `/api/registry/projects/${encodeURIComponent(slug)}/runs/${encodeURIComponent(runNo)}/resume`,
+      { method: "POST", json: {} },
+    );
+  }
+
+  /**
    * The run's live reasoning and tool activity as raw SSE, for the BFF to
    * pipe. `after` resumes from a sequence number so a reconnect replays what
    * it missed. Like `openChatStream`, the body is NOT consumed here.
@@ -1869,6 +1888,70 @@ export class HermesApiClient {
           text ? safeJson(text) : undefined,
           "That run has no activity to show.",
         ),
+        text,
+      );
+    }
+    return res;
+  }
+
+  /**
+   * The run row itself, pushed live (§12 push edition) instead of the
+   * browser polling `projectRun` on a timer: the same payload, re-sent
+   * only when it actually changes, ending once the run is terminal. Raw
+   * SSE for the BFF to pipe, like `openRunActivityStream`.
+   */
+  async openRunStream(slug: string, runNo: number): Promise<Response> {
+    return this._openRowStream(
+      `/api/registry/projects/${encodeURIComponent(slug)}/runs/${encodeURIComponent(runNo)}/stream`,
+      "That run could not be found.",
+    );
+  }
+
+  /**
+   * One card's row, pushed live while a worker is on it — same payload as
+   * `projectCard`, ending once the card leaves `running`.
+   */
+  async openCardStream(slug: string, taskId: string): Promise<Response> {
+    return this._openRowStream(
+      `/api/registry/projects/${encodeURIComponent(slug)}/cards/${encodeURIComponent(taskId)}/stream`,
+      "That card could not be found.",
+    );
+  }
+
+  /**
+   * The project's event cursor, pushed live instead of the project page
+   * polling `projectEvents` on a timer. Never ends on its own — the
+   * project has no terminal state — so the caller tears the connection
+   * down on unmount.
+   */
+  async openProjectEventsStream(slug: string): Promise<Response> {
+    return this._openRowStream(
+      `/api/registry/projects/${encodeURIComponent(slug)}/events/stream`,
+      "That project could not be found.",
+    );
+  }
+
+  /** Shared opener behind `openRunStream` / `openCardStream` /
+   * `openProjectEventsStream`: same auth headers and error shape as
+   * `openRunActivityStream`, the body is NOT consumed here. */
+  private async _openRowStream(
+    path: string,
+    notFoundDetail: string,
+  ): Promise<Response> {
+    const headers = new Headers({ accept: "text/event-stream" });
+    if (this.hermesToken) {
+      headers.set("cookie", `hermes_session_at=${this.hermesToken}`);
+      headers.set("authorization", `Bearer ${this.hermesToken}`);
+    }
+    const res = await fetch(`${this.baseUrl}${path}`, {
+      headers,
+      cache: "no-store",
+    });
+    if (!res.ok || !res.body) {
+      const text = res.body ? await res.text().catch(() => "") : "";
+      throw new HermesApiError(
+        res.status,
+        upstreamDetail(text ? safeJson(text) : undefined, notFoundDetail),
         text,
       );
     }
@@ -1961,11 +2044,31 @@ export class HermesApiClient {
     );
   }
 
+  /** Email-poller account flags (deployment poller config; owner-gated). */
+  async emailAccounts(): Promise<{
+    config_present: boolean;
+    accounts: EmailPollerAccount[];
+  }> {
+    return this.request("/api/email-accounts");
+  }
+
+  /** Enable/disable polling for an address; creates a Gmail entry when
+   *  enabling an address the poller doesn't know yet. */
+  async setEmailPolling(
+    address: string,
+    enabled: boolean,
+  ): Promise<{ account: EmailPollerAccount }> {
+    return this.request("/api/email-accounts", {
+      method: "PATCH",
+      json: { address, enabled },
+    });
+  }
+
   /** Begin a Google OAuth connect; returns the consent URL to open. */
   async googleStart(payload: {
     name?: string;
     services: string[];
-  }): Promise<{ auth_url: string; state: string }> {
+  }): Promise<{ auth_url: string; state: string; expires_in?: number }> {
     return this.request("/api/credentials/google/start", {
       method: "POST",
       json: payload,
@@ -1992,6 +2095,74 @@ export class HermesApiClient {
       `/api/credentials/google/${encodeURIComponent(name)}/refresh`,
       { method: "POST" },
     );
+  }
+
+  // ── Models page (System ▸ Models) ─────────────────────────────────────
+  // Thin forwards to the same `/api/model/*` endpoints the dashboard's
+  // Models Settings screen uses. Writes apply to new sessions only —
+  // upstream owns that contract, this just replays it.
+
+  /** Resolved main-model metadata (context length + capabilities). */
+  async modelInfo(): Promise<ModelInfo> {
+    return this.request("/api/model/info");
+  }
+
+  /**
+   * Every catalog provider (authenticated or not) with curated model lists
+   * and picker hints (`authenticated`/`auth_type`/`key_env`/`warning`) —
+   * the same payload the dashboard picker consumes.
+   */
+  async modelOptions(): Promise<ModelOptionsResponse> {
+    return this.request("/api/model/options");
+  }
+
+  /** Auxiliary task-slot assignments plus the current main model. */
+  async auxiliaryModels(): Promise<AuxiliaryModelsResponse> {
+    return this.request("/api/model/auxiliary");
+  }
+
+  /**
+   * Assign provider+model to the main slot or one auxiliary task.
+   * `scope: "auxiliary"` with `provider: "auto"` resets the slot to inherit
+   * the main model. `confirm_expensive_model` re-sends after the upstream
+   * `confirm_required` response.
+   */
+  async setModelAssignment(body: {
+    scope: "main" | "auxiliary";
+    provider: string;
+    model: string;
+    task?: string;
+    base_url?: string;
+    api_key?: string;
+    confirm_expensive_model?: boolean;
+  }): Promise<ModelSetResponse> {
+    return this.request("/api/model/set", { method: "POST", json: body });
+  }
+
+  /** Per-model usage/cost analytics for the "In use" list. */
+  async modelsAnalytics(days = 30): Promise<ModelsAnalyticsResponse> {
+    return this.request(`/api/analytics/models?days=${days}`);
+  }
+
+  /** Live-probe a provider credential before persisting it. */
+  async validateProviderKey(
+    key: string,
+    value: string,
+  ): Promise<ProviderValidateResponse> {
+    return this.request("/api/providers/validate", {
+      method: "POST",
+      json: { key, value },
+    });
+  }
+
+  /** Write a `.env` value (provider API keys live there). */
+  async setEnvVar(key: string, value: string): Promise<{ ok: boolean; key: string }> {
+    return this.request("/api/env", { method: "PUT", json: { key, value } });
+  }
+
+  /** Remove a `.env` value — disconnects a key-based provider. */
+  async deleteEnvVar(key: string): Promise<{ ok: boolean; key: string }> {
+    return this.request("/api/env", { method: "DELETE", json: { key } });
   }
 }
 

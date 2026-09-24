@@ -348,3 +348,70 @@ def test_copilot_enterprise_base_url_applies_copilot_default_headers(mock_openai
     assert lc.get("copilot-integration-id") == "vscode-chat", (
         f"enterprise Copilot endpoint must carry Copilot-Integration-Id=vscode-chat; got {headers}"
     )
+
+
+@patch("run_agent.OpenAI")
+def test_opencode_base_url_applies_session_header(mock_openai):
+    """OpenCode Go/Zen requires a stable per-conversation x-opencode-session
+    id on every request (HTTP 400 MissingSessionID otherwise). (#81584)"""
+    mock_openai.return_value = MagicMock()
+    agent = AIAgent(
+        api_key="test-key",
+        base_url="https://opencode.ai/zen/go/v1",
+        model="deepseek-v4.1-flash",
+        provider="opencode-go",
+        quiet_mode=True,
+        skip_context_files=True,
+        skip_memory=True,
+        session_id="sess-test-123",
+    )
+
+    headers = agent._client_kwargs["default_headers"]
+    assert headers["x-opencode-session"] == "sess-test-123"
+
+    # The credential-refresh / client-rebuild path must keep the header.
+    agent._apply_client_headers_for_base_url("https://opencode.ai/zen/go/v1")
+    assert (
+        agent._client_kwargs["default_headers"]["x-opencode-session"]
+        == "sess-test-123"
+    )
+
+
+@patch("run_agent.OpenAI")
+def test_opencode_session_header_tracks_generated_session_id(mock_openai):
+    """When no session_id is passed in, the header baked at client
+    construction is refreshed to the generated id once it is finalised."""
+    mock_openai.return_value = MagicMock()
+    agent = AIAgent(
+        api_key="test-key",
+        base_url="https://opencode.ai/zen/go/v1",
+        model="deepseek-v4.1-flash",
+        provider="opencode-go",
+        quiet_mode=True,
+        skip_context_files=True,
+        skip_memory=True,
+    )
+
+    assert (
+        agent._client_kwargs["default_headers"]["x-opencode-session"]
+        == agent.session_id
+    )
+
+
+@patch("run_agent.OpenAI")
+def test_non_opencode_base_url_gets_no_session_header(mock_openai):
+    mock_openai.return_value = MagicMock()
+    agent = AIAgent(
+        api_key="test-key",
+        base_url="https://openrouter.ai/api/v1",
+        model="test/model",
+        quiet_mode=True,
+        skip_context_files=True,
+        skip_memory=True,
+        session_id="sess-test-123",
+    )
+
+    agent._apply_client_headers_for_base_url("https://openrouter.ai/api/v1")
+
+    headers = agent._client_kwargs["default_headers"]
+    assert "x-opencode-session" not in headers

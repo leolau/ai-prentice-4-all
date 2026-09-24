@@ -31,7 +31,7 @@ were the last single-user island.
 - **R4** **Supabase is the source of truth** on deployments that have it; a file
   backend remains as the portable fallback (upstream skill users without Supabase).
 - **R5** Background pollers consume an entry **only when its owner opted it in**
-  via explicit `services` flags (`email`, `calendar`, `workspace`).
+  via explicit `services` flags (`email`, `calendar`, `drive`, `workspace`).
 - **R6** Per-user management UI = agent-home Settings → *Connected accounts*.
   The dashboard Keys page keeps managing profile-level service credentials.
 - **R7** This design doc is saved before any code.
@@ -67,7 +67,7 @@ CREATE TABLE IF NOT EXISTS credentials (
     kind TEXT NOT NULL,               -- 'google-oauth2'; registry-driven
     visibility TEXT NOT NULL DEFAULT 'shared'
         CHECK (visibility = 'shared' OR visibility LIKE 'private:%'),
-    services TEXT[] NOT NULL DEFAULT '{}',  -- opt-in: email, calendar, workspace
+    services TEXT[] NOT NULL DEFAULT '{}',  -- opt-in: email, calendar, drive, workspace
     payload JSONB NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -130,8 +130,12 @@ for refresh persistence (the one sanctioned write, race-safe by construction).
 ## 7. OAuth2 flow (Google adapter)
 
 Mechanics live in `hermes_cli/google_oauth.py` (extracted from the skill's proven
-`setup.py`): PKCE, `redirect_uri=http://localhost:1`, `access_type=offline`,
-`prompt=consent`, `login_hint=<email>`, pending state in
+`setup.py`): PKCE, `redirect_uri=http://localhost:4321` (any unblocked,
+unlistened loopback port — port 1 is on browser blocklists and can hang),
+`access_type=offline`,
+`prompt=select_account consent` (the account chooser is forced so connecting an
+additional account can't silently reuse the signed-in one), `login_hint=<email>`,
+pending state in
 `$HERMES_HOME/credentials-pending/<user_id>/google.json` (0600, 10-min TTL),
 code-or-full-redirect-URL accepted, granted (possibly partial) scopes persisted.
 
@@ -141,10 +145,18 @@ Scopes are **derived from the requested services** (`SCOPES_BY_SERVICE`):
 |---|---|
 | `email` | `https://mail.google.com/` (required for IMAP/SMTP XOAUTH2; `gmail.*` do NOT grant IMAP) |
 | `calendar` | `https://www.googleapis.com/auth/calendar` |
+| `drive` | `https://www.googleapis.com/auth/drive` |
 | `workspace` | the skill's existing 8 scopes (gmail.readonly/send/modify, calendar, drive, contacts.readonly, spreadsheets, documents) |
 
-Account email is fixed at exchange time via
-`https://openidconnect.googleapis.com/v1/userinfo`. **Re-consent is required** when
+Every connect also requests the identity scopes `openid` +
+`userinfo.email` (`connect_scopes()` = service scopes ∪ identity scopes), so the
+consenting account's email is always recoverable: `complete` tries the
+`id_token` `email` claim first, then the
+`https://openidconnect.googleapis.com/v1/userinfo` endpoint, then falls back to
+the start-time hint. The hint is only a `login_hint` convenience — the entry is
+named by the account that actually consented, so a wrong-account approval is
+visible (and correctly keyed) rather than silently stored under the hint.
+**Re-consent is required** when
 adding `email` to an existing consent — existing grants lack `mail.google.com`.
 
 HTTP surface: `hermes_cli/credentials_api.py` router `/api/credentials`
@@ -185,6 +197,10 @@ margin); refresh persists via `update_tokens` (single writer).
 
 - **email poller**: accounts = `config.json` accounts ∩ store entries with `email`
   service (config keeps host/port/folders/label; the secret moves to the store).
+  The per-account `enabled` flag is owner-managed from Settings → Connected
+  accounts via `hermes_cli/email_accounts_api.py` (`GET`/`PATCH
+  /api/email-accounts`); enabling an unknown address creates a Gmail-defaults
+  entry. The poller re-reads the config each cycle — no restart needed.
   Auth = `imaplib.IMAP4_SSL` + `authenticate("XOAUTH2", ...)` with
   `xoauth2_string(email, token)`; one retry on auth failure, then per-account
   error status + health field.

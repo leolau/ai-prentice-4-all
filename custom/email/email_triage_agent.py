@@ -27,7 +27,10 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # Paths
 EMAIL_CONFIG_PATH = '/opt/data/email-messages/config.json'
-DB_PATH = '/opt/data/whatsapp-messages/whatsapp_data.db'
+DB_PATH = os.environ.get('EMAIL_DB_PATH', '/opt/data/email-messages/email_data.db')
+# Shared tables (escalations, contact_handles, unified_contacts) stay in the
+# messaging DB; get_db() attaches it so unqualified queries keep working.
+MESSAGING_DB_PATH = os.environ.get('MESSAGING_DB_PATH', '/opt/data/whatsapp-messages/messaging_data.db')
 EMAIL_BATCH_DIR = '/opt/data/email-messages/batches'
 WA_SKILLS_DIR = '/opt/data/skills/whatsapp-triage'
 EMAIL_SKILLS_DIR = '/opt/data/skills/email-triage'
@@ -59,6 +62,10 @@ def get_db():
     conn = sqlite3.connect(DB_PATH, timeout=10)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
+    # Table names are disjoint across domains — unqualified queries on shared
+    # tables (escalations, contact_handles, unified_contacts) resolve to the
+    # attached messaging DB.
+    conn.execute("ATTACH DATABASE ? AS msg", (MESSAGING_DB_PATH,))
     return conn
 
 

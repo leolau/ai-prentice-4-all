@@ -185,6 +185,200 @@ def test_reconcile_fails_a_stale_run_with_nothing_left_to_promote(stores):
     assert APPROVALS.calls, "a stalled-run approval must be raised, not swallowed"
 
 
+def test_reconcile_never_fails_a_run_parked_at_a_checkpoint(stores):
+    """The exact incident this was built to fix (2026-09-14 tender-project
+    report): a supervised run whose checkpoint card finished — correctly
+    holding its successor in triage — must never be auto-failed as
+    'stale' just because a human hasn't answered yet. It is waiting on a
+    person, not orphaned, and a live approval quoting the checkpoint
+    card's own comment must be raised so the person actually finds out."""
+    project = _make_project(autonomy="supervised", max_in_progress=1)
+    steps = [
+        {"key": "s0", "title": "Step 0"},
+        {
+            "key": "s1", "title": "Step 1 (checkpoint)",
+            "depends_on": ["s0"], "checkpoint": True,
+        },
+        {"key": "s2", "title": "Step 2", "depends_on": ["s1"]},
+    ]
+    _save_playbook(project.id, steps)
+    with projects_db.connect_closing() as conn:
+        projects_db.activate_playbook_rev(conn, project.id, 1)
+    result = _start(project.id)
+    run = result["run"]
+    s0_id = result["cards"]["s0"]
+    s1_id = result["cards"]["s1"]
+
+    with kanban_db.connect_closing() as bconn:
+        bconn.execute("UPDATE tasks SET status = 'running' WHERE id = ?", (s0_id,))
+        assert kanban_db.complete_task(bconn, s0_id, result="done")
+        # The completion hook (Gap A) promotes the checkpoint step itself —
+        # only its *successor* (s2) is held.
+        assert kanban_db.get_task(bconn, s1_id).status in ("ready", "todo")
+        bconn.execute("UPDATE tasks SET status = 'running' WHERE id = ?", (s1_id,))
+        kanban_db.add_comment(
+            bconn, s1_id, "default", "Two questions for you: A or B? X or Y?"
+        )
+        assert kanban_db.complete_task(bconn, s1_id, result="done")
+        assert kanban_db.get_task(bconn, result["cards"]["s2"]).status == "triage"
+
+    future = int(run["started_at"]) + 3 * 3600  # past the 2h default threshold
+    results = projects_reconcile.reconcile_all_open_runs(now=future)
+
+    with projects_db.connect_closing() as conn:
+        still = projects_db.get_project_run_by_id(conn, run["id"])
+    assert still["status"] == "running"  # never auto-failed
+    assert any(
+        r.get("action") == "awaiting_continue" and r.get("run_no") == run["run_no"]
+        for r in results
+    )
+    # `start_run()` itself already raised a generic notice ("this playbook
+    # has checkpoints") the moment the run began — before anyone could
+    # know whether s1 would ever actually be reached. The *live* one,
+    # raised once the checkpoint genuinely engaged (by on_card_settled
+    # during kanban_db.complete_task above, and re-detected here by the
+    # sweep against this non-deduping fake store), is the last call and
+    # must quote the checkpoint card's own comment.
+    assert APPROVALS.calls, "the checkpoint hold must raise a live approval"
+    live_calls = [c for c in APPROVALS.calls if "Two questions for you" in c["body"]]
+    assert live_calls, "the live checkpoint notice was never raised"
+    for raised in live_calls:
+        assert raised["dedupe_key"] == (
+            f"proj:{project.slug}:run:{run['run_no']}:checkpoint:s1"
+        )
+
+
+def test_checkpoint_wait_info_is_not_masked_by_a_second_still_open_checkpoint(stores):
+    """Regression for the regression (2026-09-14, second recurrence on the
+    real project): `checkpoint_wait_info` used to require EVERY checkpoint
+    in the playbook to be `done` before considering anything held, so a
+    playbook with two checkpoints (this project's — pricing, then the
+    final package) had its first, already-finished checkpoint's hold
+    masked by the second, still-open one. The run looked "not held",
+    the stale-run sweep auto-failed it a second time even though the
+    first fix had already landed, and a card was genuinely, correctly
+    waiting on a human the whole time."""
+    project = _make_project(autonomy="supervised", max_in_progress=1)
+    steps = [
+        {"key": "s0", "title": "Step 0"},
+        {
+            "key": "s1", "title": "Checkpoint 1",
+            "depends_on": ["s0"], "checkpoint": True,
+        },
+        {"key": "s2", "title": "Step 2", "depends_on": ["s1"]},
+        {
+            "key": "s3", "title": "Checkpoint 2 (not yet reached)",
+            "depends_on": ["s1"], "checkpoint": True,
+        },
+    ]
+    _save_playbook(project.id, steps)
+    with projects_db.connect_closing() as conn:
+        projects_db.activate_playbook_rev(conn, project.id, 1)
+    result = _start(project.id)
+    run = result["run"]
+    s0_id = result["cards"]["s0"]
+    s1_id = result["cards"]["s1"]
+
+    with kanban_db.connect_closing() as bconn:
+        bconn.execute("UPDATE tasks SET status = 'running' WHERE id = ?", (s0_id,))
+        assert kanban_db.complete_task(bconn, s0_id, result="done")
+        assert kanban_db.get_task(bconn, s1_id).status in ("ready", "todo")
+        bconn.execute("UPDATE tasks SET status = 'running' WHERE id = ?", (s1_id,))
+        assert kanban_db.complete_task(bconn, s1_id, result="done")
+        # Both successors of the now-finished checkpoint sit held in
+        # triage — s3 is itself a not-yet-reached checkpoint, and must
+        # not make s2's hold (on the checkpoint that DID finish) invisible.
+        assert kanban_db.get_task(bconn, result["cards"]["s2"]).status == "triage"
+        assert kanban_db.get_task(bconn, result["cards"]["s3"]).status == "triage"
+
+    with projects_db.connect_closing() as conn:
+        cards = [
+            {"step_key": "s0", "status": "done", "task_id": s0_id},
+            {"step_key": "s1", "status": "done", "task_id": s1_id, "title": "Checkpoint 1"},
+            {"step_key": "s2", "status": "triage", "task_id": result["cards"]["s2"]},
+            {"step_key": "s3", "status": "triage", "task_id": result["cards"]["s3"]},
+        ]
+        info = projects_run.checkpoint_wait_info(conn, project, run, cards)
+    assert info is not None, (
+        "the finished checkpoint's hold must not be masked by the "
+        "second, still-open checkpoint"
+    )
+    assert info["checkpoint_step_key"] == "s1"
+    assert "s2" in info["held_step_keys"]
+
+    future = int(run["started_at"]) + 3 * 3600  # past the 2h default threshold
+    projects_reconcile.reconcile_all_open_runs(now=future)
+    with projects_db.connect_closing() as conn:
+        still = projects_db.get_project_run_by_id(conn, run["id"])
+    assert still["status"] == "running"  # never auto-failed
+
+
+def test_completing_the_last_card_closes_the_run_as_done(stores):
+    """Regression (2026-09-14, real project): finishing every card never
+    itself closed the run — a fully-finished run just sat `running`
+    forever with nothing left to promote, which read as "stalled" on the
+    run page even though everything actually succeeded ("7 of 7 steps
+    done" next to a red Failed/Stalled badge). The completion hook
+    (on_card_settled, via kanban_db.complete_task) must close it the
+    instant the last card settles — no waiting on the periodic sweep."""
+    project = _make_project(autonomy="autonomous", max_in_progress=1)
+    steps = [
+        {"key": "s0", "title": "Step 0"},
+        {"key": "s1", "title": "Step 1", "depends_on": ["s0"]},
+    ]
+    _save_playbook(project.id, steps)
+    with projects_db.connect_closing() as conn:
+        projects_db.activate_playbook_rev(conn, project.id, 1)
+    result = _start(project.id)
+    run = result["run"]
+    s0_id, s1_id = result["cards"]["s0"], result["cards"]["s1"]
+
+    with kanban_db.connect_closing() as bconn:
+        bconn.execute("UPDATE tasks SET status = 'running' WHERE id = ?", (s0_id,))
+        assert kanban_db.complete_task(bconn, s0_id, result="done")
+        assert kanban_db.get_task(bconn, s1_id).status in ("ready", "todo")
+        bconn.execute("UPDATE tasks SET status = 'running' WHERE id = ?", (s1_id,))
+        # Not yet closed — one card is still open.
+        with projects_db.connect_closing() as conn:
+            assert projects_db.get_project_run_by_id(conn, run["id"])["status"] == "running"
+        assert kanban_db.complete_task(bconn, s1_id, result="done")
+
+    with projects_db.connect_closing() as conn:
+        closed = projects_db.get_project_run_by_id(conn, run["id"])
+    assert closed["status"] == "done"
+    assert closed["ended_at"] is not None
+    assert closed["outcome"] is not None
+
+
+def test_reconcile_sweep_also_closes_a_run_whose_completion_event_was_lost(stores):
+    """Safety net for the case on_card_settled never fired (a process
+    restart landed between the last card settling and the hook running)
+    — the periodic sweep must close it too, not just refill/notify."""
+    project = _make_project(autonomy="autonomous", max_in_progress=1)
+    steps = [{"key": "s0", "title": "Step 0"}]
+    _save_playbook(project.id, steps)
+    with projects_db.connect_closing() as conn:
+        projects_db.activate_playbook_rev(conn, project.id, 1)
+    result = _start(project.id)
+    run = result["run"]
+    s0_id = result["cards"]["s0"]
+
+    with kanban_db.connect_closing() as bconn:
+        # Raw status flip — bypasses complete_task()'s settle hook
+        # entirely, exactly like the restart-orphan scenario elsewhere
+        # in this file.
+        bconn.execute("UPDATE tasks SET status = 'done' WHERE id = ?", (s0_id,))
+
+    results = projects_reconcile.reconcile_all_open_runs()
+    assert any(
+        r.get("action") == "completed" and r.get("run_no") == run["run_no"]
+        for r in results
+    )
+    with projects_db.connect_closing() as conn:
+        closed = projects_db.get_project_run_by_id(conn, run["id"])
+    assert closed["status"] == "done"
+
+
 def test_reconcile_leaves_a_fresh_running_run_alone(stores):
     """Nothing stale, nothing new to refill (start_run already promoted
     everything room allowed) — the sweep must be a true no-op."""

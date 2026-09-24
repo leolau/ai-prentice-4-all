@@ -826,6 +826,17 @@ def build_anthropic_client(
         if common_betas:
             kwargs["default_headers"] = {"anthropic-beta": ",".join(common_betas)}
 
+    # OpenCode Go routes Anthropic-wire models (MiniMax, qwen3.7-max) through
+    # the same session-affinity gateway — merge the required header into
+    # whichever auth branch above produced default_headers. (#81584)
+    if base_url_host_matches(normalized_base_url or "", "opencode.ai"):
+        from agent.auxiliary_client import build_opencode_session_headers
+
+        kwargs["default_headers"] = {
+            **(kwargs.get("default_headers") or {}),
+            **build_opencode_session_headers(),
+        }
+
     return _anthropic_sdk.Anthropic(**kwargs)
 
 

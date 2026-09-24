@@ -19,8 +19,15 @@ import {
   type ChatActivity,
 } from "@/components/chat/StatusIndicator";
 import { TagFilterBar } from "@/components/chat/TagFilterBar";
+import {
+  categorizeSession,
+  categoryOverrideTagName,
+  isCategoryOverrideTag,
+  type ChatCategory,
+} from "@/lib/chat/categorize";
 import { chatHeaderActionsRef } from "@/lib/chat/header-actions";
 import { markSessionRead } from "@/lib/chat/last-read";
+import { CHAT_SESSION_LIST_LIMIT } from "@/lib/chat/session-limits";
 import {
   setLastAssistantContent,
   withLiveTurn,
@@ -33,6 +40,7 @@ import {
   SESSION_ORDER_STORAGE_KEY,
 } from "@/lib/chat/session-order";
 import { withProfileBody, withProfileQuery } from "@/lib/chat/profile";
+import { fetchSessionList } from "@/lib/chat/session-list-fetch";
 import {
   attachChatStream,
   cancelChatTurn,
@@ -582,16 +590,22 @@ export function ChatPane({
       const params = new URLSearchParams();
       // Match the first-paint fetch: a refresh must not shrink the picker to
       // the upstream's default page size.
-      params.set("limit", "200");
+      params.set("limit", String(CHAT_SESSION_LIST_LIMIT));
+      // The strip groups cron sessions into their own "Scheduled" row
+      // instead of hiding them — opt in to seeing them (see the BFF
+      // route's doc comment for the empty-string-vs-absent distinction).
+      params.set("exclude_sources", "");
       if (includeTags.length > 0) params.set("tags", includeTags.join(","));
       if (excludeTags.length > 0) params.set("exclude_tags", excludeTags.join(","));
       params.set("tag_match", matchMode);
-      const res = await fetch(path(`/api/chat/sessions?${params.toString()}`), {
-        cache: "no-store",
-      });
-      if (!res.ok) return;
-      const body = (await res.json()) as { sessions?: SessionSummary[] };
-      if (body.sessions) setSessions(body.sessions);
+      // `force`: every caller reaches here right after a mutation — a shared
+      // in-flight GET could answer with pre-mutation state, and the 2 s reuse
+      // window could replay it. A fresh request is the correct read here.
+      const body = await fetchSessionList(
+        path(`/api/chat/sessions?${params.toString()}`),
+        { force: true },
+      );
+      if (body?.sessions) setSessions(body.sessions);
     } catch {
       // A stale conversation list is non-fatal.
     }
@@ -721,6 +735,20 @@ export function ChatPane({
     if (!res.ok) throw new Error("Failed to remove tag.");
     setSessionTags((prev) => prev.filter((t) => t.id !== tagId));
     void loadAllTags();
+  }
+
+  /** Move the open conversation to a different category. Stored as a
+   * reserved `category:<value>` tag (see `lib/chat/categorize.ts`) — a
+   * session should carry at most one, so any existing override is removed
+   * before the new one is added. Refreshes the strip afterward so it
+   * regroups immediately instead of waiting for the next natural refresh. */
+  async function setSessionCategory(next: ChatCategory) {
+    const existing = sessionTags.find((t) => isCategoryOverrideTag(t));
+    if (existing) {
+      await removeTag(existing.id);
+    }
+    await addTag(categoryOverrideTagName(next));
+    void refreshSessions();
   }
 
   async function suggestTags() {
@@ -989,6 +1017,8 @@ export function ChatPane({
           }}
           onRename={renameSession}
           onArchive={archiveSession}
+          category={categorizeSession({ ...detailsSession, tags: sessionTags })}
+          onSetCategory={setSessionCategory}
           tags={sessionTags}
           allTags={allTags}
           tagSuggestions={tagSuggestions}

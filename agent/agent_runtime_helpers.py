@@ -1804,6 +1804,15 @@ def switch_model(agent, new_model, new_provider, api_key='', base_url='', api_mo
                 )
             except Exception:
                 logger.debug("custom-provider TLS resolution skipped on switch_model", exc_info=True)
+            if base_url_host_matches(str(effective_base or ""), "opencode.ai"):
+                # OpenCode Go/Zen rejects requests without a stable
+                # per-conversation session id — the rebuilt client needs the
+                # header too, or every call after a mid-session switch 400s.
+                from agent.auxiliary_client import build_opencode_session_headers
+
+                agent._client_kwargs["default_headers"] = build_opencode_session_headers(
+                    getattr(agent, "session_id", None)
+                )
             _sm_timeout = get_provider_request_timeout(agent.provider, agent.model)
             if _sm_timeout is not None:
                 agent._client_kwargs["timeout"] = _sm_timeout

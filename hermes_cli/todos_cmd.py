@@ -41,7 +41,12 @@ from hermes_cli.todo_store import (
 import os as _os
 
 DEFAULT_DB_PATH = _os.environ.get(
-    "DB_PATH", "/opt/data/whatsapp-messages/whatsapp_data.db"
+    "MESSAGING_DB_PATH", "/opt/data/whatsapp-messages/messaging_data.db"
+)
+#: The channel split moved ``email_tasks`` to its own DB; the replay command
+#: attaches it read-only so both legacy tables stay reachable.
+_EMAIL_DB_PATH = _os.environ.get(
+    "EMAIL_DB_PATH", "/opt/data/email-messages/email_data.db"
 )
 
 
@@ -664,6 +669,11 @@ async def _backfill(
             f"file:{db_path}?mode=ro", uri=True, timeout=30
         )
         conn.row_factory = sqlite3.Row
+        if _os.path.exists(_EMAIL_DB_PATH):
+            conn.execute(
+                "ATTACH DATABASE ? AS emaildb",
+                (f"file:{_EMAIL_DB_PATH}?mode=ro",),
+            )
     except sqlite3.OperationalError as exc:
         print(f"Cannot open {db_path}: {exc}", file=sys.stderr)
         return 1
