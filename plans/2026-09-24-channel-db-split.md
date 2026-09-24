@@ -1,7 +1,20 @@
 # Channel DB split — per-domain SQLite files
 
-**Status:** implemented locally; not yet deployed. Migration verified on a
-fixture DB (copy, retire, rename, idempotent re-run, cross-DB attach writes).
+**Status:** DEPLOYED 2026-09-24 (develop `0e7ff3005`, PRs #436 + #437).
+Migration ran on the box with services stopped: 9 email + 4 calendar tables
+copied, legacy file renamed to `messaging_data.db`, all units restarted
+active, zero `database is locked`/`no such table` errors post-restart,
+calendar poller + both triage agents + merged digest all writing/reading the
+new layout.
+
+**Incident found during deploy:** `app_prod.credentials` was absent from the
+live postgres (the earlier write this morning went to a container IP that no
+longer hosts it — docker network IPs had shuffled). Recreated the table via
+`store.initialize()` and restored the 3 legacy-scope accounts
+(calendar/drive/workspace only — the surviving refresh tokens predate the
+email scope). `heidilui@joyaether.com` and the `email` service flag on all
+accounts need re-consent in Settings. Unrelated: `hermes-wa-bridge-personal`
+crash-loops on a logged-out WhatsApp session — needs QR re-auth.
 
 ## Why
 
