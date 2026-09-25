@@ -10,7 +10,7 @@
  *   - NEVER cache API/auth responses or cross-origin requests — those carry
  *     per-principal data and must always hit the network.
  */
-const VERSION = "agent-home-v2";
+const VERSION = "agent-home-v3";
 const SHELL_CACHE = `${VERSION}-shell`;
 const RUNTIME_CACHE = `${VERSION}-runtime`;
 const OFFLINE_URL = "/offline.html";
@@ -67,16 +67,21 @@ self.addEventListener("fetch", (event) => {
   }
 
   if (isStaticAsset(url)) {
+    // Network-first for content-hashed assets: the URL changes when the
+    // content changes, so stale cache has zero benefit and only risks
+    // serving an old bundle after a deploy (which broke Folder Bridge
+    // keepalive pings until the user hard-refreshed). Fall back to cache
+    // only when the network is unreachable (offline).
     event.respondWith(
       caches.open(RUNTIME_CACHE).then(async (cache) => {
-        const cached = await cache.match(request);
-        const network = fetch(request)
-          .then((response) => {
-            if (response.ok) cache.put(request, response.clone());
-            return response;
-          })
-          .catch(() => cached);
-        return cached || network;
+        try {
+          const response = await fetch(request);
+          if (response.ok) cache.put(request, response.clone());
+          return response;
+        } catch {
+          const cached = await cache.match(request);
+          return cached || Response.error();
+        }
       }),
     );
   }
