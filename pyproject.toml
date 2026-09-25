@@ -198,6 +198,9 @@ mem0 = ["mem0ai==2.0.10"]
 # CLI under prompt_toolkit (#40490). This extra is kept as a no-op back-compat
 # alias so existing `pip install hermes-agent[vision]` invocations still resolve.
 vision = []
+# PDF/Excel parse-read-update-create on the box (skills/productivity/office-documents).
+# Same pins as the ``documents.*`` entries in tools/lazy_deps.py.
+documents = ["pypdf==5.1.0", "openpyxl==3.1.5", "reportlab==5.0.1"]
 # CVE-2026-48710 (BadHost): Starlette is pulled transitively by mcp's
 # sse-starlette / HTTP-SSE stack (and by fastapi in the `web` extra). Before
 # 1.0.1, a malformed Host header makes `request.url.path` desync from the path

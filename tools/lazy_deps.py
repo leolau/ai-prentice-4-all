@@ -260,6 +260,14 @@ LAZY_DEPS: dict[str, tuple[str, ...]] = {
     # (remember-file) handles them directly.
     "rag.pypdf": ("pypdf==5.1.0",),
     "rag.python_docx": ("python-docx==1.2.0",),
+
+    # ─── Office documents (skills/productivity/office-documents) ─────────
+    # PDF read/update (pypdf, same pin as rag.pypdf), PDF creation (reportlab)
+    # and .xlsx read/write (openpyxl). Mirrors the ``documents`` extra in
+    # pyproject.toml; the skill scripts call ensure() on first use.
+    "documents.pypdf": ("pypdf==5.1.0",),
+    "documents.openpyxl": ("openpyxl==3.1.5",),
+    "documents.reportlab": ("reportlab==5.0.1",),
 }
 
 
