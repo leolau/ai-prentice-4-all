@@ -16,9 +16,12 @@ import {
 import {
   connectFolderBridge,
   disconnectFolderBridge,
+  getImportProgress,
   getStatus,
+  subscribeImportProgress,
   subscribeStatus,
 } from "@/lib/folder-bridge/transport";
+import type { ImportProgress } from "@/lib/folder-bridge/transport";
 import type { ConnectionStatus, FolderRecord, SearchMatch } from "@/lib/folder-bridge/types";
 
 const STATUS_LABEL: Record<ConnectionStatus, string> = {
@@ -37,6 +40,17 @@ const STATUS_TONE: Record<ConnectionStatus, string> = {
 
 function useConnectionStatus(): ConnectionStatus {
   return useSyncExternalStore(subscribeStatus, getStatus, () => "disconnected");
+}
+
+function useImportProgress(): ImportProgress | null {
+  return useSyncExternalStore(subscribeImportProgress, getImportProgress, () => null);
+}
+
+function formatBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(0)} KB`;
+  if (n < 1024 * 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+  return `${(n / (1024 * 1024 * 1024)).toFixed(2)} GB`;
 }
 
 const noopSubscribe = () => () => {};
@@ -61,6 +75,7 @@ function usePickerSupport(): boolean | null {
  */
 export function FolderBridgeView() {
   const status = useConnectionStatus();
+  const importProgress = useImportProgress();
   const supported = usePickerSupport();
   const snapshotMode = supported === true && !fileSystemAccessSupported();
   const [folders, setFolders] = useState<FolderRecord[]>([]);
@@ -184,6 +199,35 @@ export function FolderBridgeView() {
           spreadsheets) into Files; you approve each copy in chat unless you
           mark the folder &ldquo;trusted for import&rdquo;.
         </p>
+        {importProgress ? (
+          <div data-component="FolderBridgeImportProgress" className="mt-3">
+            <div className="flex items-center justify-between text-xs text-[var(--color-muted)]">
+              <span className="truncate">Uploading {importProgress.filename}</span>
+              <span>
+                {formatBytes(importProgress.sent)} / {formatBytes(importProgress.total)}
+                {importProgress.total > 0
+                  ? ` (${Math.min(100, Math.round((importProgress.sent / importProgress.total) * 100))}%)`
+                  : ""}
+              </span>
+            </div>
+            <div className="mt-1 h-1.5 w-full overflow-hidden rounded-full bg-[var(--color-border)]">
+              <div
+                className="h-full rounded-full bg-[var(--color-accent)] transition-[width]"
+                style={{
+                  width: `${
+                    importProgress.total > 0
+                      ? Math.min(100, (importProgress.sent / importProgress.total) * 100)
+                      : 0
+                  }%`,
+                }}
+              />
+            </div>
+            <p className="mt-1 text-[11px] text-[var(--color-muted)]">
+              This tab must stay open until the upload finishes. Closing it
+              or losing your network connection will fail the import.
+            </p>
+          </div>
+        ) : null}
       </section>
 
       <section className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface)] p-4">

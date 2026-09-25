@@ -106,7 +106,7 @@ async def _ws_handler(conn: websockets.ServerConnection) -> None:
             if kind == "state":
                 target.update_state(msg.get("path"), msg.get("element"))
             elif kind == "progress":
-                target.note_progress(msg.get("id"))
+                target.note_progress(msg.get("id"), msg.get("sent"), msg.get("total"))
             elif kind == "result":
                 target.resolve_result(msg.get("id"), msg)
     finally:
@@ -313,7 +313,12 @@ async def folder_bridge_state() -> dict[str, Any]:
     """Whether a Folder Bridge browser session is connected right now, and
     how long ago it last reported in. Use this before the other
     folder_bridge_* tools to know whether to ask the user to connect one
-    first (Files -> Folder Bridge, /files/bridge, on their Mac)."""
+    first (Files -> Folder Bridge, /files/bridge, on their Mac). If an
+    import_file call is currently in flight, this also returns
+    `active_upload: {bytes_sent, bytes_total, percent}` from the browser's
+    live upload progress — useful for reassuring the user a large import
+    hasn't stalled without waiting for the (possibly very long) tool call
+    itself to return."""
     return folder_hub.state_summary()
 
 
