@@ -1,5 +1,12 @@
 # UAT suite — the live `hermes-systest` deployment
 
+> **⚠️ SUPERSEDED 2026-08-20 — `hermes-systest` (Alibaba) is decommissioned.**
+> Production is now a Hetzner box reachable by SSH; see
+> [`docs/deployment/PRODUCTION.md`](../deployment/PRODUCTION.md) before running
+> anything in this suite. Every instance ID, IP, and `aliyun`/`OOS_RunCommand`
+> reference below targets a box that has been stopped since the migration —
+> retarget to the current box first, or this suite tests nothing.
+
 **For the agent running the test, not for the person reading the result.** Every
 case below is executable on the live box and has a written pass criterion, so
 two different agents running this suite on the same revision should produce the

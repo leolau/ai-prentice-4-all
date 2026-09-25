@@ -4,6 +4,38 @@ Instructions for AI coding assistants and developers working on the hermes-agent
 
 **Never give up on the right solution.**
 
+## ⚠️ STOP — before touching "production", read `docs/deployment/PRODUCTION.md` ⚠️
+
+**The single source of truth for where production lives and how to reach it is
+[`docs/deployment/PRODUCTION.md`](docs/deployment/PRODUCTION.md).** Read it
+before running any deploy, restart, or "check the live box" command — do not
+rely on conversation history, a skill file, or a past session's memory of the
+access method, because **this has changed and the wrong assumption costs
+hours of wasted work against a server nobody uses.**
+
+As of **2026-08-20**, production is a **Hetzner** box (`hermes`, `188.245.219.105`,
+Nuremberg), reachable by **SSH**: `ssh -i ~/.ssh/hetzner_hermes_ed25519 root@188.245.219.105`.
+
+The **previous** production host — Alibaba Cloud ECS `hermes-systest`
+(`i-j6c81aisv2dd8mg17yle`, `47.83.199.25`, cn-hongkong), reached only through
+the `aliyun` CLI / `alibaba-cloud` MCP `OOS_RunCommand` tool (no SSH) — is
+**decommissioned**. It was stopped at the migration cutover and its
+subscription lapsed 2026-08-26. **If you find yourself reaching for
+`OOS_RunCommand`, an Alibaba instance ID, or an EIP `47.83.199.25`, stop.**
+That box is not production anymore; every command you run against it is
+inert, and every fix you deploy there will never reach a real user. This
+exact mistake happened once already (see
+[`plans/2026-09-25-prod-migration-guardrails.md`](plans/2026-09-25-prod-migration-guardrails.md))
+and cost an entire debugging session before the real cause — deploying to the
+wrong box — was found.
+
+`docs/deployment/README.md`, `docs/deployment/hetzner-migration-runbook.md`,
+and `HANDOFF.md` have the full history and are marked superseded where
+applicable. Any other doc, skill, or plan file describing Alibaba/`aliyun`/
+`OOS_RunCommand` as the deploy path is **historical only** — verify against
+`PRODUCTION.md` before acting on it, and fix it (add a superseded banner) if
+you find one that doesn't already say so.
+
 ## ★ Primary UI = `agent-home` (not the dashboard) ★
 
 **`agent-home/` is THE key, main, user-facing UI of ai-prentice-4-all.** The
