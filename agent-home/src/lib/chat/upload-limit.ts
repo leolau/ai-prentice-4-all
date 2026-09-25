@@ -13,6 +13,13 @@ export function uploadMaxBytes(): number {
   return Number.isFinite(raw) && raw > 0 ? raw : Number.POSITIVE_INFINITY;
 }
 
+/**
+ * The client-side *advisory* threshold (100 MB): files bigger than this ask
+ * the user to confirm before uploading — very large uploads take a while and
+ * buffer in memory on the box — but are never refused outright.
+ */
+export const UPLOAD_WARN_BYTES = 100 * 1024 * 1024;
+
 /** The refusal copy for a configured cap — kept in one place for the routes. */
 export function uploadTooLargeDetail(maxBytes: number): string {
   const mb = Math.ceil(maxBytes / (1024 * 1024));

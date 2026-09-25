@@ -20,10 +20,12 @@ Uploading a WhatsApp chat export (>100 MB zip) was refused client-side:
 - `upload-limit.ts` → `uploadMaxBytes()`: unlimited by default;
   `AGENT_HOME_UPLOAD_MAX_BYTES` reinstates a cap for deploys that need one.
   `uploadTooLargeDetail()` renders the refusal copy dynamically.
+  `UPLOAD_WARN_BYTES` (100 MB) is the client-side advisory threshold.
 - `/api/chat/upload`, `/api/files/import`, `/api/projects/[slug]/files/upload`
   all consult `uploadMaxBytes()`.
-- Composer pre-check removed — the server's `detail` message already surfaces
-  on a 413.
+- Composer shows an "Upload anyway / Cancel" confirmation for files over the
+  advisory threshold instead of refusing — the user overrides, the server
+  still enforces whatever real cap the backend has.
 - Box: `FILE_SIZE_LIMIT` raised to 10 GiB in
   `/opt/data/supabase/docker/docker-compose.yml` and the `supabase-storage`
   container recreated (compose file backed up alongside). Bucket

@@ -2,6 +2,7 @@
 
 import { useLayoutEffect, useRef, useState } from "react";
 
+import { UPLOAD_WARN_BYTES } from "@/lib/chat/upload-limit";
 import type { ChatAttachment } from "@/types";
 
 /**
@@ -34,6 +35,7 @@ export function Composer({
   const [attachments, setAttachments] = useState<ChatAttachment[]>([]);
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
+  const [oversizeFiles, setOversizeFiles] = useState<File[] | null>(null);
   const fileRef = useRef<HTMLInputElement | null>(null);
   const textRef = useRef<HTMLTextAreaElement | null>(null);
 
@@ -55,8 +57,21 @@ export function Composer({
     setAttachments([]);
   }
 
+  function pickFiles(files: File[]) {
+    setUploadError(null);
+    const oversize = files.filter((f) => f.size > UPLOAD_WARN_BYTES);
+    if (oversize.length > 0) {
+      // Advisory gate: the user confirms oversized files rather than being
+      // refused — the server enforces whatever real cap the backend has.
+      setOversizeFiles(files);
+      return;
+    }
+    void upload(files);
+  }
+
   async function upload(files: File[]) {
     setUploadError(null);
+    setOversizeFiles(null);
     setUploading(true);
     try {
       for (const file of files) {
@@ -112,6 +127,37 @@ export function Composer({
       {uploadError ? (
         <p className="mb-2 text-xs text-red-300">{uploadError}</p>
       ) : null}
+      {oversizeFiles ? (
+        <div
+          data-component="OversizeConfirm"
+          className="mb-2 rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-2)] px-3 py-2 text-xs"
+        >
+          <p className="text-[var(--color-muted)]">
+            {oversizeFiles.filter((f) => f.size > UPLOAD_WARN_BYTES).length === 1
+              ? `${oversizeFiles.find((f) => f.size > UPLOAD_WARN_BYTES)?.name} is over 100 MB — it may take a while to upload.`
+              : `${oversizeFiles.filter((f) => f.size > UPLOAD_WARN_BYTES).length} files are over 100 MB — they may take a while to upload.`}
+          </p>
+          <div className="mt-2 flex gap-2">
+            <button
+              type="button"
+              onClick={() => void upload(oversizeFiles)}
+              className="rounded-lg bg-[var(--color-accent)] px-3 py-1.5 font-medium text-[var(--color-accent-fg)]"
+            >
+              Upload anyway
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setOversizeFiles(null);
+                if (fileRef.current) fileRef.current.value = "";
+              }}
+              className="rounded-lg border border-[var(--color-border)] px-3 py-1.5"
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      ) : null}
       <div className="flex items-end gap-2">
         {storageEnabled ? (
           <>
@@ -122,7 +168,7 @@ export function Composer({
               className="hidden"
               onChange={(e) => {
                 const files = Array.from(e.target.files ?? []);
-                if (files.length > 0) void upload(files);
+                if (files.length > 0) pickFiles(files);
               }}
             />
             <button
