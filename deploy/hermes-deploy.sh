@@ -18,6 +18,12 @@ ALLOWED_LOCAL_MODS=(
 # meant to be running; `static` (timer-invoked) units are excluded.
 UNITS=$(systemctl list-unit-files 'hermes-*.service' --state=enabled --no-legend \
   | awk '{print $1}')
+# app-mcp serves the app/folder-bridge tools from this checkout (python -m
+# app_mcp.server) but sits outside the hermes-* glob, so a deploy that shipped
+# new tools left the old process registering the old tool list.
+if systemctl list-unit-files app-mcp.service --state=enabled --no-legend | grep -q .; then
+  UNITS="$UNITS app-mcp.service"
+fi
 # agent-home is restarted separately (it is not in the hermes-* glob) but a
 # deploy that leaves the phone app down must still fail loudly.
 VERIFY_UNITS="$UNITS agent-home.service"
