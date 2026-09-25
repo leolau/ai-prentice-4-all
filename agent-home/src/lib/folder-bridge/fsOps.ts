@@ -250,18 +250,59 @@ interface ImportResponse {
 export type ImportProgressCallback = (sent: number, total: number) => void;
 
 /**
+ * Whether `fetch` in this browser can actually send a `ReadableStream`
+ * request body. **Do not infer this from browser identity** — WebKit
+ * (Safari, and any WKWebView-based browser) throws `NotSupportedError:
+ * "ReadableStream uploading is not supported"` for *any* streaming body,
+ * unconditionally, regardless of file size or the `duplex` option; other
+ * engines support it fine. This is the standard feature-detection idiom
+ * (the browser only sets a `Content-Type` header on a streaming body if it
+ * *doesn't* understand streaming bodies, and only reads `duplex` if it does).
+ * Cached after first call; `undefined` means detection itself threw
+ * (treated as unsupported — never break the fallback path).
+ */
+let streamingBodySupport: boolean | undefined;
+
+export function supportsStreamingRequestBody(): boolean {
+  if (streamingBodySupport !== undefined) return streamingBodySupport;
+  try {
+    let duplexUsed = false;
+    const req = new Request("https://example.invalid", {
+      method: "POST",
+      body: new ReadableStream(),
+      get duplex() {
+        duplexUsed = true;
+        return "half";
+      },
+    } as RequestInit);
+    streamingBodySupport = duplexUsed && !req.headers.has("Content-Type");
+  } catch {
+    streamingBodySupport = false;
+  }
+  return streamingBodySupport;
+}
+
+/** Test-only: force the next `supportsStreamingRequestBody()` result. */
+export function __setStreamingBodySupportForTest(value: boolean | undefined): void {
+  streamingBodySupport = value;
+}
+
+/**
  * Copy one file, byte for byte, into the file store via the BFF
  * (`POST /api/files/import`) and return the registry row.
  *
- * The file is posted as a streamed `ReadableStream` body (not the bare
- * `File`) so upload progress is observable: the browser only pulls the next
- * chunk from the stream once the network is ready to accept it (fetch
- * applies real backpressure to a streaming body), so counting bytes as they
- * are *read* is an accurate proxy for bytes actually sent — not just bytes
- * read from disk. The browser streams from disk either way, so this works
- * for files of any size with no extra memory cost. The BFF computes the
- * SHA-256 server-side while streaming to Storage; `verified` means the
- * upload completed and the server returned a hash.
+ * When the browser supports streaming request bodies, the file is posted as
+ * a `ReadableStream` (not the bare `File`) so upload progress is observable:
+ * the browser only pulls the next chunk once the network is ready to accept
+ * it (fetch applies real backpressure to a streaming body), so counting
+ * bytes as they are *read* is an accurate proxy for bytes actually sent.
+ * Otherwise (Safari/WebKit — see `supportsStreamingRequestBody`) it falls
+ * back to posting the `File` directly, which every browser supports; that
+ * path has no live progress (`onProgress` fires only at 0% and 100%) but
+ * still streams from disk with no extra memory cost. Either way, works for
+ * files of any size. The BFF computes the SHA-256 server-side while
+ * streaming to Storage; `verified` means the upload completed and the
+ * server returned a hash.
  */
 export async function importFile(
   root: DirectoryHandleLike,
@@ -274,24 +315,27 @@ export async function importFile(
   const handle = await resolveFile(root, path);
   const file = await handle.getFile();
   onProgress?.(0, file.size);
+
+  const canStream = supportsStreamingRequestBody();
   let sent = 0;
-  const countingStream = file.stream().pipeThrough(
-    new TransformStream<Uint8Array, Uint8Array>({
-      transform(chunk, controller) {
-        sent += chunk.byteLength;
-        onProgress?.(sent, file.size);
-        controller.enqueue(chunk);
-      },
-    }),
-  );
+  const requestBody = canStream
+    ? file.stream().pipeThrough(
+        new TransformStream<Uint8Array, Uint8Array>({
+          transform(chunk, controller) {
+            sent += chunk.byteLength;
+            onProgress?.(sent, file.size);
+            controller.enqueue(chunk);
+          },
+        }),
+      )
+    : file;
+
   const res = await fetchImpl("/api/files/import", {
     method: "POST",
-    body: countingStream,
-    // Required by the fetch spec for a streaming request body; supported in
-    // every browser that has File System Access (Chromium-based — Safari/
-    // Firefox use the webkitdirectory snapshot fallback and never reach
-    // this path with a live handle, see handles.ts).
-    duplex: "half",
+    body: requestBody,
+    // Required by the fetch spec for a streaming request body; irrelevant
+    // (and untyped) for a plain File/Blob body, so only set it when needed.
+    ...(canStream ? { duplex: "half" } : {}),
     headers: {
       "content-type": file.type || "application/octet-stream",
       "x-file-name": encodeURIComponent(file.name),

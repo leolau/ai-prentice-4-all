@@ -1,6 +1,10 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { importFile, readFileContent } from "@/lib/folder-bridge/fsOps";
+import {
+  __setStreamingBodySupportForTest,
+  importFile,
+  readFileContent,
+} from "@/lib/folder-bridge/fsOps";
 import { snapshotFromFileList } from "@/lib/folder-bridge/snapshotHandle";
 
 function fakeFile(
@@ -65,7 +69,12 @@ describe("readFileContent binary handling", () => {
 });
 
 describe("importFile", () => {
+  afterEach(() => {
+    __setStreamingBodySupportForTest(undefined);
+  });
+
   it("posts the file as the raw body and trusts the server hash", async () => {
+    __setStreamingBodySupportForTest(true);
     const expected = await sha256(PDF_BYTES);
     let receivedBody: BodyInit | null = null;
     let receivedHeaders: Headers | null = null;
@@ -134,6 +143,7 @@ describe("importFile", () => {
   });
 
   it("reports verified=true when the server confirms the upload", async () => {
+    __setStreamingBodySupportForTest(true);
     const fetchImpl = vi.fn(
       async () =>
         new Response(
@@ -156,6 +166,7 @@ describe("importFile", () => {
   });
 
   it("surfaces the BFF's error detail", async () => {
+    __setStreamingBodySupportForTest(true);
     const fetchImpl = vi.fn(
       async () =>
         new Response(
@@ -171,5 +182,48 @@ describe("importFile", () => {
     await expect(
       importFile(root(), "f1", "Invoices", "2026-01.pdf", fetchImpl),
     ).rejects.toThrow("File exceeds the 100 MB limit.");
+  });
+
+  it("falls back to posting the bare File when the browser can't stream a request body (Safari/WebKit)", async () => {
+    // Safari throws `NotSupportedError: "ReadableStream uploading is not
+    // supported"` for any streaming fetch body, regardless of file size —
+    // this must never be the path that breaks an import.
+    __setStreamingBodySupportForTest(false);
+    const expected = await sha256(PDF_BYTES);
+    let receivedBody: BodyInit | null = null;
+    let duplexSeen = false;
+    const fetchImpl = vi.fn(
+      async (_url: string | URL | Request, init?: RequestInit) => {
+        receivedBody = init?.body ?? null;
+        duplexSeen = "duplex" in (init ?? {});
+        return new Response(
+          JSON.stringify({
+            asset: { id: "asset-1", filename: "2026-01.pdf" },
+            sha256: expected,
+            size: 10,
+          }),
+          { status: 200 },
+        );
+      },
+    );
+
+    const progressCalls: Array<[number, number]> = [];
+    const result = await importFile(
+      root(),
+      "f1",
+      "Invoices",
+      "2026-01.pdf",
+      fetchImpl,
+      (sent, total) => progressCalls.push([sent, total]),
+    );
+
+    expect(receivedBody).toBeInstanceOf(File);
+    expect(duplexSeen).toBe(false);
+    expect(result.verified).toBe(true);
+    // No live progress on this path — just an initial 0% and a final 100%.
+    expect(progressCalls).toEqual([
+      [0, 10],
+      [10, 10],
+    ]);
   });
 });
