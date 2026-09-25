@@ -17,9 +17,30 @@ export interface FolderRecord {
   permission: FolderPermission;
 }
 
+/**
+ * The slice of the File System Access API the bridge actually uses. A real
+ * `FileSystemDirectoryHandle` satisfies it; so does the `webkitdirectory`
+ * snapshot used where the picker API is missing (`snapshotHandle.ts`).
+ */
+export interface FileHandleLike {
+  readonly kind: "file";
+  readonly name: string;
+  getFile(): Promise<File>;
+}
+
+export interface DirectoryHandleLike {
+  readonly kind: "directory";
+  readonly name: string;
+  entries(): AsyncIterableIterator<[string, DirectoryHandleLike | FileHandleLike]>;
+  getDirectoryHandle(name: string): Promise<DirectoryHandleLike>;
+  getFileHandle(name: string): Promise<FileHandleLike>;
+  queryPermission(descriptor?: { mode?: "read" | "readwrite" }): Promise<PermissionState>;
+  requestPermission(descriptor?: { mode?: "read" | "readwrite" }): Promise<PermissionState>;
+}
+
 /** In-memory registry entry — the handle itself never leaves the browser. */
 export interface FolderEntry extends FolderRecord {
-  handle: FileSystemDirectoryHandle;
+  handle: DirectoryHandleLike;
 }
 
 export interface DirectoryEntryInfo {

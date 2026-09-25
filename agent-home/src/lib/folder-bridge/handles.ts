@@ -8,7 +8,13 @@
  *
  * Read-only, v1 (per spec §3.1 / §10): nothing here ever calls a write API.
  */
-import type { FolderEntry, FolderPermission, FolderRecord } from "@/lib/folder-bridge/types";
+import { pickDirectoryViaInput } from "@/lib/folder-bridge/snapshotHandle";
+import type {
+  DirectoryHandleLike,
+  FolderEntry,
+  FolderPermission,
+  FolderRecord,
+} from "@/lib/folder-bridge/types";
 
 const DB_NAME = "folder-bridge";
 const DB_VERSION = 1;
@@ -86,7 +92,7 @@ async function loadPersisted(): Promise<StoredFolder[]> {
   }
 }
 
-async function permissionOf(handle: FileSystemDirectoryHandle): Promise<FolderPermission> {
+async function permissionOf(handle: DirectoryHandleLike): Promise<FolderPermission> {
   try {
     const state = await handle.queryPermission({ mode: "read" });
     if (state === "granted") return "granted";
@@ -100,6 +106,15 @@ async function permissionOf(handle: FileSystemDirectoryHandle): Promise<FolderPe
 /** True in Chromium-based browsers; false elsewhere (Safari, Firefox). */
 export function fileSystemAccessSupported(): boolean {
   return typeof window !== "undefined" && "showDirectoryPicker" in window;
+}
+
+/**
+ * True when the browser can pick a folder at all — via the File System
+ * Access API or the `webkitdirectory` input fallback (Safari, Firefox).
+ */
+export function folderPickerSupported(): boolean {
+  if (typeof document === "undefined") return false;
+  return fileSystemAccessSupported() || "webkitdirectory" in document.createElement("input");
 }
 
 /**
@@ -124,8 +139,18 @@ export async function restoreFolders(): Promise<FolderRecord[]> {
  * it. Returns null if the user cancels the picker.
  */
 export async function addFolder(label?: string): Promise<FolderRecord | null> {
+  if (!folderPickerSupported()) {
+    throw new Error("This browser cannot open a folder picker.");
+  }
+  const id = newFolderId();
   if (!fileSystemAccessSupported()) {
-    throw new Error("This browser does not support the File System Access API.");
+    // Snapshot handles hold plain `File` objects, not durable handles, so
+    // they are never persisted — the user re-picks after a reload.
+    const handle = await pickDirectoryViaInput();
+    if (!handle) return null;
+    const record: FolderRecord = { id, label: label || handle.name, permission: "granted" };
+    registry.set(id, { ...record, handle });
+    return record;
   }
   let handle: FileSystemDirectoryHandle;
   try {
@@ -134,7 +159,6 @@ export async function addFolder(label?: string): Promise<FolderRecord | null> {
     if (err instanceof DOMException && err.name === "AbortError") return null;
     throw err;
   }
-  const id = newFolderId();
   const record: FolderRecord = { id, label: label || handle.name, permission: "granted" };
   registry.set(id, { ...record, handle });
   await persist({ id, label: record.label, handle });
@@ -169,7 +193,7 @@ export function listFolders(): FolderRecord[] {
   }));
 }
 
-export function getFolderHandle(id: string): FileSystemDirectoryHandle | null {
+export function getFolderHandle(id: string): DirectoryHandleLike | null {
   return registry.get(id)?.handle ?? null;
 }
 

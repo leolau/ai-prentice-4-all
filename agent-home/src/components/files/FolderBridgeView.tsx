@@ -6,6 +6,7 @@ import { searchFolder } from "@/lib/folder-bridge/fsOps";
 import {
   addFolder,
   fileSystemAccessSupported,
+  folderPickerSupported,
   getFolderHandle,
   reapproveFolder,
   removeFolder,
@@ -37,18 +38,30 @@ function useConnectionStatus(): ConnectionStatus {
   return useSyncExternalStore(subscribeStatus, getStatus, () => "disconnected");
 }
 
+const noopSubscribe = () => () => {};
+
+// `null` on the server and during hydration: the checks touch
+// `window`/`document`, so reading them during SSR would make the server and
+// client markup disagree.
+function usePickerSupport(): boolean | null {
+  return useSyncExternalStore(noopSubscribe, folderPickerSupported, () => null);
+}
+
 /**
  * `/files/bridge` — the Folder Bridge (per `folder-bridge-web-app-spec.md`).
  *
  * Lets the user grant the running agent read-only access to local Mac
  * folders via the File System Access API, over a ticket-authenticated
  * WebSocket to the `app-mcp` service's folder hub. Chromium-based browsers
- * only; the picker and the connection both need the tab open to work — this
- * is a live bridge, not an upload.
+ * get live handles that survive a reload; Safari/Firefox fall back to a
+ * `webkitdirectory` snapshot that must be re-picked after a reload. The
+ * picker and the connection both need the tab open to work — this is a
+ * live bridge, not an upload.
  */
 export function FolderBridgeView() {
   const status = useConnectionStatus();
-  const supported = fileSystemAccessSupported();
+  const supported = usePickerSupport();
+  const snapshotMode = supported === true && !fileSystemAccessSupported();
   const [folders, setFolders] = useState<FolderRecord[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -59,8 +72,7 @@ export function FolderBridgeView() {
   useEffect(() => {
     if (!supported) return;
     void restoreFolders().then(setFolders);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [supported]);
 
   const handleAddFolder = async () => {
     setError(null);
@@ -115,14 +127,17 @@ export function FolderBridgeView() {
     }
   };
 
+  if (supported === null) return null;
+
   if (!supported) {
     return (
       <div
         data-component="FolderBridgeUnsupported"
         className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface)] p-4 text-sm text-[var(--color-muted)]"
       >
-        Folder Bridge needs a Chromium-based browser (Chrome, Edge, or Brave)
-        on a Mac. It is not available in this browser.
+        Folder Bridge needs a browser that can open a folder picker (Safari,
+        Chrome, Edge, Brave or Firefox on a Mac). It is not available in this
+        browser.
       </div>
     );
   }
@@ -180,7 +195,14 @@ export function FolderBridgeView() {
           <p className="mt-2 text-sm text-[var(--color-muted)]">
             No folders yet — Add folder to approve one for the agent to use.
           </p>
-        ) : (
+        ) : null}
+        {snapshotMode ? (
+          <p className="mt-2 text-xs text-[var(--color-muted)]">
+            This browser reads the folder as it was when you picked it — add
+            it again to see new files, and after reloading this page.
+          </p>
+        ) : null}
+        {folders.length > 0 ? (
           <ul className="mt-2 flex flex-col gap-1.5">
             {folders.map((folder) => (
               <li
@@ -207,7 +229,7 @@ export function FolderBridgeView() {
               </li>
             ))}
           </ul>
-        )}
+        ) : null}
       </section>
 
       <section className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface)] p-4">

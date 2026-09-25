@@ -1,6 +1,6 @@
 /**
  * File System Access API operations, scoped to one already-approved
- * `FileSystemDirectoryHandle`. Pure with respect to everything except the
+ * `DirectoryHandleLike`. Pure with respect to everything except the
  * handle itself, so it's testable against fake handle objects that
  * implement the same minimal async-iteration shape the real API does — no
  * real browser or real disk needed.
@@ -11,7 +11,12 @@
  * filesystem symlinks to the browser, so a depth cap is sufficient cycle
  * protection without needing an inode/seen-set.
  */
-import type { DirectoryEntryInfo, SearchMatch } from "@/lib/folder-bridge/types";
+import type {
+  DirectoryEntryInfo,
+  DirectoryHandleLike,
+  FileHandleLike,
+  SearchMatch,
+} from "@/lib/folder-bridge/types";
 
 const MAX_DEPTH = 12;
 const MAX_VISITED = 5000;
@@ -53,9 +58,9 @@ function joinPath(base: string, name: string): string {
 
 /** Navigate a `/`-separated relative path down to its directory handle. */
 export async function resolveDirectory(
-  root: FileSystemDirectoryHandle,
+  root: DirectoryHandleLike,
   path: string,
-): Promise<FileSystemDirectoryHandle> {
+): Promise<DirectoryHandleLike> {
   let dir = root;
   for (const segment of path.split("/").filter(Boolean)) {
     dir = await dir.getDirectoryHandle(segment);
@@ -65,9 +70,9 @@ export async function resolveDirectory(
 
 /** Navigate a `/`-separated relative path to a file handle. */
 export async function resolveFile(
-  root: FileSystemDirectoryHandle,
+  root: DirectoryHandleLike,
   path: string,
-): Promise<FileSystemFileHandle> {
+): Promise<FileHandleLike> {
   const parts = path.split("/").filter(Boolean);
   const fileName = parts.pop();
   if (!fileName) throw new Error("Empty file path.");
@@ -77,7 +82,7 @@ export async function resolveFile(
 
 /** One directory's immediate contents (not recursive). */
 export async function listDirectoryEntries(
-  root: FileSystemDirectoryHandle,
+  root: DirectoryHandleLike,
   path: string,
 ): Promise<DirectoryEntryInfo[]> {
   const dir = await resolveDirectory(root, path);
@@ -100,7 +105,7 @@ export async function listDirectoryEntries(
   return out;
 }
 
-async function readSnippet(handle: FileSystemFileHandle, name: string): Promise<string | undefined> {
+async function readSnippet(handle: FileHandleLike, name: string): Promise<string | undefined> {
   if (!TEXT_LIKE_EXTENSIONS.has(extensionOf(name))) return undefined;
   try {
     const file = await handle.getFile();
@@ -123,7 +128,7 @@ interface SearchOptions {
  * `opts.limit` matches or the safety caps above, whichever comes first.
  */
 export async function searchFolder(
-  root: FileSystemDirectoryHandle,
+  root: DirectoryHandleLike,
   folderId: string,
   folderLabel: string,
   opts: SearchOptions,
@@ -133,7 +138,7 @@ export async function searchFolder(
   const matches: SearchMatch[] = [];
   let visited = 0;
 
-  async function walk(dir: FileSystemDirectoryHandle, path: string, depth: number): Promise<void> {
+  async function walk(dir: DirectoryHandleLike, path: string, depth: number): Promise<void> {
     if (depth > MAX_DEPTH) return;
     for await (const [name, handle] of dir.entries()) {
       if (matches.length >= opts.limit || visited >= MAX_VISITED) return;
@@ -166,7 +171,7 @@ export interface ReadFileOptions {
 }
 
 export async function readFileContent(
-  root: FileSystemDirectoryHandle,
+  root: DirectoryHandleLike,
   path: string,
   opts: ReadFileOptions,
 ): Promise<{ content: string; truncated: boolean; size: number }> {
@@ -179,7 +184,7 @@ export async function readFileContent(
 }
 
 export async function fileMetadata(
-  root: FileSystemDirectoryHandle,
+  root: DirectoryHandleLike,
   path: string,
 ): Promise<{ size: number; modifiedAt: string }> {
   const handle = await resolveFile(root, path);
