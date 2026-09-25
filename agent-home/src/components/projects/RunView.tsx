@@ -15,6 +15,7 @@ import { useRunActivity } from "@/components/projects/useRunActivity";
 import { LiveActivity } from "@/components/chat/LiveActivity";
 import { BusyRegion } from "@/components/ui/BusyRegion";
 import { Spinner } from "@/components/ui/Spinner";
+import { useRefresh, useServerState } from "@/components/ui/useRefresh";
 import type {
   ProjectDelivery,
   ProjectRun,
@@ -228,8 +229,10 @@ export function RunView({
   archived?: boolean;
 }) {
   const router = useRouter();
-  const [run, setRun] = useState(initial);
-  const [busy, setBusy] = useState(false);
+  const { refresh, refreshing } = useRefresh();
+  const [run, setRun] = useServerState(initial);
+  const [posting, setPosting] = useState(false);
+  const busy = posting || refreshing;
   const [error, setError] = useState<string | null>(null);
   const [budgetGate, setBudgetGate] = useState<string | null>(null);
   const [retroDraft, setRetroDraft] = useState(initial.retro ?? "");
@@ -267,7 +270,7 @@ export function RunView({
     /** Continue/cancel answer with the updated run row; merge it in. */
     mergeUpdatedRun = false,
   ): Promise<boolean> => {
-    setBusy(true);
+    setPosting(true);
     setError(null);
     try {
       const res = await fetch(path, {
@@ -295,13 +298,13 @@ export function RunView({
         // The thing holding the run must be visible, not silent.
         setBudgetGate(budgetGate);
       }
-      router.refresh(); // revalidate the page's server data after a write
+      refresh(); // revalidate the page's server data after a write
       return true;
     } catch {
       setError("Could not reach the server.");
       return false;
     } finally {
-      setBusy(false);
+      setPosting(false);
     }
   };
 

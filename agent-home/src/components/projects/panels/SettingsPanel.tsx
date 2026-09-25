@@ -1,10 +1,10 @@
 "use client";
 
-import { useRouter } from "next/navigation";
 import { useState } from "react";
 import { friendlyError } from "@/components/projects/errors";
 
 import { dateTimeLabel } from "@/components/projects/format";
+import { useRefresh } from "@/components/ui/useRefresh";
 import type { ProjectAutonomy, ProjectDetail } from "@/types";
 
 export const AUTONOMY_OPTIONS: {
@@ -46,11 +46,13 @@ export function SettingsPanel({
   canLead: boolean;
   hasActivePlan: boolean;
 }) {
-  const router = useRouter();
+  const { refresh, refreshing } = useRefresh();
   const slugPath = `/api/projects/${encodeURIComponent(project.slug)}`;
   const [schedule, setSchedule] = useState(project.schedule ?? "");
   const [autonomy, setAutonomy] = useState<ProjectAutonomy>(project.autonomy);
-  const [busy, setBusy] = useState<"schedule" | "autonomy" | null>(null);
+  const [saving, setBusy] = useState<"schedule" | "autonomy" | null>(null);
+  const [lastSaved, setLastSaved] = useState<"schedule" | "autonomy" | null>(null);
+  const busy = saving ?? (refreshing ? lastSaved : null);
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState<string | null>(null);
   // The write answers with the new schedule (or its removal); showing it
@@ -71,6 +73,7 @@ export function SettingsPanel({
     okMessage: string,
   ) => {
     setBusy(which);
+    setLastSaved(which);
     setError(null);
     setSaved(null);
     try {
@@ -96,7 +99,7 @@ export function SettingsPanel({
         );
       }
       setSaved(okMessage);
-      router.refresh();
+      refresh();
     } catch {
       setError("Could not reach the server.");
     } finally {

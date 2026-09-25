@@ -9,6 +9,7 @@ import { agoLabel, dateTimeLabel, durationLabel } from "@/components/projects/fo
 import { useCardLive } from "@/components/projects/useCardLive";
 import { Spinner } from "@/components/ui/Spinner";
 import { Pill, type Tone } from "@/components/ui/Pill";
+import { useServerState } from "@/components/ui/useRefresh";
 import type { ProjectCardDetail } from "@/types";
 
 const STATUS_TONE: Record<string, Tone> = {
@@ -61,7 +62,7 @@ export function CardDetailView({
   /** §13: an archived project's cards are read-only. */
   archived?: boolean;
 }) {
-  const [card, setCard] = useState(initial);
+  const [card, setCard] = useServerState(initial);
 
   // A worker runs in its own process — there is no *in-memory* reasoning
   // stream the way an inline Projects run's session has, but its output

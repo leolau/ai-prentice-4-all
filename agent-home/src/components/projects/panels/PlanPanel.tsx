@@ -1,11 +1,11 @@
 "use client";
 
-import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useState } from "react";
 import { friendlyError } from "@/components/projects/errors";
 
 import { dateTimeLabel } from "@/components/projects/format";
 import { BusyRegion } from "@/components/ui/BusyRegion";
+import { useRefresh } from "@/components/ui/useRefresh";
 import type {
   PlaybookRev,
   PlaybookStep,
@@ -93,15 +93,18 @@ export function PlanPanel({
   canActivate: boolean;
   archived: boolean;
 }) {
-  const router = useRouter();
+  const { refresh, refreshing } = useRefresh();
   const active = playbook?.active ?? null;
   const proposed = (playbook?.revisions ?? []).filter((rev) => !rev.active);
 
   const [editing, setEditing] = useState(false);
   const [body, setBody] = useState("");
   const [steps, setSteps] = useState<StepDraft[]>([{ ...EMPTY_STEP }]);
-  const [busy, setBusy] = useState(false);
-  const [busyRev, setBusyRev] = useState<number | null>(null);
+  const [saving, setBusy] = useState(false);
+  const busy = saving || refreshing;
+  const [activating, setBusyRev] = useState<number | null>(null);
+  const [lastRev, setLastRev] = useState<number | null>(null);
+  const busyRev = activating ?? (refreshing ? lastRev : null);
   const [error, setError] = useState<string | null>(null);
   const [drafting, setDrafting] = useState(false);
   const [draftNotice, setDraftNotice] = useState<string | null>(null);
@@ -119,7 +122,7 @@ export function PlanPanel({
         setDraftNotice(
           `The agent proposed revision ${state.rev ?? ""} — review it below and activate it when it looks right.`,
         );
-        router.refresh();
+        refresh();
       } else if (state.status === "failed") {
         setError(
           friendlyError(
@@ -129,7 +132,7 @@ export function PlanPanel({
         );
       }
     },
-    [router],
+    [refresh],
   );
 
   // On mount: resume waiting on a draft started before a reload. While
@@ -223,7 +226,7 @@ export function PlanPanel({
         return;
       }
       setEditing(false);
-      router.refresh();
+      refresh();
     } catch {
       setError("Could not reach the server.");
     } finally {
@@ -233,6 +236,7 @@ export function PlanPanel({
 
   const activate = async (rev: number) => {
     setBusyRev(rev);
+    setLastRev(rev);
     setError(null);
     try {
       const res = await fetch(`${slugPath}/playbook/${rev}/activate`, {
@@ -245,7 +249,7 @@ export function PlanPanel({
         setError(friendlyError({ status: res.status, detail: data.detail }, "Activation was refused."));
         return;
       }
-      router.refresh();
+      refresh();
     } catch {
       setError("Could not reach the server.");
     } finally {

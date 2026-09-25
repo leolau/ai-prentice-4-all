@@ -1,6 +1,5 @@
 "use client";
 
-import { useRouter } from "next/navigation";
 import { useState } from "react";
 import { friendlyError } from "@/components/projects/errors";
 
@@ -8,6 +7,7 @@ import { applyAcceptEnvelope } from "@/components/projects/envelopes";
 import { dateTimeLabel } from "@/components/projects/format";
 import { BusyRegion } from "@/components/ui/BusyRegion";
 import { Pill } from "@/components/ui/Pill";
+import { useRefresh, useServerState } from "@/components/ui/useRefresh";
 import type {
   ProjectOutputKind,
   ProjectOutputStatus,
@@ -41,12 +41,13 @@ export function OutputsPanel({
   /** §13: a shelved project offers restore as the only write. */
   archived?: boolean;
 }) {
-  const router = useRouter();
-  const [outputs, setOutputs] = useState(initial);
+  const { refresh, refreshing } = useRefresh();
+  const [outputs, setOutputs] = useServerState(initial);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [offersClosure, setOffersClosure] = useState(false);
-  const [closing, setClosing] = useState(false);
+  const [closingRequest, setClosing] = useState(false);
+  const closing = closingRequest || refreshing;
   const [closed, setClosed] = useState(false);
 
   // Add-output form state
@@ -84,7 +85,7 @@ export function OutputsPanel({
       if (payload.offers_closure === true) setOffersClosure(true);
       // Progress, health and the header rollup are derived on the server
       // read; revalidate so they move with the row.
-      router.refresh();
+      refresh();
     } catch (err) {
       setError(err instanceof Error ? err.message : "That didn't stick — try again.");
     } finally {
@@ -111,7 +112,7 @@ export function OutputsPanel({
         );
       }
       setClosed(true);
-      router.refresh();
+      refresh();
     } catch (err) {
       setError(err instanceof Error ? err.message : "The project could not be marked done.");
     } finally {

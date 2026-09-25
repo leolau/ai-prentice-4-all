@@ -1,9 +1,9 @@
 "use client";
 
 import Link from "next/link";
-import { useRouter } from "next/navigation";
 import { useState } from "react";
 import { friendlyError } from "@/components/projects/errors";
+import { useRefresh } from "@/components/ui/useRefresh";
 
 import {
   agoLabel,
@@ -51,12 +51,15 @@ export function RunsPanel({
   runs: ProjectRunBrief[];
   archived?: boolean;
 }) {
-  const router = useRouter();
-  const [busyRun, setBusyRun] = useState<number | null>(null);
+  const { refresh, refreshing } = useRefresh();
+  const [pendingRun, setBusyRun] = useState<number | null>(null);
+  const [lastRun, setLastRun] = useState<number | null>(null);
+  const busyRun = pendingRun ?? (refreshing ? lastRun : null);
   const [error, setError] = useState<string | null>(null);
 
   const post = async (runNo: number, action: "continue" | "cancel" | "stop") => {
     setBusyRun(runNo);
+    setLastRun(runNo);
     setError(null);
     try {
       const res = await fetch(
@@ -68,7 +71,7 @@ export function RunsPanel({
         setError(friendlyError({ status: res.status, detail: data.detail }, "That did not go through."));
         return;
       }
-      router.refresh();
+      refresh();
     } catch {
       setError("Could not reach the server.");
     } finally {

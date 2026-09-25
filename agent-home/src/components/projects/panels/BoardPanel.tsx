@@ -1,11 +1,11 @@
 "use client";
 
 import Link from "next/link";
-import { useRouter } from "next/navigation";
 import { useState } from "react";
 
 import { cardMoves } from "@/components/projects/cardMoves";
 import { BusyRegion } from "@/components/ui/BusyRegion";
+import { useRefresh } from "@/components/ui/useRefresh";
 import type { ProjectBoardView } from "@/types";
 
 /**
@@ -31,8 +31,10 @@ export function BoardPanel({
   board: ProjectBoardView | null;
   archived?: boolean;
 }) {
-  const router = useRouter();
-  const [busyId, setBusyId] = useState<string | null>(null);
+  const { refresh, refreshing } = useRefresh();
+  const [pendingId, setBusyId] = useState<string | null>(null);
+  const [lastId, setLastId] = useState<string | null>(null);
+  const busyId = pendingId ?? (refreshing ? lastId : null);
   const [error, setError] = useState<string | null>(null);
   const [newIn, setNewIn] = useState<string | null>(null);
   const [newTitle, setNewTitle] = useState("");
@@ -61,6 +63,7 @@ export function BoardPanel({
 
   const move = async (taskId: string, to: string) => {
     setBusyId(taskId);
+    setLastId(taskId);
     setError(null);
     try {
       const ok = await request(
@@ -68,7 +71,7 @@ export function BoardPanel({
         "PATCH",
         { status: to },
       );
-      if (ok) router.refresh();
+      if (ok) refresh();
     } catch {
       setError("Could not reach the server.");
     } finally {
@@ -83,6 +86,7 @@ export function BoardPanel({
       return;
     }
     setBusyId(`new:${column}`);
+    setLastId(`new:${column}`);
     setError(null);
     try {
       const made = await request(base, "POST", { title });
@@ -100,7 +104,7 @@ export function BoardPanel({
       }
       setNewTitle("");
       setNewIn(null);
-      router.refresh();
+      refresh();
     } catch {
       setError("Could not reach the server.");
     } finally {
