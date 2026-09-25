@@ -79,6 +79,11 @@ def test_capacity_endpoint_returns_a_verdict_and_its_binding_constraint(client):
         assert key in indicators, key
     assert isinstance(payload["bounds"], list)
     assert isinstance(payload["recommendations"], list)
+    # The 24h graph / window peaks; empty shape is fine on a fresh box.
+    history = payload["cpu_history"]
+    assert set(history) == {"hourly", "max_24h", "max_7d", "max_30d"}
+    for point in history["hourly"]:
+        assert set(point) == {"ts", "avg_pct", "max_pct"}
     if payload["state"] != "comfortable":
         assert payload["binding_constraint"] is not None
         assert "hardware_helps" in payload["binding_constraint"]

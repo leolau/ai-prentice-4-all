@@ -22,6 +22,7 @@ leases, ``psutil`` for RSS/available memory, the write-retry accounting in
 from __future__ import annotations
 
 import logging
+import sqlite3
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -469,6 +470,165 @@ def collect_cpu_load() -> CpuLoad:
     except Exception as exc:
         log.debug("capacity: cpu load unavailable: %s", exc)
     return load
+
+
+# ── CPU utilization history ─────────────────────────────────────────────────
+#
+# The instantaneous reading above can only describe *now*. The capacity page
+# asks a different question — how busy the box has been — which needs samples
+# persisted somewhere. A tiny SQLite file at the shared root (alongside
+# kanban.db, box-wide rather than per-profile) keeps one row per minute; the
+# dashboard runs the sampler thread in its lifespan.
+
+#: How often the sampler records a reading, and how long rows are kept.
+#: 31 days covers the longest maximum window with a small margin.
+CPU_SAMPLE_INTERVAL_S = 60.0
+CPU_HISTORY_KEEP_S = 31 * 86400.0
+
+_CPU_HISTORY_WINDOWS = (
+    ("max_24h", 86400.0),
+    ("max_7d", 7 * 86400.0),
+    ("max_30d", 30 * 86400.0),
+)
+
+
+def _capacity_db_path() -> Path:
+    """``<shared root>/capacity.db`` — box-wide history, not per-profile."""
+    from hermes_constants import get_default_hermes_root
+
+    return get_default_hermes_root() / "capacity.db"
+
+
+def _connect_history(path: Path, *, create: bool) -> Optional[sqlite3.Connection]:
+    """Open the history DB. Read paths never create it — an indicator must
+    not make a file appear on a box that has none."""
+    if not create and not path.exists():
+        return None
+    try:
+        conn = sqlite3.connect(str(path), timeout=5.0)
+        if create:
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS cpu_samples ("
+                "ts REAL PRIMARY KEY, pct REAL NOT NULL, load1 REAL)"
+            )
+        return conn
+    except Exception as exc:
+        log.debug("capacity: history db unavailable: %s", exc)
+        return None
+
+
+def record_cpu_sample(
+    pct: float,
+    load1: Optional[float],
+    *,
+    now: Optional[float] = None,
+    path: Optional[Path] = None,
+) -> None:
+    """Append one utilization reading and prune past the retention window."""
+    ts = now if now is not None else time.time()
+    conn = _connect_history(
+        path if path is not None else _capacity_db_path(), create=True
+    )
+    if conn is None:
+        return
+    try:
+        conn.execute(
+            "INSERT OR REPLACE INTO cpu_samples (ts, pct, load1) VALUES (?, ?, ?)",
+            (ts, float(pct), load1),
+        )
+        conn.execute(
+            "DELETE FROM cpu_samples WHERE ts < ?", (ts - CPU_HISTORY_KEEP_S,)
+        )
+        conn.commit()
+    except Exception as exc:
+        log.debug("capacity: history write failed: %s", exc)
+    finally:
+        conn.close()
+
+
+def cpu_sampler_loop(
+    stop_event: Any,
+    interval_s: float = CPU_SAMPLE_INTERVAL_S,
+    *,
+    path: Optional[Path] = None,
+) -> None:
+    """Daemon-thread target: record CPU busy% once a minute.
+
+    ``cpu_percent(interval=None)`` reports the share of wall-clock time the
+    box was busy *since the previous call*, so each sample is already the
+    average over the interval — no second measurement needed.
+    """
+    try:
+        import psutil
+    except ImportError:
+        return
+    target = path if path is not None else _capacity_db_path()
+    psutil.cpu_percent(interval=None)  # prime: the first call measures since boot
+    while not stop_event.wait(interval_s):
+        try:
+            pct = psutil.cpu_percent(interval=None)
+            load1 = psutil.getloadavg()[0]
+        except Exception as exc:
+            log.debug("capacity: cpu sample failed: %s", exc)
+            continue
+        record_cpu_sample(pct, load1, path=target)
+
+
+def cpu_history(
+    *, now: Optional[float] = None, path: Optional[Path] = None
+) -> Dict[str, Any]:
+    """Hourly utilization for the graph plus peaks over 24h / 7d / 30d.
+
+    ``hourly`` is exactly 24 hour-aligned buckets ending at the current hour;
+    a bucket with no samples gets ``None`` so the UI renders a gap rather than
+    a fake zero. Peaks are the busiest sampled minute in each window — the
+    per-minute samples are themselves interval averages, so a "peak" is the
+    busiest minute, not a scheduler tick.
+    """
+    ts_now = now if now is not None else time.time()
+    empty: Dict[str, Any] = {"hourly": [], "max_24h": None, "max_7d": None, "max_30d": None}
+    conn = _connect_history(
+        path if path is not None else _capacity_db_path(), create=False
+    )
+    if conn is None:
+        return empty
+    try:
+        hour_now = int(ts_now // 3600)
+        rows = conn.execute(
+            "SELECT CAST(ts / 3600 AS INTEGER) AS bucket, AVG(pct), MAX(pct) "
+            "FROM cpu_samples WHERE ts >= ? AND ts < ? GROUP BY bucket",
+            ((hour_now - 23) * 3600.0, (hour_now + 1) * 3600.0),
+        ).fetchall()
+        by_bucket = {int(r[0]): (r[1], r[2]) for r in rows}
+        hourly = [
+            {
+                "ts": (hour_now - 23 + i) * 3600,
+                "avg_pct": (
+                    None
+                    if (hour_now - 23 + i) not in by_bucket
+                    else round(by_bucket[hour_now - 23 + i][0], 1)
+                ),
+                "max_pct": (
+                    None
+                    if (hour_now - 23 + i) not in by_bucket
+                    else round(by_bucket[hour_now - 23 + i][1], 1)
+                ),
+            }
+            for i in range(24)
+        ]
+        peaks: Dict[str, Any] = {}
+        for name, window_s in _CPU_HISTORY_WINDOWS:
+            row = conn.execute(
+                "SELECT MAX(pct) FROM cpu_samples WHERE ts >= ?",
+                (ts_now - window_s,),
+            ).fetchone()
+            peaks[name] = None if row is None or row[0] is None else round(row[0], 1)
+    except Exception as exc:
+        log.debug("capacity: history read failed: %s", exc)
+        return empty
+    finally:
+        conn.close()
+    return {"hourly": hourly, **peaks}
 
 
 def collect_turn_latency(

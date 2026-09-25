@@ -679,3 +679,77 @@ def test_the_minimum_sample_size_is_a_config_setting():
     latency = TurnLatency(samples=2, p50_s=90.0, p95_s=90.0)
     assert latency.representative(thresholds)
     assert not latency.representative(CapacityThresholds())
+
+
+# ── CPU utilization history ──────────────────────────────────────────────────
+
+
+def _seed_history(path, now, entries):
+    """``entries``: (age_seconds, pct) pairs written as individual samples."""
+    for age_s, pct in entries:
+        capacity.record_cpu_sample(pct, 0.5, now=now - age_s, path=path)
+
+
+def test_history_is_empty_until_the_sampler_has_written(tmp_path):
+    assert capacity.cpu_history(path=tmp_path / "capacity.db") == {
+        "hourly": [],
+        "max_24h": None,
+        "max_7d": None,
+        "max_30d": None,
+    }
+
+
+def test_hourly_buckets_hold_one_point_per_hour(tmp_path):
+    now = time.time()
+    path = tmp_path / "capacity.db"
+    # Three samples in the current hour, one in the hour two hours ago.
+    _seed_history(
+        path, now, [(60, 10.0), (120, 30.0), (180, 50.0), (2 * 3600 + 60, 70.0)]
+    )
+    history = capacity.cpu_history(now=now, path=path)
+    assert len(history["hourly"]) == 24
+    current = history["hourly"][-1]
+    assert current["avg_pct"] == 30.0  # mean of the hour's samples
+    assert current["max_pct"] == 50.0
+    assert history["hourly"][-3]["max_pct"] == 70.0
+    # Untouched buckets are null, not a fake zero.
+    assert all(
+        p["avg_pct"] is None
+        for p in history["hourly"][:-3]
+    )
+
+
+def test_window_maxima_report_the_busiest_sampled_minute(tmp_path):
+    now = time.time()
+    path = tmp_path / "capacity.db"
+    _seed_history(
+        path,
+        now,
+        [
+            (3600, 40.0),
+            (2 * 86400, 65.0),
+            (15 * 86400, 92.0),
+            (32 * 86400, 99.0),  # pruned / outside every window
+        ],
+    )
+    history = capacity.cpu_history(now=now, path=path)
+    assert history["max_24h"] == 40.0
+    assert history["max_7d"] == 65.0
+    assert history["max_30d"] == 92.0
+
+
+def test_samples_older_than_the_retention_window_are_pruned(tmp_path):
+    now = time.time()
+    path = tmp_path / "capacity.db"
+    # A backdated row is kept when inserted (its own write prunes nothing
+    # older than itself) but is pruned by the next fresh write.
+    capacity.record_cpu_sample(60.0, 0.5, now=now - 32 * 86400, path=path)
+    capacity.record_cpu_sample(70.0, 0.5, now=now, path=path)
+    conn = sqlite3.connect(str(path))
+    try:
+        kept = conn.execute("SELECT COUNT(*) FROM cpu_samples").fetchone()[0]
+        oldest = conn.execute("SELECT MIN(ts) FROM cpu_samples").fetchone()[0]
+    finally:
+        conn.close()
+    assert kept == 1
+    assert oldest >= now - capacity.CPU_HISTORY_KEEP_S
