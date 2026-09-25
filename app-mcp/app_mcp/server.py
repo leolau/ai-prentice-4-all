@@ -16,6 +16,7 @@ Caddy fronts:
   the Hermes agent via ``mcp_servers: app:`` in its config. Tools register as
   ``mcp_app_*``; ``mcp_app_app_act_destructive`` and (recommended)
   ``mcp_app_folder_bridge_read_file`` / ``mcp_app_folder_bridge_search_files``
+  / ``mcp_app_folder_bridge_import_file_approved``
   are gated by Hermes' ``approvals.tools`` so the user approves in-chat
   before anything sensitive runs — see README.md "MCP tools" for the full
   recommendation and why reads are gated too.
@@ -291,7 +292,7 @@ async def app_act_destructive(
 
 NOT_CONNECTED_HINT = (
     "No Folder Bridge session connected. Tell the user to open Files -> "
-    "Folder Bridge (/files/bridge) in a Chromium browser on their Mac and "
+    "Folder Bridge (/files/bridge) in their browser on their Mac and "
     "press Connect, then add at least one folder."
 )
 
@@ -310,7 +311,7 @@ async def folder_bridge_state() -> dict[str, Any]:
     """Whether a Folder Bridge browser session is connected right now, and
     how long ago it last reported in. Use this before the other
     folder_bridge_* tools to know whether to ask the user to connect one
-    first (Files -> Folder Bridge, /files/bridge, Chromium on Mac only)."""
+    first (Files -> Folder Bridge, /files/bridge, on their Mac)."""
     return folder_hub.state_summary()
 
 
@@ -360,10 +361,12 @@ async def folder_bridge_search_files(
 async def folder_bridge_read_file(
     folder_id: str, path: str, max_bytes: int = 200_000
 ) -> dict[str, Any]:
-    """Read a file's content from an approved folder (text decoded as
-    utf-8; capped at max_bytes). This is a read of the user's own local
-    files — Hermes recommends gating this tool behind approvals.tools so
-    the user sees and approves each read in chat."""
+    """Read a UTF-8 text file's content from an approved folder (capped at
+    max_bytes). Binary files (PDF, .numbers/.xlsx, images, ...) are refused
+    with `binary: true` — use folder_bridge_import_file for those, which
+    copies the bytes intact into Files instead of decoding them. This is a
+    read of the user's own local files — Hermes recommends gating this tool
+    behind approvals.tools so the user sees and approves each read in chat."""
     return await _folder_command(
         {
             "type": "readFile",
@@ -373,6 +376,34 @@ async def folder_bridge_read_file(
             "maxBytes": max_bytes,
         }
     )
+
+
+async def _import_file(folder_id: str, path: str, *, approved: bool) -> dict[str, Any]:
+    return await _folder_command(
+        {"type": "importFile", "folderId": folder_id, "path": path, "approved": approved}
+    )
+
+
+@mcp.tool()
+async def folder_bridge_import_file(folder_id: str, path: str) -> dict[str, Any]:
+    """Copy one file from an approved folder byte-for-byte into Files (the
+    file store + registry), any type including PDF/.numbers/.xlsx. The
+    browser uploads the bytes directly; the result is the registry row
+    (asset id, filename, size, sha256, storage path, `verified` = the stored
+    hash matches the original). Only works for folders the user has marked
+    "trusted for import" on /files/bridge — otherwise it returns
+    `needsApproval: true`; then use folder_bridge_import_file_approved,
+    which asks the user in chat."""
+    return await _import_file(folder_id, path, approved=False)
+
+
+@mcp.tool()
+async def folder_bridge_import_file_approved(folder_id: str, path: str) -> dict[str, Any]:
+    """Same as folder_bridge_import_file, for a folder the user has NOT
+    marked trusted: the user approves this specific file in chat first.
+    Hermes must list this tool in approvals.tools — that prompt is the
+    approval; the browser then accepts the import."""
+    return await _import_file(folder_id, path, approved=True)
 
 
 @mcp.tool()

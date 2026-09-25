@@ -127,8 +127,8 @@ export async function restoreFolders(): Promise<FolderRecord[]> {
   const out: FolderRecord[] = [];
   for (const { id, label, handle } of stored) {
     const permission = await permissionOf(handle);
-    registry.set(id, { id, label, handle, permission });
-    out.push({ id, label, permission });
+    registry.set(id, { id, label, handle, permission, trusted: false });
+    out.push({ id, label, permission, trusted: false });
   }
   return out;
 }
@@ -148,7 +148,12 @@ export async function addFolder(label?: string): Promise<FolderRecord | null> {
     // they are never persisted — the user re-picks after a reload.
     const handle = await pickDirectoryViaInput();
     if (!handle) return null;
-    const record: FolderRecord = { id, label: label || handle.name, permission: "granted" };
+    const record: FolderRecord = {
+      id,
+      label: label || handle.name,
+      permission: "granted",
+      trusted: false,
+    };
     registry.set(id, { ...record, handle });
     return record;
   }
@@ -159,7 +164,12 @@ export async function addFolder(label?: string): Promise<FolderRecord | null> {
     if (err instanceof DOMException && err.name === "AbortError") return null;
     throw err;
   }
-  const record: FolderRecord = { id, label: label || handle.name, permission: "granted" };
+  const record: FolderRecord = {
+    id,
+    label: label || handle.name,
+    permission: "granted",
+    trusted: false,
+  };
   registry.set(id, { ...record, handle });
   await persist({ id, label: record.label, handle });
   return record;
@@ -185,11 +195,33 @@ export async function removeFolder(id: string): Promise<void> {
   await removePersisted(id);
 }
 
+/**
+ * Opt a folder into (or out of) agent-initiated imports without per-file
+ * approval. Session-only by design: trust is never written to IndexedDB, so
+ * every page load starts with nothing trusted.
+ */
+export function setFolderTrusted(id: string, trusted: boolean): FolderRecord | null {
+  const entry = registry.get(id);
+  if (!entry) return null;
+  entry.trusted = trusted;
+  const { label, permission } = entry;
+  return { id, label, permission, trusted };
+}
+
+export function isFolderTrusted(id: string): boolean {
+  return registry.get(id)?.trusted ?? false;
+}
+
+export function getFolderLabel(id: string): string | null {
+  return registry.get(id)?.label ?? null;
+}
+
 export function listFolders(): FolderRecord[] {
-  return Array.from(registry.values(), ({ id, label, permission }) => ({
+  return Array.from(registry.values(), ({ id, label, permission, trusted }) => ({
     id,
     label,
     permission,
+    trusted,
   }));
 }
 

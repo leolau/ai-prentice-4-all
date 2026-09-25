@@ -16,11 +16,17 @@
  */
 import {
   fileMetadata,
+  importFile,
   listDirectoryEntries,
   readFileContent,
   searchFolder,
 } from "@/lib/folder-bridge/fsOps";
-import { getFolderHandle, listFolders } from "@/lib/folder-bridge/handles";
+import {
+  getFolderHandle,
+  getFolderLabel,
+  isFolderTrusted,
+  listFolders,
+} from "@/lib/folder-bridge/handles";
 import type { ConnectionStatus, FolderCommand, SearchMatch } from "@/lib/folder-bridge/types";
 
 interface ServiceMessage {
@@ -65,7 +71,8 @@ async function fetchTicket(): Promise<string | null> {
   }
 }
 
-async function runCommand(command: FolderCommand): Promise<Record<string, unknown>> {
+/** Execute one relayed command against the local folder registry. */
+export async function runCommand(command: FolderCommand): Promise<Record<string, unknown>> {
   try {
     switch (command.type) {
       case "listFolders":
@@ -99,6 +106,16 @@ async function runCommand(command: FolderCommand): Promise<Record<string, unknow
         const result = await readFileContent(handle, command.path, {
           maxBytes: command.maxBytes,
         });
+        if (result.binary) {
+          return {
+            ok: false,
+            binary: true,
+            size: result.size,
+            detail:
+              "This file is not UTF-8 text and cannot be read through the bridge. " +
+              "Use folder_bridge_import_file to copy it byte-for-byte into Files.",
+          };
+        }
         return {
           ok: true,
           folderId: command.folderId,
@@ -106,6 +123,27 @@ async function runCommand(command: FolderCommand): Promise<Record<string, unknow
           encoding: "utf-8",
           ...result,
         };
+      }
+      case "importFile": {
+        const handle = getFolderHandle(command.folderId);
+        if (!handle) return { ok: false, detail: "Unknown or removed folder." };
+        if (!command.approved && !isFolderTrusted(command.folderId)) {
+          return {
+            ok: false,
+            needsApproval: true,
+            detail:
+              "This folder is not marked 'trusted for import'. Ask the user to " +
+              "toggle it on /files/bridge, or call folder_bridge_import_file_approved " +
+              "so they can approve this file in chat.",
+          };
+        }
+        const result = await importFile(
+          handle,
+          command.folderId,
+          getFolderLabel(command.folderId) ?? "",
+          command.path,
+        );
+        return { ok: true, ...result };
       }
       case "getFileMetadata": {
         const handle = getFolderHandle(command.folderId);

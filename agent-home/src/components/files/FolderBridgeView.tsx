@@ -11,6 +11,7 @@ import {
   reapproveFolder,
   removeFolder,
   restoreFolders,
+  setFolderTrusted,
 } from "@/lib/folder-bridge/handles";
 import {
   connectFolderBridge,
@@ -97,6 +98,11 @@ export function FolderBridgeView() {
     setFolders((prev) => prev.map((f) => (f.id === id ? { ...f, permission } : f)));
   };
 
+  const handleToggleTrusted = (id: string, trusted: boolean) => {
+    const updated = setFolderTrusted(id, trusted);
+    if (updated) setFolders((prev) => prev.map((f) => (f.id === id ? updated : f)));
+  };
+
   // A local, in-browser search over the same approved folders the agent
   // would query — lets the user try the feature without needing a chat
   // turn, and confirms what the agent will see.
@@ -173,7 +179,10 @@ export function FolderBridgeView() {
         <p className="mt-2 text-xs text-[var(--color-muted)]">
           Connecting lets the agent list, search and read files in the
           folders you approve below — nothing else on your Mac. Closing this
-          tab or pressing Disconnect ends its access immediately.
+          tab or pressing Disconnect ends its access immediately. The agent
+          can also ask to copy a file (any type, including PDF and
+          spreadsheets) into Files; you approve each copy in chat unless you
+          mark the folder &ldquo;trusted for import&rdquo;.
         </p>
       </section>
 
@@ -210,6 +219,19 @@ export function FolderBridgeView() {
                 className="flex items-center gap-2 rounded-lg bg-[var(--color-surface-2)] px-3 py-2 text-sm"
               >
                 <span className="min-w-0 flex-1 truncate">{folder.label}</span>
+                <label
+                  className="flex items-center gap-1 text-xs text-[var(--color-muted)]"
+                  title="Let the agent copy files from this folder into Files without asking for each one. Resets when you reload this page."
+                >
+                  <input
+                    type="checkbox"
+                    data-component="FolderBridgeTrust"
+                    checked={folder.trusted}
+                    disabled={folder.permission !== "granted"}
+                    onChange={(e) => handleToggleTrusted(folder.id, e.target.checked)}
+                  />
+                  Trusted for import
+                </label>
                 {folder.permission !== "granted" ? (
                   <button
                     type="button"

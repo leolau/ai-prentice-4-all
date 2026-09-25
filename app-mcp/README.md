@@ -77,6 +77,8 @@ FolderBridge (client,   ──WSS──▶     · MCP endpoint 127.0.0.1:9220/mc
 | `folder_bridge_search_files` | Search by filename/snippet across approved folders — **recommend gating** |
 | `folder_bridge_read_file` | Read a file's content — **recommend gating** |
 | `folder_bridge_get_file_metadata` | A file's size/modified time without reading it |
+| `folder_bridge_import_file` | Copy a file byte-for-byte into Files (any type) — browser accepts it only for folders the user marked "trusted for import" |
+| `folder_bridge_import_file_approved` | Same, for untrusted folders — **gate this**; the in-chat approval is what lets the browser accept it |
 
 ### Why Folder Bridge reads are recommended-gated
 
@@ -103,7 +105,17 @@ approvals:
     - mcp_app_app_act_destructive
     - mcp_app_folder_bridge_read_file
     - mcp_app_folder_bridge_search_files
+    - mcp_app_folder_bridge_import_file_approved
 ```
+
+`folder_bridge_import_file` (no suffix) is deliberately left ungated: the
+browser refuses it unless the user toggled "trusted for import" on that folder
+in the current `/files/bridge` session, so the human decision has already been
+made — per folder instead of per file. Trust is never persisted; it resets on
+every page load. Imported bytes go browser → agent-home BFF
+(`POST /api/files/import`) → Storage + `file_assets`; they never traverse the
+WebSocket or the model context, which is why binary files survive intact
+(`read_file` refuses non-UTF-8 files instead of decoding them lossily).
 
 Restart the gateway after changing either block. This is a deliberate,
 owner-made config change on the production box — it is not turned on by

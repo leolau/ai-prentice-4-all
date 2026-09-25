@@ -15,6 +15,7 @@ import type {
   DirectoryEntryInfo,
   DirectoryHandleLike,
   FileHandleLike,
+  ImportResult,
   SearchMatch,
 } from "@/lib/folder-bridge/types";
 
@@ -170,17 +171,94 @@ export interface ReadFileOptions {
   maxBytes: number;
 }
 
+/**
+ * Read as UTF-8 text. Bytes that are not valid UTF-8 (PDF, zip-based office
+ * documents, images, ...) are reported as `binary` with empty `content`
+ * rather than decoded lossily into U+FFFD — a mangled copy is worse than
+ * none. Binary files reach Hermes through `importFile`, never through here.
+ */
 export async function readFileContent(
   root: DirectoryHandleLike,
   path: string,
   opts: ReadFileOptions,
-): Promise<{ content: string; truncated: boolean; size: number }> {
+): Promise<{ content: string; truncated: boolean; size: number; binary?: boolean }> {
   const handle = await resolveFile(root, path);
   const file = await handle.getFile();
   const truncated = file.size > opts.maxBytes;
   const buf = await file.slice(0, opts.maxBytes).arrayBuffer();
-  const content = new TextDecoder("utf-8", { fatal: false }).decode(buf);
-  return { content, truncated, size: file.size };
+  try {
+    // A cut at maxBytes may split a multi-byte sequence; trim the tail so a
+    // truncated text file is not misreported as binary.
+    const probe = truncated ? buf.slice(0, Math.max(0, buf.byteLength - 4)) : buf;
+    const content = new TextDecoder("utf-8", { fatal: true }).decode(probe);
+    return { content, truncated, size: file.size };
+  } catch {
+    return { content: "", truncated: false, size: file.size, binary: true };
+  }
+}
+
+async function sha256Hex(buf: ArrayBuffer): Promise<string> {
+  const hash = await crypto.subtle.digest("SHA-256", buf);
+  return Array.from(new Uint8Array(hash))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+interface ImportResponse {
+  asset?: { id?: string; filename?: string };
+  sha256?: string;
+  size?: number;
+  storage_bucket?: string;
+  storage_path?: string;
+  error?: string;
+  detail?: string;
+}
+
+/**
+ * Copy one file, byte for byte, into the file store via the BFF
+ * (`POST /api/files/import`) and return the registry row. The browser
+ * hashes the original and compares it with the hash the BFF computed over
+ * what it stored, so `verified` means the copy is provably intact.
+ */
+export async function importFile(
+  root: DirectoryHandleLike,
+  folderId: string,
+  folderLabel: string,
+  path: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<ImportResult> {
+  const handle = await resolveFile(root, path);
+  const file = await handle.getFile();
+  const bytes = await file.arrayBuffer();
+  const localSha = await sha256Hex(bytes);
+  const form = new FormData();
+  form.set("file", new File([bytes], file.name, { type: file.type }));
+  form.set("sourcePath", path);
+  form.set("folderLabel", folderLabel);
+  const res = await fetchImpl("/api/files/import", { method: "POST", body: form });
+  let body: ImportResponse = {};
+  try {
+    body = (await res.json()) as ImportResponse;
+  } catch {
+    // Non-JSON error page; the status code below carries the failure.
+  }
+  if (!res.ok) {
+    throw new Error(body.detail || body.error || `Import failed (HTTP ${res.status}).`);
+  }
+  if (!body.asset?.id || !body.sha256) {
+    throw new Error("Import failed: the file store returned no registry row.");
+  }
+  return {
+    folderId,
+    path,
+    assetId: body.asset.id,
+    filename: body.asset.filename ?? file.name,
+    size: body.size ?? file.size,
+    sha256: body.sha256,
+    storageBucket: body.storage_bucket ?? "",
+    storagePath: body.storage_path ?? "",
+    verified: body.sha256 === localSha && (body.size ?? file.size) === file.size,
+  };
 }
 
 export async function fileMetadata(

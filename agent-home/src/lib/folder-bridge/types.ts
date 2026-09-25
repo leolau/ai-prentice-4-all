@@ -15,6 +15,13 @@ export interface FolderRecord {
   id: string;
   label: string;
   permission: FolderPermission;
+  /**
+   * User opted this folder into agent-initiated imports without a per-file
+   * approval prompt. Held in the browser only (never persisted), so it is
+   * re-decided every session, and enforced in the browser — the server
+   * cannot mark a folder trusted.
+   */
+  trusted: boolean;
 }
 
 /**
@@ -74,6 +81,22 @@ export interface FileContentResult {
   content: string;
   truncated: boolean;
   size: number;
+  /** Set when the bytes are not UTF-8 text; `content` is then empty. */
+  binary?: boolean;
+}
+
+/** Outcome of copying one local file into the file store via the BFF. */
+export interface ImportResult {
+  folderId: string;
+  path: string;
+  assetId: string;
+  filename: string;
+  size: number;
+  sha256: string;
+  storageBucket: string;
+  storagePath: string;
+  /** The BFF's SHA-256 of what it stored equals the browser's SHA-256 of the original. */
+  verified: boolean;
 }
 
 /** A command the server relays to the browser (matches `_folder_command` in app_mcp/server.py). */
@@ -88,7 +111,13 @@ export type FolderCommand =
       limit: number;
     }
   | { type: "readFile"; folderId: string; path: string; encoding: "utf-8"; maxBytes: number }
-  | { type: "getFileMetadata"; folderId: string; path: string };
+  | { type: "getFileMetadata"; folderId: string; path: string }
+  /**
+   * `approved` is set by the server when the call came through the
+   * approval-gated tool; the browser accepts an unapproved import only for
+   * a folder the user marked trusted.
+   */
+  | { type: "importFile"; folderId: string; path: string; approved: boolean };
 
 export type FolderCommandResult =
   | { ok: true; folders: FolderRecord[] }
@@ -96,6 +125,7 @@ export type FolderCommandResult =
   | { ok: true; matches: SearchMatch[] }
   | ({ ok: true } & FileContentResult)
   | ({ ok: true } & FileMetadata)
-  | { ok: false; detail: string };
+  | ({ ok: true } & ImportResult)
+  | { ok: false; detail: string; needsApproval?: boolean };
 
 export type ConnectionStatus = "disconnected" | "connecting" | "connected" | "reconnecting";

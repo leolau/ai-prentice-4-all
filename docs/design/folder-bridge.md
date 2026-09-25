@@ -56,8 +56,8 @@ FolderBridge (opt-in,     ──WSS──▶     · MCP endpoint 127.0.0.1:9220/
   · list/search/read, scoped            Hermes agent
     to approved handles only            approvals.tools (recommended):
       ▲                                   [mcp_app_folder_bridge_read_file,
-      │ 60s HMAC ticket (same              mcp_app_folder_bridge_search_files]
-      │  secret/route as app-mcp)
+      │ 60s HMAC ticket (same              mcp_app_folder_bridge_search_files,
+      │  secret/route as app-mcp)           mcp_app_folder_bridge_import_file_approved]
   POST /api/app-mcp/ticket
   (BFF, signed session)
 ```
@@ -150,3 +150,26 @@ service catalog (post-Hetzner-migration) does not list `app-mcp` at all,
 while `docs/design/app-mcp.md` says "built" from before that migration. This
 needs a read-only check against the live box before anyone assumes Folder
 Bridge (or the existing UI bridge) is reachable in production today.
+
+## Import (binary-safe copy into Files)
+
+`read_file` is UTF-8 text only and refuses binary files (`binary: true`).
+For PDFs, `.numbers`/`.xlsx`, images, etc. the agent calls
+`folder_bridge_import_file(folder_id, path)`: the browser resolves the handle,
+POSTs the raw `File` to the agent-home BFF (`POST /api/files/import`), which
+writes it to principal-scoped Storage, computes SHA-256 server-side and
+registers a `file_assets` row (`surface=agent_home`, `conversation` =
+`<folder label>/<relative path>` as provenance). The browser hashes the
+original itself and returns `verified: sha256 matches` with the registry row.
+Bytes never traverse the WebSocket or the model context.
+
+Approval is two-tier, decided in the browser:
+
+- Folder toggled **Trusted for import** on `/files/bridge` (session-only, never
+  persisted): `folder_bridge_import_file` succeeds without a chat prompt — also
+  in dispatcher-spawned runs.
+- Otherwise it returns `needsApproval: true`; the agent falls back to
+  `folder_bridge_import_file_approved`, which must be in `approvals.tools` so
+  the user approves that file in chat. The `approved: true` flag it sends is
+  only honoured because the tool is gated — deployments that leave it ungated
+  turn it into an unconditional import.
