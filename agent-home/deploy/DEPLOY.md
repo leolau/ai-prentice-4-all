@@ -1,5 +1,16 @@
 # agent-home — on-box deploy runbook (FG-20, Decision 2)
 
+> **⚠️ SUPERSEDED 2026-08-20 — production moved to Hetzner.** The live box,
+> access method, and every fact below (instance ID, EIP, `aliyun` CLI) are
+> **historical**. The authoritative ops document is
+> [`docs/deployment/PRODUCTION.md`](../../docs/deployment/PRODUCTION.md) —
+> read that first. Reach production by SSH
+> (`ssh -i ~/.ssh/hetzner_hermes_ed25519 root@188.245.219.105`), not `aliyun`/
+> `OOS_RunCommand`. Deploying agent-home is now just one step of the single
+> whole-stack `deploy-hermes.sh` script documented there — there is no
+> separate dedicated clone anymore. Keep reading only for the historical
+> record of the original FG-20 rollout decisions.
+
 Deploys `agent-home` on the **existing prod box** behind the **existing Caddy**,
 on its own subdomain, same box + same Supabase as the Python AI layer and the
 `web/` dashboard. Nothing here changes `web/` or the Python service.
@@ -7,7 +18,7 @@ on its own subdomain, same box + same Supabase as the Python AI layer and the
 > **Owner-gated.** Prod deploy touches the running box. Only run this with the
 > owner's go-ahead. The ECS system-test gate is separate and also owner-gated.
 
-## Live-infra facts (see `docs/design/SESSION-HANDOFF-2026-07-prod-cutover.md`)
+## Live-infra facts (see `docs/design/SESSION-HANDOFF-2026-07-prod-cutover.md`) — historical, pre-2026-08-20
 
 - **Prod box:** `hermes-systest`, Alibaba ECS `i-j6c81aisv2dd8mg17yle`, `47.83.199.25`, cn-hongkong.
 - **Reach it:** `aliyun` CLI → ECS RunCommand (creds `ALIBABA_CLOUD_ACCESS_KEY_ID/SECRET` in the agent VM env; no SSH key on file). Runs as `root`.

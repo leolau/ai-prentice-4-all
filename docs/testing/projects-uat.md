@@ -1,5 +1,11 @@
 # Projects (FG-32) — UAT test suite
 
+> **⚠️ SUPERSEDED 2026-08-20 — the Alibaba `hermes-systest` box named below is
+> decommissioned.** Production is now a Hetzner box reachable by SSH; see
+> [`docs/deployment/PRODUCTION.md`](../deployment/PRODUCTION.md) before running
+> anything in this suite. Retarget the instance ID / IP / `aliyun` commands
+> below to the current box first.
+
 **This document is self-contained.** It is written for an agent with no session
 context, no access to the conversation that produced it, and nobody to ask. Every
 instance id, credential path, command, fixture and expectation you need is

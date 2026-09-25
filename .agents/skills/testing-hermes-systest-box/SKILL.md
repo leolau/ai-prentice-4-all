@@ -1,15 +1,53 @@
 ---
 name: testing-hermes-systest-box
-description: How to verify the live Hermes deployment on the remote Alibaba Cloud ECS "systest" box (services, privilege model, Supabase memory tier, Supabase CLI, MCP/skills, SQLite pushers) when there is no SSH and the only access path is the alibaba-cloud MCP OOS_RunCommand tool.
+description: "SUPERSEDED 2026-08-20 — the Alibaba 'systest' box this skill describes is decommissioned. Production moved to a Hetzner box reachable by SSH; see docs/deployment/PRODUCTION.md. Kept only for historical/rollback reference — do NOT use OOS_RunCommand against production."
 ---
 
-# Verifying the live Hermes deployment on the remote systest box
+# ⚠️ SUPERSEDED — this box is decommissioned, do not act on it ⚠️
 
-The Hermes staging/systest deployment does **not** run locally. It lives on an Alibaba Cloud
-ECS instance and there is **no SSH**. Everything is driven through the `alibaba-cloud` MCP
+**Production migrated off this Alibaba Cloud ECS box on 2026-08-20.** It was
+stopped at cutover and its subscription lapsed 2026-08-26. Every fact and
+command below (instance ID `i-j6c81aisv2dd8mg17yle`, EIP `47.83.199.25`,
+`OOS_RunCommand` as the only access path) describes a server that is **no
+longer serving any real traffic**. Running commands against it wastes time
+and changes nothing anyone will ever see.
+
+**Before doing anything "live box" related, read
+[`docs/deployment/PRODUCTION.md`](../../../docs/deployment/PRODUCTION.md).**
+Current production is the Hetzner box `hermes` (`188.245.219.105`, Nuremberg),
+reachable directly by SSH:
+
+```bash
+ssh -i ~/.ssh/hetzner_hermes_ed25519 root@188.245.219.105 '<command>'
+```
+
+No OOS polling, no base64-decoding invocation results, no ~60s MCP call
+ceiling — it's a normal SSH session. The full service catalog, deploy
+procedure, and health-check commands for the *current* box are in
+`PRODUCTION.md` §4–5.7.
+
+This exact mistake — debugging and redeploying to this decommissioned box
+while believing it was production — happened once already and cost a full
+session before the real cause was found. See
+[`plans/2026-09-25-prod-migration-guardrails.md`](../../../plans/2026-09-25-prod-migration-guardrails.md)
+for the incident writeup. If you're reading this skill because it matched a
+query about verifying the live deployment, stop here and go to
+`PRODUCTION.md` instead — everything past this point is historical.
+
+---
+
+## Historical content below — Alibaba `hermes-systest` box (pre-2026-08-20)
+
+Kept for the pre-migration rollback path noted in `PRODUCTION.md` §6
+(Alibaba snapshots retained until the migration is proven stable). Do not
+act on anything below without re-verifying against `PRODUCTION.md` first —
+paths, unit names, and gotchas may or may not still apply to the Hetzner box.
+
+The Hermes staging/systest deployment does **not** run locally. It lived on an Alibaba Cloud
+ECS instance and there was **no SSH**. Everything was driven through the `alibaba-cloud` MCP
 server's `OOS_RunCommand` tool.
 
-## Access pattern
+## Access pattern (historical — do not use against current production)
 
 ```
 mcp_tool(command="call_tool", server="alibaba-cloud", tool_name="OOS_RunCommand",
@@ -17,7 +55,7 @@ mcp_tool(command="call_tool", server="alibaba-cloud", tool_name="OOS_RunCommand"
 ```
 
 Instance used historically: `i-j6c81aisv2dd8mg17yle` (region `cn-hongkong`, host `hermes-systest`).
-Confirm the current instance with the user/lead rather than assuming.
+This instance is stopped/decommissioned — do not target it.
 
 ### Hard-won rules for OOS_RunCommand
 
