@@ -6,6 +6,9 @@
  * principal instead of an anonymous sender, so it is the difference between the
  * gateway attributing work to somebody and not. Body:
  * `{ platform, channel_user_id }`.
+ *
+ * DELETE …/channels?platform=&channel_user_id= — the inverse: the handle goes
+ * back to resolving as an anonymous sender; the member is untouched.
  */
 import { NextResponse } from "next/server";
 
@@ -44,6 +47,37 @@ export async function POST(
   try {
     return NextResponse.json(
       await gate.client.linkMemberChannel(userId, {
+        platform,
+        channel_user_id: channelUserId,
+      }),
+    );
+  } catch (err) {
+    return forwardMemberError(err);
+  }
+}
+
+export async function DELETE(
+  request: Request,
+  { params }: { params: Promise<{ userId: string }> },
+): Promise<NextResponse> {
+  const gate = await requireMemberAdmin();
+  if ("response" in gate) return gate.response;
+  const { userId } = await params;
+  const query = new URL(request.url).searchParams;
+  const platform = (query.get("platform") ?? "").trim();
+  const channelUserId = (query.get("channel_user_id") ?? "").trim();
+  if (!platform || !channelUserId) {
+    return NextResponse.json(
+      {
+        error: "invalid_input",
+        detail: "Both a platform and a channel user id are required.",
+      },
+      { status: 400 },
+    );
+  }
+  try {
+    return NextResponse.json(
+      await gate.client.unlinkMemberChannel(userId, {
         platform,
         channel_user_id: channelUserId,
       }),

@@ -34,6 +34,7 @@ from hermes_cli.members import (
     administered_profile,
     link_member_channel,
     load_admin_client,
+    unlink_member_channel,
 )
 
 
@@ -264,6 +265,27 @@ def member_link_channel_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def member_unlink_channel_command(args: argparse.Namespace) -> int:
+    """Run ``hermes member unlink-channel`` — detach a channel handle from a member."""
+    try:
+        principal = asyncio.run(
+            unlink_member_channel(
+                _prod_store(),
+                _actor(),
+                user_id=args.user_id,
+                platform=args.platform,
+                channel_user_id=args.channel_user_id,
+            )
+        )
+    except (MemberError, PermissionError, RuntimeError, ValueError) as error:
+        print(f"Could not unlink the channel: {error}", file=sys.stderr)
+        raise SystemExit(1) from error
+
+    print(f"{args.platform}:{args.channel_user_id} no longer resolves to {principal.user_id}.")
+    print(f"Linked channels: {', '.join(principal.channels) or 'none'}")
+    return 0
+
+
 def member_deactivate_command(args: argparse.Namespace) -> int:
     """Run ``hermes member deactivate`` — suspend the enrolment in this profile."""
     return _set_active(args.user_id, active=False)
@@ -453,6 +475,20 @@ def register_member_subparser(subparsers: argparse._SubParsersAction) -> None:
         help="The platform-native sender id (e.g. a Telegram numeric user id)",
     )
     link_channel.set_defaults(func=member_link_channel_command)
+
+    unlink_channel = member_sub.add_parser(
+        "unlink-channel",
+        help="Detach an inbound channel handle from a member",
+        description=(
+            "Undo link-channel: messages from (platform, channel_user_id) go "
+            "back to resolving as the raw channel handle. The member and "
+            "their data are untouched."
+        ),
+    )
+    unlink_channel.add_argument("user_id", help="The member's principal id")
+    unlink_channel.add_argument("platform", help="Gateway platform name (e.g. telegram)")
+    unlink_channel.add_argument("channel_user_id", help="The platform-native sender id")
+    unlink_channel.set_defaults(func=member_unlink_channel_command)
 
     deactivate = member_sub.add_parser(
         "deactivate",

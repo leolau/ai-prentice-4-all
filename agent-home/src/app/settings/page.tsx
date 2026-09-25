@@ -27,6 +27,9 @@ export default async function Page() {
       <SettingsView
         entityGoal={entityGoal}
         entityGoalReadOnly={!principal.is_owner}
+        canManageMembers={
+          principal.is_owner || principal.role === "admin"
+        }
       />
     </MobileShell>
   );

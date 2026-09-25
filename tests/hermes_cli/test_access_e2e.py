@@ -151,6 +151,13 @@ async def test_enroll_link_and_resolve_by_channel(postgres_dsn: str) -> None:
     # Unknown identity resolves to nothing.
     assert await store.resolve_by_channel("telegram", "nobody") is None
 
+    # Unlink only removes the mapping when it points at the named principal.
+    assert await store.unlink_channel("alice", "telegram", "tg-999") is False
+    assert await store.unlink_channel("alice", "telegram", "tg-123") is True
+    assert await store.resolve_by_channel("telegram", "tg-123") is None
+    refreshed = await store.get("alice")
+    assert refreshed is not None and refreshed.channels == ()
+
 
 @pytest.mark.asyncio
 async def test_resolve_principal_auto_enrolls_only_paired_users(postgres_dsn: str) -> None:
