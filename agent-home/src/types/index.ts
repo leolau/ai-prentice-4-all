@@ -1920,6 +1920,22 @@ export interface CapacityIndicators {
   profile_count: number;
 }
 
+/** One hour-aligned bucket of CPU busy% — nulls when nothing was sampled. */
+export interface CpuHistoryPoint {
+  ts: number;
+  avg_pct: number | null;
+  max_pct: number | null;
+}
+
+export interface CpuHistory {
+  /** 24 hourly buckets ending at the current hour (oldest first). */
+  hourly: CpuHistoryPoint[];
+  /** Busiest sampled minute in each window; null when no samples. */
+  max_24h: number | null;
+  max_7d: number | null;
+  max_30d: number | null;
+}
+
 export interface CapacityResponse {
   state: "comfortable" | "watch" | "constrained";
   headline: string;
@@ -1932,6 +1948,9 @@ export interface CapacityResponse {
   bounds: CapacityBound[];
   recommendations: string[];
   indicators: CapacityIndicators;
+  /** Per-minute samples aggregated hourly — only populated once the
+   * dashboard's sampler has had time to collect. */
+  cpu_history: CpuHistory | null;
   /** Indicators that could not be read — shown as unknown, never as zero. */
   unavailable: string[];
   collected_at: number;

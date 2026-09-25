@@ -35,6 +35,16 @@ function capacity(overrides: Partial<CapacityResponse> = {}): CapacityResponse {
       cpu_percent: 22.5,
       profile_count: 2,
     },
+    cpu_history: {
+      hourly: Array.from({ length: 24 }, (_, i) => ({
+        ts: 1_700_000_000 - (23 - i) * 3600,
+        avg_pct: 10 + i,
+        max_pct: 20 + i,
+      })),
+      max_24h: 64.0,
+      max_7d: 88.5,
+      max_30d: 99.9,
+    },
     unavailable: [],
     collected_at: 1_700_000_000,
     ...overrides,
@@ -143,5 +153,26 @@ describe("CapacityView", () => {
       />,
     );
     expect(html).toContain("3 (no cap set)");
+  });
+
+  it("renders the 24-hour cpu graph and the window peaks", () => {
+    const html = renderToStaticMarkup(<CapacityView capacity={capacity()} />);
+    expect(html).toContain("CPU utilization");
+    expect(html).toContain("Busiest minute, 24h");
+    expect(html).toContain("64%");
+    expect(html).toContain("89%");
+    expect(html).toContain("100%");
+  });
+
+  it("shows the collecting state instead of an empty chart", () => {
+    const html = renderToStaticMarkup(
+      <CapacityView
+        capacity={capacity({
+          cpu_history: { hourly: [], max_24h: null, max_7d: null, max_30d: null },
+        })}
+      />,
+    );
+    expect(html).toContain("No CPU history yet");
+    expect(html).not.toContain("NaN");
   });
 });

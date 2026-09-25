@@ -1,4 +1,4 @@
-import type { CapacityResponse } from "@/types";
+import type { CapacityResponse, CpuHistory } from "@/types";
 
 const TONE: Record<CapacityResponse["state"], string> = {
   comfortable: "text-[var(--color-ok,#16a34a)]",
@@ -130,6 +130,8 @@ export function CapacityView({ capacity }: { capacity: CapacityResponse }) {
         ) : null}
       </section>
 
+      <CpuHistorySection history={capacity.cpu_history} />
+
       {capacity.recommendations.length > 0 ? (
         <section
           data-component="CapacityRecommendations"
@@ -146,5 +148,78 @@ export function CapacityView({ capacity }: { capacity: CapacityResponse }) {
         </section>
       ) : null}
     </div>
+  );
+}
+
+function pct(value: number | null): string {
+  return value === null ? "—" : `${Math.round(value)}%`;
+}
+
+function hourLabel(ts: number): string {
+  return new Date(ts * 1000).toLocaleTimeString([], {
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+/**
+ * CPU utilization history: a 24-bucket bar chart plus the busiest sampled
+ * minute over 24h / 7d / 30d. Bars show each hour's average; the title holds
+ * the exact figure so the graph stays readable at 24 buckets.
+ */
+function CpuHistorySection({ history }: { history: CpuHistory | null }) {
+  const hourly = history?.hourly ?? [];
+  const hasData = hourly.some((p) => p.avg_pct !== null || p.max_pct !== null);
+  return (
+    <section
+      data-component="CapacityCpuHistory"
+      className="flex flex-col gap-3 rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface)] p-4"
+    >
+      <h2 className="text-sm font-medium">CPU utilization</h2>
+      {hasData ? (
+        <>
+          <div
+            data-component="CpuHistoryChart"
+            role="img"
+            aria-label="CPU utilization over the past 24 hours"
+            className="flex h-24 items-end gap-px"
+          >
+            {hourly.map((point) => {
+              const avg = point.avg_pct ?? 0;
+              return (
+                <div
+                  key={point.ts}
+                  title={`${hourLabel(point.ts)} — avg ${pct(point.avg_pct)}, peak ${pct(point.max_pct)}`}
+                  className="flex-1 rounded-sm bg-[var(--color-accent,#2563eb)]"
+                  style={{ height: `${Math.max(avg, 2)}%`, opacity: point.avg_pct === null ? 0.15 : 1 }}
+                />
+              );
+            })}
+          </div>
+          <div className="flex justify-between text-xs text-[var(--color-muted)]">
+            <span>{hourly.length > 0 ? hourLabel(hourly[0].ts) : ""}</span>
+            <span>24h ago → now</span>
+          </div>
+        </>
+      ) : (
+        <p data-component="CpuHistoryEmpty" className="text-sm text-[var(--color-muted)]">
+          No CPU history yet — the dashboard samples once a minute, so the graph fills in over the first day.
+        </p>
+      )}
+      <dl data-component="CpuHistoryPeaks" className="flex flex-col gap-2 text-sm">
+        {(
+          [
+            ["Busiest minute, 24h", history?.max_24h ?? null],
+            ["Busiest minute, 7d", history?.max_7d ?? null],
+            ["Busiest minute, 30d", history?.max_30d ?? null],
+          ] as const
+        ).map(([label, value]) => (
+          <div key={label} className="flex items-baseline justify-between gap-3">
+            <dt className="text-[var(--color-muted)]">{label}</dt>
+            <dd>{pct(value)}</dd>
+          </div>
+        ))}
+      </dl>
+    </section>
   );
 }

@@ -171,6 +171,17 @@ def _start_desktop_cron_ticker(stop_event: "threading.Event", interval: int = 60
     provider.start(stop_event, interval=interval)
 
 
+def _start_cpu_history_sampler(stop_event: "threading.Event") -> None:
+    """Record a per-minute CPU busy% reading for the capacity page's history.
+
+    Runs in every dashboard — server and desktop alike — since the dashboard
+    is the long-lived process that also serves ``/api/capacity``.
+    """
+    from hermes_cli.capacity import cpu_sampler_loop
+
+    cpu_sampler_loop(stop_event)
+
+
 def _warm_gateway_module() -> None:
     try:
         import hermes_cli.gateway  # noqa: F401
@@ -221,9 +232,21 @@ async def _lifespan(app: "FastAPI"):
         )
         cron_thread.start()
 
+    # CPU history for /api/capacity's 24h graph and peaks — one tiny row a
+    # minute, run wherever a dashboard lives.
+    cpu_stop = threading.Event()
+    cpu_thread = threading.Thread(
+        target=_start_cpu_history_sampler,
+        args=(cpu_stop,),
+        daemon=True,
+        name="cpu-history-sampler",
+    )
+    cpu_thread.start()
+
     try:
         yield
     finally:
+        cpu_stop.set()
         if cron_stop is not None:
             cron_stop.set()
 
@@ -14511,7 +14534,7 @@ async def capacity_headroom_endpoint(request: Request):
     Any enrolled principal may read it; nothing here is mutable, and the
     recommendations are advice rather than an applied change.
     """
-    from hermes_cli.capacity import as_dict, headroom
+    from hermes_cli.capacity import as_dict, cpu_history, headroom
 
     await _comms_resolve_principal(request)
     try:
@@ -14528,7 +14551,9 @@ async def capacity_headroom_endpoint(request: Request):
             idle = [name for name, _age in await idle_profiles()]
         except Exception as exc:
             _log.debug("capacity: idle profiles unavailable: %s", exc)
-        return as_dict(headroom(config, idle_profiles=idle))
+        payload = as_dict(headroom(config, idle_profiles=idle))
+        payload["cpu_history"] = cpu_history()
+        return payload
     except Exception:
         _log.exception("GET /api/capacity failed")
         raise HTTPException(
