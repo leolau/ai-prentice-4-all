@@ -262,9 +262,10 @@ export function FolderBridgeView() {
           Search
         </h2>
         <p className="mt-1 text-xs text-[var(--color-muted)]">
-          Preview what the agent can see: matches by filename across the
-          folders above (substring, or a glob such as <code>*.pdf</code>).
-          Tap a result to peek at its text, then ask the agent about it in
+          Preview what the agent can see: matches by file or folder name
+          across the folders above (substring, or a glob such as{" "}
+          <code>*.pdf</code>; include a <code>/</code> to match the whole
+          path, e.g. <code>2026/*.pdf</code>). Tap a result to peek at its text, then ask the agent about it in
           chat.
         </p>
         <div className="mt-2 flex gap-2">
@@ -276,7 +277,7 @@ export function FolderBridgeView() {
             onKeyDown={(e) => {
               if (e.key === "Enter") void handleSearch();
             }}
-            placeholder="Filename or glob, e.g. invoice or *.pdf"
+            placeholder="File or folder name, e.g. invoices, *.pdf or 2026/*.pdf"
             className="w-full rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm outline-none focus:border-[var(--color-accent)]"
           />
           <button
@@ -307,9 +308,11 @@ export function FolderBridgeView() {
                     onClick={() => setPreview(match)}
                     className="w-full rounded-lg bg-[var(--color-surface-2)] px-3 py-2 text-left text-sm"
                   >
-                    <span className="block font-medium">{match.path}</span>
+                    <span className="block break-all font-medium">
+                      {match.folderLabel}/{match.path}
+                    </span>
                     <span className="block text-xs text-[var(--color-muted)]">
-                      {match.folderLabel} · {match.size} bytes ·{" "}
+                      {match.size} bytes ·{" "}
                       {new Date(match.modifiedAt).toLocaleDateString()}
                     </span>
                     {match.snippet ? (
@@ -332,7 +335,7 @@ export function FolderBridgeView() {
         >
           <div className="flex items-center justify-between">
             <h2 className="text-xs uppercase tracking-wide text-[var(--color-muted)]">
-              {preview.path}
+              {preview.folderLabel}/{preview.path}
             </h2>
             <button
               type="button"
