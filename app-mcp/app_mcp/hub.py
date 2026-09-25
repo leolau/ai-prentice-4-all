@@ -34,6 +34,11 @@ class Hub:
         self._element: dict[str, Any] | None = None
         self._state_at: float = 0.0
         self._pending: dict[str, asyncio.Future[dict[str, Any]]] = {}
+        # monotonic() of the last progress ping per in-flight command; makes
+        # `timeout` a silence deadline so long-running commands (a large
+        # file import uploads over HTTP for minutes) don't hit a fixed total
+        # cap they can never beat.
+        self._progress: dict[str, float] = {}
 
     # -- connection lifecycle ------------------------------------------------
 
@@ -54,6 +59,8 @@ class Hub:
         for fut in self._pending.values():
             if not fut.done():
                 fut.set_result({"ok": False, "detail": detail, "state": None})
+        for msg_id in self._pending:
+            self._progress.pop(msg_id, None)
         self._pending.clear()
 
     # -- inbound --------------------------------------------------------------
@@ -66,6 +73,16 @@ class Hub:
         elif element is None:
             self._element = None
         self._state_at = time.time()
+
+    def note_progress(self, msg_id: Any) -> None:
+        """Refresh the silence deadline for an in-flight command.
+
+        The browser pings `{type: "progress", id}` while a command runs;
+        each ping resets the clock so `send_command` only fails after
+        `timeout` seconds with no sign of life.
+        """
+        if isinstance(msg_id, str) and msg_id in self._pending:
+            self._progress[msg_id] = time.monotonic()
 
     def resolve_result(self, msg_id: Any, payload: dict[str, Any]) -> None:
         if not isinstance(msg_id, str):
@@ -99,11 +116,23 @@ class Hub:
         loop = asyncio.get_running_loop()
         fut: asyncio.Future[dict[str, Any]] = loop.create_future()
         self._pending[msg_id] = fut
+        self._progress[msg_id] = time.monotonic()
         try:
             await conn.send(json.dumps({"type": "cmd", "id": msg_id, "command": command}))
-            return await asyncio.wait_for(fut, timeout=self.timeout)
-        except asyncio.TimeoutError:
-            self._pending.pop(msg_id, None)
-            raise HubError("Timed out waiting for the app to execute the action.") from None
+            while True:
+                try:
+                    # shield() so a slice timeout doesn't cancel the future —
+                    # the browser may still be working and pinging progress.
+                    return await asyncio.wait_for(
+                        asyncio.shield(fut), timeout=self.timeout
+                    )
+                except asyncio.TimeoutError:
+                    last = self._progress.get(msg_id, 0.0)
+                    if time.monotonic() - last < self.timeout:
+                        continue
+                    raise HubError(
+                        "Timed out waiting for the app to execute the action."
+                    ) from None
         finally:
             self._pending.pop(msg_id, None)
+            self._progress.pop(msg_id, None)
