@@ -18,6 +18,8 @@ import pytest
 
 from hermes_cli import active_sessions, capacity
 from hermes_cli.capacity import (
+    BOUND_CPU,
+    BOUND_DISK,
     BOUND_LATENCY,
     BOUND_MEMORY,
     BOUND_SESSIONS,
@@ -27,6 +29,8 @@ from hermes_cli.capacity import (
     WATCH,
     CapacityIndicators,
     CapacityThresholds,
+    CpuLoad,
+    DiskUsage,
     MemoryLoad,
     SessionLoad,
     TurnLatency,
@@ -70,8 +74,12 @@ def _indicators(
     waits=0.0,
     p95=1.0,
     profiles=1,
+    cpu=None,
+    disk=None,
 ) -> CapacityIndicators:
     return CapacityIndicators(
+        cpu=cpu or CpuLoad(),
+        disk=disk or DiskUsage(),
         sessions=SessionLoad(
             active_total=active, cap_box_wide=cap, cap_here=cap, profiles_seen=profiles
         ),
@@ -160,6 +168,67 @@ def test_a_bound_hardware_cannot_fix_wins_a_tie_against_one_it_can():
     assert verdict.state == CONSTRAINED
     assert verdict.binding is not None
     assert verdict.binding.name == BOUND_WRITE_LOCK
+
+
+# ── CPU and disk: the two the owner asked to see next to memory ─────────────
+
+
+def test_cpu_load_is_judged_per_core_not_in_absolute_terms():
+    cpu = CpuLoad(cores=8, load_1m=6.0, load_5m=6.0, load_15m=5.0)
+    verdict = derive_verdict(_indicators(active=1, cap=15, cpu=cpu))
+    # 6.0 on 8 cores is 0.75/core: watch, not constrained.
+    assert verdict.state == WATCH
+    assert verdict.binding is not None
+    assert verdict.binding.name == BOUND_CPU
+    assert "8 core(s)" in verdict.binding.reason
+    verdict = derive_verdict(
+        _indicators(active=1, cap=15, cpu=CpuLoad(cores=2, load_5m=2.4, load_1m=2.4))
+    )
+    assert verdict.state == CONSTRAINED
+    assert verdict.binding.hardware_helps is True
+
+
+def test_disk_binds_on_share_or_absolute_free_space_whichever_is_stricter():
+    # 10% free of a small disk: watch on share.
+    small = DiskUsage(path="/data", total_mb=40960.0, used_mb=36864.0, free_mb=4096.0)
+    verdict = derive_verdict(_indicators(active=1, cap=15, disk=small))
+    assert verdict.state == WATCH
+    assert verdict.binding.name == BOUND_DISK
+    assert "/data" in verdict.binding.reason
+    # 4% free of a huge disk is still 40 GB: share says constrained, and share wins.
+    huge = DiskUsage(path="/data", total_mb=1_048_576.0, used_mb=1_006_632.0, free_mb=41_943.0)
+    verdict = derive_verdict(_indicators(active=1, cap=15, disk=huge))
+    assert verdict.state == CONSTRAINED
+    assert verdict.binding.name == BOUND_DISK
+    assert any("Free space first" in rec for rec in verdict.recommendations)
+
+
+def test_unmeasured_cpu_and_disk_are_named_not_zeroed():
+    indicators = _indicators(active=1, cap=15)
+    verdict = derive_verdict(indicators)
+    assert {b.name for b in verdict.bounds}.isdisjoint({BOUND_CPU, BOUND_DISK})
+    payload = capacity.as_dict(verdict)
+    assert payload["indicators"]["cpu_load_5m"] is None
+    assert payload["indicators"]["disk_free_mb"] is None
+    line = capacity.summary_line(verdict)
+    assert "cpu unknown" in line
+    assert "disk unknown" in line
+
+
+def test_disk_usage_is_read_from_the_hermes_home_filesystem(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "not-created-yet" / ".hermes"))
+    usage = capacity.collect_disk_usage()
+    # Walks up to the nearest existing ancestor rather than failing.
+    assert usage.measured
+    assert usage.total_mb > 0
+    assert usage.used_mb + usage.free_mb <= usage.total_mb + 1
+
+
+def test_cpu_load_collection_reports_cores_and_load():
+    cpu = capacity.collect_cpu_load()
+    assert cpu.measured
+    assert cpu.cores >= 1
+    assert cpu.load_per_core >= 0.0
 
 
 def test_hardware_advice_states_its_measured_basis():

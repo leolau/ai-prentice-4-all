@@ -1,4 +1,4 @@
-import type { CapacityResponse } from "@/types";
+import type { CapacityIndicators, CapacityResponse } from "@/types";
 
 const TONE: Record<CapacityResponse["state"], string> = {
   comfortable: "text-[var(--color-ok,#16a34a)]",
@@ -14,6 +14,21 @@ const VERDICT_HINT: Record<CapacityResponse["state"], string> = {
 
 function gb(mb: number | null): string {
   return mb === null ? "unknown" : `${(mb / 1024).toFixed(1)} GB`;
+}
+
+function cpuUsage(ind: CapacityIndicators): string {
+  if (ind.cpu_load_5m === null || !ind.cpu_cores) return "unknown";
+  const perCore = Math.round((100 * ind.cpu_load_5m) / ind.cpu_cores);
+  const now = ind.cpu_percent === null ? "" : `${Math.round(ind.cpu_percent)}% now · `;
+  return `${now}${perCore}% of ${ind.cpu_cores} core${ind.cpu_cores === 1 ? "" : "s"} (5-min load ${ind.cpu_load_5m.toFixed(2)})`;
+}
+
+function storageUsed(ind: CapacityIndicators): string {
+  if (ind.disk_total_mb === null || ind.disk_used_mb === null || ind.disk_free_mb === null) {
+    return "unknown";
+  }
+  const pct = ind.disk_total_mb > 0 ? Math.round((100 * ind.disk_used_mb) / ind.disk_total_mb) : 0;
+  return `${gb(ind.disk_used_mb)} of ${gb(ind.disk_total_mb)} (${pct}%) · ${gb(ind.disk_free_mb)} free`;
 }
 
 function seconds(value: number | null): string {
@@ -45,6 +60,8 @@ export function CapacityView({ capacity }: { capacity: CapacityResponse }) {
       label: "Memory available",
       value: ind.total_mb ? `${gb(ind.available_mb)} of ${gb(ind.total_mb)}` : gb(ind.available_mb),
     },
+    { label: "CPU usage", value: cpuUsage(ind) },
+    { label: "Storage used", value: storageUsed(ind) },
     {
       label: "Write-lock waits",
       value:

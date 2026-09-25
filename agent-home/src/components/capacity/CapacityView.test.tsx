@@ -21,6 +21,15 @@ function capacity(overrides: Partial<CapacityResponse> = {}): CapacityResponse {
       total_mb: 16384,
       hermes_rss_mb: 900,
       by_process: { gateway: 700 },
+      cpu_cores: 4,
+      cpu_load_1m: 1.2,
+      cpu_load_5m: 1.0,
+      cpu_load_15m: 0.8,
+      cpu_percent: 31,
+      disk_path: "/opt/data",
+      disk_total_mb: 81920,
+      disk_used_mb: 40960,
+      disk_free_mb: 40960,
       write_lock_waits_per_hour: 0,
       write_lock_waited_s: 0,
       turn_p50_s: 2.4,
@@ -35,12 +44,39 @@ function capacity(overrides: Partial<CapacityResponse> = {}): CapacityResponse {
 }
 
 describe("CapacityView", () => {
+  it("shows unmeasured CPU and storage as unknown, never as zero", () => {
+    const base = capacity();
+    const html = renderToStaticMarkup(
+      <CapacityView
+        capacity={{
+          ...base,
+          indicators: {
+            ...base.indicators,
+            cpu_cores: null,
+            cpu_load_5m: null,
+            cpu_percent: null,
+            disk_total_mb: null,
+            disk_used_mb: null,
+            disk_free_mb: null,
+          },
+        }}
+      />,
+    );
+    expect(html).not.toContain("0% of");
+    expect(html).not.toContain("0.0 GB of 0.0 GB");
+    expect((html.match(/unknown/g) ?? []).length).toBeGreaterThanOrEqual(2);
+  });
+
   it("renders the reading and the verdict", () => {
     const html = renderToStaticMarkup(<CapacityView capacity={capacity()} />);
     expect(html).toContain("Headroom: comfortable");
     expect(html).toContain("3 / ~45");
     expect(html).toContain("6.0 GB of 16.0 GB");
     expect(html).toContain("p50 2.4s");
+    expect(html).toContain("CPU usage");
+    expect(html).toContain("31% now · 25% of 4 cores (5-min load 1.00)");
+    expect(html).toContain("Storage used");
+    expect(html).toContain("40.0 GB of 80.0 GB (50%) · 40.0 GB free");
     // Box-wide, so the per-profile split is shown when there is more than one.
     expect(html).toContain("default 2");
     expect(html).toContain("hr 1");
@@ -93,6 +129,9 @@ describe("CapacityView", () => {
             ...capacity().indicators,
             available_mb: null,
             total_mb: null,
+            disk_total_mb: null,
+            disk_used_mb: null,
+            disk_free_mb: null,
             write_lock_waits_per_hour: null,
             turn_samples: 0,
             turn_p50_s: null,

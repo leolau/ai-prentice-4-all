@@ -1901,6 +1901,17 @@ export interface CapacityIndicators {
   total_mb: number | null;
   hermes_rss_mb: number | null;
   by_process: Record<string, number>;
+  cpu_cores: number | null;
+  cpu_load_1m: number | null;
+  cpu_load_5m: number | null;
+  cpu_load_15m: number | null;
+  /** Whole-box utilisation over a short sample; null without psutil. */
+  cpu_percent: number | null;
+  /** Filesystem holding the Hermes data directory. */
+  disk_path: string;
+  disk_total_mb: number | null;
+  disk_used_mb: number | null;
+  disk_free_mb: number | null;
   write_lock_waits_per_hour: number | null;
   write_lock_waited_s: number | null;
   turn_p50_s: number | null;

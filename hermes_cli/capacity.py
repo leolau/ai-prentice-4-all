@@ -22,6 +22,8 @@ leases, ``psutil`` for RSS/available memory, the write-retry accounting in
 from __future__ import annotations
 
 import logging
+import os
+import shutil
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -43,6 +45,8 @@ BOUND_SESSIONS = "concurrent conversations"
 BOUND_MEMORY = "memory"
 BOUND_WRITE_LOCK = "write-lock waits"
 BOUND_LATENCY = "turn latency"
+BOUND_CPU = "cpu"
+BOUND_DISK = "disk"
 
 #: Bounds a bigger box cannot fix. The single-writer bound is serialisation:
 #: more RAM and more cores do not remove it, the runtime scale-out work does.
@@ -86,6 +90,15 @@ class CapacityThresholds:
     min_latency_samples: float = 8.0
     #: Trailing window for contention and latency.
     window_s: float = 86400.0
+    #: 5-minute load average per core. Above 1.0 work is queueing for a CPU.
+    watch_cpu_load_per_core: float = 0.70
+    constrained_cpu_load_per_core: float = 1.00
+    #: Free space on the filesystem holding the Hermes data. Either the share
+    #: or the absolute figure may trip the bound, whichever is stricter.
+    watch_disk_free_pct: float = 15.0
+    constrained_disk_free_pct: float = 5.0
+    watch_disk_free_mb: float = 5120.0
+    constrained_disk_free_mb: float = 2048.0
 
     @classmethod
     def from_config(cls, config: Optional[Dict[str, Any]]) -> "CapacityThresholds":
@@ -143,6 +156,44 @@ class MemoryLoad:
 
 
 @dataclass
+class CpuLoad:
+    cores: Optional[int] = None
+    load_1m: Optional[float] = None
+    load_5m: Optional[float] = None
+    load_15m: Optional[float] = None
+    #: Whole-box CPU utilisation over a short sample, when psutil is present.
+    percent: Optional[float] = None
+
+    @property
+    def measured(self) -> bool:
+        return self.load_5m is not None and bool(self.cores)
+
+    @property
+    def load_per_core(self) -> Optional[float]:
+        if not self.measured:
+            return None
+        return self.load_5m / float(self.cores)
+
+
+@dataclass
+class DiskUsage:
+    path: str = ""
+    total_mb: Optional[float] = None
+    used_mb: Optional[float] = None
+    free_mb: Optional[float] = None
+
+    @property
+    def measured(self) -> bool:
+        return self.total_mb is not None and self.free_mb is not None
+
+    @property
+    def free_pct(self) -> Optional[float]:
+        if not self.measured or not self.total_mb:
+            return None
+        return 100.0 * self.free_mb / self.total_mb
+
+
+@dataclass
 class WriteContention:
     events: float = 0.0
     waited_s: float = 0.0
@@ -171,6 +222,8 @@ class TurnLatency:
 class CapacityIndicators:
     sessions: SessionLoad = field(default_factory=SessionLoad)
     memory: MemoryLoad = field(default_factory=MemoryLoad)
+    cpu: CpuLoad = field(default_factory=CpuLoad)
+    disk: DiskUsage = field(default_factory=DiskUsage)
     contention: WriteContention = field(default_factory=WriteContention)
     latency: TurnLatency = field(default_factory=TurnLatency)
     profile_count: int = 1
@@ -334,6 +387,45 @@ def collect_memory_load() -> MemoryLoad:
     return load
 
 
+def collect_cpu_load() -> CpuLoad:
+    """Load averages from the kernel; a short utilisation sample from psutil."""
+    load = CpuLoad()
+    try:
+        load.cores = os.cpu_count()
+        load.load_1m, load.load_5m, load.load_15m = os.getloadavg()
+    except (OSError, AttributeError) as exc:
+        log.debug("capacity: load average unavailable: %s", exc)
+        return load
+    try:
+        import psutil
+
+        load.percent = psutil.cpu_percent(interval=0.1)
+    except Exception as exc:
+        log.debug("capacity: cpu percent unavailable: %s", exc)
+    return load
+
+
+def collect_disk_usage(path: Optional[Path] = None) -> DiskUsage:
+    """Free space on the filesystem that holds the Hermes data."""
+    if path is None:
+        from hermes_constants import get_hermes_home
+
+        path = get_hermes_home()
+    usage = DiskUsage(path=str(path))
+    probe = Path(path)
+    while not probe.exists() and probe.parent != probe:
+        probe = probe.parent
+    try:
+        stat = shutil.disk_usage(probe)
+    except OSError as exc:
+        log.debug("capacity: disk usage unavailable: %s", exc)
+        return usage
+    usage.total_mb = stat.total / 1048576.0
+    usage.used_mb = stat.used / 1048576.0
+    usage.free_mb = stat.free / 1048576.0
+    return usage
+
+
 def collect_write_contention(
     thresholds: CapacityThresholds, *, now: Optional[float] = None
 ) -> WriteContention:
@@ -419,6 +511,15 @@ def collect_indicators(
     indicators.memory = collect_memory_load()
     if not indicators.memory.measured:
         indicators.unavailable.append("memory")
+    indicators.cpu = collect_cpu_load()
+    if not indicators.cpu.measured:
+        indicators.unavailable.append("cpu")
+    try:
+        indicators.disk = collect_disk_usage()
+    except Exception as exc:
+        log.debug("capacity: disk usage unavailable: %s", exc)
+    if not indicators.disk.measured:
+        indicators.unavailable.append("disk")
     indicators.contention = collect_write_contention(thresholds, now=now)
     if not indicators.contention.available:
         indicators.unavailable.append("write-lock waits")
@@ -483,6 +584,43 @@ def _memory_bound(
             pressure,
         )
     return Bound(BOUND_MEMORY, COMFORTABLE, detail, pressure)
+
+
+def _cpu_bound(cpu: CpuLoad, thresholds: CapacityThresholds) -> Optional[Bound]:
+    per_core = cpu.load_per_core
+    if per_core is None:
+        return None
+    detail = f"5-minute load {cpu.load_5m:.2f} on {cpu.cores} core(s)"
+    if cpu.percent is not None:
+        detail += f", {cpu.percent:.0f}% busy now"
+    pressure = per_core / thresholds.constrained_cpu_load_per_core
+    if per_core >= thresholds.constrained_cpu_load_per_core:
+        return Bound(BOUND_CPU, CONSTRAINED, f"{detail} — work is queueing for a CPU", pressure)
+    if per_core >= thresholds.watch_cpu_load_per_core:
+        return Bound(BOUND_CPU, WATCH, f"{detail} — approaching saturation", pressure)
+    return Bound(BOUND_CPU, COMFORTABLE, detail, pressure)
+
+
+def _disk_bound(disk: DiskUsage, thresholds: CapacityThresholds) -> Optional[Bound]:
+    free_pct = disk.free_pct
+    if free_pct is None or disk.free_mb is None:
+        return None
+    detail = (
+        f"{disk.free_mb / 1024.0:.1f} GB free of {disk.total_mb / 1024.0:.1f} GB "
+        f"({free_pct:.0f}%) on {disk.path}"
+    )
+    pressure = max(
+        thresholds.constrained_disk_free_pct / max(free_pct, 0.01),
+        thresholds.constrained_disk_free_mb / max(disk.free_mb, 1.0),
+    )
+    if (
+        free_pct <= thresholds.constrained_disk_free_pct
+        or disk.free_mb <= thresholds.constrained_disk_free_mb
+    ):
+        return Bound(BOUND_DISK, CONSTRAINED, f"{detail} — writes will start failing", pressure)
+    if free_pct <= thresholds.watch_disk_free_pct or disk.free_mb <= thresholds.watch_disk_free_mb:
+        return Bound(BOUND_DISK, WATCH, f"{detail} — running low", pressure)
+    return Bound(BOUND_DISK, COMFORTABLE, detail, pressure)
 
 
 def _contention_bound(
@@ -551,6 +689,8 @@ def derive_verdict(
         for bound in (
             _session_bound(indicators.sessions, thresholds),
             _memory_bound(indicators.memory, indicators.sessions, thresholds),
+            _cpu_bound(indicators.cpu, thresholds),
+            _disk_bound(indicators.disk, thresholds),
             _contention_bound(indicators.contention, thresholds),
             _latency_bound(indicators.latency, thresholds),
         )
@@ -633,6 +773,12 @@ def _recommendations(
                 f"yet — it removes about {thresholds.profile_slab_mb:.0f} MB per "
                 "profile."
             )
+    if binding.name == BOUND_DISK:
+        out.append(
+            "Free space first: prune old backups under the data directory, "
+            "vacuum or archive session/message databases, and clear the media "
+            "cache — cheaper than a bigger disk and usually enough."
+        )
     if binding.hardware_helps:
         out.append(_tier_advice(indicators, thresholds))
     if binding.name == BOUND_SESSIONS:
@@ -668,7 +814,19 @@ def summary_line(verdict: CapacityVerdict) -> str:
         if ind.contention.available
         else "write-lock waits unknown"
     )
-    return f"Active conversations {sessions} · memory {memory} · {waits}"
+    cpu = (
+        f"cpu load {ind.cpu.load_per_core:.2f}/core"
+        if ind.cpu.load_per_core is not None
+        else "cpu unknown"
+    )
+    disk = (
+        f"disk {_fmt_optional_gb(ind.disk.free_mb)} free"
+        if ind.disk.measured
+        else "disk unknown"
+    )
+    return (
+        f"Active conversations {sessions} · memory {memory} · {cpu} · {disk} · {waits}"
+    )
 
 
 def digest_lines(verdict: CapacityVerdict) -> List[str]:
@@ -715,6 +873,15 @@ def as_dict(verdict: CapacityVerdict) -> Dict[str, Any]:
             "total_mb": ind.memory.total_mb,
             "hermes_rss_mb": ind.memory.hermes_rss_mb,
             "by_process": dict(ind.memory.by_process),
+            "cpu_cores": ind.cpu.cores,
+            "cpu_load_1m": ind.cpu.load_1m,
+            "cpu_load_5m": ind.cpu.load_5m,
+            "cpu_load_15m": ind.cpu.load_15m,
+            "cpu_percent": ind.cpu.percent,
+            "disk_path": ind.disk.path,
+            "disk_total_mb": ind.disk.total_mb,
+            "disk_used_mb": ind.disk.used_mb,
+            "disk_free_mb": ind.disk.free_mb,
             "write_lock_waits_per_hour": ind.contention.per_hour
             if ind.contention.available
             else None,
