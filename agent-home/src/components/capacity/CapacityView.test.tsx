@@ -26,6 +26,13 @@ function capacity(overrides: Partial<CapacityResponse> = {}): CapacityResponse {
       turn_p50_s: 2.4,
       turn_p95_s: 8.1,
       turn_samples: 120,
+      disk_used_mb: 15360,
+      disk_total_mb: 41984,
+      disk_pct: 0.375,
+      disk_path: "/opt/data",
+      cpu_load1: 0.8,
+      cpu_count: 4,
+      cpu_percent: 22.5,
       profile_count: 2,
     },
     unavailable: [],
@@ -41,9 +48,29 @@ describe("CapacityView", () => {
     expect(html).toContain("3 / ~45");
     expect(html).toContain("6.0 GB of 16.0 GB");
     expect(html).toContain("p50 2.4s");
+    expect(html).toContain("15.0 GB of 41.0 GB used (38%)");
+    expect(html).toContain("0.8 on 4 cpu(s)");
+    expect(html).toContain("23% now");
     // Box-wide, so the per-profile split is shown when there is more than one.
     expect(html).toContain("default 2");
     expect(html).toContain("hr 1");
+  });
+
+  it("shows unmeasured disk and cpu as unknown", () => {
+    const html = renderToStaticMarkup(
+      <CapacityView
+        capacity={capacity({
+          indicators: {
+            ...capacity().indicators,
+            disk_pct: null,
+            disk_used_mb: null,
+            cpu_load1: null,
+          },
+        })}
+      />,
+    );
+    const unknowns = html.match(/unknown/g) ?? [];
+    expect(unknowns.length).toBeGreaterThanOrEqual(2);
   });
 
   it("names the binding constraint when the box is not comfortable", () => {

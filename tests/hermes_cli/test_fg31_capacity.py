@@ -18,17 +18,21 @@ import pytest
 
 from hermes_cli import active_sessions, capacity
 from hermes_cli.capacity import (
+    BOUND_CPU,
     BOUND_LATENCY,
     BOUND_MEMORY,
     BOUND_SESSIONS,
+    BOUND_STORAGE,
     BOUND_WRITE_LOCK,
     COMFORTABLE,
     CONSTRAINED,
     WATCH,
     CapacityIndicators,
     CapacityThresholds,
+    CpuLoad,
     MemoryLoad,
     SessionLoad,
+    StorageLoad,
     TurnLatency,
     WriteContention,
     derive_verdict,
@@ -70,6 +74,8 @@ def _indicators(
     waits=0.0,
     p95=1.0,
     profiles=1,
+    disk_pct=None,
+    load_ratio=None,
 ) -> CapacityIndicators:
     return CapacityIndicators(
         sessions=SessionLoad(
@@ -78,6 +84,16 @@ def _indicators(
         memory=MemoryLoad(available_mb=available_mb, total_mb=16384.0),
         contention=WriteContention(events=waits, waited_s=waits * 0.1, window_s=3600.0),
         latency=TurnLatency(samples=100, p50_s=1.0, p95_s=p95),
+        storage=(
+            StorageLoad(used_mb=disk_pct * 40960.0, total_mb=40960.0, path="/data")
+            if disk_pct is not None
+            else StorageLoad()
+        ),
+        cpu=(
+            CpuLoad(load1=load_ratio * 4.0, cpus=4, percent=load_ratio * 100.0)
+            if load_ratio is not None
+            else CpuLoad()
+        ),
         profile_count=profiles,
     )
 
@@ -137,6 +153,53 @@ def test_latency_alone_can_produce_a_verdict():
     assert verdict.state == CONSTRAINED
     assert verdict.binding is not None
     assert verdict.binding.name == BOUND_LATENCY
+
+
+# ── Disk and CPU bounds ──────────────────────────────────────────────────────
+
+
+def test_disk_verdict_transitions_at_the_configured_thresholds():
+    assert derive_verdict(_indicators(active=1, cap=15, disk_pct=0.5)).state == COMFORTABLE
+    watch = derive_verdict(_indicators(active=1, cap=15, disk_pct=0.85))
+    assert watch.state == WATCH
+    assert watch.binding is not None and watch.binding.name == BOUND_STORAGE
+    full = derive_verdict(_indicators(active=1, cap=15, disk_pct=0.95))
+    assert full.state == CONSTRAINED
+    assert full.binding is not None and full.binding.name == BOUND_STORAGE
+    # A full disk is named with where, and the advice is cleanup not hardware.
+    assert "/data" in full.binding.reason
+    joined = " ".join(full.recommendations)
+    assert "data volume" in joined
+    assert "next tier" not in joined
+
+
+def test_sustained_cpu_saturation_binds_but_a_quiet_box_does_not():
+    quiet = derive_verdict(_indicators(active=1, cap=15, load_ratio=0.3))
+    assert quiet.state == COMFORTABLE
+    saturated = derive_verdict(_indicators(active=1, cap=15, load_ratio=2.5))
+    assert saturated.state == CONSTRAINED
+    assert saturated.binding is not None and saturated.binding.name == BOUND_CPU
+    assert "load 10.0 on 4" in saturated.binding.reason
+
+
+def test_unmeasured_disk_and_cpu_do_not_bind_or_report_zero():
+    indicators = _indicators(active=1, cap=15)
+    verdict = derive_verdict(indicators)
+    assert verdict.state == COMFORTABLE
+    payload = capacity.as_dict(verdict)
+    assert payload["indicators"]["disk_pct"] is None
+    assert payload["indicators"]["cpu_load1"] is None
+
+
+def test_as_dict_carries_the_new_indicators():
+    payload = capacity.as_dict(
+        derive_verdict(_indicators(active=1, cap=15, disk_pct=0.4, load_ratio=0.5))
+    )
+    ind = payload["indicators"]
+    assert ind["disk_pct"] == pytest.approx(0.4)
+    assert ind["disk_path"] == "/data"
+    assert ind["cpu_load1"] == pytest.approx(2.0)
+    assert ind["cpu_count"] == 4
 
 
 # ── The bound hardware cannot fix ───────────────────────────────────────────
@@ -596,6 +659,10 @@ def test_a_small_sample_is_named_as_unjudged_by_collection(tmp_path, monkeypatch
         "collect_turn_latency",
         lambda thresholds, now=None: TurnLatency(samples=1, p50_s=50.0, p95_s=50.0),
     )
+    # Disk/CPU read the real machine — a loaded dev box would bind the verdict
+    # for reasons unrelated to what this test checks.
+    monkeypatch.setattr(capacity, "collect_storage_load", lambda: StorageLoad())
+    monkeypatch.setattr(capacity, "collect_cpu_load", lambda: CpuLoad())
 
     indicators = capacity.collect_indicators({"max_concurrent_sessions": 15})
 
