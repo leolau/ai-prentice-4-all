@@ -51,6 +51,16 @@ SSH: `ssh -i ~/.ssh/hetzner_hermes_ed25519 root@188.245.219.105`
 - Data: `volumes/db/data` — **single `postgres` DB holding all schemas** (`app_prod`, `app_prod_maintenance`, `app_dev`, `auth`, `storage`, `realtime`, …). NOTE: `app_prod` is a **schema**, not a separate database.
 - Manage: `cd /opt/data/supabase/docker && docker compose ps|up -d|pull`
 - Health: all 11 must show `healthy`
+- **`FILE_SIZE_LIMIT=5368709120` (5 GiB) must be set in `.env`** — storage-api's
+  own default is 50 MB, silently rejecting any bigger upload with `413` only
+  *after* it fully buffers the transfer (looks exactly like a multi-minute
+  timeout, not a size rejection — this cost real debugging time twice, see
+  `plans/2026-09-25-upload-size-limit.md`). `docker-compose.yml` reads it as
+  `FILE_SIZE_LIMIT: ${FILE_SIZE_LIMIT:-104857600}`, so verify with
+  `docker exec supabase-storage env | grep FILE_SIZE_LIMIT` after any
+  `docker compose up`/migration/template refresh — a hand-edited
+  `docker-compose.yml` value alone does **not** survive a template refresh,
+  only the `.env` entry does.
 
 ### 4.2 systemd services (Hermes)
 
