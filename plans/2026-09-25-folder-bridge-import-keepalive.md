@@ -60,9 +60,12 @@ Separate from the code change — installs the service that was missing:
 
 ## Status
 
-- [ ] Implementation
-- [ ] Tests pass
-- [ ] PR merged
+- [x] Implementation
+- [x] Tests pass (27 app-mcp pytest, 38 vitest)
+- [ ] PR merged — [#457](https://github.com/leolau/ai-prentice-4-all/pull/457)
 - [ ] Code deployed
-- [ ] app-mcp service installed + wired on the box
+- [x] app-mcp service installed + wired on the box — unit active, ports
+      9220/9221 listening, Caddy `/app-mcp/*` routes added, `mcp_servers.app`
+      (timeout 3600) + README approvals gating in `config.yaml`, gateway /
+      dashboard / agent-home restarted 2026-09-25 ~21:07 box time
 - [ ] Live verification (ticket, WS connect, large import)
