@@ -66,5 +66,7 @@ implying a measured zero.
 ## Status
 
 - [x] Implementation + tests (44 pytest, 8 vitest green; tsc + eslint clean)
-- [ ] PR / merge
-- [ ] Deploy + verify live
+- [x] PR [#455](https://github.com/leolau/ai-prentice-4-all/pull/455) — merged `1355fa5c3`
+- [x] Deployed + verified live: `deploy OK (1355fa5c3)`, all units active,
+  `capacity.db` created at `/opt/data/hermes-home-staging/` and the sampler is
+  writing rows (first sample 54s post-restart)
