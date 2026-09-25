@@ -46,6 +46,23 @@ export function CapacityView({ capacity }: { capacity: CapacityResponse }) {
       value: ind.total_mb ? `${gb(ind.available_mb)} of ${gb(ind.total_mb)}` : gb(ind.available_mb),
     },
     {
+      label: "Storage",
+      value:
+        ind.disk_pct === null || ind.disk_used_mb === null
+          ? "unknown"
+          : `${gb(ind.disk_used_mb)} of ${gb(ind.disk_total_mb)} used (${Math.round(ind.disk_pct * 100)}%)`,
+    },
+    {
+      label: "CPU load",
+      value:
+        ind.cpu_load1 === null
+          ? "unknown"
+          : `${ind.cpu_load1.toFixed(1)} on ${ind.cpu_count ?? "?"} cpu(s)` +
+            (ind.cpu_percent !== null
+              ? ` · ${Math.round(ind.cpu_percent)}% now`
+              : ""),
+    },
+    {
       label: "Write-lock waits",
       value:
         ind.write_lock_waits_per_hour === null

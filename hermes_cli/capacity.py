@@ -43,6 +43,8 @@ BOUND_SESSIONS = "concurrent conversations"
 BOUND_MEMORY = "memory"
 BOUND_WRITE_LOCK = "write-lock waits"
 BOUND_LATENCY = "turn latency"
+BOUND_STORAGE = "disk space"
+BOUND_CPU = "cpu load"
 
 #: Bounds a bigger box cannot fix. The single-writer bound is serialisation:
 #: more RAM and more cores do not remove it, the runtime scale-out work does.
@@ -84,6 +86,15 @@ class CapacityThresholds:
     #: Below this the latency is still reported — labelled as too small to
     #: judge — and simply cannot bind.
     min_latency_samples: float = 8.0
+    #: Share of the data volume used. A full disk breaks everything at once —
+    #: WAL files, uploads, backups — so it binds the verdict like the others.
+    watch_disk_pct: float = 0.80
+    constrained_disk_pct: float = 0.90
+    #: 1-minute load average per CPU. Sustained ratio above 1.0 means work is
+    #: queueing; instantaneous percentages are too noisy to bind, so only the
+    #: load average feeds the verdict.
+    watch_load_ratio: float = 1.0
+    constrained_load_ratio: float = 2.0
     #: Trailing window for contention and latency.
     window_s: float = 86400.0
 
@@ -168,11 +179,54 @@ class TurnLatency:
 
 
 @dataclass
+class StorageLoad:
+    """Usage of the filesystem that holds the hermes home (and the SQLite
+    databases, session dirs, and backups that grow with use)."""
+
+    used_mb: Optional[float] = None
+    total_mb: Optional[float] = None
+    #: The path the reading was taken on — names *which* volume is filling.
+    path: Optional[str] = None
+
+    @property
+    def measured(self) -> bool:
+        return self.used_mb is not None and self.total_mb is not None
+
+    @property
+    def pct(self) -> Optional[float]:
+        if not self.measured or not self.total_mb:
+            return None
+        return (self.used_mb or 0.0) / self.total_mb
+
+
+@dataclass
+class CpuLoad:
+    """Sustained CPU pressure: the 1-minute load average per core, plus an
+    instantaneous busy sample for display."""
+
+    load1: Optional[float] = None
+    cpus: Optional[int] = None
+    percent: Optional[float] = None
+
+    @property
+    def measured(self) -> bool:
+        return self.load1 is not None and bool(self.cpus)
+
+    @property
+    def ratio(self) -> Optional[float]:
+        if not self.measured:
+            return None
+        return self.load1 / float(self.cpus)
+
+
+@dataclass
 class CapacityIndicators:
     sessions: SessionLoad = field(default_factory=SessionLoad)
     memory: MemoryLoad = field(default_factory=MemoryLoad)
     contention: WriteContention = field(default_factory=WriteContention)
     latency: TurnLatency = field(default_factory=TurnLatency)
+    storage: StorageLoad = field(default_factory=StorageLoad)
+    cpu: CpuLoad = field(default_factory=CpuLoad)
     profile_count: int = 1
     collected_at: float = field(default_factory=time.time)
     #: Indicators that could not be read, by name, so a surface can say
@@ -372,6 +426,51 @@ def _percentile(values: Sequence[float], pct: float) -> Optional[float]:
     return ordered[index]
 
 
+def collect_storage_load() -> StorageLoad:
+    """Usage of the filesystem holding the hermes home.
+
+    That path is deliberate: it is where the databases, session dirs, and
+    backups grow, so it is the disk that running out actually hurts — the OS
+    volume filling is a different incident.
+    """
+    from hermes_constants import get_hermes_home
+
+    load = StorageLoad()
+    try:
+        import psutil
+    except ImportError:
+        return load
+    try:
+        target = Path(get_hermes_home())
+        if not target.exists():
+            target = Path("/")
+        usage = psutil.disk_usage(str(target))
+    except Exception as exc:
+        log.debug("capacity: disk_usage unavailable: %s", exc)
+        return load
+    load.used_mb = usage.used / 1048576.0
+    load.total_mb = usage.total / 1048576.0
+    load.path = str(target)
+    return load
+
+
+def collect_cpu_load() -> CpuLoad:
+    load = CpuLoad()
+    try:
+        import psutil
+    except ImportError:
+        return load
+    try:
+        load.cpus = psutil.cpu_count() or None
+        load.load1 = psutil.getloadavg()[0]
+        # A short sample: instantaneous busy-ness for display only — the
+        # verdict binds on the sustained load average, not a spike.
+        load.percent = psutil.cpu_percent(interval=0.1)
+    except Exception as exc:
+        log.debug("capacity: cpu load unavailable: %s", exc)
+    return load
+
+
 def collect_turn_latency(
     thresholds: CapacityThresholds, *, now: Optional[float] = None
 ) -> TurnLatency:
@@ -431,6 +530,12 @@ def collect_indicators(
             f"turn(s) in the window; {int(thresholds.min_latency_samples)} "
             "needed to judge)"
         )
+    indicators.storage = collect_storage_load()
+    if not indicators.storage.measured:
+        indicators.unavailable.append("disk space")
+    indicators.cpu = collect_cpu_load()
+    if not indicators.cpu.measured:
+        indicators.unavailable.append("cpu load")
     try:
         indicators.profile_count = max(1, len(_profile_homes()))
     except Exception as exc:
@@ -532,6 +637,49 @@ def _latency_bound(
     return Bound(BOUND_LATENCY, COMFORTABLE, detail, pressure)
 
 
+def _storage_bound(
+    storage: StorageLoad, thresholds: CapacityThresholds
+) -> Optional[Bound]:
+    pct = storage.pct
+    if pct is None:
+        return None
+    where = storage.path or "the data volume"
+    detail = (
+        f"{(storage.used_mb or 0.0) / 1024.0:.0f} of "
+        f"{(storage.total_mb or 0.0) / 1024.0:.0f} GB used "
+        f"({pct:.0%}) on {where}"
+    )
+    pressure = pct / max(thresholds.constrained_disk_pct, 1e-6)
+    if pct >= thresholds.constrained_disk_pct:
+        return Bound(
+            BOUND_STORAGE, CONSTRAINED, f"{detail} — nearly full", pressure
+        )
+    if pct >= thresholds.watch_disk_pct:
+        return Bound(
+            BOUND_STORAGE, WATCH, f"{detail} — filling up", pressure
+        )
+    return Bound(BOUND_STORAGE, COMFORTABLE, detail, pressure)
+
+
+def _cpu_bound(
+    cpu: CpuLoad, thresholds: CapacityThresholds
+) -> Optional[Bound]:
+    ratio = cpu.ratio
+    if ratio is None:
+        return None
+    detail = f"load {cpu.load1:.1f} on {cpu.cpus} cpu(s)"
+    pressure = ratio / max(thresholds.constrained_load_ratio, 1e-6)
+    if ratio >= thresholds.constrained_load_ratio:
+        return Bound(
+            BOUND_CPU, CONSTRAINED, f"{detail} — work is queueing", pressure
+        )
+    if ratio >= thresholds.watch_load_ratio:
+        return Bound(
+            BOUND_CPU, WATCH, f"{detail} — at saturation", pressure
+        )
+    return Bound(BOUND_CPU, COMFORTABLE, detail, pressure)
+
+
 def derive_verdict(
     indicators: CapacityIndicators,
     thresholds: Optional[CapacityThresholds] = None,
@@ -553,6 +701,8 @@ def derive_verdict(
             _memory_bound(indicators.memory, indicators.sessions, thresholds),
             _contention_bound(indicators.contention, thresholds),
             _latency_bound(indicators.latency, thresholds),
+            _storage_bound(indicators.storage, thresholds),
+            _cpu_bound(indicators.cpu, thresholds),
         )
         if bound is not None
     ]
@@ -633,7 +783,22 @@ def _recommendations(
                 f"yet — it removes about {thresholds.profile_slab_mb:.0f} MB per "
                 "profile."
             )
-    if binding.hardware_helps:
+    if binding.name == BOUND_STORAGE:
+        out.append(
+            "Free space on the data volume first — rotated logs, retired "
+            "tables (zz_migrated_*), bridge-session rebind backups, and "
+            "deploy backups all grow without bound. Deleting rows from a "
+            "SQLite database does not shrink its file; a VACUUM does."
+        )
+    if binding.name == BOUND_CPU:
+        out.append(
+            "If the load is pollers, spread or lengthen their intervals; if "
+            "it is conversations, a bigger tier adds cores — and noisy "
+            "neighbours on the same box show up here too."
+        )
+    if binding.hardware_helps and binding.name != BOUND_STORAGE:
+        # The sizing basis is memory-shaped; for a full disk the advice is
+        # cleanup, not a bigger instance.
         out.append(_tier_advice(indicators, thresholds))
     if binding.name == BOUND_SESSIONS:
         out.append(
@@ -661,6 +826,16 @@ def summary_line(verdict: CapacityVerdict) -> str:
     memory = _fmt_optional_gb(ind.memory.available_mb)
     if ind.memory.total_mb:
         memory += f" free of {_fmt_optional_gb(ind.memory.total_mb)}"
+    disk = (
+        f"disk {ind.storage.pct:.0%} used"
+        if ind.storage.pct is not None
+        else "disk unknown"
+    )
+    cpu = (
+        f"load {ind.cpu.load1:.1f}/{ind.cpu.cpus} cpu"
+        if ind.cpu.measured
+        else "cpu load unknown"
+    )
     waits = (
         "no write-lock waits"
         if ind.contention.available and ind.contention.events == 0
@@ -668,7 +843,7 @@ def summary_line(verdict: CapacityVerdict) -> str:
         if ind.contention.available
         else "write-lock waits unknown"
     )
-    return f"Active conversations {sessions} · memory {memory} · {waits}"
+    return f"Active conversations {sessions} · memory {memory} · {disk} · {cpu} · {waits}"
 
 
 def digest_lines(verdict: CapacityVerdict) -> List[str]:
@@ -724,6 +899,13 @@ def as_dict(verdict: CapacityVerdict) -> Dict[str, Any]:
             "turn_p50_s": ind.latency.p50_s,
             "turn_p95_s": ind.latency.p95_s,
             "turn_samples": ind.latency.samples,
+            "disk_used_mb": ind.storage.used_mb,
+            "disk_total_mb": ind.storage.total_mb,
+            "disk_pct": ind.storage.pct,
+            "disk_path": ind.storage.path,
+            "cpu_load1": ind.cpu.load1,
+            "cpu_count": ind.cpu.cpus,
+            "cpu_percent": ind.cpu.percent,
             "profile_count": ind.profile_count,
         },
         "unavailable": sorted(ind.unavailable),

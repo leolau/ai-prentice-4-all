@@ -1906,6 +1906,17 @@ export interface CapacityIndicators {
   turn_p50_s: number | null;
   turn_p95_s: number | null;
   turn_samples: number;
+  /** Data volume holding hermes home (databases, session dirs, backups). */
+  disk_used_mb: number | null;
+  disk_total_mb: number | null;
+  /** Fraction used, 0..1; null when unmeasured. */
+  disk_pct: number | null;
+  disk_path: string | null;
+  /** 1-minute load average; sustained queueing is what binds the verdict. */
+  cpu_load1: number | null;
+  cpu_count: number | null;
+  /** Instantaneous busy sample — display only, too noisy to judge by. */
+  cpu_percent: number | null;
   profile_count: number;
 }
 
