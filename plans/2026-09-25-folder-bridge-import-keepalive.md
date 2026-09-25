@@ -37,6 +37,18 @@ measures inactivity instead of total elapsed time.
   messages to `note_progress`.
 - `agent-home/src/lib/folder-bridge/transport.ts` — every in-flight
   command gets a 10 s progress ping until its result is sent.
+- `agent-home/src/lib/folder-bridge/fsOps.ts` — `importFile` now posts the
+  `File` directly as the request body (browser streams from disk, zero
+  buffering) instead of `arrayBuffer()` + `new File([bytes])` + FormData.
+- `agent-home/src/app/api/files/import/route.ts` — rewritten to stream the
+  raw request body through a SHA-256 `TransformStream` straight to Supabase
+  Storage with `duplex: 'half'` (zero buffering in the BFF). Metadata
+  travels in headers (`x-file-name`, `x-source-path`, `x-folder-label`).
+- `agent-home/src/lib/supabase/storage.ts` — `uploadChatMediaStream()`
+  accepts a `ReadableStream` body and passes `duplex: 'half'` to storage-js.
+- `agent-home/src/instrumentation.ts` — Next.js instrumentation hook that
+  disables Node's default 300s `requestTimeout` on server startup so
+  streaming uploads of any size aren't killed mid-transfer.
 - `app-mcp/tests/test_hub.py` — pings extend the deadline; silence after a
   ping still times out.
 - `app-mcp/README.md` — document keepalive semantics + recommend a long

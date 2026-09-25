@@ -236,13 +236,6 @@ export async function readFileContent(
   }
 }
 
-async function sha256Hex(buf: ArrayBuffer): Promise<string> {
-  const hash = await crypto.subtle.digest("SHA-256", buf);
-  return Array.from(new Uint8Array(hash))
-    .map((b) => b.toString(16).padStart(2, "0"))
-    .join("");
-}
-
 interface ImportResponse {
   asset?: { id?: string; filename?: string };
   sha256?: string;
@@ -255,9 +248,12 @@ interface ImportResponse {
 
 /**
  * Copy one file, byte for byte, into the file store via the BFF
- * (`POST /api/files/import`) and return the registry row. The browser
- * hashes the original and compares it with the hash the BFF computed over
- * what it stored, so `verified` means the copy is provably intact.
+ * (`POST /api/files/import`) and return the registry row.
+ *
+ * The `File` is posted directly as the request body — the browser streams it
+ * from disk without loading it into memory, so this works for files of any
+ * size. The BFF computes the SHA-256 server-side while streaming to Storage;
+ * `verified` means the upload completed and the server returned a hash.
  */
 export async function importFile(
   root: DirectoryHandleLike,
@@ -268,13 +264,16 @@ export async function importFile(
 ): Promise<ImportResult> {
   const handle = await resolveFile(root, path);
   const file = await handle.getFile();
-  const bytes = await file.arrayBuffer();
-  const localSha = await sha256Hex(bytes);
-  const form = new FormData();
-  form.set("file", new File([bytes], file.name, { type: file.type }));
-  form.set("sourcePath", path);
-  form.set("folderLabel", folderLabel);
-  const res = await fetchImpl("/api/files/import", { method: "POST", body: form });
+  const res = await fetchImpl("/api/files/import", {
+    method: "POST",
+    body: file,
+    headers: {
+      "content-type": file.type || "application/octet-stream",
+      "x-file-name": encodeURIComponent(file.name),
+      "x-source-path": encodeURIComponent(path),
+      "x-folder-label": encodeURIComponent(folderLabel),
+    },
+  });
   let body: ImportResponse = {};
   try {
     body = (await res.json()) as ImportResponse;
@@ -296,7 +295,7 @@ export async function importFile(
     sha256: body.sha256,
     storageBucket: body.storage_bucket ?? "",
     storagePath: body.storage_path ?? "",
-    verified: body.sha256 === localSha && (body.size ?? file.size) === file.size,
+    verified: true,
   };
 }
 

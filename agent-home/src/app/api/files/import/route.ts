@@ -2,33 +2,26 @@
  * POST /api/files/import — Folder Bridge import (byte-faithful copy of one
  * local file into the file store).
  *
- * The `/files/bridge` tab posts the raw `File` as `multipart/form-data`; the
- * BFF writes it to principal-scoped Storage server-side and registers it in
- * the inbound file registry (`file_assets`, surface `agent_home`). Unlike
- * `/api/chat/upload`, registration is mandatory here — the caller is the
- * agent (via the bridge), and the registry row *is* the deliverable — and the
- * response carries the server-side SHA-256 so the browser can verify the copy
- * against the hash it computed from the original bytes.
+ * The browser posts the raw `File` as the request body (not multipart) with
+ * metadata in headers (`x-file-name`, `x-source-path`, `x-folder-label`).
+ * The BFF streams the body through a SHA-256 TransformStream straight to
+ * principal-scoped Storage with `duplex: 'half'` — zero buffering, works for
+ * any file size — then registers the asset in `file_assets` (surface
+ * `agent_home`). The response carries the server-computed SHA-256.
  *
  * Bytes never traverse the app-mcp WebSocket or the model context: the agent
  * only ever sees the registry row.
  */
+import { createHash } from "node:crypto";
 import { NextResponse } from "next/server";
 
 import { apiClientForRequest, getPrincipal } from "@/lib/auth/principal";
 import { uploadMaxBytes, uploadTooLargeDetail } from "@/lib/chat/upload-limit";
 import { mediaBucket } from "@/lib/env";
-import { storageAvailable, uploadChatMedia } from "@/lib/supabase/storage";
+import { storageAvailable, uploadChatMediaStream } from "@/lib/supabase/storage";
 
 /** Storage "session" segment for bridge imports (`<user>/folder-bridge/<uuid>-<name>`). */
 export const IMPORT_SCOPE = "folder-bridge";
-
-async function digest(bytes: ArrayBuffer): Promise<string> {
-  const hash = await crypto.subtle.digest("SHA-256", bytes);
-  return Array.from(new Uint8Array(hash))
-    .map((b) => b.toString(16).padStart(2, "0"))
-    .join("");
-}
 
 export async function POST(request: Request): Promise<NextResponse> {
   const principal = await getPrincipal();
@@ -45,48 +38,57 @@ export async function POST(request: Request): Promise<NextResponse> {
     );
   }
 
-  let form: FormData;
-  try {
-    form = await request.formData();
-  } catch {
-    return NextResponse.json({ error: "invalid_form" }, { status: 400 });
-  }
-  const file = form.get("file");
-  if (!(file instanceof File)) {
+  const fileName =
+    request.headers.get("x-file-name") != null
+      ? decodeURIComponent(request.headers.get("x-file-name")!)
+      : "import";
+  const contentType =
+    request.headers.get("content-type") || "application/octet-stream";
+  const sourcePath = decodeURIComponent(request.headers.get("x-source-path") ?? "");
+  const folderLabel = decodeURIComponent(request.headers.get("x-folder-label") ?? "");
+  const contentLength = Number(request.headers.get("content-length") ?? "0");
+
+  if (!request.body) {
     return NextResponse.json(
-      { error: "missing_file", detail: "A file field is required." },
+      { error: "missing_file", detail: "A request body is required." },
       { status: 400 },
     );
   }
+
   const maxBytes = uploadMaxBytes();
-  if (file.size > maxBytes) {
+  if (maxBytes < Infinity && contentLength > maxBytes) {
     return NextResponse.json(
       { error: "too_large", detail: uploadTooLargeDetail(maxBytes) },
       { status: 413 },
     );
   }
-  const sourcePath = String(form.get("sourcePath") ?? "");
-  const folderLabel = String(form.get("folderLabel") ?? "");
 
-  let bytes: ArrayBuffer;
-  try {
-    bytes = await file.arrayBuffer();
-  } catch {
-    return NextResponse.json({ error: "invalid_form" }, { status: 400 });
-  }
-  const sha256 = await digest(bytes);
+  // Hash on the fly while streaming to Storage — the TransformStream passes
+  // every chunk straight through to the upload and updates the hash in the
+  // same pass, so the BFF holds zero file bytes in memory.
+  const hasher = createHash("sha256");
+  let bytesSeen = 0;
+  const hashTransform = new TransformStream<Uint8Array, Uint8Array>({
+    transform(chunk, controller) {
+      hasher.update(chunk);
+      bytesSeen += chunk.length;
+      controller.enqueue(chunk);
+    },
+  });
+  const uploadBody = request.body.pipeThrough(hashTransform);
 
   try {
-    const stored = await uploadChatMedia(principal, IMPORT_SCOPE, {
-      name: file.name || "import",
-      contentType: file.type || "application/octet-stream",
-      bytes,
+    const stored = await uploadChatMediaStream(principal, IMPORT_SCOPE, {
+      name: fileName,
+      contentType,
+      body: uploadBody,
     });
+    const sha256 = hasher.digest("hex");
     const client = await apiClientForRequest();
     const asset = await client.registerFile({
       filename: stored.name,
       content_type: stored.content_type,
-      byte_size: stored.size,
+      byte_size: bytesSeen,
       sha256,
       storage_bucket: mediaBucket(),
       storage_path: stored.path,
@@ -96,7 +98,7 @@ export async function POST(request: Request): Promise<NextResponse> {
     return NextResponse.json({
       asset,
       sha256,
-      size: stored.size,
+      size: bytesSeen,
       storage_bucket: mediaBucket(),
       storage_path: stored.path,
     });

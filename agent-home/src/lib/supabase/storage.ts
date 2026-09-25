@@ -98,6 +98,47 @@ export async function uploadChatMedia(
 }
 
 /**
+ * Streaming variant of {@link uploadChatMedia} for files too large to buffer
+ * in memory (Folder Bridge imports of any size). The body is piped straight
+ * to Storage with `duplex: 'half'` — zero buffering in the BFF. The caller
+ * is responsible for computing the SHA-256 (typically via a TransformStream
+ * that tees the stream) since this function does not see the bytes.
+ */
+export async function uploadChatMediaStream(
+  principal: Principal,
+  sessionId: string,
+  file: { name: string; contentType: string; body: ReadableStream<Uint8Array> },
+): Promise<{ path: string; name: string; content_type: string }> {
+  const key = supabaseStorageKey();
+  if (!key) {
+    throw new Error("agent-home: Supabase Storage is not configured.");
+  }
+  const bucket = mediaBucket();
+  const client = createClient(supabaseUrl(), key, {
+    auth: { persistSession: false },
+  });
+
+  const unique =
+    typeof crypto !== "undefined" && "randomUUID" in crypto
+      ? crypto.randomUUID()
+      : `${Date.now()}`;
+  const path = scopedMediaPath(principal, sessionId, file.name, unique);
+
+  const { error } = await client.storage
+    .from(bucket)
+    .upload(path, file.body, {
+      contentType: file.contentType,
+      duplex: "half",
+      upsert: false,
+    });
+  if (error) {
+    throw new Error(`agent-home: media upload failed — ${error.message}`);
+  }
+
+  return { path, name: file.name, content_type: file.contentType };
+}
+
+/**
  * Whether `path` is an object key this principal may read.
  *
  * Fail-closed: the path must be a plain, relative, two-or-more-segment key
