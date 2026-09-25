@@ -39,7 +39,10 @@ vi.mock("@/lib/supabase/storage", () => ({
   uploadChatMedia: (...args: unknown[]) =>
     (uploadChatMedia as (...a: unknown[]) => unknown)(...args),
 }));
-vi.mock("@/lib/chat/upload-limit", () => ({ UPLOAD_MAX_BYTES: 64 }));
+vi.mock("@/lib/chat/upload-limit", () => ({
+  uploadMaxBytes: () => 64,
+  uploadTooLargeDetail: (n: number) => `File exceeds the ${n} B limit.`,
+}));
 
 const principal: Principal = {
   user_id: "mia",

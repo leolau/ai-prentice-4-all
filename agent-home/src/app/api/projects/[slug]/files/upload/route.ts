@@ -10,11 +10,10 @@
 import { NextResponse } from "next/server";
 
 import { apiClientForRequest, getPrincipal } from "@/lib/auth/principal";
+import { uploadMaxBytes, uploadTooLargeDetail } from "@/lib/chat/upload-limit";
 import { mediaBucket } from "@/lib/env";
 import { storageAvailable, uploadChatMedia } from "@/lib/supabase/storage";
 import { invalidRequest, withPrincipal } from "../../../hermes-bridge";
-
-const MAX_BYTES = 10 * 1024 * 1024;
 
 async function digest(bytes: ArrayBuffer): Promise<string> {
   const hash = await crypto.subtle.digest("SHA-256", bytes);
@@ -49,9 +48,10 @@ export async function POST(
   if (!(file instanceof File)) {
     return invalidRequest("A file field is required.");
   }
-  if (file.size > MAX_BYTES) {
+  const maxBytes = uploadMaxBytes();
+  if (file.size > maxBytes) {
     return NextResponse.json(
-      { error: "too_large", detail: "File exceeds the 10 MB limit." },
+      { error: "too_large", detail: uploadTooLargeDetail(maxBytes) },
       { status: 413 },
     );
   }

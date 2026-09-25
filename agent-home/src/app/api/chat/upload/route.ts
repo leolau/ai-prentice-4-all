@@ -14,7 +14,7 @@
 import { NextResponse } from "next/server";
 
 import { apiClientForRequest, getPrincipal } from "@/lib/auth/principal";
-import { UPLOAD_MAX_BYTES } from "@/lib/chat/upload-limit";
+import { uploadMaxBytes, uploadTooLargeDetail } from "@/lib/chat/upload-limit";
 import { mediaBucket } from "@/lib/env";
 import { storageAvailable, uploadChatMedia } from "@/lib/supabase/storage";
 
@@ -52,9 +52,10 @@ export async function POST(request: Request): Promise<NextResponse> {
       { status: 400 },
     );
   }
-  if (file.size > UPLOAD_MAX_BYTES) {
+  const maxBytes = uploadMaxBytes();
+  if (file.size > maxBytes) {
     return NextResponse.json(
-      { error: "too_large", detail: "File exceeds the 100 MB limit." },
+      { error: "too_large", detail: uploadTooLargeDetail(maxBytes) },
       { status: 413 },
     );
   }

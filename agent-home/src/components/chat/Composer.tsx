@@ -2,7 +2,6 @@
 
 import { useLayoutEffect, useRef, useState } from "react";
 
-import { UPLOAD_MAX_BYTES } from "@/lib/chat/upload-limit";
 import type { ChatAttachment } from "@/types";
 
 /**
@@ -61,11 +60,6 @@ export function Composer({
     setUploading(true);
     try {
       for (const file of files) {
-        // Refuse oversize files before spending a long upload round-trip;
-        // the route enforces the same cap server-side.
-        if (file.size > UPLOAD_MAX_BYTES) {
-          throw new Error(`${file.name}: exceeds the 100 MB limit.`);
-        }
         const form = new FormData();
         form.set("file", file);
         if (sessionId) form.set("sessionId", sessionId);
