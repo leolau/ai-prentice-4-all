@@ -70,6 +70,59 @@ def test_command_times_out_when_browser_never_answers():
     asyncio.run(scenario())
 
 
+def test_progress_pings_extend_the_deadline():
+    async def scenario():
+        hub = Hub(timeout=0.1)
+        conn = FakeConn()
+        hub.attach(conn, "leo_owner")
+
+        async def browser():
+            for _ in range(100):
+                if conn.sent:
+                    break
+                await asyncio.sleep(0.01)
+            msg_id = json.loads(conn.sent[0])["id"]
+            # Stay alive past the raw timeout via progress pings, then answer.
+            for _ in range(5):
+                await asyncio.sleep(0.06)
+                hub.note_progress(msg_id)
+            hub.resolve_result(msg_id, {"ok": True})
+
+        _, result = await asyncio.gather(browser(), hub.send_command({"type": "importFile"}))
+        return result
+
+    assert asyncio.run(scenario())["ok"] is True
+
+
+def test_silence_after_a_ping_still_times_out():
+    async def scenario():
+        hub = Hub(timeout=0.1)
+        conn = FakeConn()
+        hub.attach(conn, "leo_owner")
+
+        async def browser():
+            for _ in range(100):
+                if conn.sent:
+                    break
+                await asyncio.sleep(0.01)
+            hub.note_progress(json.loads(conn.sent[0])["id"])  # one ping, then silence
+
+        async def call():
+            with pytest.raises(HubError, match="Timed out"):
+                await hub.send_command({"type": "importFile"})
+
+        await asyncio.gather(browser(), call())
+
+    asyncio.run(scenario())
+
+
+def test_progress_for_unknown_id_is_ignored():
+    hub = Hub(timeout=0.05)
+    hub.note_progress("not-a-real-id")
+    hub.note_progress(None)
+    assert not hub._progress
+
+
 def test_detach_fails_inflight_commands():
     async def scenario():
         hub = Hub(timeout=5)

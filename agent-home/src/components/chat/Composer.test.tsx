@@ -15,13 +15,6 @@ function fakeFile(name: string, size: number): File {
   return f;
 }
 
-function pickFile(getByLabelText: (t: string) => HTMLElement, file: File) {
-  const input = document.querySelector(
-    'input[type="file"]',
-  ) as HTMLInputElement;
-  fireEvent.change(input, { target: { files: [file] } });
-}
-
 afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();

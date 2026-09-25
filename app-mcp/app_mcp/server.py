@@ -105,6 +105,8 @@ async def _ws_handler(conn: websockets.ServerConnection) -> None:
             kind = msg.get("type")
             if kind == "state":
                 target.update_state(msg.get("path"), msg.get("element"))
+            elif kind == "progress":
+                target.note_progress(msg.get("id"))
             elif kind == "result":
                 target.resolve_result(msg.get("id"), msg)
     finally:

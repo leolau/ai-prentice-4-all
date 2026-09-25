@@ -43,6 +43,11 @@ let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 // doesn't resurrect a connection the user explicitly ended.
 let wantConnected = false;
 
+// While a command runs, ping the hub every few seconds so its timeout
+// measures silence rather than total elapsed time — a large importFile
+// uploads for minutes and must not hit the command deadline.
+const PROGRESS_PING_MS = 10_000;
+
 const listeners = new Set<() => void>();
 
 function setStatus(next: ConnectionStatus): void {
@@ -202,13 +207,27 @@ async function connect(): Promise<void> {
       return;
     }
     if (msg.type !== "cmd" || !msg.command) return;
-    void runCommand(msg.command).then((result) => {
-      try {
-        sock.send(JSON.stringify({ type: "result", id: msg.id, ...result }));
-      } catch {
-        // Connection died mid-command; the service times out and reports it.
-      }
-    });
+    const ping =
+      typeof msg.id === "string"
+        ? setInterval(() => {
+            try {
+              sock.send(JSON.stringify({ type: "progress", id: msg.id }));
+            } catch {
+              // Socket closing; the hub's silence timeout handles the rest.
+            }
+          }, PROGRESS_PING_MS)
+        : null;
+    void runCommand(msg.command)
+      .then((result) => {
+        try {
+          sock.send(JSON.stringify({ type: "result", id: msg.id, ...result }));
+        } catch {
+          // Connection died mid-command; the service times out and reports it.
+        }
+      })
+      .finally(() => {
+        if (ping !== null) clearInterval(ping);
+      });
   };
   sock.onclose = () => scheduleReconnect();
   sock.onerror = () => sock.close();

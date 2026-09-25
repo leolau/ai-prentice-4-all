@@ -99,6 +99,11 @@ are left ungated by default (names/sizes/timestamps only, same sensitivity as
 mcp_servers:
   app:
     url: "http://127.0.0.1:9220/mcp"
+    # Per-tool-call deadline on the agent side (default 300 s). A large
+    # folder import uploads browser → BFF → Storage and can take tens of
+    # minutes — the hub-side timeout is a *silence* deadline kept alive by
+    # browser progress pings, so this is the only real total cap.
+    timeout: 3600
 
 approvals:
   tools:

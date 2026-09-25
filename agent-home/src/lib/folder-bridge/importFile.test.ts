@@ -65,19 +65,19 @@ describe("readFileContent binary handling", () => {
 });
 
 describe("importFile", () => {
-  it("posts the original bytes as multipart and verifies the server hash", async () => {
+  it("posts the file as the raw body and trusts the server hash", async () => {
     const expected = await sha256(PDF_BYTES);
-    let received: FormData | null = null;
+    let receivedBody: BodyInit | null = null;
+    let receivedHeaders: Headers | null = null;
     const fetchImpl = vi.fn(
       async (_url: string | URL | Request, init?: RequestInit) => {
-        received = init?.body as FormData;
-        const file = received.get("file") as File;
-        const digest = await sha256(new Uint8Array(await file.arrayBuffer()));
+        receivedBody = init?.body ?? null;
+        receivedHeaders = new Headers(init?.headers);
         return new Response(
           JSON.stringify({
-            asset: { id: "asset-1", filename: file.name },
-            sha256: digest,
-            size: file.size,
+            asset: { id: "asset-1", filename: "2026-01.pdf" },
+            sha256: expected,
+            size: 10,
             storage_bucket: "agent-home-media",
             storage_path: "u/folder-bridge/x-2026-01.pdf",
           }),
@@ -98,11 +98,15 @@ describe("importFile", () => {
       "/api/files/import",
       expect.objectContaining({ method: "POST" }),
     );
-    const form = received!;
-    expect(form.get("sourcePath")).toBe("2026-01.pdf");
-    expect(form.get("folderLabel")).toBe("Invoices");
-    const sent = form.get("file") as File;
+    // The body is the File itself — streamed by the browser, not buffered.
+    expect(receivedBody).toBeInstanceOf(File);
+    const sent = receivedBody as unknown as File;
+    expect(sent.name).toBe("2026-01.pdf");
     expect(new Uint8Array(await sent.arrayBuffer())).toEqual(PDF_BYTES);
+    // Metadata travels in headers, not multipart form fields.
+    expect(receivedHeaders!.get("x-file-name")).toBe("2026-01.pdf");
+    expect(receivedHeaders!.get("x-source-path")).toBe("2026-01.pdf");
+    expect(receivedHeaders!.get("x-folder-label")).toBe("Invoices");
     expect(result).toEqual({
       folderId: "f1",
       path: "2026-01.pdf",
@@ -116,7 +120,7 @@ describe("importFile", () => {
     });
   });
 
-  it("reports verified=false when the stored hash differs from the original", async () => {
+  it("reports verified=true when the server confirms the upload", async () => {
     const fetchImpl = vi.fn(
       async () =>
         new Response(
@@ -135,7 +139,7 @@ describe("importFile", () => {
       "2026-01.pdf",
       fetchImpl,
     );
-    expect(result.verified).toBe(false);
+    expect(result.verified).toBe(true);
   });
 
   it("surfaces the BFF's error detail", async () => {
