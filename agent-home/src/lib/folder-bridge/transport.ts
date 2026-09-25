@@ -65,6 +65,33 @@ export function subscribeStatus(listener: () => void): () => void {
   return () => listeners.delete(listener);
 }
 
+/** Live upload state for the Folder Bridge page's own progress UI — the
+ * browser is the only party with ground truth on bytes actually sent, so
+ * this is shown directly on /files/bridge rather than relayed anywhere
+ * else. `null` when no import is in flight. */
+export interface ImportProgress {
+  filename: string;
+  sent: number;
+  total: number;
+}
+
+let importProgress: ImportProgress | null = null;
+const progressListeners = new Set<() => void>();
+
+function setImportProgress(next: ImportProgress | null): void {
+  importProgress = next;
+  for (const listener of progressListeners) listener();
+}
+
+export function getImportProgress(): ImportProgress | null {
+  return importProgress;
+}
+
+export function subscribeImportProgress(listener: () => void): () => void {
+  progressListeners.add(listener);
+  return () => progressListeners.delete(listener);
+}
+
 async function fetchTicket(): Promise<string | null> {
   try {
     const res = await fetch("/api/app-mcp/ticket", { method: "POST" });
@@ -76,8 +103,14 @@ async function fetchTicket(): Promise<string | null> {
   }
 }
 
-/** Execute one relayed command against the local folder registry. */
-export async function runCommand(command: FolderCommand): Promise<Record<string, unknown>> {
+/** Execute one relayed command against the local folder registry.
+ * `reportBytes`, if given, is called with the latest known (sent, total)
+ * for an in-flight importFile — used to carry real byte counts on the
+ * hub's silence-timeout ping instead of a bare keepalive. */
+export async function runCommand(
+  command: FolderCommand,
+  reportBytes?: (sent: number, total: number) => void,
+): Promise<Record<string, unknown>> {
   try {
     switch (command.type) {
       case "listFolders":
@@ -142,13 +175,23 @@ export async function runCommand(command: FolderCommand): Promise<Record<string,
               "so they can approve this file in chat.",
           };
         }
-        const result = await importFile(
-          handle,
-          command.folderId,
-          getFolderLabel(command.folderId) ?? "",
-          command.path,
-        );
-        return { ok: true, ...result };
+        const filename = command.path.split("/").pop() ?? command.path;
+        try {
+          const result = await importFile(
+            handle,
+            command.folderId,
+            getFolderLabel(command.folderId) ?? "",
+            command.path,
+            fetch,
+            (sent, total) => {
+              setImportProgress({ filename, sent, total });
+              reportBytes?.(sent, total);
+            },
+          );
+          return { ok: true, ...result };
+        } finally {
+          setImportProgress(null);
+        }
       }
       case "getFileMetadata": {
         const handle = getFolderHandle(command.folderId);
@@ -207,17 +250,29 @@ async function connect(): Promise<void> {
       return;
     }
     if (msg.type !== "cmd" || !msg.command) return;
+    // Latest known byte counts for an in-flight importFile, if any — sent on
+    // every ping so the hub (and anyone querying folder_bridge_state) can
+    // see real upload progress, not just "still alive".
+    let lastBytes: { sent: number; total: number } | null = null;
     const ping =
       typeof msg.id === "string"
         ? setInterval(() => {
             try {
-              sock.send(JSON.stringify({ type: "progress", id: msg.id }));
+              sock.send(
+                JSON.stringify({
+                  type: "progress",
+                  id: msg.id,
+                  ...(lastBytes ?? {}),
+                }),
+              );
             } catch {
               // Socket closing; the hub's silence timeout handles the rest.
             }
           }, PROGRESS_PING_MS)
         : null;
-    void runCommand(msg.command)
+    void runCommand(msg.command, (sent, total) => {
+      lastBytes = { sent, total };
+    })
       .then((result) => {
         try {
           sock.send(JSON.stringify({ type: "result", id: msg.id, ...result }));

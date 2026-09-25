@@ -104,6 +104,8 @@ describe("importFile command gating", () => {
       id,
       "Inv",
       "a.pdf",
+      expect.anything(),
+      expect.anything(),
     );
   });
 

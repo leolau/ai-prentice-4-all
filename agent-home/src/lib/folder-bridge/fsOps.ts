@@ -246,14 +246,22 @@ interface ImportResponse {
   detail?: string;
 }
 
+/** Reported as bytes leave this tab's network stack, throttled by the caller. */
+export type ImportProgressCallback = (sent: number, total: number) => void;
+
 /**
  * Copy one file, byte for byte, into the file store via the BFF
  * (`POST /api/files/import`) and return the registry row.
  *
- * The `File` is posted directly as the request body — the browser streams it
- * from disk without loading it into memory, so this works for files of any
- * size. The BFF computes the SHA-256 server-side while streaming to Storage;
- * `verified` means the upload completed and the server returned a hash.
+ * The file is posted as a streamed `ReadableStream` body (not the bare
+ * `File`) so upload progress is observable: the browser only pulls the next
+ * chunk from the stream once the network is ready to accept it (fetch
+ * applies real backpressure to a streaming body), so counting bytes as they
+ * are *read* is an accurate proxy for bytes actually sent — not just bytes
+ * read from disk. The browser streams from disk either way, so this works
+ * for files of any size with no extra memory cost. The BFF computes the
+ * SHA-256 server-side while streaming to Storage; `verified` means the
+ * upload completed and the server returned a hash.
  */
 export async function importFile(
   root: DirectoryHandleLike,
@@ -261,19 +269,41 @@ export async function importFile(
   folderLabel: string,
   path: string,
   fetchImpl: typeof fetch = fetch,
+  onProgress?: ImportProgressCallback,
 ): Promise<ImportResult> {
   const handle = await resolveFile(root, path);
   const file = await handle.getFile();
+  onProgress?.(0, file.size);
+  let sent = 0;
+  const countingStream = file.stream().pipeThrough(
+    new TransformStream<Uint8Array, Uint8Array>({
+      transform(chunk, controller) {
+        sent += chunk.byteLength;
+        onProgress?.(sent, file.size);
+        controller.enqueue(chunk);
+      },
+    }),
+  );
   const res = await fetchImpl("/api/files/import", {
     method: "POST",
-    body: file,
+    body: countingStream,
+    // Required by the fetch spec for a streaming request body; supported in
+    // every browser that has File System Access (Chromium-based — Safari/
+    // Firefox use the webkitdirectory snapshot fallback and never reach
+    // this path with a live handle, see handles.ts).
+    duplex: "half",
     headers: {
       "content-type": file.type || "application/octet-stream",
       "x-file-name": encodeURIComponent(file.name),
       "x-source-path": encodeURIComponent(path),
       "x-folder-label": encodeURIComponent(folderLabel),
+      "content-length": String(file.size),
     },
-  });
+    // TS's DOM lib doesn't type `duplex` yet, though it's required by the
+    // fetch spec for a streaming request body and every relevant browser
+    // implements it.
+  } as RequestInit);
+  onProgress?.(file.size, file.size);
   let body: ImportResponse = {};
   try {
     body = (await res.json()) as ImportResponse;

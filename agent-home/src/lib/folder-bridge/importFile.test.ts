@@ -98,11 +98,24 @@ describe("importFile", () => {
       "/api/files/import",
       expect.objectContaining({ method: "POST" }),
     );
-    // The body is the File itself — streamed by the browser, not buffered.
-    expect(receivedBody).toBeInstanceOf(File);
-    const sent = receivedBody as unknown as File;
-    expect(sent.name).toBe("2026-01.pdf");
-    expect(new Uint8Array(await sent.arrayBuffer())).toEqual(PDF_BYTES);
+    // The body is a stream of the file's bytes (through a byte-counting
+    // TransformStream for upload progress), not the bare File and not
+    // buffered — read it back to confirm the bytes are untouched.
+    expect(receivedBody).toBeInstanceOf(ReadableStream);
+    const chunks: Uint8Array[] = [];
+    const reader = (receivedBody as unknown as ReadableStream<Uint8Array>).getReader();
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      chunks.push(value);
+    }
+    const sentBytes = new Uint8Array(chunks.reduce((n, c) => n + c.byteLength, 0));
+    let offset = 0;
+    for (const chunk of chunks) {
+      sentBytes.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+    expect(sentBytes).toEqual(PDF_BYTES);
     // Metadata travels in headers, not multipart form fields.
     expect(receivedHeaders!.get("x-file-name")).toBe("2026-01.pdf");
     expect(receivedHeaders!.get("x-source-path")).toBe("2026-01.pdf");

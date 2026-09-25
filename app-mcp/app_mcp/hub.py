@@ -39,6 +39,10 @@ class Hub:
         # file import uploads over HTTP for minutes) don't hit a fixed total
         # cap they can never beat.
         self._progress: dict[str, float] = {}
+        # (bytes_sent, bytes_total) from the same pings, when the browser
+        # includes them (currently only importFile) — lets folder_bridge_state
+        # report real upload progress instead of just "still alive".
+        self._progress_bytes: dict[str, tuple[int, int]] = {}
 
     # -- connection lifecycle ------------------------------------------------
 
@@ -61,6 +65,7 @@ class Hub:
                 fut.set_result({"ok": False, "detail": detail, "state": None})
         for msg_id in self._pending:
             self._progress.pop(msg_id, None)
+            self._progress_bytes.pop(msg_id, None)
         self._pending.clear()
 
     # -- inbound --------------------------------------------------------------
@@ -74,20 +79,27 @@ class Hub:
             self._element = None
         self._state_at = time.time()
 
-    def note_progress(self, msg_id: Any) -> None:
+    def note_progress(
+        self, msg_id: Any, sent: Any = None, total: Any = None
+    ) -> None:
         """Refresh the silence deadline for an in-flight command.
 
         The browser pings `{type: "progress", id}` while a command runs;
         each ping resets the clock so `send_command` only fails after
-        `timeout` seconds with no sign of life.
+        `timeout` seconds with no sign of life. `sent`/`total` are optional
+        byte counts (currently sent only by importFile) surfaced through
+        `state_summary()` for real upload progress, not just liveness.
         """
         if isinstance(msg_id, str) and msg_id in self._pending:
             self._progress[msg_id] = time.monotonic()
+            if isinstance(sent, (int, float)) and isinstance(total, (int, float)):
+                self._progress_bytes[msg_id] = (int(sent), int(total))
 
     def resolve_result(self, msg_id: Any, payload: dict[str, Any]) -> None:
         if not isinstance(msg_id, str):
             return
         fut = self._pending.pop(msg_id, None)
+        self._progress_bytes.pop(msg_id, None)
         if fut is not None and not fut.done():
             clean = {k: v for k, v in payload.items() if k not in ("type", "id")}
             fut.set_result(clean)
@@ -99,13 +111,24 @@ class Hub:
         return self._conn is not None
 
     def state_summary(self) -> dict[str, Any]:
-        return {
+        summary: dict[str, Any] = {
             "connected": self.connected,
             "user": self._user,
             "page": self._path,
             "element": self._element,
             "state_age_s": round(time.time() - self._state_at, 1) if self._state_at else None,
         }
+        # Surface the most advanced in-flight upload, if any — a single
+        # browser session runs one Folder Bridge command at a time, so
+        # "most bytes sent" is effectively "the current one".
+        if self._progress_bytes:
+            sent, total = max(self._progress_bytes.values(), key=lambda st: st[0])
+            summary["active_upload"] = {
+                "bytes_sent": sent,
+                "bytes_total": total,
+                "percent": round(100 * sent / total, 1) if total else None,
+            }
+        return summary
 
     async def send_command(self, command: dict[str, Any]) -> dict[str, Any]:
         """Send one command to the browser and await its structured result."""
