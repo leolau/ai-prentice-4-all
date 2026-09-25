@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   fileMetadata,
   listDirectoryEntries,
+  nameMatcher,
   readFileContent,
   resolveDirectory,
   resolveFile,
@@ -133,6 +134,25 @@ describe("searchFolder", () => {
     expect(matches[0].folderLabel).toBe("Work Docs");
   });
 
+  it("treats * and ? as a glob over the whole filename", async () => {
+    const matches = await searchFolder(fakeRoot(TREE), "f1", "Work Docs", {
+      query: "*.txt",
+      extensions: [],
+      limit: 50,
+    });
+    expect(matches.map((m) => m.path).sort()).toEqual([
+      "Archive/Old/ancient.txt",
+      "Reports/Q1.txt",
+      "Reports/Q2.txt",
+    ]);
+    const one = await searchFolder(fakeRoot(TREE), "f1", "Work Docs", {
+      query: "q?.TXT",
+      extensions: [],
+      limit: 50,
+    });
+    expect(one.map((m) => m.path).sort()).toEqual(["Reports/Q1.txt", "Reports/Q2.txt"]);
+  });
+
   it("narrows by extension", async () => {
     const matches = await searchFolder(fakeRoot(TREE), "f1", "Work Docs", {
       query: "",
@@ -173,6 +193,18 @@ describe("searchFolder", () => {
       limit: 1,
     });
     expect(matches).toHaveLength(1);
+  });
+});
+
+describe("nameMatcher", () => {
+  it("substring when no wildcard, anchored glob otherwise, regex chars literal", () => {
+    expect(nameMatcher("voice")("Invoice.PDF")).toBe(true);
+    expect(nameMatcher("*.pdf")("Invoice.PDF")).toBe(true);
+    expect(nameMatcher("*.pdf")("Invoice.pdf.bak")).toBe(false);
+    expect(nameMatcher("inv-2026-??.xlsx")("inv-2026-09.xlsx")).toBe(true);
+    expect(nameMatcher("a+b*")("a+b.txt")).toBe(true);
+    expect(nameMatcher("a+b*")("aab.txt")).toBe(false);
+    expect(nameMatcher("  ")("anything")).toBe(true);
   });
 });
 

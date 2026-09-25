@@ -207,8 +207,10 @@ export function FolderBridgeView() {
         ) : null}
         {snapshotMode ? (
           <p className="mt-2 text-xs text-[var(--color-muted)]">
-            This browser reads the folder as it was when you picked it — add
-            it again to see new files, and after reloading this page.
+            Safari and Firefox cannot remember folders between visits, so the
+            list is empty after a reload — Add folder again (Chrome, Edge and
+            Brave keep them). The folder is read as it was when you picked it;
+            add it again to see new files.
           </p>
         ) : null}
         {folders.length > 0 ? (
@@ -258,6 +260,12 @@ export function FolderBridgeView() {
         <h2 className="text-xs uppercase tracking-wide text-[var(--color-muted)]">
           Search
         </h2>
+        <p className="mt-1 text-xs text-[var(--color-muted)]">
+          Preview what the agent can see: matches by filename across the
+          folders above (substring, or a glob such as <code>*.pdf</code>).
+          Tap a result to peek at its text, then ask the agent about it in
+          chat.
+        </p>
         <div className="mt-2 flex gap-2">
           <input
             data-component="FolderBridgeSearch"
@@ -267,7 +275,7 @@ export function FolderBridgeView() {
             onKeyDown={(e) => {
               if (e.key === "Enter") void handleSearch();
             }}
-            placeholder="Search by filename"
+            placeholder="Filename or glob, e.g. invoice or *.pdf"
             className="w-full rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm outline-none focus:border-[var(--color-accent)]"
           />
           <button

@@ -124,9 +124,27 @@ interface SearchOptions {
 }
 
 /**
- * Recursively search one folder for files whose name contains `query`
- * (case-insensitive), optionally narrowed by extension. Stops at
- * `opts.limit` matches or the safety caps above, whichever comes first.
+ * Build a case-insensitive filename matcher. A query containing `*` or `?`
+ * is a glob matched against the whole filename (`*.pdf`, `inv-2026-??.xlsx`);
+ * anything else is a plain substring match.
+ */
+export function nameMatcher(query: string): (name: string) => boolean {
+  const needle = query.trim().toLowerCase();
+  if (!needle) return () => true;
+  if (!/[*?]/.test(needle)) return (name) => name.toLowerCase().includes(needle);
+  const pattern = needle
+    .split(/([*?])/)
+    .map((part) => (part === "*" ? ".*" : part === "?" ? "." : part.replace(/[.+^${}()|[\]\\]/g, "\\$&")))
+    .join("");
+  const re = new RegExp(`^${pattern}$`, "i");
+  return (name) => re.test(name);
+}
+
+/**
+ * Recursively search one folder for files whose name matches `query`
+ * (substring or `*`/`?` glob, case-insensitive), optionally narrowed by
+ * extension. Stops at `opts.limit` matches or the safety caps above,
+ * whichever comes first.
  */
 export async function searchFolder(
   root: DirectoryHandleLike,
@@ -134,7 +152,7 @@ export async function searchFolder(
   folderLabel: string,
   opts: SearchOptions,
 ): Promise<SearchMatch[]> {
-  const needle = opts.query.trim().toLowerCase();
+  const matchesName = nameMatcher(opts.query);
   const wantExt = new Set(opts.extensions.map((e) => e.toLowerCase()));
   const matches: SearchMatch[] = [];
   let visited = 0;
@@ -150,7 +168,7 @@ export async function searchFolder(
         continue;
       }
       if (wantExt.size > 0 && !wantExt.has(extensionOf(name))) continue;
-      if (needle && !name.toLowerCase().includes(needle)) continue;
+      if (!matchesName(name)) continue;
       const file = await handle.getFile();
       matches.push({
         folderId,
