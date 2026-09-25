@@ -1,11 +1,11 @@
 "use client";
 
-import Link from "next/link";
 import { useEffect, useState } from "react";
 
 import { EntityGoalSection } from "@/components/settings/EntityGoalSection";
 import { PushEnroll } from "@/components/push/PushEnroll";
 import { ConnectedAccounts } from "@/components/settings/ConnectedAccounts";
+import { TelegramLinks } from "@/components/settings/TelegramLinks";
 import { WhatsAppBridges } from "@/components/settings/WhatsAppBridges";
 import { BusyRegion } from "@/components/ui/BusyRegion";
 import { Spinner } from "@/components/ui/Spinner";
@@ -49,9 +49,12 @@ const TAG_DOT: Record<string, string> = {
 export function SettingsView({
   entityGoal = null,
   entityGoalReadOnly = false,
+  canManageMembers = true,
 }: {
   entityGoal?: EntityGoal | null;
   entityGoalReadOnly?: boolean;
+  /** Owner/admin may link and unlink Telegram ids; others see a note. */
+  canManageMembers?: boolean;
 } = {}) {
   const [theme, setTheme] = usePersistentState<ThemeId>(
     THEME_STORAGE_KEY,
@@ -115,7 +118,7 @@ export function SettingsView({
 
       <PushEnroll />
 
-      <InOutSection />
+      <InOutSection canManageMembers={canManageMembers} />
 
       <EntityGoalSection goal={entityGoal} readOnly={entityGoalReadOnly} />
 
@@ -126,7 +129,7 @@ export function SettingsView({
 
 /* ── In&Out: channels the agent talks through ────────────────────── */
 
-function InOutSection() {
+function InOutSection({ canManageMembers }: { canManageMembers: boolean }) {
   return (
     <section
       data-section="in-out"
@@ -140,26 +143,8 @@ function InOutSection() {
       <div className="space-y-6 border-t border-[var(--color-border)] pt-4">
         <ConnectedAccounts />
         <WhatsAppBridges />
-        <TelegramSection />
+        <TelegramLinks canManage={canManageMembers} />
       </div>
-    </section>
-  );
-}
-
-function TelegramSection() {
-  return (
-    <section data-section="telegram">
-      <h2 className="text-sm font-semibold">Telegram</h2>
-      <p className="text-xs text-[var(--color-muted)]">
-        The Telegram bot is configured on the Hermes gateway. Who may talk to it
-        is decided per person: link a Telegram user id to an enrolled member on
-        the{" "}
-        <Link href="/users" className="underline">
-          Users page
-        </Link>
-        {" "}(<em>Link channel</em> → platform <code>telegram</code>). Messages
-        from unlinked accounts are treated as anonymous.
-      </p>
     </section>
   );
 }

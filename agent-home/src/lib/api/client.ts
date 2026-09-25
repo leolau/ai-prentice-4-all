@@ -890,6 +890,18 @@ export class HermesApiClient {
     );
   }
 
+  /** Detach a channel handle from a member (owner/admin). */
+  async unlinkMemberChannel(
+    userId: string,
+    input: { platform: string; channel_user_id: string },
+  ): Promise<MemberChannelsResponse> {
+    const query = new URLSearchParams(input);
+    return this.request(
+      `/api/comms/members/${encodeURIComponent(userId)}/channels?${query.toString()}`,
+      { method: "DELETE" },
+    );
+  }
+
   /** Recent identity-administration events from the C5 log (owner/admin). */
   async memberActivity(limit = 50): Promise<IdentityActivityResponse> {
     return this.request(`/api/comms/members/activity?limit=${limit}`);

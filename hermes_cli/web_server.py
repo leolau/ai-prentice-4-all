@@ -3652,6 +3652,47 @@ async def comms_link_member_channel(
     }
 
 
+@app.delete("/api/comms/members/{user_id}/channels")
+async def comms_unlink_member_channel(
+    user_id: str,
+    request: Request,
+    platform: str = "",
+    channel_user_id: str = "",
+    _console_scope=Depends(require_console_scope),
+):
+    """Remove a channel handle from an enrolled member (owner/admin)."""
+    from hermes_cli.access import PrincipalStore
+    from hermes_cli.members import unlink_member_channel
+
+    platform = platform.strip()
+    channel_user_id = channel_user_id.strip()
+    if not platform or not channel_user_id:
+        raise HTTPException(
+            status_code=400,
+            detail="platform and channel_user_id are required",
+        )
+    try:
+        actor, _service = await _comms_member_service(request)
+        principal = await unlink_member_channel(
+            PrincipalStore(_comms_app_store()),
+            actor,
+            user_id=user_id,
+            platform=platform,
+            channel_user_id=channel_user_id,
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001 — mapped to a clean HTTP status
+        raise _comms_member_error(exc)
+    return {
+        "ok": True,
+        "member": {
+            "user_id": principal.user_id,
+            "channels": list(principal.channels),
+        },
+    }
+
+
 @app.get("/api/comms/members/activity")
 async def comms_member_activity(request: Request, _console_scope=Depends(require_console_scope)):
     """Recent identity administration events (owner/admin only).

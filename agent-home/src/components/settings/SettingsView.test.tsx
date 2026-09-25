@@ -48,8 +48,8 @@ describe("SettingsView", () => {
     const inside = html.slice(inOut, sectionEnd);
     expect(inside).toContain('data-component="ConnectedAccounts"');
     expect(inside).toContain('data-component="WhatsAppBridges"');
-    expect(inside).toContain('data-section="telegram"');
-    expect(inside).toContain('href="/users"');
+    expect(inside).toContain('data-component="TelegramLinks"');
+    expect(inside).not.toContain('href="/users"');
   });
 
   it("renders the Tags section header", () => {

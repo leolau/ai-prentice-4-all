@@ -1527,6 +1527,39 @@ async def link_member_channel(
     return refreshed if refreshed is not None else principal
 
 
+async def unlink_member_channel(
+    store: PrincipalStore,
+    actor: Principal,
+    *,
+    user_id: str,
+    platform: str,
+    channel_user_id: str,
+) -> Principal:
+    """Remove a ``(platform, channel_user_id)`` mapping from an enrolled principal.
+
+    The inverse of :func:`link_member_channel`. Nothing else is touched: the
+    principal, its data and any other channels stay; messages from the handle
+    simply resolve to the raw channel identity again. Refuses a handle that is
+    not currently linked to ``user_id`` so a stale view cannot detach a mapping
+    that has since been re-pointed at someone else.
+    """
+    require_member_admin(actor)
+    platform = _normalize_platform(platform)
+    channel_user_id = str(channel_user_id or "").strip()
+    if not channel_user_id:
+        raise MemberError("channel_user_id is required")
+    principal = await store.get(user_id)
+    if principal is None:
+        raise MemberError(f"No principal enrolled for {user_id!r}.")
+    if f"{platform}:{channel_user_id}" not in principal.channels:
+        raise MemberError(
+            f"{platform}:{channel_user_id} is not linked to {principal.user_id}."
+        )
+    await store.unlink_channel(principal.user_id, platform, channel_user_id)
+    refreshed = await store.get(principal.user_id)
+    return refreshed if refreshed is not None else principal
+
+
 def _normalize_platform(platform: str) -> str:
     """Validate a platform name against the gateway's own enum.
 

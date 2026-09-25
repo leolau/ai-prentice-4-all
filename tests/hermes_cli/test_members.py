@@ -42,6 +42,7 @@ from hermes_cli.members import (
     MemberService,
     MemberView,
     link_member_channel,
+    unlink_member_channel,
     parse_member_csv,
     require_member_admin,
 )
@@ -1318,6 +1319,19 @@ class _LinkStore(_FakeStore):
             channels=existing.channels + (f"{platform}:{channel_user_id}",),
         )
 
+    async def unlink_channel(
+        self, user_id: str, platform: str, channel_user_id: str
+    ) -> bool:
+        handle = f"{platform}:{channel_user_id}"
+        existing = self.principals[user_id]
+        self.principals[user_id] = Principal(
+            user_id=existing.user_id,
+            display=existing.display,
+            role=existing.role,
+            channels=tuple(c for c in existing.channels if c != handle),
+        )
+        return handle in existing.channels
+
 
 def _link_store_with(role: Role = "owner", user_id: str = "leo_owner") -> _LinkStore:
     store = _LinkStore()
@@ -1339,6 +1353,50 @@ async def test_link_member_channel_links_and_returns_refreshed_principal() -> No
     # The returned principal carries the new channel, so a caller can show the
     # mapping it just made rather than the pre-link state.
     assert principal.channels == ("telegram:8756039695",)
+
+
+@pytest.mark.asyncio
+async def test_unlink_member_channel_removes_only_that_handle() -> None:
+    store = _link_store_with()
+    for handle in ("8756039695", "111"):
+        await link_member_channel(
+            store,  # type: ignore[arg-type]
+            _principal("owner"),
+            user_id="leo_owner",
+            platform="telegram",
+            channel_user_id=handle,
+        )
+    principal = await unlink_member_channel(
+        store,  # type: ignore[arg-type]
+        _principal("admin"),
+        user_id="leo_owner",
+        platform="Telegram",
+        channel_user_id=" 8756039695 ",
+    )
+    assert principal.channels == ("telegram:111",)
+    assert "leo_owner" in store.principals
+
+
+@pytest.mark.asyncio
+async def test_unlink_member_channel_refuses_handle_not_linked_here() -> None:
+    store = _link_store_with()
+    with pytest.raises(MemberError):
+        await unlink_member_channel(
+            store,  # type: ignore[arg-type]
+            _principal("owner"),
+            user_id="leo_owner",
+            platform="telegram",
+            channel_user_id="8756039695",
+        )
+    for role in ("member", "viewer"):
+        with pytest.raises(MemberAuthorizationError):
+            await unlink_member_channel(
+                store,  # type: ignore[arg-type]
+                _principal(role),  # type: ignore[arg-type]
+                user_id="leo_owner",
+                platform="telegram",
+                channel_user_id="8756039695",
+            )
 
 
 @pytest.mark.asyncio

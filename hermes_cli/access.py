@@ -1481,6 +1481,39 @@ class PrincipalStore:
             if own_connection:
                 await conn.close()
 
+    async def unlink_channel(
+        self,
+        user_id: str,
+        platform: str,
+        channel_user_id: str,
+        *,
+        connection: asyncpg.Connection | None = None,
+    ) -> bool:
+        """Drop the ``(platform, channel_user_id)`` mapping if it points at ``user_id``.
+
+        Matching on all three columns means a stale handle in the caller's view
+        cannot remove a mapping that has since been re-pointed at somebody else.
+        Returns whether a row was removed.
+        """
+        user_id = _validate_user_id(user_id)
+        own_connection = connection is None
+        conn = connection or await self._store.connect()
+        try:
+            await initialize_access(conn)
+            status = await conn.execute(
+                """
+                DELETE FROM channel_identities
+                WHERE platform = $1 AND channel_user_id = $2 AND user_id = $3
+                """,
+                platform,
+                channel_user_id,
+                user_id,
+            )
+        finally:
+            if own_connection:
+                await conn.close()
+        return status.endswith(" 1")
+
     async def link_alias(
         self,
         alias_subject: str,
