@@ -141,10 +141,31 @@ export function nameMatcher(query: string): (name: string) => boolean {
 }
 
 /**
- * Recursively search one folder for files whose name matches `query`
- * (substring or `*`/`?` glob, case-insensitive), optionally narrowed by
- * extension. Stops at `opts.limit` matches or the safety caps above,
- * whichever comes first.
+ * Build a matcher over a file's location. A query without `/` is tried
+ * against the filename and against every directory name on the way down
+ * (so `invoices` finds everything inside an `Invoices` folder). A query
+ * containing `/` is matched against the full `Folder label/relative/path`.
+ * Each is substring or `*`/`?` glob, case-insensitive, as in `nameMatcher`.
+ */
+export function pathMatcher(
+  query: string,
+  folderLabel: string,
+): (relPath: string) => boolean {
+  const needle = query.trim();
+  if (!needle) return () => true;
+  if (needle.includes("/")) {
+    const full = nameMatcher(needle.replace(/^\/+/, ""));
+    return (relPath) => full(`${folderLabel}/${relPath}`);
+  }
+  const seg = nameMatcher(needle);
+  return (relPath) => [folderLabel, ...relPath.split("/")].some(seg);
+}
+
+/**
+ * Recursively search one folder for files whose name, or any folder on
+ * their path, matches `query` (substring or `*`/`?` glob, case-insensitive;
+ * see `pathMatcher`), optionally narrowed by extension. Stops at
+ * `opts.limit` matches or the safety caps above, whichever comes first.
  */
 export async function searchFolder(
   root: DirectoryHandleLike,
@@ -152,7 +173,7 @@ export async function searchFolder(
   folderLabel: string,
   opts: SearchOptions,
 ): Promise<SearchMatch[]> {
-  const matchesName = nameMatcher(opts.query);
+  const matchesPath = pathMatcher(opts.query, folderLabel);
   const wantExt = new Set(opts.extensions.map((e) => e.toLowerCase()));
   const matches: SearchMatch[] = [];
   let visited = 0;
@@ -168,7 +189,7 @@ export async function searchFolder(
         continue;
       }
       if (wantExt.size > 0 && !wantExt.has(extensionOf(name))) continue;
-      if (!matchesName(name)) continue;
+      if (!matchesPath(entryPath)) continue;
       const file = await handle.getFile();
       matches.push({
         folderId,

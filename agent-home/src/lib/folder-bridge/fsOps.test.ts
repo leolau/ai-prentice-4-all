@@ -4,6 +4,7 @@ import {
   fileMetadata,
   listDirectoryEntries,
   nameMatcher,
+  pathMatcher,
   readFileContent,
   resolveDirectory,
   resolveFile,
@@ -193,6 +194,37 @@ describe("searchFolder", () => {
       limit: 1,
     });
     expect(matches).toHaveLength(1);
+  });
+});
+
+describe("pathMatcher", () => {
+  it("matches folder names on the path as well as the filename", () => {
+    const m = pathMatcher("old", "Work Docs");
+    expect(m("Archive/Old/ancient.txt")).toBe(true);
+    expect(m("Reports/Q1.txt")).toBe(false);
+    expect(pathMatcher("work", "Work Docs")("Reports/Q1.txt")).toBe(true);
+    expect(pathMatcher("*.txt", "Work Docs")("Reports/Q1.txt")).toBe(true);
+    expect(pathMatcher("arch*", "Work Docs")("Archive/Old/ancient.txt")).toBe(true);
+  });
+
+  it("matches the whole label/path when the query contains a slash", () => {
+    const m = pathMatcher("*/reports/*.txt", "Work Docs");
+    expect(m("Reports/Q1.txt")).toBe(true);
+    expect(m("Archive/Old/ancient.txt")).toBe(false);
+    expect(pathMatcher("docs/rep", "Work Docs")("Reports/Q1.txt")).toBe(true);
+    expect(pathMatcher("/Work Docs/Reports/Q1.txt", "Work Docs")("Reports/Q1.txt")).toBe(true);
+    expect(pathMatcher("", "Work Docs")("x")).toBe(true);
+  });
+});
+
+describe("searchFolder by folder name", () => {
+  it("finds files inside a matching directory", async () => {
+    const matches = await searchFolder(fakeRoot(TREE), "f1", "Work Docs", {
+      query: "reports",
+      extensions: [],
+      limit: 50,
+    });
+    expect(matches.map((m) => m.path).sort()).toEqual(["Reports/Q1.txt", "Reports/Q2.txt"]);
   });
 });
 

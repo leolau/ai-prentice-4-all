@@ -342,9 +342,10 @@ async def folder_bridge_search_files(
     extensions: list[str] | None = None,
     limit: int = 50,
 ) -> dict[str, Any]:
-    """Search by filename (case-insensitive substring, or a `*`/`?` glob
-    such as "*.pdf" matched against the whole name) plus a short content
-    snippet where feasible, across one or more approved folders. `folder_ids` from
+    """Search by file or folder name (case-insensitive substring, or a
+    `*`/`?` glob such as "*.pdf"; a query containing `/` is matched against
+    the whole "Folder label/relative/path") plus a short content snippet
+    where feasible, across one or more approved folders. `folder_ids` from
     folder_bridge_list_folders; `extensions` optionally narrows to file
     types (e.g. [".md", ".pdf", ".txt"])."""
     return await _folder_command(
