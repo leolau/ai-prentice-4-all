@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useEffect, useState } from "react";
 
 import { EntityGoalSection } from "@/components/settings/EntityGoalSection";
@@ -41,6 +42,7 @@ const TAG_DOT: Record<string, string> = {
 /**
  * The Settings page body. Currently provides:
  * - A UI theme selector (applies immediately, persists in localStorage).
+ * - In&Out — the channels the agent talks through (Google, WhatsApp, Telegram).
  * - The entity goal — what the whole system is for (owner-editable).
  * - A Tags management section (create / list / delete tags).
  */
@@ -113,14 +115,52 @@ export function SettingsView({
 
       <PushEnroll />
 
-      <ConnectedAccounts />
-
-      <WhatsAppBridges />
+      <InOutSection />
 
       <EntityGoalSection goal={entityGoal} readOnly={entityGoalReadOnly} />
 
       <TagsSection />
     </div>
+  );
+}
+
+/* ── In&Out: channels the agent talks through ────────────────────── */
+
+function InOutSection() {
+  return (
+    <section
+      data-section="in-out"
+      className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface)] p-4"
+    >
+      <h2 className="text-base font-semibold">In&amp;Out</h2>
+      <p className="mb-4 text-xs text-[var(--color-muted)]">
+        Where messages, mail and calendar events come in and go out: Google
+        accounts, WhatsApp bridges and Telegram.
+      </p>
+      <div className="space-y-6 border-t border-[var(--color-border)] pt-4">
+        <ConnectedAccounts />
+        <WhatsAppBridges />
+        <TelegramSection />
+      </div>
+    </section>
+  );
+}
+
+function TelegramSection() {
+  return (
+    <section data-section="telegram">
+      <h2 className="text-sm font-semibold">Telegram</h2>
+      <p className="text-xs text-[var(--color-muted)]">
+        The Telegram bot is configured on the Hermes gateway. Who may talk to it
+        is decided per person: link a Telegram user id to an enrolled member on
+        the{" "}
+        <Link href="/users" className="underline">
+          Users page
+        </Link>
+        {" "}(<em>Link channel</em> → platform <code>telegram</code>). Messages
+        from unlinked accounts are treated as anonymous.
+      </p>
+    </section>
   );
 }
 

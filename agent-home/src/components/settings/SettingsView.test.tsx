@@ -36,6 +36,22 @@ describe("SettingsView", () => {
     expect(html).toContain("Connected accounts");
   });
 
+  it("groups Google, WhatsApp and Telegram under In&Out", () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ tags: [], credentials: [] })),
+    );
+    const html = renderToStaticMarkup(<SettingsView />);
+    const inOut = html.indexOf('data-section="in-out"');
+    expect(inOut).toBeGreaterThan(-1);
+    expect(html).toContain("In&amp;Out");
+    const sectionEnd = html.indexOf('data-section="entity-goal"');
+    const inside = html.slice(inOut, sectionEnd);
+    expect(inside).toContain('data-component="ConnectedAccounts"');
+    expect(inside).toContain('data-component="WhatsAppBridges"');
+    expect(inside).toContain('data-section="telegram"');
+    expect(inside).toContain('href="/users"');
+  });
+
   it("renders the Tags section header", () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
       new Response(JSON.stringify({ tags: [] })),
