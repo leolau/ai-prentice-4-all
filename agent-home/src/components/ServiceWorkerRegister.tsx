@@ -17,7 +17,7 @@ export function ServiceWorkerRegister() {
       // never reaches the browser until the proxy cache expires. A query
       // parameter makes it a new URL the proxy hasn't seen. Bump this when
       // sw.js changes (the SW's own VERSION constant is the source of truth).
-      navigator.serviceWorker.register("/sw.js?v=3").catch(() => {
+      navigator.serviceWorker.register("/sw-v3.js").catch(() => {
         // Registration failures are non-fatal — the app works without the SW.
       });
     };
