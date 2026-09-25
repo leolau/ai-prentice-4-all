@@ -38,6 +38,7 @@ import {
 } from "@/components/projects/ProjectRow";
 import { BusyRegion } from "@/components/ui/BusyRegion";
 import { Pill, type Tone } from "@/components/ui/Pill";
+import { useRefresh } from "@/components/ui/useRefresh";
 import { useProjectEvents } from "@/components/projects/useProjectEvents";
 import type {
   ProjectBoardTask,
@@ -104,7 +105,9 @@ export function ProjectDetailView({
   isInstanceAdmin: boolean;
 }) {
   const router = useRouter();
-  const [busy, setBusy] = useState(false);
+  const { refresh, refreshing } = useRefresh();
+  const [requesting, setBusy] = useState(false);
+  const busy = requesting || refreshing;
   const [error, setError] = useState<string | null>(null);
   const [addOpen, setAddOpen] = useState(false);
   const [editOpen, setEditOpen] = useState(false);
@@ -163,7 +166,7 @@ export function ProjectDetailView({
         setError(friendlyError({ status: res.status, detail: data.detail }, "That did not go through."));
         return;
       }
-      router.refresh();
+      refresh();
     } catch {
       setError("Could not reach the server.");
     } finally {
@@ -194,7 +197,7 @@ export function ProjectDetailView({
         );
         return;
       }
-      router.refresh();
+      refresh();
     } catch {
       setError("Could not reach the server.");
     } finally {
@@ -219,7 +222,7 @@ export function ProjectDetailView({
         setError(friendlyError({ status: res.status, detail: data.detail }, "That did not go through."));
         return;
       }
-      router.refresh();
+      refresh();
     } catch {
       setError("Could not reach the server.");
     } finally {
@@ -468,7 +471,7 @@ export function ProjectDetailView({
         <AddToProjectSheet
           onClose={() => {
             setAddOpen(false);
-            router.refresh();
+            refresh();
           }}
           fixedSlug={project.slug}
           fixedName={project.name}
@@ -481,7 +484,7 @@ export function ProjectDetailView({
           initial={project.summary ?? ""}
           onClose={() => {
             setSummariseOpen(false);
-            router.refresh();
+            refresh();
           }}
         />
       ) : null}
@@ -491,7 +494,7 @@ export function ProjectDetailView({
           project={project}
           onClose={() => {
             setEditOpen(false);
-            router.refresh();
+            refresh();
           }}
         />
       ) : null}

@@ -1,11 +1,11 @@
 "use client";
 
-import { useRouter } from "next/navigation";
 import { useState } from "react";
 import { friendlyError } from "@/components/projects/errors";
 
 import { cardMoves, cardPatch } from "@/components/projects/cardMoves";
 import { BusyRegion } from "@/components/ui/BusyRegion";
+import { useRefresh } from "@/components/ui/useRefresh";
 import type { ProjectCardDetail } from "@/types";
 
 /**
@@ -24,7 +24,7 @@ export function CardEditor({
   /** The project's profiles — the only valid assignees. */
   profiles: string[];
 }) {
-  const router = useRouter();
+  const { refresh, refreshing } = useRefresh();
   const before = {
     title: card.title,
     body: card.body ?? "",
@@ -32,7 +32,8 @@ export function CardEditor({
   };
   const [editing, setEditing] = useState(false);
   const [fields, setFields] = useState(before);
-  const [busy, setBusy] = useState(false);
+  const [saving, setBusy] = useState(false);
+  const busy = saving || refreshing;
   const [error, setError] = useState<string | null>(null);
 
   const patch = async (body: Record<string, unknown>) => {
@@ -52,7 +53,7 @@ export function CardEditor({
         setError(friendlyError({ status: res.status, detail: data.detail }, "The change was not saved."));
         return false;
       }
-      router.refresh();
+      refresh();
       return true;
     } catch {
       setError("Could not reach the server.");

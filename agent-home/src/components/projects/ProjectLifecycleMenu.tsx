@@ -4,6 +4,7 @@ import { useRouter } from "next/navigation";
 import { useState } from "react";
 
 import { BusyRegion } from "@/components/ui/BusyRegion";
+import { useRefresh } from "@/components/ui/useRefresh";
 import type { ProjectDetail } from "@/types";
 
 /**
@@ -25,11 +26,13 @@ export function ProjectLifecycleMenu({
   isInstanceAdmin: boolean;
 }) {
   const router = useRouter();
+  const { refresh, refreshing } = useRefresh();
   const [open, setOpen] = useState(false);
   const [dialog, setDialog] = useState<null | "archive" | "delete">(null);
   const [reason, setReason] = useState("");
   const [typedSlug, setTypedSlug] = useState("");
-  const [busy, setBusy] = useState(false);
+  const [requesting, setBusy] = useState(false);
+  const busy = requesting || refreshing;
   const [error, setError] = useState<string | null>(null);
 
   const callerRole =
@@ -100,7 +103,7 @@ export function ProjectLifecycleMenu({
       }
       // The write answers with the updated row; the server read merges it.
       closeAll();
-      router.refresh();
+      refresh();
     } catch {
       setError("Could not reach the server.");
     } finally {
@@ -122,7 +125,7 @@ export function ProjectLifecycleMenu({
         return;
       }
       closeAll();
-      router.refresh();
+      refresh();
     } catch {
       setError("Could not reach the server.");
     } finally {

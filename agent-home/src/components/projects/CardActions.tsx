@@ -1,10 +1,10 @@
 "use client";
 
-import { useRouter } from "next/navigation";
 import { useState } from "react";
 import { friendlyError } from "@/components/projects/errors";
 
 import { BusyRegion } from "@/components/ui/BusyRegion";
+import { useRefresh } from "@/components/ui/useRefresh";
 
 /**
  * Operator recovery for a card (§12): **Stop** terminates a stuck/running
@@ -14,6 +14,8 @@ import { BusyRegion } from "@/components/ui/BusyRegion";
  * no claim (Stop released it), so its way back is the column move to
  * ready (**Make ready**), not a reclaim the backend would refuse.
  */
+type Action = "stop" | "reclaim" | "ready";
+
 export function CardActions({
   slug,
   taskId,
@@ -23,16 +25,21 @@ export function CardActions({
   taskId: string;
   status: string;
 }) {
-  const router = useRouter();
-  const [busy, setBusy] = useState<"stop" | "reclaim" | "ready" | null>(null);
+  const { refresh, refreshing } = useRefresh();
+  const [pending, setPending] = useState<Action | null>(null);
+  const [last, setLast] = useState<Action | null>(null);
+  // Busy from the click until the refreshed page has rendered.
+  const busy = pending ?? (refreshing ? last : null);
+  const inFlight = busy !== null;
   const [error, setError] = useState<string | null>(null);
 
   if (status !== "running" && status !== "ready" && status !== "blocked") {
     return null;
   }
 
-  const act = async (action: "stop" | "reclaim" | "ready") => {
-    setBusy(action);
+  const act = async (action: Action) => {
+    setPending(action);
+    setLast(action);
     setError(null);
     try {
       const base = `/api/projects/${encodeURIComponent(slug)}/cards/${encodeURIComponent(taskId)}`;
@@ -49,11 +56,11 @@ export function CardActions({
         setError(friendlyError({ status: res.status, detail: data.detail }, "That didn't go through."));
         return;
       }
-      router.refresh();
+      refresh();
     } catch {
       setError("Could not reach the server.");
     } finally {
-      setBusy(null);
+      setPending(null);
     }
   };
 
@@ -64,7 +71,7 @@ export function CardActions({
           <button
             type="button"
             onClick={() => void act("stop")}
-            disabled={busy !== null}
+            disabled={inFlight}
             className="rounded-lg border border-[var(--color-border)] px-3 py-1.5 text-xs font-medium disabled:opacity-40"
           >
             Stop
@@ -76,7 +83,7 @@ export function CardActions({
           <button
             type="button"
             onClick={() => void act("reclaim")}
-            disabled={busy !== null}
+            disabled={inFlight}
             className="rounded-lg border border-[var(--color-accent)] px-3 py-1.5 text-xs font-medium text-[var(--color-accent)] disabled:opacity-40"
           >
             Re-run
@@ -88,7 +95,7 @@ export function CardActions({
           <button
             type="button"
             onClick={() => void act("ready")}
-            disabled={busy !== null}
+            disabled={inFlight}
             className="rounded-lg border border-[var(--color-accent)] px-3 py-1.5 text-xs font-medium text-[var(--color-accent)] disabled:opacity-40"
           >
             Make ready
