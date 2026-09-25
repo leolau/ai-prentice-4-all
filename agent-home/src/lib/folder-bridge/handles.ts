@@ -118,14 +118,19 @@ export function folderPickerSupported(): boolean {
 }
 
 /**
- * Restore folders saved from a previous session. Handles restored this way
- * still require the browser to re-verify permission (usually "prompt" until
- * the user interacts with the page again) — this never auto-grants access.
+ * Folders to show when the bridge page mounts. The registry is module
+ * state, so folders added earlier in this page load (including snapshot
+ * folders and their trust flags) are still live after in-app navigation
+ * and are returned as-is; only folders not already live are restored from
+ * storage. Restored handles still require the browser to re-verify
+ * permission (usually "prompt" until the user interacts with the page
+ * again) — this never auto-grants access.
  */
 export async function restoreFolders(): Promise<FolderRecord[]> {
+  const out = listFolders();
   const stored = await loadPersisted();
-  const out: FolderRecord[] = [];
   for (const { id, label, handle } of stored) {
+    if (registry.has(id)) continue;
     const permission = await permissionOf(handle);
     registry.set(id, { id, label, handle, permission, trusted: false });
     out.push({ id, label, permission, trusted: false });

@@ -207,10 +207,11 @@ export function FolderBridgeView() {
         ) : null}
         {snapshotMode ? (
           <p className="mt-2 text-xs text-[var(--color-muted)]">
-            Safari and Firefox cannot remember folders between visits, so the
-            list is empty after a reload — Add folder again (Chrome, Edge and
-            Brave keep them). The folder is read as it was when you picked it;
-            add it again to see new files.
+            Folders stay connected while you move around agent-home in this
+            tab. Safari and Firefox forget them on a reload or when the tab
+            closes — Add folder again (Chrome, Edge and Brave keep them). The
+            folder is read as it was when you picked it; add it again to see
+            new files.
           </p>
         ) : null}
         {folders.length > 0 ? (
