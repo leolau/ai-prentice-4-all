@@ -1,8 +1,8 @@
 /**
  * BFF route tests for POST /api/chat/upload.
  *
- * Pins the raised size cap: files over 10 MB (the old limit) are accepted up
- * to 100 MB, and only beyond that does the route refuse with 413.
+ * The route is unlimited by default; `AGENT_HOME_UPLOAD_MAX_BYTES` reinstates
+ * a cap when a deploy wants one. The 413 case stubs that env var.
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -58,6 +58,7 @@ function post(file: File): Promise<Response> {
 describe("POST /api/chat/upload", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.unstubAllEnvs();
     getPrincipal.mockResolvedValue(principal);
   });
 
@@ -78,7 +79,19 @@ describe("POST /api/chat/upload", () => {
     expect(uploadChatMedia).toHaveBeenCalledOnce();
   });
 
-  it("refuses a file above the 100 MB cap with 413", async () => {
+  it("is unlimited by default", async () => {
+    const big = new File(
+      [new Uint8Array(101 * 1024 * 1024)],
+      "huge.bin",
+      { type: "application/octet-stream" },
+    );
+    const res = await post(big);
+    expect(res.status).toBe(200);
+    expect(uploadChatMedia).toHaveBeenCalledOnce();
+  });
+
+  it("refuses a file above a configured cap with 413", async () => {
+    vi.stubEnv("AGENT_HOME_UPLOAD_MAX_BYTES", "104857600");
     const oversize = new File(
       [new Uint8Array(100 * 1024 * 1024 + 1)],
       "huge.bin",
