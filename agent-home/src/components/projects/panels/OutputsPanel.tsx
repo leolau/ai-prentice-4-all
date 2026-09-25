@@ -5,10 +5,13 @@ import { friendlyError } from "@/components/projects/errors";
 
 import { applyAcceptEnvelope } from "@/components/projects/envelopes";
 import { dateTimeLabel } from "@/components/projects/format";
+import { useFileRefOpener } from "@/components/files/FileRefOpener";
+import { friendlyFileName } from "@/components/projects/panels/LinkRow";
 import { BusyRegion } from "@/components/ui/BusyRegion";
 import { Pill } from "@/components/ui/Pill";
 import { useRefresh, useServerState } from "@/components/ui/useRefresh";
 import type {
+  ProjectDelivery,
   ProjectOutputKind,
   ProjectOutputStatus,
   ProjectOutputWithDeliveries,
@@ -43,6 +46,7 @@ export function OutputsPanel({
 }) {
   const { refresh, refreshing } = useRefresh();
   const [outputs, setOutputs] = useServerState(initial);
+  const fileOpener = useFileRefOpener();
   const [busyId, setBusyId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [offersClosure, setOffersClosure] = useState(false);
@@ -272,8 +276,12 @@ export function OutputsPanel({
                     <li key={delivery.id}>
                       delivered{" "}
                       {delivery.run_id ? `on a run` : "by hand"}
-                      {delivery.label ? ` → ${delivery.label}` : ""} ·{" "}
-                      {dateTimeLabel(delivery.delivered_at)}
+                      <DeliveryRef
+                        delivery={delivery}
+                        onOpenFile={fileOpener.open}
+                        resolving={fileOpener.resolving}
+                      />{" "}
+                      · {dateTimeLabel(delivery.delivered_at)}
                     </li>
                   ))}
                 </ul>
@@ -365,6 +373,66 @@ export function OutputsPanel({
           </div>
         </BusyRegion>
       ) : null}
+
+      {fileOpener.dialog}
     </section>
   );
+}
+
+/**
+ * The artefact pointer on one delivery row. A `file` ref resolves through the
+ * shared registry/storage opener so the reviewer can actually view or
+ * download what they are about to accept; a `url` ref is a plain external
+ * link; anything else keeps its cached label (a link is never an authority —
+ * §11 rule 5).
+ */
+function DeliveryRef({
+  delivery,
+  onOpenFile,
+  resolving,
+}: {
+  delivery: ProjectDelivery;
+  onOpenFile: (target: { ref: string; label?: string | null }) => Promise<void>;
+  resolving: string | null;
+}) {
+  const ref = delivery.link_ref;
+  const label =
+    delivery.label ??
+    (delivery.link_kind === "file" && ref
+      ? (friendlyFileName(ref) ?? ref)
+      : ref) ??
+    null;
+
+  if (delivery.link_kind === "file" && ref) {
+    return (
+      <>
+        {" → "}
+        <button
+          type="button"
+          onClick={() => void onOpenFile({ ref, label: delivery.label })}
+          disabled={resolving === ref}
+          aria-label={`Open ${label}`}
+          className="underline decoration-dotted underline-offset-2 hover:text-[var(--color-accent)] disabled:opacity-50"
+        >
+          {label}
+        </button>
+      </>
+    );
+  }
+  if (delivery.link_kind === "url" && ref) {
+    return (
+      <>
+        {" → "}
+        <a
+          href={ref}
+          target="_blank"
+          rel="noreferrer"
+          className="underline decoration-dotted underline-offset-2 hover:text-[var(--color-accent)]"
+        >
+          {label}
+        </a>
+      </>
+    );
+  }
+  return label ? <> → {label}</> : null;
 }
