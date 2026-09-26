@@ -35,7 +35,8 @@ export async function register(): Promise<void> {
     get(this: object) {
       return values.get(this) ?? 0;
     },
-    set(this: object, _v: number) {
+    set(this: object, v: number) {
+      void v;
       values.set(this, 0);
     },
     configurable: true,
@@ -52,4 +53,8 @@ export async function register(): Promise<void> {
       // upload; a hung TCP handshake should still fail fast.
     }),
   );
+
+  // Boot marker: this line in journalctl is the proof the hook ran — the
+  // alternative is inferring timeout behaviour from production failures.
+  console.info("[instrumentation] http requestTimeout=0 + undici timeouts disabled");
 }

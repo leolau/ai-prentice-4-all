@@ -242,9 +242,37 @@ interface ImportResponse {
   size?: number;
   storage_bucket?: string;
   storage_path?: string;
+  received?: number;
   error?: string;
   detail?: string;
 }
+
+/**
+ * Chunked import. Browsers abort any single request that runs long enough
+ * (Safari kills a ~1 GiB POST at ~300 s on every network tried), so files
+ * above the threshold go up in sequential slices the BFF appends to a spool
+ * file; a final empty request at offset == total makes it stream the
+ * assembled file to Storage and register it. Every request is short, every
+ * `{received}` response is the server's authoritative byte count (lost
+ * responses resync via 409 instead of re-sending), and each chunk retries
+ * with backoff — so a killed connection costs one chunk, not the import.
+ */
+const DEFAULT_IMPORT_CHUNK_SIZE = 16 * 1024 * 1024;
+let importChunkSize = DEFAULT_IMPORT_CHUNK_SIZE;
+const IMPORT_CHUNK_MAX_ATTEMPTS = 4;
+
+/** Test-only: override the chunk size so multi-chunk paths run on tiny files. */
+export function __setImportChunkSizeForTest(value: number | undefined): void {
+  importChunkSize = value ?? DEFAULT_IMPORT_CHUNK_SIZE;
+}
+
+function newImportId(): string {
+  return typeof crypto !== "undefined" && "randomUUID" in crypto
+    ? crypto.randomUUID()
+    : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /** Reported as bytes leave this tab's network stack, throttled by the caller. */
 export type ImportProgressCallback = (sent: number, total: number) => void;
@@ -291,16 +319,22 @@ export function __setStreamingBodySupportForTest(value: boolean | undefined): vo
  * Copy one file, byte for byte, into the file store via the BFF
  * (`POST /api/files/import`) and return the registry row.
  *
- * When the browser supports streaming request bodies, the file is posted as
- * a `ReadableStream` (not the bare `File`) so upload progress is observable:
- * the browser only pulls the next chunk once the network is ready to accept
- * it (fetch applies real backpressure to a streaming body), so counting
- * bytes as they are *read* is an accurate proxy for bytes actually sent.
- * Otherwise (Safari/WebKit — see `supportsStreamingRequestBody`) it falls
- * back to posting the `File` directly, which every browser supports; that
- * path has no live progress (`onProgress` fires only at 0% and 100%) but
- * still streams from disk with no extra memory cost. Either way, works for
- * files of any size. The BFF computes the SHA-256 server-side while
+ * Files larger than the chunk threshold go up as sequential chunk requests
+ * (see `importFileChunked`) — no single request runs long enough to hit the
+ * ~300 s request watchdog browsers impose, `onProgress` reflects
+ * server-acknowledged bytes, and a dropped connection retries one chunk,
+ * not the whole file.
+ *
+ * Below the threshold it's a single POST: when the browser supports
+ * streaming request bodies, the file is posted as a `ReadableStream` (not
+ * the bare `File`) so upload progress is observable — the browser only pulls
+ * the next chunk once the network is ready to accept it (fetch applies real
+ * backpressure to a streaming body), so counting bytes as they are *read* is
+ * an accurate proxy for bytes actually sent. Otherwise (Safari/WebKit — see
+ * `supportsStreamingRequestBody`) it falls back to posting the `File`
+ * directly, which every browser supports; that path has no live progress
+ * (`onProgress` fires only at 0% and 100%) but still streams from disk with
+ * no extra memory cost. The BFF computes the SHA-256 server-side while
  * streaming to Storage; `verified` means the upload completed and the
  * server returned a hash.
  */
@@ -315,6 +349,10 @@ export async function importFile(
   const handle = await resolveFile(root, path);
   const file = await handle.getFile();
   onProgress?.(0, file.size);
+
+  if (file.size > importChunkSize) {
+    return importFileChunked(file, folderId, path, folderLabel, fetchImpl, onProgress);
+  }
 
   const canStream = supportsStreamingRequestBody();
   let sent = 0;
@@ -348,15 +386,28 @@ export async function importFile(
     // implements it.
   } as RequestInit);
   onProgress?.(file.size, file.size);
-  let body: ImportResponse = {};
-  try {
-    body = (await res.json()) as ImportResponse;
-  } catch {
-    // Non-JSON error page; the status code below carries the failure.
-  }
+  const body = await readImportResponse(res);
   if (!res.ok) {
     throw new Error(body.detail || body.error || `Import failed (HTTP ${res.status}).`);
   }
+  return importResultFromBody(body, folderId, path, file);
+}
+
+async function readImportResponse(res: Response): Promise<ImportResponse> {
+  try {
+    return (await res.json()) as ImportResponse;
+  } catch {
+    // Non-JSON error page; the status code carries the failure.
+    return {};
+  }
+}
+
+function importResultFromBody(
+  body: ImportResponse,
+  folderId: string,
+  path: string,
+  file: File,
+): ImportResult {
   if (!body.asset?.id || !body.sha256) {
     throw new Error("Import failed: the file store returned no registry row.");
   }
@@ -371,6 +422,93 @@ export async function importFile(
     storagePath: body.storage_path ?? "",
     verified: true,
   };
+}
+
+/**
+ * Upload `file` in importChunkSize slices. `offset` is always the count
+ * the server has confirmed (`received`), so retries and resyncs never
+ * duplicate bytes: a 409 means "your offset is stale — here's the truth".
+ */
+async function importFileChunked(
+  file: File,
+  folderId: string,
+  path: string,
+  folderLabel: string,
+  fetchImpl: typeof fetch,
+  onProgress?: ImportProgressCallback,
+): Promise<ImportResult> {
+  const importId = newImportId();
+  const chunkHeaders = (offset: number): Record<string, string> => ({
+    "content-type": file.type || "application/octet-stream",
+    "x-file-name": encodeURIComponent(file.name),
+    "x-source-path": encodeURIComponent(path),
+    "x-folder-label": encodeURIComponent(folderLabel),
+    "x-import-id": importId,
+    "x-import-offset": String(offset),
+    "x-import-total": String(file.size),
+  });
+
+  const post = async (
+    offset: number,
+    body: Blob | null,
+  ): Promise<{ res: Response; data: ImportResponse }> => {
+    const res = await fetchImpl("/api/files/import", {
+      method: "POST",
+      ...(body ? { body } : {}),
+      headers: chunkHeaders(offset),
+    });
+    return { res, data: await readImportResponse(res) };
+  };
+
+  let offset = 0;
+  while (offset < file.size) {
+    const end = Math.min(offset + importChunkSize, file.size);
+    for (let attempt = 0; ; attempt++) {
+      try {
+        const { res, data } = await post(offset, file.slice(offset, end));
+        if (res.status === 409 && typeof data.received === "number") {
+          offset = data.received; // resync to the server's byte count
+          break;
+        }
+        if (!res.ok) {
+          throw new Error(
+            data.detail || data.error || `Import failed (HTTP ${res.status}).`,
+          );
+        }
+        offset = typeof data.received === "number" ? data.received : end;
+        break;
+      } catch (err) {
+        if (attempt + 1 >= IMPORT_CHUNK_MAX_ATTEMPTS) throw err;
+        await sleep(500 * 2 ** attempt);
+      }
+    }
+    onProgress?.(Math.min(offset, file.size), file.size);
+  }
+
+  // Finalize: empty request at offset == total → server streams the spool to
+  // Storage and registers the asset. Idempotent server-side, so it can be
+  // retried like any chunk.
+  for (let attempt = 0; ; attempt++) {
+    try {
+      const { res, data } = await post(file.size, null);
+      if (res.status === 409 && typeof data.received === "number") {
+        if (data.received >= file.size) continue;
+        throw new Error(
+          `Import failed: the server only received ${data.received} of ${file.size} bytes.`,
+        );
+      }
+      if (!res.ok) {
+        throw new Error(
+          data.detail || data.error || `Import failed (HTTP ${res.status}).`,
+        );
+      }
+      onProgress?.(file.size, file.size);
+      return importResultFromBody(data, folderId, path, file);
+    } catch (err) {
+      if (attempt + 1 >= IMPORT_CHUNK_MAX_ATTEMPTS) throw err;
+      await sleep(500 * 2 ** attempt);
+    }
+  }
 }
 
 export async function fileMetadata(
