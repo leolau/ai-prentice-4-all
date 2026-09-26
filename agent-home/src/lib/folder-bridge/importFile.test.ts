@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
+  __setImportChunkSizeForTest,
   __setStreamingBodySupportForTest,
   importFile,
   readFileContent,
@@ -225,5 +226,120 @@ describe("importFile", () => {
       [0, 10],
       [10, 10],
     ]);
+  });
+});
+
+describe("importFile (chunked)", () => {
+  afterEach(() => {
+    __setImportChunkSizeForTest(undefined);
+    __setStreamingBodySupportForTest(undefined);
+  });
+
+  function chunkServer(opts: {
+    overrides?: Record<number, () => Promise<Response> | Response>;
+    startReceived?: number;
+  } = {}) {
+    const calls: Array<{ offset: number; total: number; size: number }> = [];
+    let received = opts.startReceived ?? 0;
+    const fetchImpl = vi.fn(
+      async (_url: string | URL | Request, init?: RequestInit) => {
+        const h = new Headers(init?.headers);
+        const offset = Number(h.get("x-import-offset"));
+        const total = Number(h.get("x-import-total"));
+        const blob = init?.body as Blob | null;
+        const size = blob?.size ?? 0;
+        calls.push({ offset, total, size });
+        const override = opts.overrides?.[calls.length - 1];
+        if (override) return override();
+        if (offset !== received) {
+          return new Response(
+            JSON.stringify({ error: "offset_mismatch", received }),
+            { status: 409 },
+          );
+        }
+        received += size;
+        if (offset < total) {
+          return new Response(JSON.stringify({ received }), { status: 200 });
+        }
+        return new Response(
+          JSON.stringify({
+            asset: { id: "asset-9", filename: "2026-01.pdf" },
+            sha256: "ab".repeat(32),
+            size: total,
+            storage_bucket: "agent-home-media",
+            storage_path: "u/folder-bridge/x-2026-01.pdf",
+          }),
+          { status: 200 },
+        );
+      },
+    );
+    return { calls, fetchImpl };
+  }
+
+  it("uploads sequential chunks then finalizes with an empty request", async () => {
+    __setImportChunkSizeForTest(4); // 10-byte file → chunks at 0, 4, 8
+    const { calls, fetchImpl } = chunkServer();
+    const progressCalls: Array<[number, number]> = [];
+
+    const result = await importFile(
+      root(),
+      "f1",
+      "Invoices",
+      "2026-01.pdf",
+      fetchImpl,
+      (s, t) => progressCalls.push([s, t]),
+    );
+
+    expect(calls.map((c) => [c.offset, c.size])).toEqual([
+      [0, 4],
+      [4, 4],
+      [8, 2],
+      [10, 0], // finalize
+    ]);
+    expect(result.assetId).toBe("asset-9");
+    expect(result.sha256).toBe("ab".repeat(32));
+    expect(progressCalls.at(-1)).toEqual([10, 10]);
+  });
+
+  it("resyncs to the server's byte count on a 409 instead of re-sending", async () => {
+    __setImportChunkSizeForTest(4);
+    // Simulate a previous attempt that already committed 8 bytes server-side.
+    const { calls, fetchImpl } = chunkServer({ startReceived: 8 });
+
+    const result = await importFile(
+      root(),
+      "f1",
+      "Invoices",
+      "2026-01.pdf",
+      fetchImpl,
+    );
+
+    // After the resync the client jumps to offset 8 — no re-send of 0.
+    expect(calls.map((c) => [c.offset, c.size])).toEqual([
+      [0, 4],
+      [8, 2],
+      [10, 0],
+    ]);
+    expect(result.assetId).toBe("asset-9");
+  });
+
+  it("retries a chunk after a network error", async () => {
+    __setImportChunkSizeForTest(4);
+    const { calls, fetchImpl } = chunkServer({
+      overrides: { 0: () => Promise.reject(new Error("socket reset")) },
+    });
+
+    const result = await importFile(
+      root(),
+      "f1",
+      "Invoices",
+      "2026-01.pdf",
+      fetchImpl,
+    );
+
+    // First call failed, retried at the same offset.
+    expect(calls[0].offset).toBe(0);
+    expect(calls[1].offset).toBe(0);
+    expect(result.assetId).toBe("asset-9");
   });
 });

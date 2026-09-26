@@ -8,7 +8,11 @@
  * The route now streams the raw request body to Storage (no multipart), so
  * tests post the file as the body with metadata in headers.
  */
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { POST } from "@/app/api/files/import/route";
 import type { Principal } from "@/types";
@@ -49,6 +53,13 @@ vi.mock("@/lib/supabase/storage", () => ({
   storageAvailable: () => storageAvailable(),
   uploadChatMediaStream: (...args: unknown[]) =>
     (uploadChatMediaStream as (...a: unknown[]) => unknown)(...args),
+  // Mirror of the real slug() — the module itself can't be imported in tests
+  // (it imports `server-only`, which throws outside an RSC build).
+  slug: (input: string) =>
+    input
+      .replace(/[^A-Za-z0-9._-]+/g, "_")
+      .replace(/\.{2,}/g, "_")
+      .replace(/^[._]+|[._]+$/g, "") || "file",
 }));
 vi.mock("@/lib/chat/upload-limit", () => ({
   uploadMaxBytes: () => 64,
@@ -174,5 +185,110 @@ describe("POST /api/files/import", () => {
       error: "import_failed",
       detail: "registry down",
     });
+  });
+});
+
+describe("POST /api/files/import (chunked)", () => {
+  let spoolTmp: string;
+
+  beforeEach(async () => {
+    spoolTmp = await mkdtemp(join(tmpdir(), "import-route-test-"));
+    vi.stubEnv("TMPDIR", spoolTmp);
+  });
+
+  afterEach(async () => {
+    vi.unstubAllEnvs();
+    await rm(spoolTmp, { recursive: true, force: true });
+  });
+
+  function postChunk(
+    bytes: Uint8Array | null,
+    importId: string,
+    offset: number,
+    total: number,
+  ): Promise<Response> {
+    return POST(
+      new Request("http://home.test/api/files/import", {
+        method: "POST",
+        body: bytes ? (bytes.buffer.slice(0) as BodyInit) : null,
+        headers: {
+          "content-type": "application/octet-stream",
+          "x-file-name": "invoice.pdf",
+          "x-source-path": "2026/invoice.pdf",
+          "x-folder-label": "Invoices",
+          "x-import-id": importId,
+          "x-import-offset": String(offset),
+          "x-import-total": String(total),
+        },
+      }),
+    ) as unknown as Promise<Response>;
+  }
+
+  it("assembles chunks, then finalizes to Storage + registry", async () => {
+    const id = "imp-1";
+    const half = PDF_BYTES.length / 2;
+
+    const r1 = await postChunk(PDF_BYTES.slice(0, half), id, 0, PDF_BYTES.length);
+    expect(r1.status).toBe(200);
+    expect(await r1.json()).toEqual({ received: half });
+
+    const r2 = await postChunk(
+      PDF_BYTES.slice(half),
+      id,
+      half,
+      PDF_BYTES.length,
+    );
+    expect(await r2.json()).toEqual({ received: PDF_BYTES.length });
+
+    const fin = await postChunk(null, id, PDF_BYTES.length, PDF_BYTES.length);
+    expect(fin.status).toBe(200);
+    const body = await fin.json();
+    expect(body.asset.id).toBe("asset-1");
+    expect(body.sha256).toBe(await sha256(PDF_BYTES));
+    expect(registerFile).toHaveBeenCalledWith(
+      expect.objectContaining({ byte_size: PDF_BYTES.length }),
+    );
+  });
+
+  it("409s with the true byte count when the client offset is stale", async () => {
+    const id = "imp-2";
+    await postChunk(PDF_BYTES.slice(0, 4), id, 0, PDF_BYTES.length);
+    const res = await postChunk(PDF_BYTES.slice(4), id, 0, PDF_BYTES.length);
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({
+      error: "offset_mismatch",
+      received: 4,
+    });
+  });
+
+  it("replays a completed finalize instead of double-registering", async () => {
+    const id = "imp-3";
+    await postChunk(PDF_BYTES, id, 0, PDF_BYTES.length);
+    const fin = await postChunk(null, id, PDF_BYTES.length, PDF_BYTES.length);
+    expect(fin.status).toBe(200);
+
+    uploadChatMediaStream.mockClear();
+    registerFile.mockClear();
+    const retry = await postChunk(null, id, PDF_BYTES.length, PDF_BYTES.length);
+    expect(retry.status).toBe(200);
+    expect((await retry.json()).asset.id).toBe("asset-1");
+    expect(uploadChatMediaStream).not.toHaveBeenCalled();
+    expect(registerFile).not.toHaveBeenCalled();
+  });
+
+  it("400s bad chunk headers", async () => {
+    const res = await POST(
+      new Request("http://home.test/api/files/import", {
+        method: "POST",
+        body: PDF_BYTES.buffer.slice(0) as BodyInit,
+        headers: {
+          "x-import-id": "imp-bad",
+          "x-import-offset": "abc",
+          "x-import-total": "10",
+        },
+      }),
+    );
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({ error: "bad_chunk_headers" });
   });
 });
