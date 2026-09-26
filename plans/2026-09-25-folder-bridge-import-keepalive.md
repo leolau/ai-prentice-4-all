@@ -81,3 +81,33 @@ Separate from the code change — installs the service that was missing:
       (timeout 3600) + README approvals gating in `config.yaml`, gateway /
       dashboard / agent-home restarted 2026-09-25 ~21:07 box time
 - [ ] Live verification (ticket, WS connect, large import)
+
+## Follow-up (2026-09-26): the ~300 s wall was the browser — chunked import shipped
+
+After every server-side cause was fixed and verified (app-mcp keepalive,
+`FILE_SIZE_LIMIT` 5 GiB, Kong `client_body_timeout`/`proxy_*` 3600 s, Node
+`requestTimeout`=0 + undici client timeouts via `instrumentation.ts` —
+boot marker `[instrumentation] http requestTimeout=0 + undici timeouts
+disabled` now proves the hook runs), the real Safari import still died at
+~300-320 s with Kong logging an empty `400` for the storage leg. The wall
+is **time, not bytes**: ~500 MB survived on a fast line, ~131 MB on a slow
+hotspot. Every synthetic client (curl, node http/1.1, node http/2 through
+the real route at 308-309 s, direct storage uploads past 9 min) succeeds —
+only real browser requests die. Conclusion: the browser's per-request
+watchdog kills any upload that runs long enough, regardless of server
+config. No server-side fix can remove it.
+
+**Shipped in PR #472** (`6c109eb5b`): files >16 MiB import as sequential
+chunk POSTs (`x-import-id`/`x-import-offset`/`x-import-total`) appended to
+a per-principal spool under `os.tmpdir()/agent-home-imports/`; each
+response returns the authoritative `{received}` count, `409
+offset_mismatch` resyncs the client (resume, no byte duplication), chunks
+retry with backoff, and an empty request at `offset==total` finalizes —
+streams the assembled file to Storage (local disk, seconds), registers the
+asset, and caches the result in a `.done` marker so a retried finalize can
+never double-register. Spool files sweep after 24 h. Small files keep the
+single-shot streaming path. Progress now reflects **server-acknowledged**
+bytes, true on every browser including Safari.
+
+Diagnostics added: `import-chunk` / `import-store` / `import-finalize`
+journal lines per request.
