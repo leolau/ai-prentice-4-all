@@ -3,6 +3,10 @@
 import Link from "next/link";
 import { useCallback, useEffect, useRef, useState } from "react";
 
+/** How often the visible list re-reads its first page — project statuses,
+ * health and next-run move without anyone touching this page. */
+const AUTO_REFRESH_MS = 30_000;
+
 import { ProjectRow } from "@/components/projects/ProjectRow";
 import { ProjectsFilters } from "@/components/projects/ProjectsFilters";
 import {
@@ -36,11 +40,23 @@ export function ProjectsList({ initial }: { initial: ProjectsResponse }) {
   );
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // True once the user has appended a page beyond the server's first. An
+  // auto-refresh replaces the first page only, so it would silently drop
+  // everything below — polling pauses in that state instead.
+  const [paged, setPaged] = useState(false);
+  // Mirrors `loading` for the interval callback (which must not re-arm on
+  // every fetch or the cadence would never settle). Written only inside
+  // `fetchPage` — assigning a ref during render is off-limits.
+  const loadingRef = useRef(false);
 
   const fetchPage = useCallback(
     async (value: ProjectsFilterState, after: string | null) => {
       setLoading(true);
+      loadingRef.current = true;
       setError(null);
+      // A fresh first page (filters changed, auto-refresh) resets the flag;
+      // appending a deeper page sets it.
+      setPaged(after !== null);
       try {
         const params = filtersToParams(value, after);
         params.set("limit", String(PAGE_SIZE));
@@ -62,6 +78,7 @@ export function ProjectsList({ initial }: { initial: ProjectsResponse }) {
         setError("Couldn't reach the AI layer.");
       } finally {
         setLoading(false);
+        loadingRef.current = false;
       }
     },
     [],
@@ -85,6 +102,29 @@ export function ProjectsList({ initial }: { initial: ProjectsResponse }) {
     }, 300);
     return () => clearTimeout(timer);
   }, [filters, fetchPage]);
+
+  // Live list: health, status and next-run move without a reload. Re-read
+  // the first page on a cadence while the tab is visible and the moment
+  // focus returns — the same pattern the chat unread badge uses. Paused
+  // while the user has paged deeper (a refresh would drop appended pages)
+  // and skipped while a fetch is already in flight.
+  useEffect(() => {
+    if (paged) return;
+    const tick = () => {
+      if (document.visibilityState !== "visible" || loadingRef.current) {
+        return;
+      }
+      void fetchPage(filters, null);
+    };
+    const interval = window.setInterval(tick, AUTO_REFRESH_MS);
+    window.addEventListener("focus", tick);
+    document.addEventListener("visibilitychange", tick);
+    return () => {
+      window.clearInterval(interval);
+      window.removeEventListener("focus", tick);
+      document.removeEventListener("visibilitychange", tick);
+    };
+  }, [filters, paged, fetchPage]);
 
   // Infinite scroll, with the button below as the accessible fallback for
   // keyboard users and for browsers where the sentinel never intersects.

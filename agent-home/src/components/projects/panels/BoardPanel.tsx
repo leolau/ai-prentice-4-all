@@ -3,9 +3,14 @@
 import Link from "next/link";
 import { useState } from "react";
 
-import { cardMoves } from "@/components/projects/cardMoves";
+import {
+  addTaskToBoard,
+  cardMoves,
+  moveTaskInBoard,
+  newBoardCard,
+} from "@/components/projects/cardMoves";
 import { BusyRegion } from "@/components/ui/BusyRegion";
-import { useRefresh } from "@/components/ui/useRefresh";
+import { useRefresh, useServerState } from "@/components/ui/useRefresh";
 import type { ProjectBoardView } from "@/types";
 
 /**
@@ -32,6 +37,12 @@ export function BoardPanel({
   archived?: boolean;
 }) {
   const { refresh, refreshing } = useRefresh();
+  // Optimistic copy of the server-rendered board: moves and new cards apply
+  // here the moment they're requested, and the refresh that follows swaps in
+  // the server's authoritative board (see `useServerState`). Until that
+  // lands the card already sits in its new column instead of reading as
+  // ignored for the whole round trip.
+  const [liveBoard, setLiveBoard] = useServerState(board);
   const [pendingId, setBusyId] = useState<string | null>(null);
   const [lastId, setLastId] = useState<string | null>(null);
   const busyId = pendingId ?? (refreshing ? lastId : null);
@@ -65,14 +76,22 @@ export function BoardPanel({
     setBusyId(taskId);
     setLastId(taskId);
     setError(null);
+    // Apply the column move immediately; a failure restores the snapshot.
+    const before = liveBoard;
+    if (before) setLiveBoard(moveTaskInBoard(before, taskId, to));
     try {
       const ok = await request(
         `${base}/${encodeURIComponent(taskId)}`,
         "PATCH",
         { status: to },
       );
-      if (ok) refresh();
+      if (ok) {
+        refresh();
+      } else if (before) {
+        setLiveBoard(before);
+      }
     } catch {
+      if (before) setLiveBoard(before);
       setError("Could not reach the server.");
     } finally {
       setBusyId(null);
@@ -92,6 +111,7 @@ export function BoardPanel({
       const made = await request(base, "POST", { title });
       if (!made) return;
       const taskId = typeof made.task_id === "string" ? made.task_id : null;
+      let finalColumn = column;
       if (column !== "triage" && taskId) {
         const moved = await request(
           `${base}/${encodeURIComponent(taskId)}`,
@@ -99,8 +119,16 @@ export function BoardPanel({
           { status: column },
         );
         if (!moved) {
+          finalColumn = "triage";
           setError((prev) => `${prev ?? ""} The card was created in triage.`.trim());
         }
+      }
+      // The POST only answers with the id — show a minimal card right away
+      // rather than waiting for the refresh to paint it.
+      if (taskId && liveBoard) {
+        setLiveBoard(
+          addTaskToBoard(liveBoard, finalColumn, newBoardCard(taskId, title, finalColumn)),
+        );
       }
       setNewTitle("");
       setNewIn(null);
@@ -125,14 +153,14 @@ export function BoardPanel({
         Board
       </h2>
 
-      {board == null ? (
+      {liveBoard == null ? (
         <p className="mt-2 text-sm text-[var(--color-muted)]">
           The board is unavailable right now — the profile it lives on could
           not be reached.
         </p>
       ) : (
         <>
-          {board.columns.every((column) => column.tasks.length === 0) ? (
+          {liveBoard.columns.every((column) => column.tasks.length === 0) ? (
             <p className="mt-2 text-sm text-[var(--color-muted)]">
               No cards yet. The first run creates one card per plan step;
               you can also start one with <strong>+ New card</strong> in a
@@ -140,7 +168,7 @@ export function BoardPanel({
             </p>
           ) : null}
           <div className="mt-2 flex snap-x snap-mandatory gap-3 overflow-x-auto pb-1 md:grid md:grid-cols-3 md:overflow-visible">
-            {board.columns.map((column) => (
+            {liveBoard.columns.map((column) => (
               <div
                 key={column.name}
                 data-component="BoardColumn"

@@ -27,7 +27,13 @@ export function Composer({
   sessionId: string | null;
   /** Pre-filled text (a deep link's `?draft=`); the user still presses send. */
   initialText?: string;
-  onSend: (text: string, attachments: ChatAttachment[]) => void | Promise<void>;
+  /**
+   * Resolves `false` when the message never reached the agent (a transport
+   * failure, not a mid-turn error) — the composer then puts the draft and
+   * its attachments back so nothing is lost to a flaky network. Any other
+   * resolution (void/true/undefined) leaves the field cleared.
+   */
+  onSend: (text: string, attachments: ChatAttachment[]) => void | Promise<boolean | void> | boolean;
   /** Cancel the in-flight turn for the conversation on screen. */
   onStop?: () => void;
 }) {
@@ -50,11 +56,19 @@ export function Composer({
 
   const canSend = !sending && !uploading && (text.trim() !== "" || attachments.length > 0);
 
-  function submit() {
+  async function submit() {
     if (!canSend) return;
-    void onSend(text.trim(), attachments);
+    const sent = text.trim();
+    const sentAttachments = attachments;
     setText("");
     setAttachments([]);
+    const ok = await onSend(sent, sentAttachments);
+    if (ok === false) {
+      // The turn never started — the error line names why; give the draft
+      // back so the user retries instead of retyping.
+      setText(sent);
+      setAttachments(sentAttachments);
+    }
   }
 
   function pickFiles(files: File[]) {

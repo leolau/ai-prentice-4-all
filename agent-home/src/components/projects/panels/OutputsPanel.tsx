@@ -48,6 +48,12 @@ export function OutputsPanel({
   const [outputs, setOutputs] = useServerState(initial);
   const fileOpener = useFileRefOpener();
   const [busyId, setBusyId] = useState<string | null>(null);
+  const [lastId, setLastId] = useState<string | null>(null);
+  // Held from the click until the refreshed page has rendered — the same
+  // pending/refreshing pattern CardActions uses, so a second tap in the gap
+  // between the POST answering and the new render landing can't re-fire.
+  const busyRow = busyId ?? (refreshing ? lastId : null);
+  const inFlight = busyRow !== null;
   const [error, setError] = useState<string | null>(null);
   const [offersClosure, setOffersClosure] = useState(false);
   const [closingRequest, setClosing] = useState(false);
@@ -63,6 +69,7 @@ export function OutputsPanel({
 
   const accept = async (outputId: string) => {
     setBusyId(outputId);
+    setLastId(outputId);
     setError(null);
     try {
       const res = await fetch(
@@ -160,6 +167,7 @@ export function OutputsPanel({
 
   const remove = async (outputId: string) => {
     setBusyId(`del:${outputId}`);
+    setLastId(`del:${outputId}`);
     setError(null);
     try {
       const res = await fetch(
@@ -287,12 +295,13 @@ export function OutputsPanel({
                 </ul>
               ) : null}
               {output.status === "delivered" && !archived ? (
-                <BusyRegion busy={busyId === output.id} label="Accepting…">
+                <BusyRegion busy={busyRow === output.id} label="Accepting…">
                   <div className="mt-2 flex flex-wrap items-center gap-2">
                     <button
                       type="button"
                       onClick={() => void accept(output.id)}
-                      className="rounded-lg border border-[var(--color-accent)] px-3 py-1.5 text-xs font-medium text-[var(--color-accent)]"
+                      disabled={inFlight}
+                      className="rounded-lg border border-[var(--color-accent)] px-3 py-1.5 text-xs font-medium text-[var(--color-accent)] disabled:opacity-40"
                     >
                       Accept
                     </button>
@@ -310,10 +319,11 @@ export function OutputsPanel({
                 </p>
               ) : null}
               {output.status === "pending" && !archived ? (
-                <BusyRegion busy={busyId === `del:${output.id}`} label="Removing…">
+                <BusyRegion busy={busyRow === `del:${output.id}`} label="Removing…">
                   <button
                     type="button"
                     onClick={() => void remove(output.id)}
+                    disabled={inFlight}
                     className="mt-2 text-xs text-[var(--color-muted)] underline disabled:opacity-40"
                   >
                     Remove
@@ -364,7 +374,7 @@ export function OutputsPanel({
               <button
                 type="button"
                 onClick={() => void add()}
-                disabled={!newTitle.trim()}
+                disabled={!newTitle.trim() || adding}
                 className="ml-auto rounded-lg border border-[var(--color-accent)] px-3 py-1.5 text-xs font-medium text-[var(--color-accent)] disabled:opacity-40"
               >
                 Add output
