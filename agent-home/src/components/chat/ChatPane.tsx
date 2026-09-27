@@ -83,6 +83,9 @@ export interface ChatPaneProps {
   initialDraft?: string;
 }
 
+/** Idle-watch cadence for turns started on other surfaces. */
+const ACTIVE_WATCH_MS = 10_000;
+
 /** Only user/assistant turns are shown in the visible thread. */
 function visible(messages: ChatMessage[]): ChatMessage[] {
   return messages.filter((m) => m.role === "user" || m.role === "assistant");
@@ -196,29 +199,55 @@ export function ChatPane({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Reload mid-turn: re-attach to the in-flight turn of the session the page
-  // reopened on, so its content keeps flowing instead of freezing.
+  // Idle watch: a turn can start on the open conversation from another
+  // surface (Telegram, another device, a scheduled job) or be mid-flight when
+  // the page loads. While no local turn is running, poll `active` on a short
+  // cadence and on wake; when a run appears, attach to its stream so the
+  // reply arrives live instead of on the next manual reload. Also covers the
+  // mount-time "re-attach to the in-flight turn" case the old one-shot
+  // effect handled.
+  const watchBusy = sendingKeys.includes(keyOf(sessionId));
   useEffect(() => {
-    if (!initialSessionId) return;
+    if (!sessionId || watchBusy) return;
     let cancelled = false;
-    fetch(
-      withProfileQuery(
-        `/api/chat/active?sessionId=${encodeURIComponent(initialSessionId)}`,
-        profile,
-      ),
-      { cache: "no-store" },
-    )
-      .then((res) => (res.ok ? res.json() : { runId: null }))
-      .then((data: { runId?: string | null }) => {
-        if (cancelled || !data.runId) return;
-        void resumeTurn(initialSessionId, data.runId);
-      })
-      .catch(() => undefined);
+    let attaching = false;
+    const check = async () => {
+      if (cancelled || attaching || document.visibilityState !== "visible") {
+        return;
+      }
+      try {
+        const res = await fetch(
+          path(`/api/chat/active?sessionId=${encodeURIComponent(sessionId)}`),
+          { cache: "no-store" },
+        );
+        const data = (await res.json()) as { runId?: string | null };
+        if (cancelled || !res.ok || !data.runId) return;
+        attaching = true;
+        await resumeTurn(sessionId, data.runId);
+        // Reconcile against the persisted transcript whether the attach
+        // succeeded or the turn had already finished.
+        if (!cancelled && selectedRef.current === sessionId) {
+          void reloadTranscript(sessionId);
+        }
+      } catch {
+        // A failed probe is non-fatal — the next tick retries.
+      } finally {
+        attaching = false;
+      }
+    };
+    void check();
+    const interval = window.setInterval(check, ACTIVE_WATCH_MS);
+    const onWake = () => void check();
+    window.addEventListener("focus", onWake);
+    document.addEventListener("visibilitychange", onWake);
     return () => {
       cancelled = true;
+      window.clearInterval(interval);
+      window.removeEventListener("focus", onWake);
+      document.removeEventListener("visibilitychange", onWake);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [sessionId, profile, watchBusy]);
 
   // Register the chat header action callbacks (startNew / openArchived) into the
   // shared ref so the ChatHeaderActions component in the MobileShell header can
@@ -322,6 +351,32 @@ export function ChatPane({
     }
   }
 
+  /**
+   * Quiet in-place transcript re-read for the session currently on screen —
+   * no loading state, no session switching. Used after the idle watcher
+   * attaches to an externally-started turn so the persisted rows replace the
+   * live overlay, and as the fallthrough when the turn finished before we
+   * could attach.
+   */
+  async function reloadTranscript(id: string) {
+    try {
+      const res = await fetch(
+        path(`/api/chat/messages?sessionId=${encodeURIComponent(id)}`),
+        { cache: "no-store" },
+      );
+      const body = (await res.json()) as { messages?: ChatMessage[] };
+      if (!res.ok) return;
+      if (selectedRef.current === id) {
+        setMessages(
+          withLiveTurn(visible(body.messages ?? []), liveRef.current.get(keyOf(id))),
+        );
+        markSessionRead(id);
+      }
+    } catch {
+      // A stale transcript is non-fatal — the next change retries.
+    }
+  }
+
   function startNewConversation() {
     setSessionId(null);
     selectedRef.current = null;
@@ -392,6 +447,7 @@ export function ChatPane({
    */
   async function resumeTurn(sid: string, runId: string) {
     const turnKey = keyOf(sid);
+    if (sendingKeys.includes(turnKey)) return; // already attached/attaching
     setError(null);
     setSendingKeys((prev) =>
       prev.includes(turnKey) ? prev : [...prev, turnKey],
@@ -428,12 +484,18 @@ export function ChatPane({
     }
   }
 
-  async function send(text: string, attachments: ChatAttachment[]) {
+  /**
+   * Send one turn. Returns false only when the message never reached the
+   * agent (transport failure) — the composer restores the draft on that
+   * signal. A user-initiated stop resolves true: the streamed partial stays,
+   * and restoring the draft would read as an error that wasn't.
+   */
+  async function send(text: string, attachments: ChatAttachment[]): Promise<boolean> {
     // The session this turn belongs to, captured up-front so late-arriving
     // events are attributed to their origin, not to whatever is selected later.
     const turnSessionId = sessionId;
     const turnKey = keyOf(turnSessionId);
-    if (sendingKeys.includes(turnKey)) return; // one live turn per session
+    if (sendingKeys.includes(turnKey)) return false; // one live turn per session
     setError(null);
     setApprovals((prev) => dropKey(prev, turnKey));
     setDecisions((prev) => dropKey(prev, turnKey));
@@ -484,6 +546,7 @@ export function ChatPane({
       // leave a blank reply bubble behind.
       if (onThisSession()) setMessages(dropTrailingEmptyAssistant);
       void refreshSessions();
+      return true;
     } catch (err) {
       const aborted = err instanceof DOMException && err.name === "AbortError";
       if (aborted) {
@@ -496,6 +559,7 @@ export function ChatPane({
         }
         setError(err instanceof Error ? err.message : "The message could not be sent.");
       }
+      return !aborted ? false : true;
     } finally {
       // Turn is done and now persisted server-side; drop the live buffer so a
       // later re-open shows the canonical transcript, not a duplicate overlay.

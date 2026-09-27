@@ -21,6 +21,42 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+describe("Composer draft restore", () => {
+  it("puts the text back when onSend reports a transport failure", async () => {
+    const { getByRole, getByPlaceholderText } = render(
+      <Composer
+        sending={false}
+        storageEnabled={false}
+        sessionId="s1"
+        onSend={() => Promise.resolve(false)}
+      />,
+    );
+    const box = getByPlaceholderText(/Message your agent/);
+    fireEvent.change(box, { target: { value: "lost on the wire" } });
+    fireEvent.click(getByRole("button", { name: "Send" }));
+    await waitFor(() =>
+      expect((box as HTMLTextAreaElement).value).toBe("lost on the wire"),
+    );
+  });
+
+  it("clears the text for good when onSend resolves true", async () => {
+    const { getByRole, getByPlaceholderText } = render(
+      <Composer
+        sending={false}
+        storageEnabled={false}
+        sessionId="s1"
+        onSend={() => Promise.resolve(true)}
+      />,
+    );
+    const box = getByPlaceholderText(/Message your agent/);
+    fireEvent.change(box, { target: { value: "delivered" } });
+    fireEvent.click(getByRole("button", { name: "Send" }));
+    await waitFor(() =>
+      expect((box as HTMLTextAreaElement).value).toBe(""),
+    );
+  });
+});
+
 describe("Composer oversized uploads", () => {
   it("uploads a small file without confirmation", async () => {
     const fetchMock = vi.fn().mockResolvedValue(
