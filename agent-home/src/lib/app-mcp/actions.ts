@@ -4,6 +4,7 @@
  * structured result — never throws — so the MCP tool always has something
  * sane to hand back to the agent.
  */
+import { softNavigate } from "@/lib/app-mcp/navigation";
 import { getUiContext, type UiContext } from "@/lib/app-mcp/state";
 import { accessibleName, snapshotElements } from "@/lib/app-mcp/snapshot";
 
@@ -109,7 +110,9 @@ export function executeCommand(cmd: AppMcpCommand): AppMcpActionResult {
       if (!path.startsWith("/") || path.startsWith("//")) {
         return fail(`Refusing to navigate to a non-internal path: ${path}`);
       }
-      window.location.assign(path);
+      // Prefer the SPA router — a full reload severs the WebSockets this
+      // command channel (and the folder bridge) runs on.
+      if (!softNavigate(path)) window.location.assign(path);
       return done(`Navigated to ${path}`);
     }
     default:
