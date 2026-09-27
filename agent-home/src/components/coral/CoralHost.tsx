@@ -88,8 +88,21 @@ export function CoralHost({
     items[next]?.focus();
   };
 
+  // Stagger delays in render order: all app tiles first, then each cluster's
+  // members — matching the two render passes below.
+  const tileDelays = new Map<string, number>();
   let tileIndex = 0;
-  const nextDelay = () => (tileIndex += 1) * STAGGER_MS;
+  for (const petal of petals) {
+    if (petal.type === "app") {
+      tileDelays.set(`a:${petal.app.id}`, ++tileIndex * STAGGER_MS);
+    }
+  }
+  for (const petal of petals) {
+    if (petal.type !== "cluster") continue;
+    for (const member of petal.members) {
+      tileDelays.set(`c:${member.id}`, ++tileIndex * STAGGER_MS);
+    }
+  }
 
   return (
     <div data-component="CoralHost">
@@ -124,7 +137,7 @@ export function CoralHost({
                             ? allBadges[petal.app.badgeSlot]
                             : undefined
                         }
-                        delayMs={nextDelay()}
+                        delayMs={tileDelays.get(`a:${petal.app.id}`) ?? 0}
                         onClose={() => close("navigate")}
                       />
                     );
@@ -154,7 +167,7 @@ export function CoralHost({
                               ? allBadges[member.badgeSlot]
                               : undefined
                           }
-                          delayMs={nextDelay()}
+                          delayMs={tileDelays.get(`c:${member.id}`) ?? 0}
                           onClose={() => close("navigate")}
                         />
                       ))}

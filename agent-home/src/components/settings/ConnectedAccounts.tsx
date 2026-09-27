@@ -143,7 +143,8 @@ export function ConnectedAccounts() {
   }, []);
 
   useEffect(() => {
-    void reload();
+    const t = setTimeout(() => void reload(), 0);
+    return () => clearTimeout(t);
   }, [reload]);
 
   const start = useCallback(async () => {

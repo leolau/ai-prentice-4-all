@@ -163,10 +163,6 @@ function TagsSection() {
   const [deleting, setDeleting] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
-    void loadTags();
-  }, []);
-
   async function loadTags() {
     try {
       const res = await fetch("/api/chat/sessions/tags", { cache: "no-store" });
@@ -180,6 +176,11 @@ function TagsSection() {
       setLoading(false);
     }
   }
+
+  useEffect(() => {
+    const t = setTimeout(() => void loadTags(), 0);
+    return () => clearTimeout(t);
+  }, []);
 
   async function createTag() {
     const trimmed = name.trim();
