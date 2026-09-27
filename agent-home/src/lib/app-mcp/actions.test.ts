@@ -2,6 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { executeCommand, resolveElement } from "@/lib/app-mcp/actions";
+import { registerSoftNavigate } from "@/lib/app-mcp/navigation";
 import { setUiContext } from "@/lib/app-mcp/state";
 import { snapshotElements } from "@/lib/app-mcp/snapshot";
 
@@ -109,6 +110,8 @@ describe("executeCommand select/read/focus", () => {
 });
 
 describe("executeCommand navigate", () => {
+  afterEach(() => registerSoftNavigate(null));
+
   it("refuses external or protocol-relative paths", () => {
     const res = executeCommand({ type: "navigate", path: "https://evil.example" });
     expect(res.ok).toBe(false);
@@ -125,6 +128,20 @@ describe("executeCommand navigate", () => {
     const res = executeCommand({ type: "navigate", path: "/chat" });
     expect(res.ok).toBe(true);
     expect(assign).toHaveBeenCalledWith("/chat");
+  });
+
+  it("prefers the registered soft navigator — a full reload would sever the bridge WebSockets", () => {
+    const soft = vi.fn();
+    const assign = vi.fn();
+    registerSoftNavigate(soft);
+    Object.defineProperty(window, "location", {
+      value: { ...window.location, assign, pathname: "/todos", protocol: "http:", host: "localhost" },
+      configurable: true,
+    });
+    const res = executeCommand({ type: "navigate", path: "/files" });
+    expect(res.ok).toBe(true);
+    expect(soft).toHaveBeenCalledWith("/files");
+    expect(assign).not.toHaveBeenCalled();
   });
 });
 

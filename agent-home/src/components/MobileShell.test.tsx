@@ -6,6 +6,7 @@ import { describe, expect, it, vi } from "vitest";
 // mock to a neutral path so the server-render stays pure.
 vi.mock("next/navigation", () => ({
   usePathname: () => "/",
+  useRouter: () => ({ push: () => {} }),
 }));
 
 import { MobileShell } from "@/components/MobileShell";
