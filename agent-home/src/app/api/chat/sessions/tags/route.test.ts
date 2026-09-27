@@ -4,6 +4,8 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { GET, POST } from "@/app/api/chat/sessions/tags/route";
+import type { NextRequest } from "next/server";
+
 import type { Principal } from "@/types";
 
 const getPrincipal = vi.fn<() => Promise<Principal | null>>();
@@ -72,7 +74,7 @@ describe("POST /api/chat/sessions/tags", () => {
       method: "POST",
       body: JSON.stringify({ name: "bug" }),
     });
-    const res = await POST(req as any);
+    const res = await POST(req as NextRequest);
     expect(res.status).toBe(401);
   });
 
@@ -81,7 +83,7 @@ describe("POST /api/chat/sessions/tags", () => {
       method: "POST",
       body: JSON.stringify({}),
     });
-    const res = await POST(req as any);
+    const res = await POST(req as NextRequest);
     expect(res.status).toBe(400);
   });
 
@@ -90,7 +92,7 @@ describe("POST /api/chat/sessions/tags", () => {
       method: "POST",
       body: JSON.stringify({ name: "bug", color: "red" }),
     });
-    const res = await POST(req as any);
+    const res = await POST(req as NextRequest);
     expect(res.status).toBe(200);
     const data = await res.json();
     expect(data.tag.name).toBe("bug");
@@ -102,7 +104,7 @@ describe("POST /api/chat/sessions/tags", () => {
       method: "POST",
       body: JSON.stringify({ name: "feature" }),
     });
-    const res = await POST(req as any);
+    const res = await POST(req as NextRequest);
     expect(res.status).toBe(200);
     expect(createTag).toHaveBeenCalledWith("feature", undefined);
   });
@@ -114,7 +116,7 @@ describe("POST /api/chat/sessions/tags", () => {
       method: "POST",
       body: JSON.stringify({ name: "bug" }),
     });
-    const res = await POST(req as any);
+    const res = await POST(req as NextRequest);
     expect(res.status).toBe(502);
   });
 });

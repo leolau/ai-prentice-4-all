@@ -73,7 +73,9 @@ export function LeadChatHost({
   );
   const [dragRect, setDragRect] = useState<LeadChatRect | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
-  const [loading, setLoading] = useState(false);
+  // The transcript fetch records which session it last completed; the spinner
+  // derives from that instead of a synchronous setState inside the effect.
+  const [loadedFor, setLoadedFor] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
   // The same per-turn activity record as the main chat pane drives the same
   // phase/elapsed indicator, long-task hint, stall warning and Stop here.
@@ -93,6 +95,8 @@ export function LeadChatHost({
   const turnsRef = useRef(0);
 
   const effectiveRect = dragRect ?? rect;
+
+  const loading = open && leadSession !== null && loadedFor !== leadSession;
 
   // Which conversation this panel is. Asked once the panel opens, so a
   // signed-in page that never opens the lead chat creates no session.
@@ -114,7 +118,6 @@ export function LeadChatHost({
     // it answers with; applying it would erase what the user just sent.
     const turnsAtStart = turnsRef.current;
     const stale = () => cancelled || turnsRef.current !== turnsAtStart;
-    setLoading(true);
     fetch(`/api/chat/messages?sessionId=${encodeURIComponent(leadSession)}`)
       .then((res) => (res.ok ? res.json() : { messages: [] }))
       .then((data: { messages?: ChatMessage[] }) => {
@@ -124,7 +127,7 @@ export function LeadChatHost({
         if (!stale()) setMessages([]);
       })
       .finally(() => {
-        if (!cancelled) setLoading(false);
+        if (!cancelled) setLoadedFor(leadSession);
       });
     return () => {
       cancelled = true;

@@ -791,14 +791,19 @@ export function ChatPane({
 
   // Auto-suggest tags when opening the SessionModal if the session has 5+ messages.
   useEffect(() => {
-    if (detailsSession && detailsSession.message_count >= 5 && tagSuggestions.length === 0) {
-      void suggestTags();
+    if (!detailsSession || detailsSession.message_count < 5 || tagSuggestions.length > 0) {
+      return;
     }
+    const t = setTimeout(() => void suggestTags(), 0);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [detailsSession]);
 
   // Load all tags on mount.
   useEffect(() => {
-    void loadAllTags();
+    const t = setTimeout(() => void loadAllTags(), 0);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // ── Tag filter handlers ──
@@ -820,6 +825,7 @@ export function ChatPane({
   // Re-fetch sessions when tag filter changes.
   useEffect(() => {
     void refreshSessions();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [includeTags, excludeTags, matchMode]);
 
   // ── Search handlers ──────────────────────────────────────────────

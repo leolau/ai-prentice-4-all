@@ -101,7 +101,8 @@ export function ModelPickerSheet({
   };
 
   useEffect(() => {
-    void loadInitial();
+    const t = setTimeout(() => void loadInitial(), 0);
+    return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 

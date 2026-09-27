@@ -27,23 +27,25 @@ export function PushEnroll() {
   const [state, setState] = useState<EnrollState>("off");
 
   useEffect(() => {
-    const supported =
-      typeof window !== "undefined" &&
-      "serviceWorker" in navigator &&
-      "PushManager" in window &&
-      "Notification" in window;
-    setSupport(supported ? "supported" : "unsupported");
-    if (!supported) return;
-    // Reflect any existing enrollment (e.g. enrolled before a reload).
-    void (async () => {
-      try {
-        const reg = await navigator.serviceWorker.getRegistration();
-        const sub = await reg?.pushManager.getSubscription();
-        if (sub && Notification.permission === "granted") setState("on");
-      } catch {
-        // Leave it off.
-      }
-    })();
+    const t = setTimeout(() => {
+      const supported =
+        "serviceWorker" in navigator &&
+        "PushManager" in window &&
+        "Notification" in window;
+      setSupport(supported ? "supported" : "unsupported");
+      if (!supported) return;
+      // Reflect any existing enrollment (e.g. enrolled before a reload).
+      void (async () => {
+        try {
+          const reg = await navigator.serviceWorker.getRegistration();
+          const sub = await reg?.pushManager.getSubscription();
+          if (sub && Notification.permission === "granted") setState("on");
+        } catch {
+          // Leave it off.
+        }
+      })();
+    }, 0);
+    return () => clearTimeout(t);
   }, []);
 
   const enable = useCallback(async () => {

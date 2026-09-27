@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 
 import {
   categorizeSession,
@@ -73,7 +73,11 @@ export function SessionTabs({
   // Categorized once per render of the same session list, so a drag
   // interaction and its resulting reorder-rebuild agree on categories even
   // right at a local-day boundary.
-  const now = useMemo(() => new Date(), [sessions]);
+  const now = useMemo(
+    () => new Date(),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [sessions],
+  );
   const groups = useMemo(() => groupSessionsByCategory(sessions, now), [sessions, now]);
   const availableCategories = useMemo(
     () => CHAT_CATEGORY_ORDER.filter((c) => groups[c].length > 0),
@@ -90,13 +94,12 @@ export function SessionTabs({
   // (e.g. opened via a memory citation) — but only in reaction to the active
   // conversation changing, so a manual dropdown switch is never fought on
   // the next unrelated re-render.
-  useEffect(() => {
-    if (!activeId) return;
+  const [prevActiveId, setPrevActiveId] = useState(activeId);
+  if (activeId !== prevActiveId) {
+    setPrevActiveId(activeId);
     const activeSession = sessions.find((s) => s.id === activeId);
-    if (!activeSession) return;
-    setSelectedCategory(categorizeSession(activeSession, now));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeId]);
+    if (activeSession) setSelectedCategory(categorizeSession(activeSession, now));
+  }
 
   // If the selected category emptied out (its last conversation was
   // archived, etc.), fall back to whatever is actually available instead of

@@ -22,7 +22,7 @@ export function ReadinessChecklist({
 }) {
   const missing = items.filter((item) => !item.ok);
   if (missing.length === 0 && findings.length === 0) return null;
-  let step = 0;
+  const stepFor = new Map(missing.map((item, i) => [item.key, i + 1]));
   return (
     <div
       data-component="ReadinessChecklist"
@@ -35,7 +35,6 @@ export function ReadinessChecklist({
       ) : null}
       <ol className="mt-1 flex flex-col gap-1.5">
         {items.map((item) => {
-          if (!item.ok) step += 1;
           return (
             <li key={item.key} className="flex items-start gap-2 text-sm">
               <span
@@ -46,7 +45,7 @@ export function ReadinessChecklist({
                     : "text-amber-400 tabular-nums"
                 }
               >
-                {item.ok ? "✓" : `${step}.`}
+                {item.ok ? "✓" : `${stepFor.get(item.key) ?? 0}.`}
               </span>
               <span className="min-w-0 flex-1">
                 <span className={item.ok ? "text-[var(--color-muted)]" : ""}>
