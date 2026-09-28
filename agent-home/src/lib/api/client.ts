@@ -89,7 +89,14 @@ import type {
   WaBridge,
   SessionTag,
   SessionsResponse,
+  CronJob,
+  McpOAuthFlowState,
+  McpServersResponse,
+  McpServerTestResult,
+  SystemStats,
   TagSuggestion,
+  Toolset,
+  UsageAnalytics,
   Todo,
   TodoCompletion,
   TodoDetail,
@@ -298,6 +305,105 @@ export class HermesApiClient {
    */
   async capacity(): Promise<CapacityResponse> {
     return this.request("/api/capacity");
+  }
+
+  // --- Status strip + Tools & Integrations -------------------------------
+
+  /** Host stats (psutil-backed): CPU, memory, disk, uptime. */
+  async systemStats(): Promise<SystemStats> {
+    return this.request("/api/system/stats");
+  }
+
+  /** Token/cost rollup for the trailing `days` (profile-scoped upstream). */
+  async usageAnalytics(days = 30): Promise<UsageAnalytics> {
+    return this.request(`/api/analytics/usage?days=${days}`);
+  }
+
+  /** Cron jobs. With no bound profile the upstream default lists every
+   * profile's jobs; a bound client sees its own profile's set. */
+  async cronJobs(): Promise<CronJob[]> {
+    return this.request("/api/cron/jobs");
+  }
+
+  /** Configured MCP servers for the bound profile. */
+  async mcpServers(): Promise<McpServersResponse> {
+    return this.request("/api/mcp/servers");
+  }
+
+  /** Enable/disable an MCP server (`enabled` flag in config.yaml). */
+  async setMcpServerEnabled(
+    name: string,
+    enabled: boolean,
+  ): Promise<{ ok: boolean; name: string; enabled: boolean }> {
+    return this.request(
+      `/api/mcp/servers/${encodeURIComponent(name)}/enabled`,
+      { method: "PUT", json: { enabled } },
+    );
+  }
+
+  /** Probe one server: connect, list tools, disconnect. */
+  async testMcpServer(name: string): Promise<McpServerTestResult> {
+    return this.request(
+      `/api/mcp/servers/${encodeURIComponent(name)}/test`,
+      { method: "POST", json: {} },
+    );
+  }
+
+  async deleteMcpServer(name: string): Promise<{ ok: boolean }> {
+    return this.request(`/api/mcp/servers/${encodeURIComponent(name)}`, {
+      method: "DELETE",
+    });
+  }
+
+  /** The `hermes tools` set — configurable toolsets with enable state. */
+  async toolsets(): Promise<Toolset[]> {
+    return this.request("/api/tools/toolsets");
+  }
+
+  async setToolsetEnabled(
+    name: string,
+    enabled: boolean,
+  ): Promise<{ ok: boolean; name: string; enabled: boolean }> {
+    return this.request(`/api/tools/toolsets/${encodeURIComponent(name)}`, {
+      method: "PUT",
+      json: { enabled },
+    });
+  }
+
+  /**
+   * Browser-driven OAuth re-auth for an `auth: oauth` MCP server (Canva,
+   * Vercel, …). Start returns immediately; poll status until
+   * `authorization_url` appears, open it, then hand the final redirect URL
+   * to `mcpOauthRedirect` — the flow completes via the stock drop-file path.
+   */
+  async mcpOauthStart(name: string): Promise<McpOAuthFlowState> {
+    return this.request(
+      `/api/mcp/servers/${encodeURIComponent(name)}/oauth/start`,
+      { method: "POST", json: {} },
+    );
+  }
+
+  async mcpOauthStatus(name: string): Promise<McpOAuthFlowState> {
+    return this.request(
+      `/api/mcp/servers/${encodeURIComponent(name)}/oauth/status`,
+    );
+  }
+
+  async mcpOauthRedirect(
+    name: string,
+    url: string,
+  ): Promise<{ ok: boolean }> {
+    return this.request(
+      `/api/mcp/servers/${encodeURIComponent(name)}/oauth/redirect`,
+      { method: "POST", json: { url } },
+    );
+  }
+
+  async mcpOauthCancel(name: string): Promise<{ ok: boolean }> {
+    return this.request(
+      `/api/mcp/servers/${encodeURIComponent(name)}/oauth/cancel`,
+      { method: "POST", json: {} },
+    );
   }
 
   /** Resolve the C1 principal + role for the current bridged session. */

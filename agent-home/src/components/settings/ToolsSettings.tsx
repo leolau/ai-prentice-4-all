@@ -1,0 +1,559 @@
+"use client";
+
+import { useEffect, useRef, useState } from "react";
+
+import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
+import { Pill } from "@/components/ui/Pill";
+import { Spinner } from "@/components/ui/Spinner";
+import { useRefresh } from "@/components/ui/useRefresh";
+import type { McpOAuthFlowState, McpServer, Toolset } from "@/types";
+
+/**
+ * Settings → Tools & Integrations. Lists the MCP servers and `hermes tools`
+ * toolsets for the signed-in profile, with the operational actions: enable/
+ * disable, probe ("Test"), remove, and — for `auth: oauth` servers — the
+ * headless OAuth re-auth flow (open the authorization URL, paste the final
+ * redirect URL back).
+ */
+
+type TestResult = { ok: boolean; detail: string } | null;
+
+async function postJson(url: string, body?: unknown): Promise<Response> {
+  return fetch(url, {
+    method: "POST",
+    headers: body !== undefined ? { "content-type": "application/json" } : {},
+    body: body !== undefined ? JSON.stringify(body) : undefined,
+  });
+}
+
+async function detailOf(res: Response): Promise<string> {
+  try {
+    const body = await res.json();
+    return body.detail ?? body.error ?? `HTTP ${res.status}`;
+  } catch {
+    return `HTTP ${res.status}`;
+  }
+}
+
+/* ── OAuth re-auth sheet ─────────────────────────────────────────────── */
+
+function OAuthSheet({
+  server,
+  onClose,
+}: {
+  server: McpServer;
+  onClose: (completed: boolean) => void;
+}) {
+  const [flow, setFlow] = useState<McpOAuthFlowState | null>(null);
+  const [redirectUrl, setRedirectUrl] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [note, setNote] = useState<string | null>(null);
+  const completedRef = useRef(false);
+
+  // Kick the flow off once, then poll until it settles.
+  useEffect(() => {
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+
+    async function poll() {
+      try {
+        const res = await fetch(
+          `/api/tools/mcp/${encodeURIComponent(server.name)}/oauth/status`,
+          { cache: "no-store" },
+        );
+        if (res.ok && !cancelled) {
+          const state = (await res.json()) as McpOAuthFlowState;
+          setFlow(state);
+          if (state.status === "success") completedRef.current = true;
+          if (state.status === "starting" || state.status === "waiting_user") {
+            timer = setTimeout(poll, 1500);
+          }
+        }
+      } catch {
+        /* keep polling — transient blips mustn't kill an in-flight flow */
+        if (!cancelled) timer = setTimeout(poll, 1500);
+      }
+    }
+
+    void (async () => {
+      const res = await postJson(
+        `/api/tools/mcp/${encodeURIComponent(server.name)}/oauth/start`,
+        {},
+      );
+      if (!res.ok) {
+        setNote(await detailOf(res));
+      }
+      void poll();
+    })();
+
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+    };
+  }, [server.name]);
+
+  // Stop the page behind the sheet from scrolling (same as ConfirmDialog).
+  useEffect(() => {
+    const previous = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.body.style.overflow = previous;
+    };
+  }, []);
+
+  async function submitRedirect() {
+    if (!redirectUrl.trim() || submitting) return;
+    setSubmitting(true);
+    setNote(null);
+    try {
+      const res = await postJson(
+        `/api/tools/mcp/${encodeURIComponent(server.name)}/oauth/redirect`,
+        { url: redirectUrl.trim() },
+      );
+      if (!res.ok) setNote(await detailOf(res));
+      else setNote("Redirect received — finishing…");
+    } catch {
+      setNote("Could not deliver the redirect URL.");
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  async function cancel() {
+    if (
+      flow &&
+      (flow.status === "starting" || flow.status === "waiting_user")
+    ) {
+      await postJson(
+        `/api/tools/mcp/${encodeURIComponent(server.name)}/oauth/cancel`,
+        {},
+      ).catch(() => {});
+    }
+    onClose(completedRef.current);
+  }
+
+  const waiting = flow?.status === "waiting_user";
+  const settled =
+    flow?.status === "success" ||
+    flow?.status === "error" ||
+    flow?.status === "cancelled";
+
+  return (
+    <div
+      data-component="OAuthSheet"
+      className="fixed inset-0 z-50 flex items-end justify-center bg-black/60 sm:items-center"
+      role="dialog"
+      aria-modal="true"
+      aria-label={`Re-authenticate ${server.name}`}
+    >
+      <div className="w-full max-w-md rounded-t-2xl border border-[var(--color-border)] bg-[var(--color-surface)] p-4 sm:rounded-2xl">
+        <h3 className="text-sm font-semibold">
+          Re-authenticate {server.name}
+        </h3>
+
+        {flow?.status === "starting" || !flow ? (
+          <p className="mt-3 flex items-center gap-2 text-sm text-[var(--color-muted)]">
+            <Spinner /> Starting the sign-in flow…
+          </p>
+        ) : null}
+
+        {waiting && flow?.authorization_url ? (
+          <div className="mt-3 space-y-3 text-sm">
+            <p className="text-[var(--color-muted)]">
+              1. Open the provider&apos;s sign-in page and approve access:
+            </p>
+            <a
+              href={flow.authorization_url}
+              target="_blank"
+              rel="noreferrer"
+              className="block break-all rounded-lg bg-[var(--color-surface-2)] px-3 py-2 text-xs text-[var(--color-accent)] underline"
+            >
+              Open authorization page
+            </a>
+            <p className="text-[var(--color-muted)]">
+              2. After approving, the browser will try to open a{" "}
+              <code>127.0.0.1</code> address that fails to load — that&apos;s
+              expected on a headless box. Copy the full URL from the address
+              bar and paste it here:
+            </p>
+            <div className="flex gap-2">
+              <input
+                type="text"
+                value={redirectUrl}
+                onChange={(e) => setRedirectUrl(e.target.value)}
+                placeholder="http://127.0.0.1:…/callback?code=…&state=…"
+                className="min-w-0 flex-1 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-2 text-xs"
+              />
+              <button
+                type="button"
+                onClick={() => void submitRedirect()}
+                disabled={submitting || !redirectUrl.trim()}
+                className="shrink-0 rounded-lg bg-[var(--color-accent)] px-3 py-2 text-xs font-medium text-[var(--color-accent-fg)] disabled:opacity-50"
+              >
+                {submitting ? "Sending…" : "Complete"}
+              </button>
+            </div>
+          </div>
+        ) : null}
+
+        {flow?.status === "success" ? (
+          <p className="mt-3 text-sm text-emerald-400">
+            Signed in —{" "}
+            {flow.tools ? `${flow.tools} tool(s) available.` : "token stored."}
+          </p>
+        ) : null}
+        {flow?.status === "error" ? (
+          <p className="mt-3 text-sm text-red-400">
+            {flow.error ?? "The sign-in flow failed."}
+          </p>
+        ) : null}
+        {flow?.status === "cancelled" ? (
+          <p className="mt-3 text-sm text-[var(--color-muted)]">Cancelled.</p>
+        ) : null}
+        {note ? (
+          <p className="mt-3 text-xs text-[var(--color-muted)]">{note}</p>
+        ) : null}
+
+        <div className="mt-4 flex justify-end gap-2">
+          {settled ? (
+            <button
+              type="button"
+              onClick={() => onClose(completedRef.current)}
+              className="rounded-lg bg-[var(--color-surface-2)] px-3 py-2 text-xs font-medium"
+            >
+              Done
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={() => void cancel()}
+              className="rounded-lg bg-[var(--color-surface-2)] px-3 py-2 text-xs font-medium"
+            >
+              Cancel
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ── Server row ──────────────────────────────────────────────────────── */
+
+function McpServerRow({
+  server,
+  pending,
+  onAction,
+  testResult,
+}: {
+  server: McpServer;
+  pending: string | null;
+  onAction: (action: string) => void;
+  testResult: TestResult;
+}) {
+  const endpoint =
+    server.url ??
+    [server.command, ...(server.args ?? [])].filter(Boolean).join(" ");
+  const busy = pending !== null;
+  return (
+    <li
+      data-component="McpServerRow"
+      className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface)] p-4"
+    >
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="font-medium">{server.name}</span>
+        <Pill tone={server.enabled ? "success" : "muted"}>
+          {server.enabled ? "enabled" : "disabled"}
+        </Pill>
+        <Pill tone="muted">{server.transport}</Pill>
+        {server.auth === "oauth" ? (
+          <Pill tone={server.oauth_token_present ? "success" : "warning"}>
+            {server.oauth_token_present ? "signed in" : "needs auth"}
+          </Pill>
+        ) : null}
+      </div>
+      <p className="mt-1 truncate text-xs text-[var(--color-muted)]">
+        {endpoint}
+      </p>
+      {testResult ? (
+        <p
+          className={`mt-2 text-xs ${testResult.ok ? "text-emerald-400" : "text-red-400"}`}
+        >
+          {testResult.detail}
+        </p>
+      ) : null}
+      <div className="mt-3 flex flex-wrap gap-2">
+        <button
+          type="button"
+          disabled={busy}
+          onClick={() => onAction("test")}
+          className="rounded-lg bg-[var(--color-surface-2)] px-3 py-1.5 text-xs font-medium disabled:opacity-50"
+        >
+          {pending === "test" ? "Testing…" : "Test connection"}
+        </button>
+        {server.auth === "oauth" ? (
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => onAction("reauth")}
+            className="rounded-lg bg-[var(--color-surface-2)] px-3 py-1.5 text-xs font-medium disabled:opacity-50"
+          >
+            Re-authenticate
+          </button>
+        ) : null}
+        <button
+          type="button"
+          disabled={busy}
+          onClick={() => onAction(server.enabled ? "disable" : "enable")}
+          className="rounded-lg bg-[var(--color-surface-2)] px-3 py-1.5 text-xs font-medium disabled:opacity-50"
+        >
+          {server.enabled ? "Disable" : "Enable"}
+        </button>
+        <button
+          type="button"
+          disabled={busy}
+          onClick={() => onAction("remove")}
+          className="rounded-lg px-3 py-1.5 text-xs font-medium text-red-400 disabled:opacity-50"
+        >
+          Remove
+        </button>
+      </div>
+    </li>
+  );
+}
+
+function ToolsetRow({
+  toolset,
+  pending,
+  onToggle,
+}: {
+  toolset: Toolset;
+  pending: boolean;
+  onToggle: (enabled: boolean) => void;
+}) {
+  return (
+    <li
+      data-component="ToolsetRow"
+      className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface)] p-4"
+    >
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="font-medium">{toolset.label}</span>
+        <Pill tone={toolset.enabled ? "success" : "muted"}>
+          {toolset.enabled ? "enabled" : "disabled"}
+        </Pill>
+        {!toolset.configured ? <Pill tone="warning">missing keys</Pill> : null}
+      </div>
+      <p className="mt-1 text-xs text-[var(--color-muted)]">
+        {toolset.description}
+      </p>
+      <p className="mt-1 text-xs text-[var(--color-muted)]">
+        {toolset.tools.length} tool(s)
+      </p>
+      <div className="mt-3">
+        <button
+          type="button"
+          disabled={pending}
+          onClick={() => onToggle(!toolset.enabled)}
+          className="rounded-lg bg-[var(--color-surface-2)] px-3 py-1.5 text-xs font-medium disabled:opacity-50"
+        >
+          {toolset.enabled ? "Disable" : "Enable"}
+        </button>
+      </div>
+    </li>
+  );
+}
+
+/* ── Section ─────────────────────────────────────────────────────────── */
+
+export function ToolsSettings({
+  servers,
+  toolsets,
+}: {
+  servers: McpServer[];
+  toolsets: Toolset[];
+}) {
+  const { refresh, refreshing } = useRefresh();
+  // The server action completes before the refreshed props land; hold the
+  // row's busy state across the refresh so a second tap can't double-fire.
+  const [pending, setPending] = useState<Record<string, string | null>>({});
+  const [testResults, setTestResults] = useState<Record<string, TestResult>>({});
+  const [removing, setRemoving] = useState<McpServer | null>(null);
+  const [oauthFor, setOauthFor] = useState<McpServer | null>(null);
+  const [tsPending, setTsPending] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const rows = servers;
+  const tsets = toolsets;
+
+  function busyKey(name: string) {
+    return pending[name] ?? (refreshing ? "refresh" : null);
+  }
+
+  async function mcpAction(name: string, action: string) {
+    if (action === "reauth") {
+      setOauthFor(rows.find((s) => s.name === name) ?? null);
+      return;
+    }
+    if (action === "remove") {
+      setRemoving(rows.find((s) => s.name === name) ?? null);
+      return;
+    }
+    if (busyKey(name)) return;
+    setPending((p) => ({ ...p, [name]: action }));
+    setError(null);
+    try {
+      if (action === "test") {
+        const res = await postJson(
+          `/api/tools/mcp/${encodeURIComponent(name)}/test`,
+          {},
+        );
+        const body = (await res.json()) as {
+          ok?: boolean;
+          tools?: { name: string }[];
+          error?: string;
+          detail?: string;
+        };
+        setTestResults((r) => ({
+          ...r,
+          [name]: res.ok && body.ok
+            ? { ok: true, detail: `Connected — ${body.tools?.length ?? 0} tool(s) listed.` }
+            : {
+                ok: false,
+                detail: body.error ?? body.detail ?? "Probe failed.",
+              },
+        }));
+      } else {
+        // enable / disable
+        const res = await postJson(
+          `/api/tools/mcp/${encodeURIComponent(name)}/enabled`,
+          { enabled: action === "enable" },
+        );
+        if (!res.ok) setError(await detailOf(res));
+        refresh();
+      }
+    } catch {
+      setError("The AI layer could not be reached.");
+    } finally {
+      setPending((p) => ({ ...p, [name]: null }));
+    }
+  }
+
+  async function confirmRemove() {
+    const name = removing?.name;
+    if (!name) return;
+    setPending((p) => ({ ...p, [name]: "remove" }));
+    setRemoving(null);
+    try {
+      const res = await fetch(`/api/tools/mcp/${encodeURIComponent(name)}`, {
+        method: "DELETE",
+      });
+      if (!res.ok) setError(await detailOf(res));
+      refresh();
+    } catch {
+      setError("The AI layer could not be reached.");
+    } finally {
+      setPending((p) => ({ ...p, [name]: null }));
+    }
+  }
+
+  async function toggleToolset(name: string, enabled: boolean) {
+    if (tsPending || refreshing) return;
+    setTsPending(name);
+    setError(null);
+    try {
+      const res = await postJson(
+        `/api/tools/toolsets/${encodeURIComponent(name)}`,
+        { enabled },
+      );
+      if (!res.ok) setError(await detailOf(res));
+      refresh();
+    } catch {
+      setError("The AI layer could not be reached.");
+    } finally {
+      setTsPending(null);
+    }
+  }
+
+  return (
+    <div data-component="ToolsSettings" className="space-y-6">
+      {error ? (
+        <p className="rounded-xl border border-red-500/40 bg-red-500/10 px-3 py-2 text-sm text-red-400">
+          {error}
+        </p>
+      ) : null}
+
+      <section>
+        <h2 className="text-sm font-semibold">MCP servers</h2>
+        <p className="mb-3 text-xs text-[var(--color-muted)]">
+          Remote and local MCP integrations the agent connects to. Changes take
+          effect on the next connection; &ldquo;Test connection&rdquo; probes
+          the server now.
+        </p>
+        {rows.length === 0 ? (
+          <p className="text-sm text-[var(--color-muted)]">
+            No MCP servers configured for this profile.
+          </p>
+        ) : (
+          <ul className="flex flex-col gap-3">
+            {rows.map((server) => (
+              <McpServerRow
+                key={server.name}
+                server={server}
+                pending={busyKey(server.name)}
+                testResult={testResults[server.name] ?? null}
+                onAction={(action) => void mcpAction(server.name, action)}
+              />
+            ))}
+          </ul>
+        )}
+      </section>
+
+      <section>
+        <h2 className="text-sm font-semibold">CLI toolsets</h2>
+        <p className="mb-3 text-xs text-[var(--color-muted)]">
+          The <code>hermes tools</code> set — tool bundles enabled for the cli
+          platform. &ldquo;missing keys&rdquo; means the toolset needs
+          credentials (set them under Connected accounts or the profile&apos;s
+          env).
+        </p>
+        {tsets.length === 0 ? (
+          <p className="text-sm text-[var(--color-muted)]">
+            No configurable toolsets.
+          </p>
+        ) : (
+          <ul className="flex flex-col gap-3">
+            {tsets.map((toolset) => (
+              <ToolsetRow
+                key={toolset.name}
+                toolset={toolset}
+                pending={tsPending === toolset.name || refreshing}
+                onToggle={(enabled) => void toggleToolset(toolset.name, enabled)}
+              />
+            ))}
+          </ul>
+        )}
+      </section>
+
+      {removing ? (
+        <ConfirmDialog
+          title={`Remove ${removing.name}?`}
+          body="The server's entry is deleted from the profile config. Enabled skills or playbooks that rely on its tools will stop working until it's re-added."
+          confirmLabel="Remove"
+          busy={pending[removing.name] === "remove"}
+          onConfirm={() => void confirmRemove()}
+          onCancel={() => setRemoving(null)}
+        />
+      ) : null}
+
+      {oauthFor ? (
+        <OAuthSheet
+          server={oauthFor}
+          onClose={(completed) => {
+            setOauthFor(null);
+            if (completed) refresh();
+          }}
+        />
+      ) : null}
+    </div>
+  );
+}
