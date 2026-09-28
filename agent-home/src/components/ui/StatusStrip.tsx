@@ -6,9 +6,19 @@ import { useEffect, useState } from "react";
 import type { StatusSummary } from "@/types";
 
 const POLL_MS = 30_000;
+const AGE_TICK_MS = 1_000;
 
 function fmtPct(v: number | null): string {
   return v === null ? "—" : `${Math.round(v)}%`;
+}
+
+function fmtAge(ms: number): string {
+  const s = Math.max(0, Math.floor(ms / 1000));
+  if (s < 3) return "just now";
+  if (s < 60) return `${s}s ago`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ago`;
+  return `${Math.floor(m / 60)}h ago`;
 }
 
 function fmtTokens(n: number): string {
@@ -21,11 +31,17 @@ function fmtTokens(n: number): string {
  * The ambient status strip under the header: CPU, storage, 30-day token
  * burn, live background work, and scheduled jobs. Polls while the tab is
  * visible and re-reads on focus; a failed read keeps the last good values
- * (a strip that blanks on every hiccup is worse than a stale one).
+ * (a strip that blanks on every hiccup is worse than a stale one) but the
+ * self-ticking "Ns ago" label — amber with "retrying" while fetches fail —
+ * always says exactly how old the numbers are.
  */
 export function StatusStrip() {
   const [summary, setSummary] = useState<StatusSummary | null>(null);
   const [stale, setStale] = useState(false);
+  // When the last *successful* fetch landed (local clock — immune to server/
+  // browser clock skew) and a 1s heartbeat so the age label self-ticks.
+  const [fetchedAt, setFetchedAt] = useState<number | null>(null);
+  const [now, setNow] = useState(() => Date.now());
 
   useEffect(() => {
     let cancelled = false;
@@ -36,6 +52,7 @@ export function StatusStrip() {
         const data = (await res.json()) as StatusSummary;
         if (!cancelled) {
           setSummary(data);
+          setFetchedAt(Date.now());
           setStale(false);
         }
       } catch {
@@ -57,6 +74,15 @@ export function StatusStrip() {
       document.removeEventListener("visibilitychange", wake);
       window.removeEventListener("focus", wake);
     };
+  }, []);
+
+  // Self-ticking clock for the "Ns ago" freshness label — skipped while the
+  // tab is hidden so background tabs don't burn a render a second.
+  useEffect(() => {
+    const t = setInterval(() => {
+      if (document.visibilityState === "visible") setNow(Date.now());
+    }, AGE_TICK_MS);
+    return () => clearInterval(t);
   }, []);
 
   // The browser bundle's own SHA vs the one the server reports. A mismatch
@@ -112,7 +138,15 @@ export function StatusStrip() {
           <span className="font-medium text-[var(--color-fg)]">Cron</span>
           {summary ? `${summary.cron_enabled}/${summary.cron_total}` : "—"}
         </span>
-        {stale ? <span>updating…</span> : null}
+        {fetchedAt !== null ? (
+          <span
+            title="How old these numbers are — the strip re-reads the server every 30s"
+            className={stale ? "text-amber-400" : undefined}
+          >
+            {fmtAge(now - fetchedAt)}
+            {stale ? " · retrying" : ""}
+          </span>
+        ) : null}
         {buildMismatch ? (
           <button
             type="button"
