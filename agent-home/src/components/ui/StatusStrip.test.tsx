@@ -51,6 +51,8 @@ describe("StatusStrip", () => {
     // Same SHA on both ends → quiet build tag, no refresh prompt.
     expect(screen.getByTitle("agent-home build abc1234")).toBeTruthy();
     expect(screen.queryByText(/refresh/)).toBeNull();
+    // The self-ticking freshness label.
+    expect(await screen.findByText(/just now|\d+[smh] ago/)).toBeTruthy();
   });
 
   it("flags a stale bundle when the server reports a different build", async () => {
