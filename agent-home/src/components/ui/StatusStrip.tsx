@@ -59,14 +59,19 @@ export function StatusStrip() {
     };
   }, []);
 
-  if (!summary) return null;
+  // The browser bundle's own SHA vs the one the server reports. A mismatch
+  // means this tab is running a pre-deploy bundle — flag it instead of
+  // quietly showing old metrics forever.
+  const clientBuild = process.env.NEXT_PUBLIC_HERMES_BUILD ?? "dev";
+  const serverBuild = summary?.build ?? null;
+  const buildMismatch = serverBuild !== null && serverBuild !== clientBuild;
 
-  const tokens = summary.tokens_month
+  const tokens = summary?.tokens_month
     ? fmtTokens(summary.tokens_month.input + summary.tokens_month.output)
     : null;
-  const cost = summary.tokens_month?.cost_usd;
+  const cost = summary?.tokens_month?.cost_usd;
   const tasks =
-    (summary.active_conversations ?? 0) + (summary.running_cards ?? 0);
+    (summary?.active_conversations ?? 0) + (summary?.running_cards ?? 0);
 
   const chip =
     "inline-flex items-center gap-1 whitespace-nowrap rounded-full bg-[var(--color-surface-2)] px-2 py-0.5";
@@ -82,13 +87,13 @@ export function StatusStrip() {
       <div className="mx-auto flex w-full max-w-2xl items-center gap-2 lg:max-w-5xl">
         <Link href="/capacity" className={chip} title="CPU busy — tap for the capacity page">
           <span className="font-medium text-[var(--color-fg)]">CPU</span>
-          {fmtPct(summary.cpu_pct)}
+          {fmtPct(summary?.cpu_pct ?? null)}
         </Link>
         <Link href="/capacity" className={chip} title="Storage used on the hermes volume">
           <span className="font-medium text-[var(--color-fg)]">Disk</span>
-          {fmtPct(summary.disk_pct)}
+          {fmtPct(summary?.disk_pct ?? null)}
         </Link>
-        {tokens !== null ? (
+        {tokens ? (
           <Link
             href="/models"
             className={chip}
@@ -105,9 +110,26 @@ export function StatusStrip() {
         </span>
         <span className={chip} title="Scheduled cron jobs (enabled of total)">
           <span className="font-medium text-[var(--color-fg)]">Cron</span>
-          {summary.cron_enabled}/{summary.cron_total}
+          {summary ? `${summary.cron_enabled}/${summary.cron_total}` : "—"}
         </span>
-        {stale ? <span className="ml-auto">updating…</span> : null}
+        {stale ? <span>updating…</span> : null}
+        {buildMismatch ? (
+          <button
+            type="button"
+            onClick={() => window.location.reload()}
+            title={`This tab is running ${clientBuild} but the server is on ${serverBuild} — tap to reload`}
+            className="ml-auto inline-flex items-center gap-1 whitespace-nowrap rounded-full bg-amber-500/20 px-2 py-0.5 font-medium text-amber-400"
+          >
+            update {serverBuild} · refresh
+          </button>
+        ) : (
+          <span
+            className="ml-auto whitespace-nowrap rounded-full px-2 py-0.5 font-mono"
+            title={`agent-home build ${clientBuild}`}
+          >
+            {clientBuild}
+          </span>
+        )}
       </div>
     </div>
   );

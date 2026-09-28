@@ -2183,5 +2183,7 @@ export interface StatusSummary {
   running_cards: number | null;
   cron_total: number;
   cron_enabled: number;
+  /** Server bundle's build SHA (NEXT_PUBLIC_HERMES_BUILD); absent on older builds. */
+  build?: string | null;
   collected_at: number;
 }

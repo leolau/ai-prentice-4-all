@@ -1,5 +1,21 @@
+import { execSync } from "node:child_process";
+
+/** Short git SHA of the checkout being built — what the deploy script
+ *  reports as `deploy OK (<sha>)`. Baked into the bundle so the UI can show
+ *  it and compare it against the server build (stale-bundle detection).
+ *  HERMES_BUILD_SHA overrides it for CI/builds outside a git checkout. */
+function resolveBuildSha() {
+  if (process.env.HERMES_BUILD_SHA) return process.env.HERMES_BUILD_SHA;
+  try {
+    return execSync("git rev-parse --short HEAD", { encoding: "utf8" }).trim();
+  } catch {
+    return "dev";
+  }
+}
+
 /** @type {import('next').NextConfig} */
 const nextConfig = {
+  env: { NEXT_PUBLIC_HERMES_BUILD: resolveBuildSha() },
   // Unlike `web/` (a static SPA export served by the Python backend),
   // `agent-home` runs as a real Next.js **server** (App Router + route
   // handlers) behind Caddy on the prod box. It is the BFF (FG-20 Decision 1):
