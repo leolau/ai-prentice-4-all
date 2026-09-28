@@ -42,6 +42,9 @@ export async function GET(): Promise<NextResponse> {
       : null,
     cron_total: cron?.length ?? 0,
     cron_enabled: cron ? cron.filter((j) => j.enabled !== false).length : 0,
+    // The SHA this build was compiled from — the strip compares it to the
+    // browser bundle's own SHA to flag a stale post-deploy bundle.
+    build: process.env.NEXT_PUBLIC_HERMES_BUILD ?? null,
     collected_at: Date.now() / 1000,
   };
   return NextResponse.json(summary);
