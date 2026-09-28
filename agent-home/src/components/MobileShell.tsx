@@ -3,6 +3,7 @@ import type { ReactNode } from "react";
 import { AppMcpBridge } from "@/components/app-mcp/AppMcpBridge";
 import { CoralHost } from "@/components/coral/CoralHost";
 import { LeadChatHost } from "@/components/coral/LeadChatHost";
+import { StatusStrip } from "@/components/ui/StatusStrip";
 import { getPrincipal } from "@/lib/auth/principal";
 import { readSession } from "@/lib/auth/session";
 import { HermesApiClient } from "@/lib/api/client";
@@ -101,6 +102,7 @@ export async function MobileShell({
             ) : null}
           </div>
         </header>
+        {showCoral ? <StatusStrip /> : null}
         <main
           className={`flex-1 px-4 py-4 lg:px-8 ${
             showCoral

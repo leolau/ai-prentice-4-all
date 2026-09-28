@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useEffect, useState } from "react";
 
 import { EntityGoalSection } from "@/components/settings/EntityGoalSection";
@@ -119,6 +120,21 @@ export function SettingsView({
       <PushEnroll />
 
       <InOutSection canManageMembers={canManageMembers} />
+
+      <section data-section="tools" className="mt-6">
+        <h2 className="text-sm font-semibold">Tools &amp; Integrations</h2>
+        <p className="mb-3 text-xs text-[var(--color-muted)]">
+          MCP servers and CLI toolsets the agent can use — enable, disable,
+          test, and re-authenticate (e.g. Canva OAuth).
+        </p>
+        <Link
+          href="/settings/tools"
+          className="flex items-center justify-between rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface)] p-4 text-sm font-medium"
+        >
+          Manage integrations
+          <span aria-hidden className="text-[var(--color-muted)]">→</span>
+        </Link>
+      </section>
 
       <EntityGoalSection goal={entityGoal} readOnly={entityGoalReadOnly} />
 

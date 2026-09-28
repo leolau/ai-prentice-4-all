@@ -2088,3 +2088,100 @@ export interface PinnedModelCard {
 export interface PinnedCardsResponse {
   pinned: PinnedModelCard[];
 }
+
+/* ── Status strip + Tools & Integrations (settings) ─────────────────────── */
+
+/** `GET /api/system/stats` — the subset the status strip reads. */
+export interface SystemStats {
+  cpu_percent?: number;
+  cpu_count?: number;
+  load_avg?: number[];
+  memory?: { total: number; available: number; used: number; percent: number };
+  disk?: { total: number; used: number; free: number; percent: number };
+  uptime_seconds?: number;
+}
+
+/** `GET /api/analytics/usage` — only the totals block is consumed. */
+export interface UsageAnalytics {
+  totals: {
+    total_input: number | null;
+    total_output: number | null;
+    total_cache_read?: number | null;
+    total_reasoning?: number | null;
+    total_estimated_cost?: number;
+    total_actual_cost?: number;
+    total_sessions?: number;
+    total_api_calls?: number | null;
+  };
+  period_days?: number;
+}
+
+/** `GET /api/cron/jobs` row (loose — only `enabled` is consumed). */
+export interface CronJob {
+  id?: string;
+  name?: string;
+  enabled?: boolean;
+  next_run_at?: string | number | null;
+  [extra: string]: unknown;
+}
+
+/** `GET /api/mcp/servers` row. */
+export interface McpServer {
+  name: string;
+  transport: "http" | "stdio" | "unknown";
+  url?: string | null;
+  command?: string | null;
+  args?: string[];
+  env?: Record<string, string>;
+  /** "oauth" | "header" | null — the auth scheme on the config entry. */
+  auth?: string | null;
+  enabled: boolean;
+  /** Tool allowlist; null/absent = all tools. */
+  tools?: unknown;
+  /** Present for `auth: "oauth"` servers — whether a token file exists. */
+  oauth_token_present?: boolean;
+}
+
+export interface McpServersResponse {
+  servers: McpServer[];
+}
+
+/** `GET /api/tools/toolsets` row — the `hermes tools` CLI set. */
+export interface Toolset {
+  name: string;
+  label: string;
+  description: string;
+  enabled: boolean;
+  available: boolean;
+  configured: boolean;
+  tools: string[];
+}
+
+export interface McpServerTestResult {
+  ok: boolean;
+  tools: { name: string; description: string }[];
+  error?: string;
+}
+
+/** Live state of a browser-driven MCP OAuth flow. */
+export interface McpOAuthFlowState {
+  status: "idle" | "starting" | "waiting_user" | "success" | "error" | "cancelled";
+  name?: string;
+  authorization_url?: string | null;
+  error?: string | null;
+  /** Tool count reported after a successful probe. */
+  tools?: number;
+}
+
+/** `GET /api/status/summary` — the aggregated strip payload. */
+export interface StatusSummary {
+  cpu_pct: number | null;
+  mem_pct: number | null;
+  disk_pct: number | null;
+  tokens_month: { input: number; output: number; cost_usd: number | null } | null;
+  active_conversations: number | null;
+  running_cards: number | null;
+  cron_total: number;
+  cron_enabled: number;
+  collected_at: number;
+}

@@ -12013,11 +12013,22 @@ async def list_mcp_servers(profile: Optional[str] = None):
 
     with _profile_scope(profile):
         servers = _get_mcp_servers()
-    return {
-        "servers": [
+        out = [
             _mcp_server_summary(name, cfg) for name, cfg in sorted(servers.items())
         ]
-    }
+        # Token presence must resolve inside the scope — HermesTokenStorage
+        # reads <hermes-home>/mcp-tokens at call time.
+        try:
+            from tools.mcp_oauth import HermesTokenStorage
+
+            for row in out:
+                if row.get("auth") == "oauth":
+                    row["oauth_token_present"] = HermesTokenStorage(
+                        row["name"]
+                    ).has_cached_tokens()
+        except Exception:
+            pass
+    return {"servers": out}
 
 
 @app.post("/api/mcp/servers")
@@ -12141,6 +12152,247 @@ async def set_mcp_server_enabled(
         servers[name]["enabled"] = bool(body.enabled)
         save_config(cfg)
     return {"ok": True, "name": name, "enabled": bool(body.enabled)}
+
+
+# ── MCP OAuth: browser-driven re-auth for headless operation ────────────────
+#
+# ``hermes mcp login`` works because a human sits at the TTY: the SDK's
+# redirect handler prints the authorization URL and the callback handler
+# races the 127.0.0.1 listener against a pasted redirect (or the drop file a
+# second ``hermes mcp oauth-paste`` writes).  These endpoints expose the same
+# flow over HTTP so agent-home can drive it: /start spawns the probe with a
+# redirect handler that *captures* the URL instead of printing it, /status
+# reports where the flow is, /redirect feeds the pasted redirect into the
+# waiting flow via write_drop_redirect, /cancel aborts it.
+#
+# Only one flow may run at a time: the callback machinery keys off the
+# module-level ``_oauth_port``/``_oauth_server_name`` globals, so two live
+# flows would race them.  A human can only complete one browser consent at
+# a time anyway (same reasoning as ``hermes mcp reauth --all`` being serial).
+
+_MCP_OAUTH_FLOWS: Dict[str, Dict[str, Any]] = {}
+_MCP_OAUTH_FLOWS_LOCK = threading.Lock()
+
+_MCP_OAUTH_FLOW_ACTIVE = ("starting", "waiting_user")
+# Finished flows linger so the UI can poll the outcome after the network
+# blips; swept once they are this old.
+_MCP_OAUTH_FLOW_TTL_S = 600.0
+
+
+class McpOAuthRedirectBody(BaseModel):
+    url: str
+    profile: Optional[str] = None
+
+
+def _mcp_oauth_flow_key(name: str, profile: Optional[str]) -> str:
+    """Flows are per (profile, server): two profiles can carry a same-named
+    server with independent OAuth state under their own HERMES_HOME."""
+    return f"{profile or 'default'}:{name}"
+
+
+def _mcp_oauth_flows_gc() -> None:
+    now = time.time()
+    for key, st in list(_MCP_OAUTH_FLOWS.items()):
+        if st["status"] not in _MCP_OAUTH_FLOW_ACTIVE and now - st.get(
+            "finished_at", now
+        ) > _MCP_OAUTH_FLOW_TTL_S:
+            _MCP_OAUTH_FLOWS.pop(key, None)
+
+
+def _run_mcp_oauth_flow(name: str, cfg: Dict[str, Any], profile: Optional[str], state: Dict[str, Any]) -> None:
+    """Worker for POST …/oauth/start — runs the probe with a capturing
+    redirect handler so the authorization URL reaches the UI instead of a
+    terminal nobody is watching.  The pasted redirect still travels the
+    stock drop-file path (``_wait_for_callback`` polls it).
+    """
+    try:
+        from mcp.client.auth import OAuthClientProvider
+        from tools.mcp_oauth import (
+            HermesTokenStorage,
+            _build_client_metadata,
+            _configure_callback_port,
+            _maybe_preregister_client,
+            _wait_for_callback,
+        )
+        from tools.mcp_oauth_manager import _ProviderEntry, get_manager
+        from hermes_cli.mcp_config import _oauth_tokens_present, _probe_single_server
+
+        async def _capture(authorization_url: str) -> None:
+            state["authorization_url"] = authorization_url
+            state["status"] = "waiting_user"
+
+        manager = get_manager()
+        # Profile scope must cover the whole worker — manager.remove() deletes
+        # on-disk tokens and token-store paths resolve against the profile's
+        # HERMES_HOME at call time (same reason /test re-enters the scope in
+        # its worker thread).
+        with _profile_scope(profile):
+            # Mirrors `hermes mcp login`: wipe disk tokens + evict the cached
+            # provider so the probe takes the full browser path, then
+            # substitute our URL-capturing provider into the manager's cache
+            # so _connect_server's get_or_build_provider returns it.
+            manager.remove(name)
+            oauth_cfg = dict(cfg.get("oauth") or {})
+            storage = HermesTokenStorage(name)
+            _configure_callback_port(oauth_cfg, name)
+            metadata = _build_client_metadata(oauth_cfg)
+            _maybe_preregister_client(storage, oauth_cfg, metadata)
+            provider = OAuthClientProvider(
+                server_url=cfg["url"],
+                client_metadata=metadata,
+                storage=storage,
+                redirect_handler=_capture,
+                callback_handler=_wait_for_callback,
+                timeout=float(oauth_cfg.get("timeout", 300)),
+            )
+            with manager._entries_lock:
+                entry = _ProviderEntry(
+                    server_url=cfg["url"], oauth_config=oauth_cfg
+                )
+                entry.provider = provider
+                manager._entries[name] = entry
+            try:
+                tools = _probe_single_server(name, cfg)
+                token_ok = _oauth_tokens_present(name)
+            finally:
+                with manager._entries_lock:
+                    # Drop the injected entry without touching the tokens the
+                    # flow just wrote; the next real connection rebuilds
+                    # through the normal path and reuses them.
+                    manager._entries.pop(name, None)
+        if token_ok:
+            state["status"] = "success"
+            state["tools"] = len(tools)
+        else:
+            state["status"] = "error"
+            state["error"] = (
+                "The server answered without completing OAuth — no token was "
+                "stored. If the provider lacks dynamic registration, add its "
+                "client credentials under mcp_servers.%s.oauth in config.yaml."
+                % name
+            )
+    except Exception as exc:
+        if state.get("cancelled"):
+            state["status"] = "cancelled"
+        else:
+            state["status"] = "error"
+            state["error"] = str(exc) or type(exc).__name__
+    finally:
+        state["finished_at"] = time.time()
+
+
+@app.post("/api/mcp/servers/{name}/oauth/start")
+async def start_mcp_oauth_flow(name: str, profile: Optional[str] = None):
+    """Begin a browser-driven re-auth for an ``auth: oauth`` MCP server.
+
+    Returns immediately; poll ``GET …/oauth/status`` until
+    ``authorization_url`` appears, open it, then hand the final redirect URL
+    to ``POST …/oauth/redirect``.
+    """
+    from hermes_cli.mcp_config import _get_mcp_servers
+    from tools.mcp_oauth import _OAUTH_AVAILABLE
+
+    with _profile_scope(profile):
+        servers = _get_mcp_servers()
+    cfg = servers.get(name)
+    if cfg is None:
+        raise HTTPException(status_code=404, detail=f"Server '{name}' not found")
+    if not isinstance(cfg, dict):
+        raise HTTPException(status_code=400, detail="Malformed server config")
+    if cfg.get("auth") != "oauth":
+        raise HTTPException(
+            status_code=400,
+            detail=f"Server '{name}' is not configured for OAuth (auth={cfg.get('auth')})",
+        )
+    if not cfg.get("url"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Server '{name}' has no URL — OAuth needs an HTTP transport",
+        )
+    if not _OAUTH_AVAILABLE:
+        raise HTTPException(
+            status_code=503, detail="MCP SDK OAuth support is not installed"
+        )
+
+    with _MCP_OAUTH_FLOWS_LOCK:
+        _mcp_oauth_flows_gc()
+        key = _mcp_oauth_flow_key(name, profile)
+        existing = _MCP_OAUTH_FLOWS.get(key)
+        if existing and existing["status"] in _MCP_OAUTH_FLOW_ACTIVE:
+            return dict(existing)
+        for other, st in _MCP_OAUTH_FLOWS.items():
+            if st["status"] in _MCP_OAUTH_FLOW_ACTIVE:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"An OAuth flow for '{other}' is already running — finish or cancel it first",
+                )
+        state: Dict[str, Any] = {
+            "status": "starting",
+            "name": name,
+            "authorization_url": None,
+            "error": None,
+        }
+        _MCP_OAUTH_FLOWS[key] = state
+
+    threading.Thread(
+        target=_run_mcp_oauth_flow,
+        args=(name, cfg, profile, state),
+        daemon=True,
+        name=f"mcp-oauth-{name}",
+    ).start()
+    return dict(state)
+
+
+@app.get("/api/mcp/servers/{name}/oauth/status")
+async def get_mcp_oauth_flow(name: str, profile: Optional[str] = None):
+    with _MCP_OAUTH_FLOWS_LOCK:
+        _mcp_oauth_flows_gc()
+        state = _MCP_OAUTH_FLOWS.get(_mcp_oauth_flow_key(name, profile))
+    if state is None:
+        return {"status": "idle", "authorization_url": None, "error": None}
+    return dict(state)
+
+
+@app.post("/api/mcp/servers/{name}/oauth/redirect")
+async def submit_mcp_oauth_redirect(name: str, body: McpOAuthRedirectBody):
+    """Feed a pasted redirect URL (or ``?code=…&state=…`` query) to a waiting flow."""
+    from tools.mcp_oauth import write_drop_redirect
+
+    with _MCP_OAUTH_FLOWS_LOCK:
+        state = _MCP_OAUTH_FLOWS.get(_mcp_oauth_flow_key(name, body.profile))
+    if state is None or state["status"] != "waiting_user":
+        raise HTTPException(
+            status_code=409, detail=f"No OAuth flow is waiting for '{name}'"
+        )
+    url = (body.url or "").strip()
+    if "code=" not in url and "error=" not in url:
+        raise HTTPException(
+            status_code=400,
+            detail="That doesn't look like an OAuth redirect — it should contain code= or error=",
+        )
+    # The waiting flow consumes the drop file under the profile's HERMES_HOME
+    # (the MCP loop applies the caller's scope), so the write must scope too.
+    with _profile_scope(body.profile):
+        write_drop_redirect(name, url)
+    return {"ok": True}
+
+
+@app.post("/api/mcp/servers/{name}/oauth/cancel")
+async def cancel_mcp_oauth_flow(name: str, profile: Optional[str] = None):
+    """Abort a waiting flow: drop an error redirect so the callback poller
+    fails fast instead of sitting out its 300s timeout."""
+    from tools.mcp_oauth import write_drop_redirect
+
+    with _MCP_OAUTH_FLOWS_LOCK:
+        state = _MCP_OAUTH_FLOWS.get(_mcp_oauth_flow_key(name, profile))
+        if state is None or state["status"] not in _MCP_OAUTH_FLOW_ACTIVE:
+            raise HTTPException(
+                status_code=409, detail=f"No active OAuth flow for '{name}'"
+            )
+        state["cancelled"] = True
+    with _profile_scope(profile):
+        write_drop_redirect(name, "?error=access_denied&error_description=cancelled")
+    return {"ok": True}
 
 
 # ── Admin: FG-07 tool registry + in-house tool dashboard ────────────────────
