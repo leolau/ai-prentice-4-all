@@ -2664,6 +2664,11 @@ def _is_payment_error(exc: Exception) -> bool:
             "not available on the free tier",
             "requires a subscription", "upgrade for access",
             "upgrade for higher limits", "reached your session usage limit",
+            # Subscription/entitlement denials: Alibaba Token Plan
+            # "AccessDenied.Unpurchased" (lapsed or out-of-scope plan),
+            # and the human message it carries in case the code field is
+            # not serialized into the exception string.
+            "unpurchased", "eligible for using the model",
             # Daily / monthly / weekly quota exhaustion keywords
             "quota exceeded", "quota_exceeded",
             "too many tokens per day", "daily limit",
