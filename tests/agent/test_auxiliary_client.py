@@ -1589,6 +1589,42 @@ class TestIsPaymentError:
         exc.status_code = 429
         assert _is_payment_error(exc) is False
 
+    # ── Subscription/entitlement denials ──────────────────────────────────
+
+    def test_403_unpurchased_is_payment(self):
+        """Alibaba Token Plan AccessDenied.Unpurchased — a lapsed or
+        out-of-scope subscription — is an entitlement denial, functionally
+        identical to a 402: the provider cannot serve the request."""
+        exc = Exception(
+            "Error code: 403 - {'error': {'message': 'Access to model denied. "
+            "Please make sure you are eligible for using the model.', "
+            "'id': '528e4e2e-a0e0-4198-a947-666882622c94', "
+            "'type': 'AccessDenied.Unpurchased', "
+            "'code': 'AccessDenied.Unpurchased'}}"
+        )
+        exc.status_code = 403
+        assert _is_payment_error(exc) is True
+
+    def test_403_unpurchased_message_only_is_payment(self):
+        """The message text alone (code/type fields not serialized) still
+        classifies as an entitlement denial."""
+        exc = Exception(
+            "Access to model denied. "
+            "Please make sure you are eligible for using the model."
+        )
+        exc.status_code = 403
+        assert _is_payment_error(exc) is True
+
+    def test_403_generic_access_denied_is_not_payment(self):
+        """An ordinary IAM/permission 403 without entitlement language must
+        NOT be treated as a payment error."""
+        exc = Exception(
+            "Error code: 403 - {'error': {'message': 'Access denied for this "
+            "resource.', 'type': 'AccessDenied.InvalidToken'}}"
+        )
+        exc.status_code = 403
+        assert _is_payment_error(exc) is False
+
 
 class TestIsModelNotFoundError:
     """_is_model_not_found_error detects stale/invalid model 404s, distinct
@@ -2214,6 +2250,49 @@ class TestAuxiliaryFallbackLayering:
             )
 
         assert main_client.chat.completions.create.called
+
+    def test_explicit_provider_unpurchased_403_falls_back_to_main_agent(self, monkeypatch):
+        """AccessDenied.Unpurchased on an explicit provider is a capacity
+        error: a lapsed subscription must bypass the explicit-provider gate
+        and land on the main-agent safety net (prod incident — alibaba
+        token-plan denying glm-5.2 for plan drafting)."""
+        primary_client = MagicMock()
+        primary_client.base_url = (
+            "https://token-plan.ap-southeast-1.maas.aliyuncs.com"
+            "/compatible-mode/v1"
+        )
+        unpurchased_err = Exception(
+            "Error code: 403 - {'error': {'message': 'Access to model denied. "
+            "Please make sure you are eligible for using the model.', "
+            "'type': 'AccessDenied.Unpurchased', "
+            "'code': 'AccessDenied.Unpurchased'}}"
+        )
+        unpurchased_err.status_code = 403
+        primary_client.chat.completions.create.side_effect = unpurchased_err
+
+        main_client = MagicMock()
+        main_client.chat.completions.create.return_value = MagicMock(choices=[
+            MagicMock(message=MagicMock(content="plan via main model"))
+        ])
+
+        with patch("agent.auxiliary_client._get_cached_client",
+                   return_value=(primary_client, "glm-5.2")), \
+             patch("agent.auxiliary_client._resolve_task_provider_model",
+                   return_value=("alibaba", "glm-5.2", None, None, None)), \
+             patch("agent.auxiliary_client._recoverable_pool_provider",
+                   return_value=None), \
+             patch("agent.auxiliary_client._try_configured_fallback_chain",
+                   return_value=(None, None, "")), \
+             patch("agent.auxiliary_client._try_main_agent_model_fallback",
+                   return_value=(main_client, "deepseek-v4.1-flash",
+                                 "main-agent(opencode-go)")) as mock_main:
+            result = call_llm(
+                task="compression",
+                messages=[{"role": "user", "content": "hello"}],
+            )
+
+        assert result.choices[0].message.content == "plan via main model"
+        mock_main.assert_called_once()
 
     def test_explicit_provider_rate_limit_triggers_fallback(self, monkeypatch):
         """429 rate-limit on an explicit provider must trigger fallback (not be ignored).

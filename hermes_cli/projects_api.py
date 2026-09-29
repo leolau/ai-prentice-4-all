@@ -2389,6 +2389,30 @@ def _call_plan_model(prompt: str) -> str:
     return response.choices[0].message.content or ""
 
 
+def _plan_draft_error_detail(exc: Exception) -> str:
+    """Translate provider failures into an actionable detail for the UI."""
+    err = str(exc)
+    try:
+        from agent.auxiliary_client import _is_auth_error, _is_payment_error
+
+        if _is_payment_error(exc):
+            return (
+                "The model provider for plan drafting denied access "
+                "(subscription or model entitlement inactive). Renew the "
+                "provider plan or repoint auxiliary.compression / "
+                f"auxiliary.projects_plan in config. Provider said: {err}"
+            )
+        if _is_auth_error(exc):
+            return (
+                "The model provider for plan drafting rejected its "
+                "credentials. Re-authenticate the provider, then retry. "
+                f"Provider said: {err}"
+            )
+    except Exception:
+        pass
+    return err
+
+
 def _plan_draft_job(
     *,
     project_id: str,
@@ -2420,7 +2444,11 @@ def _plan_draft_job(
         _set(status="done", rev=rev, finished_at=int(time.time()))
     except Exception as exc:  # noqa: BLE001 — surfaced to the UI, not raised
         logger.warning("plan draft failed for project %s: %s", project_id, exc)
-        _set(status="failed", detail=str(exc), finished_at=int(time.time()))
+        _set(
+            status="failed",
+            detail=_plan_draft_error_detail(exc),
+            finished_at=int(time.time()),
+        )
 
 
 @router.post("/{slug}/playbook/draft")

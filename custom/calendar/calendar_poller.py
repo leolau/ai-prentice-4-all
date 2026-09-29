@@ -141,13 +141,21 @@ def sync_events(db, account_id, credentials, calendar_id='primary'):
     access_token = get_access_token(account_id, credentials)
     now = datetime.now(timezone.utc)
 
-    # Get existing sync token
+    # Get existing sync token + last-pass watermark
     account = db.execute(
-        "SELECT sync_token FROM calendar_accounts WHERE id = ?",
+        "SELECT sync_token, last_synced FROM calendar_accounts WHERE id = ?",
         (account_id,)
     ).fetchone()
 
     sync_token = account['sync_token'] if account else None
+    last_synced = None
+    if account and account['last_synced']:
+        try:
+            last_synced = datetime.fromisoformat(account['last_synced'])
+            if last_synced.tzinfo is None:
+                last_synced = last_synced.replace(tzinfo=timezone.utc)
+        except ValueError:
+            last_synced = None
 
     all_events = []
     page_token = None
@@ -157,11 +165,28 @@ def sync_events(db, account_id, credentials, calendar_id='primary'):
     # was issued for ("Invalid page token value"), so the window is built once
     # and every page reuses it — a calendar with more than one page of events
     # used to fail on page two and sync nothing.
-    base_params = {'maxResults': 250, 'singleEvents': True}
+    # showDeleted surfaces cancelled/deleted events as status='cancelled'
+    # items so the DB marks them — without it they silently vanish from the
+    # response and stale 'confirmed' rows persist forever.
+    base_params = {'maxResults': 250, 'singleEvents': True, 'showDeleted': True}
     if sync_token:
+        # syncToken responses carry deletion tombstones already; it can't be
+        # combined with an explicit showDeleted (nor several other filters).
         base_params['syncToken'] = sync_token
+        base_params.pop('showDeleted', None)
+    elif last_synced and (now - last_synced) < timedelta(days=7):
+        # Delta sync via updatedMin. Google never returns nextSyncToken for the
+        # timeMax'd full-window request below, so sync_token stays NULL forever
+        # and every pass reprocessed the entire calendar (~90% CPU). updatedMin
+        # keeps singleEvents expansion but returns only events modified since
+        # the last pass — a steady-state poll sees ~0 items. The 5min overlap
+        # covers clock skew between our write and Google's `updated` stamps.
+        base_params['updatedMin'] = (
+            last_synced - timedelta(minutes=5)
+        ).isoformat()
     else:
-        # Full sync: get events from 30 days ago to 365 days ahead
+        # Full sync: get events from 30 days ago to 365 days ahead. Also the
+        # weekly safety net — catches permanent deletions a delta can't see.
         base_params['timeMin'] = (now - timedelta(days=30)).isoformat()
         base_params['timeMax'] = (now + timedelta(days=365)).isoformat()
         base_params['orderBy'] = 'startTime'
@@ -201,12 +226,14 @@ def sync_events(db, account_id, credentials, calendar_id='primary'):
     for event in all_events:
         google_event_id = event.get('id', '')
         status = event.get('status', 'confirmed')
+        raw = json.dumps(event, sort_keys=True)
 
         if status == 'cancelled':
-            # Mark as cancelled in DB
+            # Mark as cancelled in DB — skip rows already cancelled so a
+            # full resync doesn't rewrite (and recount) them every pass.
             rows = db.execute(
                 """UPDATE calendar_events SET status = 'cancelled', updated_at = ?
-                   WHERE google_event_id = ? AND account_id = ?""",
+                   WHERE google_event_id = ? AND account_id = ? AND status != 'cancelled'""",
                 (now.isoformat(), google_event_id, account_id)
             ).rowcount
             if rows > 0:
@@ -217,11 +244,18 @@ def sync_events(db, account_id, credentials, calendar_id='primary'):
         conference_link = extract_conference_link(event)
         organizer = event.get('organizer', {})
 
-        # Check if event already exists
+        # Check if event already exists — and whether the payload changed.
+        # An unchanged event must not run the per-event work below: during a
+        # full resync (weekly safety net) ~770 identical events would each pay
+        # an UPDATE + register_item (fresh event loop + Postgres connect) +
+        # sync_attendees — that per-event cost is what burned ~90% CPU.
         existing = db.execute(
-            "SELECT id FROM calendar_events WHERE google_event_id = ? AND account_id = ?",
+            "SELECT id, status, raw_json FROM calendar_events WHERE google_event_id = ? AND account_id = ?",
             (google_event_id, account_id)
         ).fetchone()
+
+        if existing and existing['raw_json'] == raw and existing['status'] == status:
+            continue
 
         event_id = existing['id'] if existing else str(uuid.uuid4())
 
@@ -246,7 +280,7 @@ def sync_events(db, account_id, credentials, calendar_id='primary'):
                     event.get('recurringEventId', ''),
                     event.get('htmlLink', ''),
                     conference_link,
-                    json.dumps(event),
+                    raw,
                     now.isoformat(),
                     event_id
                 )
@@ -275,7 +309,7 @@ def sync_events(db, account_id, credentials, calendar_id='primary'):
                     event.get('recurringEventId', ''),
                     event.get('htmlLink', ''),
                     conference_link,
-                    json.dumps(event),
+                    raw,
                     now.isoformat(), now.isoformat()
                 )
             )
@@ -315,11 +349,17 @@ def sync_events(db, account_id, credentials, calendar_id='primary'):
         # Sync attendees
         sync_attendees(db, event_id, event.get('attendees', []))
 
-    # Update sync token
+    # Persist the watermark every pass — last_synced is what makes the next
+    # poll a cheap updatedMin delta. sync_token only when Google issued one.
     if new_sync_token:
         db.execute(
             "UPDATE calendar_accounts SET sync_token = ?, last_synced = ? WHERE id = ?",
             (new_sync_token, now.isoformat(), account_id)
+        )
+    else:
+        db.execute(
+            "UPDATE calendar_accounts SET last_synced = ? WHERE id = ?",
+            (now.isoformat(), account_id)
         )
 
     db.commit()
