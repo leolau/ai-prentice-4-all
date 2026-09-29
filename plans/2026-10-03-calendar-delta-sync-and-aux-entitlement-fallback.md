@@ -1,6 +1,7 @@
 # Calendar delta sync + auxiliary entitlement-denial fallback
 
-Status: **implemented, PR pending** — 2026-10-03
+Status: **merged (PR #480, `c6ac44195`) and deployed/verified on
+production** — 2026-10-03
 
 ## Requests
 
@@ -98,3 +99,21 @@ the main `opencode-go` provider automatically.
 - `pytest tests/custom/test_calendar_poller_delta.py` — 9 passed
 - `pytest tests/hermes_cli/test_projects_api_plan_draft.py
   tests/hermes_cli/test_projects_api.py` — 44 passed
+
+### Production verification (post-deploy, `c6ac44195`)
+
+- Calendar poller: first pass completed the last full sync
+  (`+0/~773/-8 cancelled` — tombstones propagating for the first time via
+  `showDeleted`), and **populated `sync_token` on all 3 accounts**.
+  Subsequent passes: `last_synced` advancing each pass; process used
+  **0.21 CPU-seconds per 90s cycle** (was ~52 CPU-seconds per 60s pass —
+  ~250× reduction). 38s CPU total in first 10 min vs the old process's
+  ~36% duty cycle.
+- Aux fallback: `call_llm("compression")` on the box reproduced the exact
+  prod failure — `alibaba` → 403 `AccessDenied.Unpurchased` → classified
+  payment error → provider marked unhealthy 600s → fell back to
+  `main-agent(opencode-go) deepseek-v4.1-flash` → **returned "ok"**. The
+  Projects plan-draft path uses this task and now works.
+- Note: the poller service has no `python -u`/PYTHONUNBUFFERED, so
+  `[calendar]` log lines buffer ~4KB before flushing — delta passes emit
+  little output so the log appears to stall between flushes. Cosmetic.
