@@ -9,8 +9,13 @@
  * trusting a value nobody vouched for.
  */
 export function callerIp(request: Request): string {
-  const forwarded = request.headers.get("x-forwarded-for") || "";
+  return callerIpFromHeaders(request.headers);
+}
+
+/** {@link callerIp} for a server component, which has headers but no Request. */
+export function callerIpFromHeaders(headers: Pick<Headers, "get">): string {
+  const forwarded = headers.get("x-forwarded-for") || "";
   const first = forwarded.split(",")[0]?.trim() || "";
   if (first) return first;
-  return (request.headers.get("x-real-ip") || "").trim();
+  return (headers.get("x-real-ip") || "").trim();
 }

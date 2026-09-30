@@ -7,6 +7,7 @@ extracts tasks/notes, and creates escalations for urgent items.
 Loads dynamic skills from /opt/data/skills/whatsapp-triage/.
 """
 
+import asyncio
 import json
 import os
 import sqlite3
@@ -18,6 +19,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from urllib.request import Request, urlopen
 from urllib.error import URLError
+
+from hermes_cli.config import load_config as load_hermes_config
+from hermes_cli.seminar_survey import (
+    SurveySettings,
+    default_store as seminar_survey_store,
+    survey_request_messages,
+)
 
 # Credit tracking
 sys.path.insert(0, '/opt/data')
@@ -226,12 +234,45 @@ def process_triage_result(batch, result):
           f"memory_facts={len(result.get('memory_facts', []))}")
 
 
+_hermes_config = load_hermes_config() or {}
+SEMINAR_SETTINGS = SurveySettings.from_config(_hermes_config)
+_seminar_store = None
+
+
+def record_survey_request(message):
+    """Queue the seminar survey link for the chat that asked. False on failure."""
+    global _seminar_store
+    try:
+        if _seminar_store is None:
+            _seminar_store = seminar_survey_store(_hermes_config)
+        outcome = asyncio.run(
+            _seminar_store.signup(message['chat_id'], message.get('sender_name'))
+        )
+    except Exception as e:
+        print(f"[triage] Seminar survey request not recorded: {e}")
+        return False
+    print(f"[triage] Seminar survey request from {message['chat_id']}: {outcome}")
+    return True
+
+
 def process_batch_file(batch_path):
     """Process a single batch file."""
     with open(batch_path) as f:
         batch = json.load(f)
     
     print(f"[triage] Processing batch: {batch['sender_phone']} on {batch['source_phone']} ({batch['message_count']} msgs)")
+
+    # Seminar QR code requests are answered by the outreach worker, not the
+    # LLM: record the request, then triage whatever else the batch holds.
+    survey_requests = survey_request_messages(batch, SEMINAR_SETTINGS)
+    if survey_requests:
+        if not record_survey_request(survey_requests[-1]):
+            print(f"[triage] Will retry batch later")
+            return
+        batch['messages'] = [m for m in batch['messages'] if m not in survey_requests]
+        if not batch['messages']:
+            os.rename(batch_path, os.path.join(PROCESSED_DIR, os.path.basename(batch_path)))
+            return
     
     # Check if sender is family (immediate escalation without LLM for pure routing)
     sender_phone = batch['sender_phone']

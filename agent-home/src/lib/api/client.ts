@@ -110,6 +110,9 @@ import type {
   WebviewActionResponse,
   WebviewMode,
   WebviewSessionResponse,
+  SeminarSurveyAnswers,
+  SeminarSurveyState,
+  SeminarSurveySubmitResult,
 } from "@/types";
 
 /** Raised when the Python API returns a non-2xx status. */
@@ -1057,6 +1060,34 @@ export class HermesApiClient {
     return this.request("/api/auth/invitations/request", {
       method: "POST",
       json: { email },
+      headers: forwardedFor(clientIp),
+    });
+  }
+
+  // --- Seminar survey (unauthenticated) --------------------------------
+  // Keyed by the personal token sent into the attendee's WhatsApp chat; the
+  // Python API throttles both per IP and per token.
+
+  /** Whether the survey behind `token` is still open. 404 for an unknown link. */
+  async seminarSurveyState(
+    token: string,
+    clientIp = "",
+  ): Promise<SeminarSurveyState> {
+    return this.request("/api/seminar/survey/state", {
+      method: "POST",
+      json: { token },
+      headers: forwardedFor(clientIp),
+    });
+  }
+
+  /** Store the answers; the slides follow on WhatsApp. Repeat submits are no-ops. */
+  async submitSeminarSurvey(
+    input: { token: string; answers: SeminarSurveyAnswers },
+    clientIp = "",
+  ): Promise<SeminarSurveySubmitResult> {
+    return this.request("/api/seminar/survey/submit", {
+      method: "POST",
+      json: input,
       headers: forwardedFor(clientIp),
     });
   }

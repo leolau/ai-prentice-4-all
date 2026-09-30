@@ -91,6 +91,12 @@ from hermes_cli.memory_providers import (
     get_memory_provider,
 )
 from hermes_cli.goal_management import RESOURCE_KINDS, ResourceKind
+from hermes_cli.invitations import RedeemThrottle as _SeminarThrottle
+from hermes_cli.seminar_survey import (
+    SurveyError,
+    default_store,
+    validate_answers,
+)
 from gateway.status import (
     derive_gateway_busy,
     derive_gateway_drainable,
@@ -3921,6 +3927,90 @@ async def auth_request_invitation(request: Request):
         except Exception as exc:  # noqa: BLE001 — never leak the reason
             logger.warning("password reset request failed: %s", exc)
     return {"ok": True}
+
+
+# --- unauthenticated seminar survey ------------------------------------------
+#
+# Public endpoints behind agent-home's ``/survey/<token>`` page. See
+# hermes_cli/seminar_survey.py for the lifecycle.
+
+_SEMINAR_THROTTLE = None
+
+
+def _seminar_throttle():
+    global _SEMINAR_THROTTLE
+    if _SEMINAR_THROTTLE is None:
+        _SEMINAR_THROTTLE = _SeminarThrottle(max_attempts=20, window_seconds=600.0)
+    return _SEMINAR_THROTTLE
+
+
+_SEMINAR_STORE = None
+
+
+def _seminar_store():
+    global _SEMINAR_STORE
+    if _SEMINAR_STORE is None:
+        _SEMINAR_STORE = default_store(load_config() or {})
+    return _SEMINAR_STORE
+
+
+_SEMINAR_UNAVAILABLE = "The survey is unavailable right now. 問卷暫時無法使用。"
+_SEMINAR_NOT_FOUND = "This survey link is not valid. 此問卷連結無效。"
+
+
+async def _seminar_body(request: "Request") -> dict:
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    return body if isinstance(body, dict) else {}
+
+
+@app.post("/api/seminar/survey/state")
+async def seminar_survey_state(request: Request):
+    """Whether the survey behind ``token`` is still open. **Unauthenticated.**"""
+    body = await _seminar_body(request)
+    token = str(body.get("token", "") or "")
+    if not token or not _seminar_throttle().allow(
+        ip=_forwarded_client_ip(request), token=token
+    ):
+        raise HTTPException(status_code=404, detail=_SEMINAR_NOT_FOUND)
+    try:
+        state = await _seminar_store().survey_state(token)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("seminar survey lookup failed: %s", exc)
+        raise HTTPException(status_code=503, detail=_SEMINAR_UNAVAILABLE) from exc
+    if state is None:
+        raise HTTPException(status_code=404, detail=_SEMINAR_NOT_FOUND)
+    return {"submitted": state.submitted}
+
+
+@app.post("/api/seminar/survey/submit")
+async def seminar_survey_submit(request: Request):
+    """Store the answers behind ``token`` and queue the slides. **Unauthenticated.**
+
+    A repeat submission is accepted as a no-op (``already_submitted``) so a
+    double tap never sends the slides twice or overwrites the first answers.
+    """
+    body = await _seminar_body(request)
+    token = str(body.get("token", "") or "")
+    if not token or not _seminar_throttle().allow(
+        ip=_forwarded_client_ip(request), token=token
+    ):
+        raise HTTPException(status_code=404, detail=_SEMINAR_NOT_FOUND)
+    raw_answers = body.get("answers")
+    try:
+        answers = validate_answers(raw_answers if isinstance(raw_answers, dict) else {})
+    except SurveyError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    try:
+        outcome = await _seminar_store().submit(token, answers)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("seminar survey submit failed: %s", exc)
+        raise HTTPException(status_code=503, detail=_SEMINAR_UNAVAILABLE) from exc
+    if outcome == "not_found":
+        raise HTTPException(status_code=404, detail=_SEMINAR_NOT_FOUND)
+    return {"ok": True, "already_submitted": outcome == "already_submitted"}
 
 
 @app.get("/api/comms/notifications")
