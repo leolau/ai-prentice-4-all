@@ -946,6 +946,9 @@ DEFAULT_CONFIG = {
         "retry_backoff_seconds": 60,
         # Asking again before submitting re-sends the link only after this long.
         "resend_cooldown_seconds": 600,
+        # Survey page lookups/submits the API runs against the database at
+        # once; the rest wait their turn instead of exhausting the pooler.
+        "db_concurrency": 8,
     },
     # C8 interaction tracing is an append-only application-datastore side
     # channel. Sampling applies only to tool_call/tool_result spans.

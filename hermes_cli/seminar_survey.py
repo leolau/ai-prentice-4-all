@@ -134,6 +134,7 @@ class SurveySettings:
     max_attempts: int = 5
     retry_backoff_seconds: float = 60.0
     resend_cooldown_seconds: float = 600.0
+    db_concurrency: int = 8
 
     @classmethod
     def from_config(cls, config: Mapping[str, object] | None) -> "SurveySettings":
@@ -168,6 +169,9 @@ class SurveySettings:
             ),
             resend_cooldown_seconds=_num(
                 values, "resend_cooldown_seconds", defaults.resend_cooldown_seconds
+            ),
+            db_concurrency=max(
+                1, int(_num(values, "db_concurrency", float(defaults.db_concurrency)))
             ),
         )
 
