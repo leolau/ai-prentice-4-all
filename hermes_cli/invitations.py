@@ -272,8 +272,12 @@ class RedeemThrottle:
         max_attempts: int = 10,
         window_seconds: float = 300.0,
         now: "Callable[[], float] | None" = None,
+        ip_max_attempts: int | None = None,
     ) -> None:
         self._max = max(1, int(max_attempts))
+        self._ip_max = (
+            self._max if ip_max_attempts is None else max(1, int(ip_max_attempts))
+        )
         self._window = float(window_seconds)
         self._now = now or time.monotonic
         self._buckets: dict[str, tuple[float, int]] = {}
@@ -284,12 +288,15 @@ class RedeemThrottle:
         The token is keyed by its **hash**, never its raw value, so the limiter's
         state cannot become a place where live tokens sit in memory as strings.
         """
-        keys = [f"ip:{ip or 'unknown'}", f"tok:{hash_token(token or '').hex()}"]
+        buckets = [
+            (f"ip:{ip or 'unknown'}", self._ip_max),
+            (f"tok:{hash_token(token or '').hex()}", self._max),
+        ]
         # Evaluate both buckets so an attempt counts against the token even when
         # the IP bucket is already exhausted (and vice versa).
-        return all([self._hit(key) for key in keys])
+        return all([self._hit(key, limit) for key, limit in buckets])
 
-    def _hit(self, key: str) -> bool:
+    def _hit(self, key: str, limit: int) -> bool:
         now = self._now()
         started, count = self._buckets.get(key, (now, 0))
         if now - started >= self._window:
@@ -298,7 +305,7 @@ class RedeemThrottle:
         self._buckets[key] = (started, count)
         if len(self._buckets) > _THROTTLE_MAX_KEYS:
             self._evict(now)
-        return count <= self._max
+        return count <= limit
 
     def _evict(self, now: float) -> None:
         """Drop expired buckets so a token-spraying attack cannot grow memory."""

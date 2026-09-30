@@ -7,12 +7,16 @@ import json
 
 import httpx
 import pytest
+from fastapi.testclient import TestClient
 
+from hermes_cli import web_server
+from hermes_cli.invitations import RedeemThrottle
 from hermes_cli.seminar_outreach import BridgeSendError, run_once, send_whatsapp
 from hermes_cli.seminar_survey import (
     Job,
     SurveyError,
     SurveySettings,
+    SurveyState,
     completion_message,
     invite_message,
     is_survey_request,
@@ -233,3 +237,44 @@ class TestWorker:
 
         with pytest.raises(BridgeSendError):
             asyncio.run(go())
+
+
+class FakeStateStore:
+    async def survey_state(self, token: str) -> SurveyState:
+        return SurveyState(status="invited", submitted=False)
+
+
+class TestPublicThrottle:
+    @pytest.fixture
+    def client(self, monkeypatch: pytest.MonkeyPatch) -> TestClient:
+        monkeypatch.setattr(web_server, "_SEMINAR_STORE", FakeStateStore())
+        monkeypatch.setattr(web_server, "_SEMINAR_THROTTLE", None)
+        monkeypatch.setattr(web_server.app.state, "auth_required", False, raising=False)
+        return TestClient(web_server.app)
+
+    def test_a_whole_audience_on_one_address_gets_through(
+        self, client: TestClient
+    ) -> None:
+        for n in range(150):
+            response = client.post(
+                "/api/seminar/survey/state", json={"token": f"attendee-{n}"}
+            )
+            assert response.status_code == 200, n
+
+    def test_hammering_one_link_is_told_to_wait(self, client: TestClient) -> None:
+        codes = [
+            client.post("/api/seminar/survey/state", json={"token": "one"}).status_code
+            for _ in range(21)
+        ]
+        assert codes[:20] == [200] * 20
+        limited = client.post("/api/seminar/survey/submit", json={"token": "one"})
+        assert limited.status_code == 429
+        assert "稍候" in limited.json()["detail"]
+
+    def test_ip_allowance_defaults_to_the_token_allowance(self) -> None:
+        throttle = RedeemThrottle(max_attempts=2)
+        assert [throttle.allow(ip="1.1.1.1", token=f"t{n}") for n in range(3)] == [
+            True,
+            True,
+            False,
+        ]

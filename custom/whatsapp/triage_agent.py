@@ -256,7 +256,7 @@ def record_survey_request(message):
 
 
 def process_batch_file(batch_path):
-    """Process a single batch file."""
+    """Process a single batch file. Returns True when it called the LLM."""
     with open(batch_path) as f:
         batch = json.load(f)
     
@@ -268,15 +268,16 @@ def process_batch_file(batch_path):
     if survey_requests:
         if not record_survey_request(survey_requests[-1]):
             print(f"[triage] Will retry batch later")
-            return
+            return False
         batch['messages'] = [m for m in batch['messages'] if m not in survey_requests]
         if not batch['messages']:
             os.rename(batch_path, os.path.join(PROCESSED_DIR, os.path.basename(batch_path)))
-            return
+            return False
     
     # Check if sender is family (immediate escalation without LLM for pure routing)
     sender_phone = batch['sender_phone']
     is_family = sender_phone in FAMILY_PHONES
+    called_llm = False
     
     # Skip LLM for empty/media-only messages from non-family
     has_text = any(m.get('text') for m in batch['messages'])
@@ -306,6 +307,7 @@ def process_batch_file(batch_path):
     else:
         # Call LLM for classification
         result = triage_batch(batch)
+        called_llm = True
     
     if result:
         process_triage_result(batch, result)
@@ -314,6 +316,14 @@ def process_batch_file(batch_path):
         os.rename(batch_path, processed_path)
     else:
         print(f"[triage] Failed to triage batch, will retry later")
+    return called_llm
+
+
+def _arrival_time(path):
+    try:
+        return os.path.getmtime(path)
+    except OSError:
+        return float('inf')
 
 
 def main():
@@ -326,14 +336,16 @@ def main():
         # Find unprocessed batch files
         batch_files = glob.glob(os.path.join(BATCH_DIR, '*.json'))
         
-        for bf in sorted(batch_files):
+        for bf in sorted(batch_files, key=lambda path: (_arrival_time(path), path)):
             if '/processed/' in bf:
                 continue
             try:
-                process_batch_file(bf)
+                called_llm = process_batch_file(bf)
             except Exception as e:
                 print(f"[triage] Error processing {bf}: {e}")
-            time.sleep(1)  # Rate limit between batches
+                called_llm = True
+            if called_llm:
+                time.sleep(1)  # Rate limit between LLM calls
         
         # Sleep before next scan
         time.sleep(3)

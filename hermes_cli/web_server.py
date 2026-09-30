@@ -3940,7 +3940,11 @@ _SEMINAR_THROTTLE = None
 def _seminar_throttle():
     global _SEMINAR_THROTTLE
     if _SEMINAR_THROTTLE is None:
-        _SEMINAR_THROTTLE = _SeminarThrottle(max_attempts=20, window_seconds=600.0)
+        # A whole audience can share one address (venue WiFi, carrier NAT), so
+        # the per-IP bucket only bounds load; the per-link bucket stops guessing.
+        _SEMINAR_THROTTLE = _SeminarThrottle(
+            max_attempts=20, ip_max_attempts=1000, window_seconds=600.0
+        )
     return _SEMINAR_THROTTLE
 
 
@@ -3956,6 +3960,10 @@ def _seminar_store():
 
 _SEMINAR_UNAVAILABLE = "The survey is unavailable right now. 問卷暫時無法使用。"
 _SEMINAR_NOT_FOUND = "This survey link is not valid. 此問卷連結無效。"
+_SEMINAR_TOO_MANY = (
+    "Too many tries — please wait a few minutes and try again. "
+    "嘗試次數過多，請稍候幾分鐘再試。"
+)
 
 
 async def _seminar_body(request: "Request") -> dict:
@@ -3971,10 +3979,10 @@ async def seminar_survey_state(request: Request):
     """Whether the survey behind ``token`` is still open. **Unauthenticated.**"""
     body = await _seminar_body(request)
     token = str(body.get("token", "") or "")
-    if not token or not _seminar_throttle().allow(
-        ip=_forwarded_client_ip(request), token=token
-    ):
+    if not token:
         raise HTTPException(status_code=404, detail=_SEMINAR_NOT_FOUND)
+    if not _seminar_throttle().allow(ip=_forwarded_client_ip(request), token=token):
+        raise HTTPException(status_code=429, detail=_SEMINAR_TOO_MANY)
     try:
         state = await _seminar_store().survey_state(token)
     except Exception as exc:  # noqa: BLE001
@@ -3994,10 +4002,10 @@ async def seminar_survey_submit(request: Request):
     """
     body = await _seminar_body(request)
     token = str(body.get("token", "") or "")
-    if not token or not _seminar_throttle().allow(
-        ip=_forwarded_client_ip(request), token=token
-    ):
+    if not token:
         raise HTTPException(status_code=404, detail=_SEMINAR_NOT_FOUND)
+    if not _seminar_throttle().allow(ip=_forwarded_client_ip(request), token=token):
+        raise HTTPException(status_code=429, detail=_SEMINAR_TOO_MANY)
     raw_answers = body.get("answers")
     try:
         answers = validate_answers(raw_answers if isinstance(raw_answers, dict) else {})

@@ -128,7 +128,7 @@ class SurveySettings:
     public_base_url: str = "https://home.leolau.ai-and-i.io"
     bridge_url: str = "http://127.0.0.1:3001"
     presentation_url: str = "https://canva.link/puysezdoxbb5sk6"
-    send_interval_seconds: float = 3.0
+    send_interval_seconds: float = 1.0
     poll_seconds: float = 5.0
     lease_seconds: float = 300.0
     max_attempts: int = 5
