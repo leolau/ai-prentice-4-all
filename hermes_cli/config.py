@@ -939,7 +939,7 @@ DEFAULT_CONFIG = {
         "presentation_url": "https://canva.link/puysezdoxbb5sk6",
         # Pacing between outbound messages, so a burst of requests after the
         # seminar does not look like bulk messaging to WhatsApp.
-        "send_interval_seconds": 3,
+        "send_interval_seconds": 1,
         "poll_seconds": 5,
         "lease_seconds": 300,
         "max_attempts": 5,
