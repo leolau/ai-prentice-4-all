@@ -3,7 +3,8 @@
 Covers what only a real database can get wrong: the table migration, the
 request -> invite -> submit -> slides lifecycle keyed by a hashed token,
 single-winner claims under ``SKIP LOCKED``, retry/give-up, the resend
-cooldown, and the unauthenticated survey endpoints end to end.
+cooldown, repeat surveys from one chat, and the unauthenticated survey
+endpoints end to end.
 """
 
 from __future__ import annotations
@@ -13,7 +14,7 @@ import shutil
 import subprocess
 import time
 import uuid
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 
 import asyncpg
 import pytest
@@ -253,14 +254,75 @@ def test_asking_again_after_cooldown_resends(postgres_dsn: str) -> None:
         assert done is not None and done.kind == "complete"
         await store.mark_sent(done, "W3")
 
-        assert await store.signup(CHAT) == "unchanged"
+    asyncio.run(scenario())
+
+
+def test_same_chat_can_answer_again_as_a_separate_record(postgres_dsn: str) -> None:
+    async def round_trip(store: SurveyStore, answers: Mapping[str, object]) -> str:
+        invite = await store.claim()
+        assert invite is not None and invite.kind == "invite" and invite.token
+        await store.mark_sent(invite, f"W-invite-{invite.signup_id}")
+        assert await store.submit(invite.token, answers) == "submitted"
+        slides = await store.claim()
+        assert slides == Job("complete", invite.signup_id, CHAT)
+        assert slides is not None
+        await store.mark_sent(slides, f"W-slides-{invite.signup_id}")
+        return invite.token
+
+    async def scenario() -> None:
+        store = await _store(postgres_dsn)
+        assert await store.signup(CHAT, "Parent") == "queued"
+        first = await round_trip(store, ANSWERS)
+
+        # Straight after the slides, with no cooldown, the same chat starts over.
+        assert await store.signup(CHAT, "Parent") == "queued"
+        assert await store.signup(CHAT, "Parent") == "unchanged"
+        second = await round_trip(store, {**ANSWERS, "rating": 2, "name": "Again"})
+        assert second != first
+
+        conn = await asyncpg.connect(postgres_dsn, ssl=False)
+        try:
+            rows = await conn.fetch(
+                f"""SELECT status, answers->>'rating' AS rating
+                      FROM app_prod.{TABLE} WHERE chat_id = $1
+                     ORDER BY requested_at""",
+                CHAT,
+            )
+        finally:
+            await conn.close()
+        assert [(r["status"], r["rating"]) for r in rows] == [
+            ("completed", "4"),
+            ("completed", "2"),
+        ]
+        for token in (first, second):
+            state = await store.survey_state(token)
+            assert state is not None and state.submitted
+            assert await store.submit(token, ANSWERS) == "already_submitted"
+
+    asyncio.run(scenario())
+
+
+def test_initialize_lifts_one_record_per_chat_on_existing_tables(
+    postgres_dsn: str,
+) -> None:
+    async def scenario() -> None:
+        store = await _store(postgres_dsn)
         await _sql(
             postgres_dsn,
-            f"UPDATE app_prod.{TABLE} SET completed_at = NOW() - INTERVAL '1 hour'",
+            f"ALTER TABLE app_prod.{TABLE} ADD CONSTRAINT "
+            f"{TABLE}_campaign_chat_id_key UNIQUE (campaign, chat_id)",
         )
-        assert await store.signup(CHAT) == "requeued"
-        slides = await store.claim()
-        assert slides is not None and slides.kind == "complete"
+        await store.initialize()
+        await store.initialize()
+        assert await store.signup(CHAT) == "queued"
+        await round_trip_submit(store)
+        assert await store.signup(CHAT) == "queued"
+
+    async def round_trip_submit(store: SurveyStore) -> None:
+        invite = await store.claim()
+        assert invite is not None and invite.token
+        await store.mark_sent(invite, "W1")
+        assert await store.submit(invite.token, ANSWERS) == "submitted"
 
     asyncio.run(scenario())
 
