@@ -2187,3 +2187,34 @@ export interface StatusSummary {
   build?: string | null;
   collected_at: number;
 }
+
+/** Seminar survey answers, as `validate_answers` in `hermes_cli/seminar_survey.py` accepts them. */
+export type SeminarGrade = "P1" | "P2" | "P3" | "P4" | "P5" | "P6";
+export type SeminarShare = "named" | "anonymous" | "no";
+export type SeminarNextStep =
+  | "enrol"
+  | "workshop"
+  | "consultation"
+  | "updates"
+  | "not_now";
+
+export interface SeminarSurveyAnswers {
+  rating: number;
+  grades: SeminarGrade[];
+  comment: string;
+  share: SeminarShare;
+  next_step: SeminarNextStep;
+  name: string;
+  stay_in_touch: boolean;
+}
+
+/** `POST /api/seminar/survey/state`. */
+export interface SeminarSurveyState {
+  submitted: boolean;
+}
+
+/** `POST /api/seminar/survey/submit`. */
+export interface SeminarSurveySubmitResult {
+  ok: boolean;
+  already_submitted: boolean;
+}

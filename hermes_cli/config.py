@@ -922,6 +922,31 @@ DEFAULT_CONFIG = {
         # longer — still bounded — window.
         "recovery_ttl_seconds": 3600,
     },
+    # Seminar follow-up (hermes_cli/seminar_survey.py). WhatsApp triage for the
+    # ``whatsapp_source`` phone (custom/whatsapp/config.json id) spots a
+    # ``trigger_phrases`` message (the QR code's pre-filled text); the outreach
+    # worker replies through ``bridge_url`` with a personal survey link, then
+    # sends ``presentation_url`` once the survey is submitted.
+    "seminar_survey": {
+        "campaign": "ai-kids-flourish",
+        "whatsapp_source": "phone2",
+        "trigger_phrases": [
+            "I want to do the survey and get the presentation link",
+            "我想填寫問卷並索取講座簡報",
+        ],
+        "public_base_url": "https://home.leolau.ai-and-i.io",
+        "bridge_url": "http://127.0.0.1:3001",
+        "presentation_url": "https://canva.link/puysezdoxbb5sk6",
+        # Pacing between outbound messages, so a burst of requests after the
+        # seminar does not look like bulk messaging to WhatsApp.
+        "send_interval_seconds": 3,
+        "poll_seconds": 5,
+        "lease_seconds": 300,
+        "max_attempts": 5,
+        "retry_backoff_seconds": 60,
+        # Asking again re-sends the link (or the slides) only after this long.
+        "resend_cooldown_seconds": 600,
+    },
     # C8 interaction tracing is an append-only application-datastore side
     # channel. Sampling applies only to tool_call/tool_result spans.
     "action_tracking": {

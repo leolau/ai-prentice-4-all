@@ -1,0 +1,25 @@
+[Unit]
+# Seminar follow-up: replies from the seminar WhatsApp number (bridge on :3001)
+# with a personal survey link to every survey request WhatsApp triage recorded,
+# then sends the slides once the survey is submitted. The queue is the
+# seminar_survey_signups table.
+Description=Hermes seminar survey outreach worker
+After=network-online.target hermes-wa-bridge-connectar.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=hermes
+Group=hermes
+WorkingDirectory=/opt/data/hermes-agent
+# Supplies HERMES_HOME (config.yaml -> seminar_survey, datastore) and
+# DATABASE_URL.
+EnvironmentFile=/opt/data/hermes-messaging.env
+ExecStart=/opt/data/hermes-agent/.venv/bin/python -m hermes_cli.seminar_outreach
+Restart=always
+RestartSec=5
+StandardOutput=append:/var/log/hermes-seminar-outreach.log
+StandardError=append:/var/log/hermes-seminar-outreach.log
+
+[Install]
+WantedBy=multi-user.target

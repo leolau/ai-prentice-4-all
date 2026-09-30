@@ -64,4 +64,10 @@ PUBLIC_API_PATHS: frozenset[str] = frozenset({
     # `{"ok": true}`.
     "/api/auth/invitations/redeem",
     "/api/auth/invitations/request",
+    # Seminar survey (hermes_cli/seminar_survey.py). Unauthenticated by
+    # definition: attendees have no account. Both are keyed by a 192-bit token
+    # that was only ever sent into the attendee's own WhatsApp chat, and are
+    # throttled per IP and per token.
+    "/api/seminar/survey/state",
+    "/api/seminar/survey/submit",
 })
