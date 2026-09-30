@@ -944,7 +944,7 @@ DEFAULT_CONFIG = {
         "lease_seconds": 300,
         "max_attempts": 5,
         "retry_backoff_seconds": 60,
-        # Asking again re-sends the link (or the slides) only after this long.
+        # Asking again before submitting re-sends the link only after this long.
         "resend_cooldown_seconds": 600,
     },
     # C8 interaction tracing is an append-only application-datastore side

@@ -82,9 +82,11 @@ CREATE TABLE IF NOT EXISTS {TABLE} (
     completion_message_id TEXT,
     completed_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    UNIQUE (campaign, chat_id)
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+ALTER TABLE {TABLE} DROP CONSTRAINT IF EXISTS {TABLE}_campaign_chat_id_key;
+CREATE UNIQUE INDEX IF NOT EXISTS {TABLE}_open_idx
+    ON {TABLE} (campaign, chat_id) WHERE submitted_at IS NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS {TABLE}_token_idx
     ON {TABLE} (token_hash) WHERE token_hash IS NOT NULL;
 CREATE INDEX IF NOT EXISTS {TABLE}_due_idx
@@ -368,9 +370,10 @@ class SurveyStore:
     async def signup(self, chat_id: str, sender_name: str | None = None) -> SignupOutcome:
         """Persist a survey request from ``chat_id``; that row *is* the queue item.
 
-        Asking again re-sends a (fresh) survey link only when the earlier invite
-        failed or is older than ``resend_cooldown_seconds``; after the survey is
-        done, asking again re-sends the slides the same way.
+        Each submitted survey is its own row, so a chat whose earlier surveys are
+        all submitted gets a new row (and link) for every request. While a chat
+        has an unsubmitted row, asking again re-sends a fresh link for it only
+        when the invite failed or is older than ``resend_cooldown_seconds``.
         """
         campaign = self._settings.campaign
         conn = await self._connect()
@@ -379,7 +382,8 @@ class SurveyStore:
                 inserted = await conn.fetchrow(
                     f"""INSERT INTO {TABLE} (campaign, chat_id, sender_name)
                         VALUES ($1, $2, $3)
-                        ON CONFLICT (campaign, chat_id) DO NOTHING
+                        ON CONFLICT (campaign, chat_id) WHERE submitted_at IS NULL
+                        DO NOTHING
                         RETURNING id""",
                     campaign,
                     chat_id,
@@ -388,12 +392,12 @@ class SurveyStore:
                 if inserted is not None:
                     return "queued"
                 row = await conn.fetchrow(
-                    f"""SELECT id, status, submitted_at,
-                               COALESCE(completed_at, invited_at)
-                                   < NOW() - make_interval(secs => $3)
+                    f"""SELECT id, status,
+                               invited_at < NOW() - make_interval(secs => $3)
                                    AS cooled_down
                           FROM {TABLE}
                          WHERE campaign = $1 AND chat_id = $2
+                           AND submitted_at IS NULL
                          FOR UPDATE""",
                     campaign,
                     chat_id,
@@ -402,22 +406,15 @@ class SurveyStore:
                 if row is None:
                     return "unchanged"
                 status = str(row["status"])
-                if status == "failed":
-                    target = "queued" if row["submitted_at"] is None else "submitted"
-                elif status == "invited" and row["cooled_down"]:
-                    target = "queued"
-                elif status == "completed" and row["cooled_down"]:
-                    target = "submitted"
-                else:
+                if not (status == "failed" or (status == "invited" and row["cooled_down"])):
                     return "unchanged"
                 await conn.execute(
                     f"""UPDATE {TABLE}
-                           SET status = $2, attempts = 0, last_error = NULL,
+                           SET status = 'queued', attempts = 0, last_error = NULL,
                                next_attempt_at = NOW(), requested_at = NOW(),
                                updated_at = NOW()
                          WHERE id = $1""",
                     row["id"],
-                    target,
                 )
                 return "requeued"
         finally:
