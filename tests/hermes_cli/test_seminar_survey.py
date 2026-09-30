@@ -240,8 +240,35 @@ class TestWorker:
 
 
 class FakeStateStore:
+    settings = SETTINGS
+
     async def survey_state(self, token: str) -> SurveyState:
         return SurveyState(status="invited", submitted=False)
+
+
+class SlowStateStore:
+    """Counts how many lookups hit the database at once."""
+
+    def __init__(self, concurrency: int) -> None:
+        self.settings = SurveySettings(db_concurrency=concurrency)
+        self.in_flight = 0
+        self.peak = 0
+
+    async def survey_state(self, token: str) -> SurveyState:
+        self.in_flight += 1
+        self.peak = max(self.peak, self.in_flight)
+        try:
+            await asyncio.sleep(0.01)
+            return SurveyState(status="invited", submitted=False)
+        finally:
+            self.in_flight -= 1
+
+
+class BrokenStore:
+    settings = SETTINGS
+
+    async def survey_state(self, token: str) -> SurveyState:
+        raise ConnectionError("max clients reached")
 
 
 class TestPublicThrottle:
@@ -249,6 +276,7 @@ class TestPublicThrottle:
     def client(self, monkeypatch: pytest.MonkeyPatch) -> TestClient:
         monkeypatch.setattr(web_server, "_SEMINAR_STORE", FakeStateStore())
         monkeypatch.setattr(web_server, "_SEMINAR_THROTTLE", None)
+        monkeypatch.setattr(web_server, "_SEMINAR_DB_SLOTS", None)
         monkeypatch.setattr(web_server.app.state, "auth_required", False, raising=False)
         return TestClient(web_server.app)
 
@@ -278,3 +306,45 @@ class TestPublicThrottle:
             True,
             False,
         ]
+
+
+class TestPublicBurst:
+    @pytest.fixture(autouse=True)
+    def _app(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(web_server, "_SEMINAR_THROTTLE", None)
+        monkeypatch.setattr(web_server, "_SEMINAR_DB_SLOTS", None)
+        monkeypatch.setattr(web_server.app.state, "auth_required", False, raising=False)
+
+    def test_a_burst_queues_for_the_database_instead_of_failing(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        store = SlowStateStore(concurrency=3)
+        monkeypatch.setattr(web_server, "_SEMINAR_STORE", store)
+
+        async def burst() -> list[int]:
+            transport = httpx.ASGITransport(app=web_server.app)
+            async with httpx.AsyncClient(
+                transport=transport, base_url="http://test"
+            ) as client:
+                responses = await asyncio.gather(
+                    *[
+                        client.post(
+                            "/api/seminar/survey/state", json={"token": f"t{n}"}
+                        )
+                        for n in range(30)
+                    ]
+                )
+            return [r.status_code for r in responses]
+
+        assert asyncio.run(burst()) == [200] * 30
+        assert store.peak == 3
+
+    def test_database_trouble_is_a_bilingual_503(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(web_server, "_SEMINAR_STORE", BrokenStore())
+        response = TestClient(web_server.app).post(
+            "/api/seminar/survey/state", json={"token": "t"}
+        )
+        assert response.status_code == 503
+        assert "問卷暫時無法使用" in response.json()["detail"]

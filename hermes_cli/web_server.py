@@ -3873,7 +3873,7 @@ async def auth_redeem_invitation(request: Request):
     except HTTPException:
         raise
     except Exception as exc:  # noqa: BLE001 — never leak the reason
-        logger.warning("invitation redeem failed: %s", exc)
+        _log.warning("invitation redeem failed: %s", exc)
         raise HTTPException(
             status_code=400, detail=_NEUTRAL_REDEEM_DETAIL
         ) from exc
@@ -3925,7 +3925,7 @@ async def auth_request_invitation(request: Request):
             service = _comms_user_service()
             await service.request_password_reset(email=email)
         except Exception as exc:  # noqa: BLE001 — never leak the reason
-            logger.warning("password reset request failed: %s", exc)
+            _log.warning("password reset request failed: %s", exc)
     return {"ok": True}
 
 
@@ -3958,6 +3958,16 @@ def _seminar_store():
     return _SEMINAR_STORE
 
 
+_SEMINAR_DB_SLOTS: "asyncio.Semaphore | None" = None
+
+
+def _seminar_db_slots() -> asyncio.Semaphore:
+    global _SEMINAR_DB_SLOTS
+    if _SEMINAR_DB_SLOTS is None:
+        _SEMINAR_DB_SLOTS = asyncio.Semaphore(_seminar_store().settings.db_concurrency)
+    return _SEMINAR_DB_SLOTS
+
+
 _SEMINAR_UNAVAILABLE = "The survey is unavailable right now. 問卷暫時無法使用。"
 _SEMINAR_NOT_FOUND = "This survey link is not valid. 此問卷連結無效。"
 _SEMINAR_TOO_MANY = (
@@ -3984,9 +3994,10 @@ async def seminar_survey_state(request: Request):
     if not _seminar_throttle().allow(ip=_forwarded_client_ip(request), token=token):
         raise HTTPException(status_code=429, detail=_SEMINAR_TOO_MANY)
     try:
-        state = await _seminar_store().survey_state(token)
+        async with _seminar_db_slots():
+            state = await _seminar_store().survey_state(token)
     except Exception as exc:  # noqa: BLE001
-        logger.warning("seminar survey lookup failed: %s", exc)
+        _log.warning("seminar survey lookup failed: %s", exc)
         raise HTTPException(status_code=503, detail=_SEMINAR_UNAVAILABLE) from exc
     if state is None:
         raise HTTPException(status_code=404, detail=_SEMINAR_NOT_FOUND)
@@ -4012,9 +4023,10 @@ async def seminar_survey_submit(request: Request):
     except SurveyError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     try:
-        outcome = await _seminar_store().submit(token, answers)
+        async with _seminar_db_slots():
+            outcome = await _seminar_store().submit(token, answers)
     except Exception as exc:  # noqa: BLE001
-        logger.warning("seminar survey submit failed: %s", exc)
+        _log.warning("seminar survey submit failed: %s", exc)
         raise HTTPException(status_code=503, detail=_SEMINAR_UNAVAILABLE) from exc
     if outcome == "not_found":
         raise HTTPException(status_code=404, detail=_SEMINAR_NOT_FOUND)
