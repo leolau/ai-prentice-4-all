@@ -292,8 +292,31 @@ def test_run_pins_its_rev_so_activation_mid_flight_is_safe(env):
     resp = client.get(f"/api/registry/projects/{project['slug']}/runs/1")
     assert resp.json()["playbook_rev"] == 1  # untouched by the activation
     # The NEXT run takes the new method.
+    with projects_db.connect_closing() as conn:
+        projects_db.update_project_run(conn, run1["id"], status="done")
     resp = client.post(f"/api/registry/projects/{project['slug']}/runs", json={})
     assert resp.json()["run"]["playbook_rev"] == 2
+
+
+@pytest.mark.parametrize(
+    ("held", "phrase"),
+    [("running", "is still running"), ("waiting", "is waiting for you")],
+)
+def test_run_now_is_a_409_while_a_run_is_open(env, held, phrase):
+    project = _active_project(env)
+    client, _state = env
+    _save_and_activate_playbook(env, project)
+    resp = client.post(f"/api/registry/projects/{project['slug']}/runs", json={})
+    assert resp.status_code == 200, resp.text
+    run1 = resp.json()["run"]
+    with projects_db.connect_closing() as conn:
+        projects_db.update_project_run(conn, run1["id"], status=held)
+
+    resp = client.post(f"/api/registry/projects/{project['slug']}/runs", json={})
+    assert resp.status_code == 409
+    assert f"run 1 {phrase}" in resp.json()["detail"]
+    runs = client.get(f"/api/registry/projects/{project['slug']}/runs").json()["runs"]
+    assert [r["run_no"] for r in runs] == [1]
 
 
 # ---------------------------------------------------------------------------
@@ -620,7 +643,7 @@ def test_detail_brief_keeps_an_old_waiting_run(env):
             conn, project_id=project["id"], trigger="manual",
             profile="default",
         )
-        projects_db.update_project_run(conn, held["id"], status="waiting")
+        projects_db.update_project_run(conn, held["id"], status="done")
         for _ in range(5):  # five newer runs push it out of the window
             run = projects_db.open_project_run(
                 conn, project_id=project["id"], trigger="manual",
@@ -629,6 +652,7 @@ def test_detail_brief_keeps_an_old_waiting_run(env):
             projects_db.update_project_run(
                 conn, run["id"], status="done", outcome="all delivered"
             )
+        projects_db.update_project_run(conn, held["id"], status="waiting")
     detail = client.get(f"/api/registry/projects/{project['slug']}").json()
     waiting = [r for r in detail["runs"] if r["status"] == "waiting"]
     assert [r["run_no"] for r in waiting] == [held["run_no"]]

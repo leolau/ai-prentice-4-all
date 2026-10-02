@@ -613,6 +613,8 @@ def test_guidance_applies_at_spawn_not_mid_conversation(stores):
     # The running run's compiled block is unchanged (frozen at spawn)…
     assert "Always cc legal" not in first["guidance"]
     # …and the NEXT run carries it.
+    with projects_db.connect_closing() as conn:
+        projects_db.update_project_run(conn, first["run"]["id"], status="done")
     second = _start(project.id)
     assert "Always cc legal" in second["guidance"]
     assert second["run"]["run_no"] == 2
@@ -1253,3 +1255,52 @@ def test_default_spawn_publishes_the_run_s_reasoning_and_tool_names(
     # The tool's path argument and its result stayed in this process.
     blob = repr(events)
     assert "/etc/secret" not in blob and "s3cr3t" not in blob
+
+
+@pytest.mark.parametrize("held", ["running", "waiting"])
+def test_a_project_holds_one_open_run_at_a_time(stores, held):
+    project, _ = _make_project()
+    _save_playbook(project.id, [{"key": "one", "title": "One"}])
+    with projects_db.connect_closing() as conn:
+        projects_db.activate_playbook_rev(conn, project.id, 1)
+    first = _start(project.id)
+    with projects_db.connect_closing() as conn:
+        projects_db.update_project_run(conn, first["run"]["id"], status=held)
+    with kanban_db.connect_closing() as bconn:
+        cards_before = bconn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0]
+    with pytest.raises(projects_db.RunAlreadyOpen) as excinfo:
+        _start(project.id, trigger="schedule")
+    assert (excinfo.value.run_no, excinfo.value.status) == (1, held)
+    with projects_db.connect_closing() as conn:
+        runs = projects_db.list_project_runs(conn, project.id)
+    assert [r["run_no"] for r in runs] == [1]
+    with kanban_db.connect_closing() as bconn:
+        assert bconn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == cards_before
+
+    for closed in ("done", "failed", "cancelled"):
+        with projects_db.connect_closing() as conn:
+            projects_db.update_project_run(conn, first["run"]["id"], status=closed)
+        nxt = _start(project.id)
+        assert nxt["run"]["run_no"] >= 2
+        with projects_db.connect_closing() as conn:
+            projects_db.update_project_run(conn, nxt["run"]["id"], status="done")
+
+
+def test_resume_refuses_while_another_run_is_open(stores):
+    project, _ = _make_project()
+    _save_playbook(project.id, [{"key": "one", "title": "One"}])
+    with projects_db.connect_closing() as conn:
+        projects_db.activate_playbook_rev(conn, project.id, 1)
+    first = _start(project.id)
+    with projects_db.connect_closing() as conn:
+        failed = projects_run.close_run(
+            conn, run=first["run"], status="failed", outcome="stalled",
+        )
+    second = _start(project.id)
+    with projects_db.connect_closing() as conn:
+        with kanban_db.connect_closing() as bconn:
+            fresh = projects_db.get_project(conn, project.id)
+            with pytest.raises(projects_db.RunAlreadyOpen, match="run 2"):
+                projects_run.resume_run(conn, bconn, project=fresh, run=failed)
+        assert projects_db.get_project_run_by_id(conn, failed["id"])["status"] == "failed"
+        assert projects_db.get_project_run_by_id(conn, second["run"]["id"])["status"] == "running"

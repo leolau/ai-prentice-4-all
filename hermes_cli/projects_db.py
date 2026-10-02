@@ -2325,6 +2325,19 @@ VALID_RUN_STATUSES = (
 )
 
 
+class RunAlreadyOpen(ValueError):
+    """A project holds at most one ``running``/``waiting`` run at a time."""
+
+    def __init__(self, run_no: int, status: str):
+        self.run_no = run_no
+        self.status = status
+        state = "is still running" if status == "running" else "is waiting for you"
+        super().__init__(
+            f"run {run_no} {state} — finish, continue or cancel it before "
+            "starting another"
+        )
+
+
 def open_project_run(
     conn: sqlite3.Connection,
     *,
@@ -2335,13 +2348,20 @@ def open_project_run(
     playbook_rev: Optional[int] = None,
     trace_id: Optional[str] = None,
 ) -> dict:
-    """Open the run row: ``run_no = max+1``, status ``running`` (§6)."""
+    """Open the run row: ``run_no = max+1``, status ``running`` (§6).
+
+    Raises :class:`RunAlreadyOpen` while another run of the project is
+    ``running`` or ``waiting``; checked inside the write transaction so two
+    concurrent starts cannot both open one."""
     if trigger not in VALID_RUN_TRIGGERS:
         raise ValueError(f"trigger must be one of {sorted(VALID_RUN_TRIGGERS)}")
     if not str(profile or "").strip():
         raise ValueError("run profile is required")
     rid = _new_row_id("run")
     with write_txn(conn):
+        open_runs = list_open_project_runs(conn, project_id)
+        if open_runs:
+            raise RunAlreadyOpen(open_runs[0]["run_no"], open_runs[0]["status"])
         row = conn.execute(
             "SELECT COALESCE(MAX(run_no), 0) AS m FROM project_runs "
             "WHERE project_id = ?",

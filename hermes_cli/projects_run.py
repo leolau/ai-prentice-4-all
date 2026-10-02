@@ -1144,12 +1144,18 @@ def resume_run(
     Refuses (``ValueError``) a run that is not ``failed``/``cancelled`` —
     ``done`` has already delivered and reopening it has no defined next
     step; ``running``/``waiting`` are already live and have their own
-    actions (Cancel/Stop, Continue).
+    actions (Cancel/Stop, Continue). Also refuses (:class:`RunAlreadyOpen`)
+    while another run of the project is open — one open run at a time.
     """
     if run.get("status") not in ("failed", "cancelled"):
         raise ValueError(
             f"run {run.get('run_no')} is '{run.get('status')}' — only a "
             "failed or cancelled run can be resumed"
+        )
+    open_runs = projects_db.list_open_project_runs(pconn, project.id)
+    if open_runs:
+        raise projects_db.RunAlreadyOpen(
+            open_runs[0]["run_no"], open_runs[0]["status"]
         )
     projects_db.update_project_run(
         pconn, run["id"], status="running", outcome=None, error=None,
