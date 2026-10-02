@@ -63,10 +63,11 @@ def _project_with_runs(env, runs: int = 1) -> dict:
     project = resp.json()
     with projects_db.connect_closing() as conn:
         for _ in range(runs):
-            projects_db.open_project_run(
+            run = projects_db.open_project_run(
                 conn, project_id=project["id"], trigger="manual",
                 profile="default",
             )
+            projects_db.update_project_run(conn, run["id"], status="done")
     return project
 
 

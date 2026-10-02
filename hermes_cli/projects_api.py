@@ -2921,6 +2921,8 @@ async def start_run_route(request: Request) -> dict[str, Any]:
                         triggered_by=principal.user_id,
                         playbook_rev=body.get("playbook_rev"),
                     )
+                except projects_db.RunAlreadyOpen as exc:
+                    raise HTTPException(status_code=409, detail=str(exc))
                 except ValueError as exc:
                     detail = str(exc)
                     status = 409 if "no playbook" in detail or "no profiles" in detail else 422

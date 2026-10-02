@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
 import { friendlyError } from "@/components/projects/errors";
@@ -131,6 +132,9 @@ export function ProjectDetailView({
   useProjectEvents(project.slug);
 
   const waitingRun = project.runs.find((run) => run.status === "waiting");
+  const openRun = project.runs.find(
+    (run) => run.status === "running" || run.status === "waiting",
+  );
   const blockedCards: ProjectBoardTask[] =
     board?.columns.flatMap((column) => column.tasks).filter(
       (task) => task.status === "blocked",
@@ -299,8 +303,14 @@ export function ProjectDetailView({
                 <button
                   type="button"
                   onClick={() => void runNow()}
-                  disabled={busy || !runnable}
-                  title={runnable ? undefined : "See the checklist below."}
+                  disabled={busy || !runnable || openRun !== undefined}
+                  title={
+                    openRun
+                      ? `Run ${openRun.run_no} is still open — one run at a time.`
+                      : runnable
+                        ? undefined
+                        : "See the checklist below."
+                  }
                   className="rounded-xl bg-[var(--color-accent)] px-4 py-2 text-sm font-medium text-[var(--color-accent-fg)] disabled:opacity-50"
                 >
                   Run now
@@ -328,6 +338,13 @@ export function ProjectDetailView({
                 >
                   Continue run {waitingRun.run_no}
                 </button>
+              ) : openRun ? (
+                <Link
+                  href={`/projects/${encodeURIComponent(project.slug)}/runs/${openRun.run_no}`}
+                  className="rounded-xl border border-[var(--color-accent)] px-4 py-2 text-sm font-medium text-[var(--color-accent)]"
+                >
+                  Run {openRun.run_no} in progress
+                </Link>
               ) : null}
               <button
                 type="button"

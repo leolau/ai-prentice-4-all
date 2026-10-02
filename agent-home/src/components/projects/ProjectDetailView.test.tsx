@@ -142,6 +142,21 @@ const BOARD: ProjectBoardView = {
   ],
 };
 
+const READY_PLAYBOOK: ProjectPlaybookResponse = {
+  active: {
+    project_id: "prj_1",
+    rev: 1,
+    body: "",
+    steps: [{ key: "a", title: "A" }],
+    active: 1,
+    created_by: "leo",
+    created_at: NOW,
+    activated_at: NOW,
+    note: null,
+  },
+  revisions: [],
+};
+
 const OUTPUT = (over: Partial<ProjectOutputWithDeliveries>): ProjectOutputWithDeliveries => ({
   id: "out_1",
   project_id: "prj_1",
@@ -664,6 +679,7 @@ describe("ProjectDetailView", () => {
         project={{
           ...PROJECT,
           outputs: [OUTPUT({ id: "out_1" })],
+          runs: [],
         }}
         board={BOARD}
         playbook={{
@@ -688,6 +704,46 @@ describe("ProjectDetailView", () => {
     );
     expect(html).not.toContain('data-component="ReadinessChecklist"');
     expect(html).not.toMatch(/<button[^>]*disabled=""[^>]*>Run now<\/button>/);
+  });
+
+  it("disables Run now and links the open run while one is in progress", () => {
+    const html = renderToStaticMarkup(
+      <ProjectDetailView
+        project={{
+          ...PROJECT,
+          outputs: [OUTPUT({ id: "out_1" })],
+          runs: [{ ...PROJECT.runs[0], run_no: 1, status: "running" }],
+        }}
+        board={BOARD}
+        playbook={READY_PLAYBOOK}
+        directives={null}
+        doctor={{ slug: PROJECT.slug, health: "ok", findings: [], clean: true }}
+        callerUserId="leo"
+        isInstanceAdmin={false}
+      />,
+    );
+    expect(html).toMatch(/<button[^>]*disabled=""[^>]*>Run now<\/button>/);
+    expect(html).toContain("Run 1 is still open");
+    expect(html).toContain(`href="/projects/${PROJECT.slug}/runs/1"`);
+    expect(html).toContain("Run 1 in progress");
+    expect(html).not.toContain("Continue run");
+  });
+
+  it("disables Run now while a run waits, keeping Continue as the way on", () => {
+    const html = renderToStaticMarkup(
+      <ProjectDetailView
+        project={{ ...PROJECT, outputs: [OUTPUT({ id: "out_1" })] }}
+        board={BOARD}
+        playbook={READY_PLAYBOOK}
+        directives={null}
+        doctor={{ slug: PROJECT.slug, health: "ok", findings: [], clean: true }}
+        callerUserId="leo"
+        isInstanceAdmin={false}
+      />,
+    );
+    expect(html).toMatch(/<button[^>]*disabled=""[^>]*>Run now<\/button>/);
+    expect(html).toContain("Continue run 14");
+    expect(html).not.toContain("Run 14 in progress");
   });
 
   it("hides Edit and the settings controls from a plain member", () => {
