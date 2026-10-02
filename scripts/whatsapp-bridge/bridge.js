@@ -19,7 +19,7 @@
  *   node bridge.js --port 3000 --session ~/.hermes/whatsapp/session
  */
 
-import { makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion, downloadMediaMessage } from '@whiskeysockets/baileys';
+import { makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion, downloadMediaMessage, toNumber } from '@whiskeysockets/baileys';
 import express from 'express';
 import { Boom } from '@hapi/boom';
 import pino from 'pino';
@@ -555,7 +555,7 @@ async function startSocket() {
         quotedRemoteJid,
         hasQuotedMessage,
         botIds,
-        timestamp: msg.messageTimestamp,
+        timestamp: toNumber(msg.messageTimestamp),
         fromOwner,
       };
 

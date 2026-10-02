@@ -221,6 +221,27 @@ def _save_and_register_media(media_data, filename, content_type, msg_id,
         print(f"[batcher] File registration failed for {msg_id}: {e}")
 
 
+def _epoch_seconds(ts):
+    """Unix seconds from a bridge timestamp, or None.
+
+    Baileys hands some messages (e.g. ones the phone re-sent after a failed
+    decrypt) a protobuf Long, which serialises as ``{"low", "high", "unsigned"}``.
+    """
+    if isinstance(ts, dict):
+        try:
+            low = int(ts.get('low', 0)) & 0xFFFFFFFF
+            high = int(ts.get('high', 0))
+        except (TypeError, ValueError):
+            return None
+        if ts.get('unsigned'):
+            high &= 0xFFFFFFFF
+        return (high << 32) | low
+    try:
+        return int(ts) if ts else None
+    except (TypeError, ValueError):
+        return None
+
+
 def process_message(msg, source_phone, bridge_port=None):
     """Process a single message: write to DB, download media, add to batch."""
     msg_id = msg.get('messageId') or msg.get('key', {}).get('id') or str(uuid.uuid4())
@@ -231,13 +252,10 @@ def process_message(msg, source_phone, bridge_port=None):
     text = extract_text(msg)
     media_type, media_mimetype = extract_media_info(msg)
     
-    ts = msg.get('timestamp') or msg.get('messageTimestamp')
-    if ts:
-        try:
-            timestamp = datetime.fromtimestamp(int(ts), tz=timezone.utc).isoformat()
-        except (ValueError, OSError):
-            timestamp = datetime.now(timezone.utc).isoformat()
-    else:
+    ts = _epoch_seconds(msg.get('timestamp') or msg.get('messageTimestamp'))
+    try:
+        timestamp = datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
+    except (TypeError, ValueError, OverflowError, OSError):
         timestamp = datetime.now(timezone.utc).isoformat()
     
     now = datetime.now(timezone.utc).isoformat()
@@ -436,7 +454,12 @@ def poll_bridge(port, source_phone):
             
             if isinstance(data, list) and len(data) > 0:
                 for msg in data:
-                    process_message(msg, source_phone, bridge_port=port)
+                    try:
+                        process_message(msg, source_phone, bridge_port=port)
+                    except Exception as e:
+                        msg_id = msg.get('messageId') if isinstance(msg, dict) else None
+                        print(f"[batcher] Failed to process message {msg_id} from {port}: {e!r} "
+                              f"raw={json.dumps(msg, default=str)[:2000]}")
         except (URLError, TimeoutError, json.JSONDecodeError) as e:
             consecutive_errors += 1
             if consecutive_errors <= 3:
