@@ -2052,6 +2052,16 @@ def validate_playbook_steps(steps: Any) -> List[dict]:
         deps = step.get("depends_on") or []
         if not isinstance(deps, list):
             raise ValueError(f"step {key!r}: depends_on must be an array")
+        ts = step.get("toolsets") or []
+        if not isinstance(ts, list) or any(
+            not isinstance(t, str) or not t.strip() or "," in t for t in ts
+        ):
+            raise ValueError(
+                f"step {key!r}: toolsets must be an array of toolset names "
+                "(e.g. [\"file\", \"terminal\"]) — the step's worker loads "
+                "only these plus the core floor; leave it out to give the "
+                "worker the profile's full tool surface"
+            )
         cleaned.append(
             {
                 "key": key,
@@ -2061,6 +2071,11 @@ def validate_playbook_steps(steps: Any) -> List[dict]:
                 "assignee": step.get("assignee"),
                 "depends_on": [str(d) for d in deps],
                 "checkpoint": bool(step.get("checkpoint")),
+                # Narrow the card worker's tool surface (fewer tool schemas
+                # per model call). Names not enabled by the host profile are
+                # dropped at run start and recorded on the run (§4.1) — a
+                # plan may legitimately name sets only some profiles enable.
+                "toolsets": [t.strip() for t in ts],
             }
         )
 

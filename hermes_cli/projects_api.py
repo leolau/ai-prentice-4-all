@@ -2280,19 +2280,31 @@ _PLAN_DRAFT_SYSTEM = (
     "for a user. Reply with ONE JSON object and nothing else, shaped as "
     '{"body": "<2-4 sentences: the approach>", "steps": [{"key": "<kebab-case, '
     'unique>", "title": "<imperative, one line>", "body": "<what done looks '
-    'like, 1-2 sentences>", "depends_on": ["<key>"], "checkpoint": <bool>}]}. '
+    'like, 1-2 sentences>", "depends_on": ["<key>"], "checkpoint": <bool>, '
+    '"toolsets": ["<toolset name>"]}]}. '
     "Write 3-7 concrete steps that together deliver every listed output; set "
     "checkpoint=true on a step whose result the user should review before "
     "the agent continues (typically before anything is sent or published). "
+    'For each step also set "toolsets" to the minimal subset of the listed '
+    "available toolsets the step's worker actually needs (e.g. file + "
+    "terminal for document work, web + browser for research); every omitted "
+    "toolset shrinks the worker's prompt and speeds it up. Omit the field "
+    "only when a step genuinely needs the full tool surface. "
     "Do not invent outputs, people or tools that are not in the brief."
 )
 
 
 def _plan_draft_prompt(
-    project, outputs: list[dict], *, clarify_lines: Optional[list[str]] = None
+    project,
+    outputs: list[dict],
+    *,
+    clarify_lines: Optional[list[str]] = None,
+    enabled_toolsets: Optional[list[str]] = None,
 ) -> str:
     """The plan drafter's user message. ``clarify_lines`` (the agreed
-    scope) is read from the store when not given."""
+    scope) is read from the store when not given. ``enabled_toolsets``
+    is the host profile's tool surface — the only names a step's
+    ``toolsets`` may usefully name."""
     if clarify_lines is None:
         from hermes_cli import projects_clarify_context
 
@@ -2317,6 +2329,13 @@ def _plan_draft_prompt(
         "",
         f"Cadence: {project.cadence}; autonomy: {project.autonomy}.",
     ]
+    if enabled_toolsets:
+        lines += [
+            "",
+            "Toolsets the step workers may use (a step's \"toolsets\" may "
+            "name only these):",
+            ", ".join(enabled_toolsets),
+        ]
     if clarify_lines:
         from hermes_cli.projects_clarify_context import has_confirmed_scope
 
@@ -2350,7 +2369,11 @@ def _extract_json_object(text: str) -> dict:
 
 
 def _normalise_draft_steps(
-    raw_steps: Any, *, assignee: Optional[str], profile_names: set[str]
+    raw_steps: Any,
+    *,
+    assignee: Optional[str],
+    profile_names: set[str],
+    enabled_toolsets: Optional[list[str]] = None,
 ) -> list[dict]:
     if not isinstance(raw_steps, list) or not raw_steps:
         raise ValueError("the model returned no steps")
@@ -2381,6 +2404,18 @@ def _normalise_draft_steps(
         who = step.get("assignee")
         if not (isinstance(who, str) and who in profile_names):
             who = assignee
+        raw_ts = step.get("toolsets")
+        step_ts = [
+            str(t).strip()
+            for t in raw_ts
+            if isinstance(t, str) and t.strip()
+        ] if isinstance(raw_ts, list) else []
+        if enabled_toolsets is not None:
+            # The prompt's catalog is the host's enabled surface — a name
+            # outside it would be dropped at run start anyway, so keep the
+            # saved plan clean of names that could never load.
+            enabled_set = set(enabled_toolsets)
+            step_ts = [t for t in step_ts if t in enabled_set]
         steps.append(
             {
                 "key": key,
@@ -2389,6 +2424,7 @@ def _normalise_draft_steps(
                 "assignee": who,
                 "depends_on": [str(d) for d in deps] if isinstance(deps, list) else [],
                 "checkpoint": bool(step.get("checkpoint")),
+                "toolsets": step_ts,
             }
         )
     # Dependencies name the model's keys; map them onto the cleaned keys
@@ -2452,6 +2488,7 @@ def _plan_draft_job(
     assignee: Optional[str],
     profile_names: set[str],
     created_by: Optional[str],
+    enabled_toolsets: Optional[list[str]] = None,
 ) -> None:
     def _set(**fields: Any) -> None:
         with _PLAN_DRAFTS_LOCK:
@@ -2462,7 +2499,10 @@ def _plan_draft_job(
     try:
         data = _extract_json_object(_call_plan_model(prompt))
         steps = _normalise_draft_steps(
-            data.get("steps"), assignee=assignee, profile_names=profile_names
+            data.get("steps"),
+            assignee=assignee,
+            profile_names=profile_names,
+            enabled_toolsets=enabled_toolsets,
         )
         with projects_db.connect_closing() as conn:
             rev = projects_db.save_playbook_rev(
@@ -2506,6 +2546,17 @@ def start_plan_draft(project, profiles, principal) -> dict:
     assignee = project.host_profile or (
         sorted(profile_names)[0] if profile_names else None
     )
+    enabled_toolsets: Optional[list[str]] = None
+    if assignee:
+        try:
+            enabled_toolsets = projects_run._enabled_toolsets_for_profile(
+                assignee
+            )
+        except Exception:  # noqa: BLE001 — the draft works without a catalog
+            logger.debug(
+                "plan draft: toolset catalog unavailable for %s",
+                assignee, exc_info=True,
+            )
     state = {"status": "running", "started_at": int(time.time())}
     with _PLAN_DRAFTS_LOCK:
         _PLAN_DRAFTS[project.id] = state
@@ -2513,10 +2564,13 @@ def start_plan_draft(project, profiles, principal) -> dict:
         target=_plan_draft_job,
         kwargs={
             "project_id": project.id,
-            "prompt": _plan_draft_prompt(project, outputs),
+            "prompt": _plan_draft_prompt(
+                project, outputs, enabled_toolsets=enabled_toolsets
+            ),
             "assignee": assignee,
             "profile_names": profile_names,
             "created_by": principal.user_id,
+            "enabled_toolsets": enabled_toolsets,
         },
         name=f"plan-draft-{project.slug}",
         daemon=True,

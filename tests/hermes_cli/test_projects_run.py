@@ -1455,3 +1455,128 @@ def test_run_start_compiles_the_agreed_scope_once(stores):
     second = _start(project.id)
     assert _cc.SCOPE_HEADING in second["guidance"]
     assert "EU subscribers only." in second["guidance"]
+
+
+# ---------------------------------------------------------------------------
+# §4.1 — per-card tool surface: step > project > full profile, plus floor
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_card_toolsets_contract():
+    """Empty request = no narrowing (None); otherwise enabled∩requested
+    plus the core floor the profile enables; drops named."""
+    rc = projects_run.resolve_card_toolsets
+    enabled = ["kanban", "file", "terminal", "clarify", "todo", "web", "canva"]
+    assert rc([], enabled) == (None, [])
+    stamped, dropped = rc(["web", "ghost"], enabled)
+    assert sorted(stamped) == [
+        "clarify", "file", "kanban", "terminal", "todo", "web",
+    ]
+    assert dropped == ["ghost"]
+    # A request that intersects to nothing still stamps the floor —
+    # the worker can touch its workspace and ask for help.
+    stamped, dropped = rc(["ghost"], enabled)
+    assert sorted(stamped) == ["clarify", "file", "kanban", "terminal", "todo"]
+    assert dropped == ["ghost"]
+    # The floor is intersected too: a profile lacking terminal does not
+    # get it granted (§4.1 is never a union).
+    stamped, _ = rc(["web"], ["web", "kanban"])
+    assert sorted(stamped) == ["kanban", "web"]
+
+
+def test_playbook_step_toolsets_must_be_a_name_array(stores):
+    project, _ = _make_project()
+    with pytest.raises(ValueError, match="toolsets"):
+        _save_playbook(
+            project.id,
+            [{"key": "a", "title": "A", "toolsets": "file,terminal"}],
+        )
+    with pytest.raises(ValueError, match="toolsets"):
+        _save_playbook(
+            project.id,
+            [{"key": "a", "title": "A", "toolsets": ["file", 3]}],
+        )
+    rev = _save_playbook(
+        project.id,
+        [{"key": "a", "title": "A", "toolsets": ["file", " terminal "]}],
+    )
+    with projects_db.connect_closing() as conn:
+        saved = projects_db.get_playbook(conn, project.id, rev=rev)
+    assert saved["steps"][0]["toolsets"] == ["file", "terminal"]
+
+
+def test_step_toolsets_stamp_the_card_with_floor(stores, monkeypatch):
+    """A step's declared toolsets narrow its card worker's surface —
+    ∩ profile-enabled ∪ core floor, stamped at card creation so the
+    dispatcher stays dumb; drops are recorded per step on the run."""
+    monkeypatch.setattr(
+        projects_run, "_enabled_toolsets_for_profile",
+        lambda p: ["kanban", "file", "terminal", "clarify", "todo",
+                   "web", "research", "google-workspace"],
+    )
+    project, _ = _make_project(max_in_progress=4)
+    steps = [
+        {"key": "convert", "title": "Convert the files",
+         "toolsets": ["file", "terminal", "code_execution"]},
+        {"key": "upload", "title": "Upload them", "depends_on": ["convert"],
+         "toolsets": ["google-workspace", "ghost"]},
+        {"key": "report", "title": "Report back", "depends_on": ["upload"]},
+    ]
+    _save_playbook(project.id, steps)
+    with projects_db.connect_closing() as conn:
+        projects_db.activate_playbook_rev(conn, project.id, 1)
+    result = _start(project.id)
+    with kanban_db.connect_closing() as bconn:
+        convert = kanban_db.get_task(bconn, result["cards"]["convert"])
+        upload = kanban_db.get_task(bconn, result["cards"]["upload"])
+        report = kanban_db.get_task(bconn, result["cards"]["report"])
+    # code_execution isn't enabled → dropped; floor ∪ in.
+    assert sorted(convert.toolsets) == [
+        "clarify", "file", "kanban", "terminal", "todo",
+    ]
+    assert sorted(upload.toolsets) == [
+        "clarify", "file", "google-workspace", "kanban", "terminal", "todo",
+    ]
+    # No declaration anywhere → no stamp → full profile surface, unchanged.
+    assert report.toolsets is None
+    summary = result["run"]["summary"] or ""
+    assert "code_execution" in summary and "convert" in summary
+    assert "ghost" in summary and "upload" in summary
+
+
+def test_project_toolsets_fall_back_to_unnarrowed_steps(stores, monkeypatch):
+    """A step with no declared toolsets inherits the project's
+    ``toolsets`` column for its card surface."""
+    monkeypatch.setattr(
+        projects_run, "_enabled_toolsets_for_profile",
+        lambda p: ["kanban", "file", "terminal", "clarify", "todo",
+                   "research", "web"],
+    )
+    project, _ = _make_project(toolsets=["research", "web"])
+    _save_playbook(project.id, [{"key": "one", "title": "One"}])
+    with projects_db.connect_closing() as conn:
+        projects_db.activate_playbook_rev(conn, project.id, 1)
+    result = _start(project.id)
+    with kanban_db.connect_closing() as bconn:
+        card = kanban_db.get_task(bconn, result["cards"]["one"])
+    assert sorted(card.toolsets) == [
+        "clarify", "file", "kanban", "research", "terminal", "todo", "web",
+    ]
+
+
+def test_create_task_stamps_toolsets_roundtrip(stores):
+    with kanban_db.connect_closing() as bconn:
+        tid = kanban_db.create_task(
+            bconn, title="Narrow worker", toolsets=["file", "terminal", "file"]
+        )
+        task = kanban_db.get_task(bconn, tid)
+        assert task.toolsets == ["file", "terminal"]
+        with pytest.raises(ValueError, match="comma"):
+            kanban_db.create_task(
+                bconn, title="Bad", toolsets=["file,terminal"]
+            )
+        # Unstamped stays None — full surface.
+        plain = kanban_db.get_task(
+            bconn, kanban_db.create_task(bconn, title="Wide worker")
+        )
+        assert plain.toolsets is None

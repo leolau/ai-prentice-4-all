@@ -116,3 +116,101 @@ toolsets:
     assert "web" in resolved
     assert "kanban" in resolved  # recovered worker lifecycle surface
     assert resolved != ["kanban"]
+
+
+def test_default_spawn_prefers_task_stamped_toolsets(monkeypatch, tmp_path):
+    """A card carrying a narrowed tool surface (stamped at creation —
+    e.g. a playbook step's declared toolsets ∩ profile-enabled) spawns
+    its worker with exactly that list, not the profile's full surface."""
+    root = tmp_path / ".hermes"
+    profile = root / "profiles" / "elias"
+    profile.mkdir(parents=True)
+    profile.joinpath("config.yaml").write_text(
+        """
+platform_toolsets:
+  cli:
+    - clarify
+    - file
+    - kanban
+    - terminal
+    - web
+    - canva
+    - figma
+toolsets:
+  - hermes-cli
+""".lstrip(),
+        encoding="utf-8",
+    )
+    root.joinpath("config.yaml").write_text("toolsets:\n  - kanban\n", encoding="utf-8")
+    monkeypatch.setenv("HERMES_HOME", str(root))
+
+    from hermes_cli import kanban_db as kb
+
+    monkeypatch.setattr(kb, "_resolve_hermes_argv", lambda: ["hermes"])
+
+    captured = {}
+
+    class FakeProc:
+        pid = 4242
+
+    def fake_popen(cmd, *args, **kwargs):
+        captured["cmd"] = list(cmd)
+        return FakeProc()
+
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    task = _make_task(kb, assignee="elias")
+    task.toolsets = ["kanban", "file", "terminal", "clarify", "todo"]
+    kb._default_spawn(task, str(workspace))
+
+    pinned = captured["cmd"][captured["cmd"].index("--toolsets") + 1].split(",")
+    # Exactly the stamped list — no canva/figma/web leaking back in.
+    assert sorted(pinned) == ["clarify", "file", "kanban", "terminal", "todo"]
+
+
+def test_default_spawn_no_stamp_keeps_profile_surface(monkeypatch, tmp_path):
+    """``toolsets=None`` (every card created before the column existed)
+    resolves the assignee profile's full CLI surface exactly as before."""
+    root = tmp_path / ".hermes"
+    profile = root / "profiles" / "elias"
+    profile.mkdir(parents=True)
+    profile.joinpath("config.yaml").write_text(
+        """
+platform_toolsets:
+  cli:
+    - file
+    - terminal
+    - web
+toolsets:
+  - hermes-cli
+""".lstrip(),
+        encoding="utf-8",
+    )
+    root.joinpath("config.yaml").write_text("toolsets:\n  - kanban\n", encoding="utf-8")
+    monkeypatch.setenv("HERMES_HOME", str(root))
+
+    from hermes_cli import kanban_db as kb
+
+    monkeypatch.setattr(kb, "_resolve_hermes_argv", lambda: ["hermes"])
+
+    captured = {}
+
+    class FakeProc:
+        pid = 4242
+
+    def fake_popen(cmd, *args, **kwargs):
+        captured["cmd"] = list(cmd)
+        return FakeProc()
+
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    task = _make_task(kb, assignee="elias")
+    assert task.toolsets is None
+    kb._default_spawn(task, str(workspace))
+
+    pinned = captured["cmd"][captured["cmd"].index("--toolsets") + 1].split(",")
+    assert "web" in pinned and "terminal" in pinned and "file" in pinned

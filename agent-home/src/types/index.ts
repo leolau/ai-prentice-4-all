@@ -1619,6 +1619,10 @@ export interface PlaybookStep {
   needs?: string[];
   mode?: "card" | "inline";
   checkpoint?: boolean;
+  /** Toolsets this step's worker should load (narrowed ∩ host-enabled
+   * plus the core floor). Absent = the worker gets the assignee
+   * profile's full tool surface. */
+  toolsets?: string[];
   [extra: string]: unknown;
 }
 
@@ -1799,6 +1803,11 @@ export interface ProjectBoardTask {
   /** Pinned model for this card's worker (`-m` at dispatch) — the card
    * ignores the main model while this is set. Null/absent = follows main. */
   model_override?: string | null;
+  /** The narrowed tool surface stamped on this card at creation
+   * (`--toolsets` at dispatch): the step's declared toolsets ∩ the
+   * assignee profile's enabled set, plus the core floor. Null/absent =
+   * the worker loads the profile's full tool surface. */
+  toolsets?: string[] | null;
   [extra: string]: unknown;
 }
 

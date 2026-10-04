@@ -157,7 +157,9 @@ def test_spawn_default_passes_the_host_profile_home(tmp_path, monkeypatch):
         "agent.seeded_session.spawn_seeded_session", fake_spawn
     )
 
-    project = SimpleNamespace(slug="monday-digest", owner_user_id="leo")
+    project = SimpleNamespace(
+        id="p_monday", slug="monday-digest", owner_user_id="leo"
+    )
     result = projects_run._default_spawn_inline(
         project=project,
         run={"run_no": 3, "profile": "worker"},
@@ -194,7 +196,9 @@ def test_spawn_default_leaves_profile_home_unset_when_the_run_has_none(
     )
 
     projects_run._default_spawn_inline(
-        project=SimpleNamespace(slug="monday-digest", owner_user_id="leo"),
+        project=SimpleNamespace(
+            id="p_monday", slug="monday-digest", owner_user_id="leo"
+        ),
         run={"run_no": 1, "profile": None},
         guidance="Ship it.",
         inline_steps=[],

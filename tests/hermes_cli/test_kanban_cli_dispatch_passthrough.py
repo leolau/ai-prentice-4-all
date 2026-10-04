@@ -23,10 +23,22 @@ def isolated_kanban_home(monkeypatch):
     test_home = tempfile.mkdtemp(prefix="kanban_cli_passthrough_")
     os.makedirs(os.path.join(test_home, "profiles", "default"), exist_ok=True)
     monkeypatch.setenv("HERMES_HOME", test_home)
-    for mod in list(sys.modules.keys()):
-        if mod.startswith("hermes_cli") or mod.startswith("hermes_state") or mod == "hermes_constants":
-            del sys.modules[mod]
+    evicted = {
+        mod: sys.modules[mod]
+        for mod in list(sys.modules.keys())
+        if mod.startswith("hermes_cli") or mod.startswith("hermes_state") or mod == "hermes_constants"
+    }
+    for mod in evicted:
+        del sys.modules[mod]
     yield test_home
+    # Restore the evicted modules: a re-imported hermes_constants caches
+    # this fixture's HERMES_HOME at first resolve, and without restoration
+    # every later test's kanban connect() leaks into this shared dir —
+    # reclaim assertions downstream then see other tests' stale claims.
+    for mod in [m for m in list(sys.modules.keys())
+                if m.startswith("hermes_cli") or m.startswith("hermes_state") or m == "hermes_constants"]:
+        del sys.modules[mod]
+    sys.modules.update(evicted)
 
 
 def test_cli_dispatch_passes_max_in_progress_from_config(isolated_kanban_home, monkeypatch):
