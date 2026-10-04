@@ -2286,7 +2286,22 @@ _PLAN_DRAFT_SYSTEM = (
 )
 
 
-def _plan_draft_prompt(project, outputs: list[dict]) -> str:
+def _plan_draft_prompt(
+    project, outputs: list[dict], *, clarify_lines: Optional[list[str]] = None
+) -> str:
+    """The plan drafter's user message. ``clarify_lines`` (the agreed
+    scope) is read from the store when not given."""
+    if clarify_lines is None:
+        from hermes_cli import projects_clarify_context
+
+        try:
+            with projects_db.connect_closing() as conn:
+                clarify_lines = projects_clarify_context.clarify_context_lines(
+                    conn, project.id
+                )
+        except Exception:  # pragma: no cover - never block a draft on this
+            logger.warning("plan draft: agreed scope unavailable", exc_info=True)
+            clarify_lines = []
     lines = [f"Project: {project.name}", f"Goal: {project.goal or ''}"]
     if (project.description or "").strip():
         lines += ["", "Brief:", project.description.strip()]
@@ -2300,6 +2315,21 @@ def _plan_draft_prompt(project, outputs: list[dict]) -> str:
         "",
         f"Cadence: {project.cadence}; autonomy: {project.autonomy}.",
     ]
+    if clarify_lines:
+        from hermes_cli.projects_clarify_context import has_confirmed_scope
+
+        lines += ["", *clarify_lines, ""]
+        if has_confirmed_scope(clarify_lines):
+            lines.append(
+                "The plan must honour the agreed scope and the owner's answers "
+                "above: plan nothing outside it and leave out nothing it "
+                "requires."
+            )
+        else:
+            lines.append(
+                "The owner has not confirmed a scope yet; take their answers "
+                "above into account."
+            )
     return "\n".join(lines)
 
 

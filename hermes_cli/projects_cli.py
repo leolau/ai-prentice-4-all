@@ -1051,7 +1051,7 @@ def _run_dry(api: _Api, slug: str, *, playbook_rev: Optional[int]) -> int:
         )
         return 1
 
-    from hermes_cli import projects_db, projects_run
+    from hermes_cli import projects_clarify_context, projects_db, projects_run
 
     with projects_db.connect_closing() as conn:
         project = projects_db.get_project(conn, slug)
@@ -1071,6 +1071,9 @@ def _run_dry(api: _Api, slug: str, *, playbook_rev: Optional[int]) -> int:
             directives=projects_db.list_project_directives(conn, project.id),
             last_run=projects_run._previous_run(  # noqa: SLF001
                 conn, project.id, next_run_no
+            ),
+            clarify_lines=projects_clarify_context.clarify_context_lines(
+                conn, project.id
             ),
         )
     print(f"# Dry run — what run {next_run_no} of {slug} would start with")

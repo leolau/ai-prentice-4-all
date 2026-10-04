@@ -32,7 +32,7 @@ import re
 import uuid
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
-from hermes_cli import kanban_db, projects_db, run_activity
+from hermes_cli import kanban_db, projects_clarify_context, projects_db, run_activity
 
 log = logging.getLogger(__name__)
 
@@ -179,13 +179,15 @@ def compile_guidance(
     directives: List[dict],
     last_run: Optional[dict] = None,
     cfg: Optional[Dict[str, Any]] = None,
+    clarify_lines: Optional[List[str]] = None,
 ) -> str:
     """Assemble the §5.2 block in its fixed order.
 
     Hard rules enforced here:
     - empty optional sections are omitted **with their heading**;
     - outputs come before instructions and are never truncated —
-      truncation eats the brief and the directives instead;
+      truncation eats the brief, then the directives, then the agreed
+      scope (``clarify_lines``) instead;
     - directives are capped, newest first, dated and attributed;
     - the compiled block is capped at ``guidance_max_chars``.
     """
@@ -252,6 +254,8 @@ def compile_guidance(
             label = link.get("label") or link.get("ref")
             sample_lines.append(f"- {label} → {link.get('ref')}")
 
+    scope_lines: List[str] = ["", *clarify_lines] if clarify_lines else []
+
     directive_lines: List[str] = []
     cap = cfg["guidance_max_directives"]
     active = [d for d in directives if d.get("active")]
@@ -277,7 +281,7 @@ def compile_guidance(
         )
 
     # Fixed order: header/brief/audience first, outputs before instructions,
-    # samples after outputs, then directives, then the retro.
+    # samples after outputs, the agreed scope, then directives, then the retro.
     header = lines
     block_parts = [
         "\n".join(header),
@@ -288,6 +292,7 @@ def compile_guidance(
                 audience_lines,
                 output_lines,
                 sample_lines,
+                scope_lines,
                 directive_lines,
                 retro_lines,
             )
@@ -296,7 +301,8 @@ def compile_guidance(
     ]
     block = "\n".join(block_parts)
 
-    # Cap: never the outputs list. Eat the brief, then the directives.
+    # Cap: never the outputs list. Eat the brief, then the directives,
+    # then the agreed scope.
     limit = cfg["guidance_max_chars"]
     if len(block) > limit and brief_lines:
         over = len(block) - limit
@@ -308,7 +314,7 @@ def compile_guidance(
         ]
         block = _rejoin(
             header, brief_lines, audience_lines, output_lines,
-            sample_lines, directive_lines, retro_lines,
+            sample_lines, scope_lines, directive_lines, retro_lines,
         )
     if len(block) > limit and directive_lines:
         while len(block) > limit and len(directive_lines) > 3:
@@ -316,9 +322,65 @@ def compile_guidance(
         directive_lines.append("…[further standing instructions omitted]")
         block = _rejoin(
             header, brief_lines, audience_lines, output_lines,
-            sample_lines, directive_lines, retro_lines,
+            sample_lines, scope_lines, directive_lines, retro_lines,
+        )
+    if len(block) > limit and scope_lines:
+        scope_lines = _trim_scope_lines(scope_lines, len(block) - limit)
+        block = _rejoin(
+            header, brief_lines, audience_lines, output_lines,
+            sample_lines, scope_lines, directive_lines, retro_lines,
         )
     return block
+
+
+def _trim_scope_lines(scope_lines: List[str], over: int) -> List[str]:
+    """Shed ``over`` chars from the agreed-scope section: Q→A lines go
+    newest-first, then the understanding is shortened. A heading left with
+    nothing under it is dropped; nothing left at all returns ``[]``."""
+    marker = projects_clarify_context.OMITTED_MARKER
+    scope_h = projects_clarify_context.SCOPE_HEADING
+    qa_heads = (
+        projects_clarify_context.CLARIFICATIONS_HEADING,
+        projects_clarify_context.PENDING_HEADING,
+    )
+    target = len("\n".join(scope_lines)) - over
+    lines = [ln for ln in scope_lines if ln != marker]
+    trimmed = len(lines) != len(scope_lines)
+
+    def _pair_indices() -> List[int]:
+        section, found = None, []
+        for i, ln in enumerate(lines):
+            if ln.startswith("### "):
+                section = ln
+            elif section in qa_heads and ln.startswith("- "):
+                found.append(i)
+        return found
+
+    pairs = _pair_indices()
+    while pairs and len("\n".join(lines + [marker])) > target:
+        del lines[pairs.pop()]
+        trimmed = True
+
+    out: List[str] = []
+    for j, ln in enumerate(lines):
+        if ln in qa_heads:
+            nxt = lines[j + 1] if j + 1 < len(lines) else ""
+            if not nxt.startswith("- "):
+                if out and out[-1] == "":
+                    out.pop()
+                continue
+        out.append(ln)
+    if scope_h not in out and not any(ln in qa_heads for ln in out):
+        return []
+    if trimmed:
+        out.append(marker)
+    if len("\n".join(out)) > target and scope_h in out:
+        i = out.index(scope_h) + 1
+        if i < len(out):
+            note = "…[truncated to fit the guidance budget]"
+            keep = len(out[i]) - (len("\n".join(out)) - target) - len(note)
+            out[i] = out[i][: max(0, keep)].rstrip() + note
+    return out
 
 
 def _rejoin(*parts: List[str]) -> str:
@@ -990,6 +1052,9 @@ def start_run(
         directives=projects_db.list_project_directives(pconn, project.id),
         last_run=_previous_run(pconn, project.id, run["run_no"]),
         cfg=cfg,
+        clarify_lines=projects_clarify_context.clarify_context_lines(
+            pconn, project.id
+        ),
     )
 
     made = instantiate_run_cards(

@@ -2230,7 +2230,8 @@ export type AskProjectSourceKind =
   | "output"
   | "requirement"
   | "plan"
-  | "event";
+  | "event"
+  | "scope";
 
 /** One checked citation: the id is a card id, run number, output id, … */
 export interface AskProjectSource {
