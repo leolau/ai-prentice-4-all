@@ -53,4 +53,4 @@ its cards were in fact `done`.
 - [x] Watchdog fix + regression test
 - [x] Data repair (run 2 record)
 - [x] UI labels
-- [ ] Merged / deployed
+- [x] Merged (PR #499) / deployed `ce98398f0`
