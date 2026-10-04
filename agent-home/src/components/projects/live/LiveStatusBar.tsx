@@ -608,7 +608,12 @@ export function LiveStatusBar({
   const stoppedByRun = stop?.phase === "done" && stop.mode === "now";
   const seg = progressSegments(state.done, state.inProgress, state.total);
   const steps =
-    state.total > 0 ? `${state.done} of ${state.total} steps done` : null;
+    state.total > 0 ? (
+      <>
+        <b>{state.done} of {state.total}</b>{" "}
+        {state.countScope === "run" ? "steps" : "cards"} done
+      </>
+    ) : null;
 
   return (
     <section
@@ -631,11 +636,7 @@ export function LiveStatusBar({
             {summaryLine(state, project, now)}
           </span>
         </button>
-        {steps ? (
-          <span className="text-sm">
-            <b>{state.done} of {state.total}</b> steps done
-          </span>
-        ) : null}
+        {steps ? <span className="text-sm">{steps}</span> : null}
         <PrimaryAction
           state={state}
           slug={slug}

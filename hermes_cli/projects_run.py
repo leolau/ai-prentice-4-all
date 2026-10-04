@@ -449,16 +449,48 @@ def checkpoint_wait_info(
         and (gating := deps_of.get(key, set()) & checkpoints)
         and all(status_of.get(c) == "done" for c in gating)
     ]
-    if not held_now:
+    # A checkpoint card can itself be the thing waiting on a human:
+    # `blocked` is the deliberate review-required handoff the worker
+    # prompt teaches (sticky until an operator unblocks it), and a
+    # checkpoint still in `triage` after its own deps settled is awaiting
+    # approval to start. Same hold, different shape — without it the
+    # stale-run sweep auto-fails a correctly paused run (found in
+    # production 2026-10-02: the review checkpoint blocked for human
+    # review, the run was auto-failed two hours later mid-wait, and every
+    # card then completed under a "failed" run).
+    engaged = sorted(
+        key
+        for key in checkpoints
+        if status_of.get(key) == "blocked"
+        or (
+            status_of.get(key) == "triage"
+            and all(
+                status_of.get(d) in ("done", "archived")
+                for d in deps_of.get(key, set())
+            )
+        )
+    )
+    if not held_now and not engaged:
         return None
     # The specific checkpoint step(s) gating the currently-held successors
     # — the thing a human actually needs to go look at.
     causing = sorted(
-        {
+        set(engaged)
+        | {
             dep
             for key in held_now
             for dep in deps_of.get(key, set())
             if dep in checkpoints
+        }
+    )
+    held_keys = sorted(
+        set(held_now)
+        | {
+            key
+            for key in held
+            for dep in engaged
+            if dep in deps_of.get(key, set())
+            and status_of.get(key) not in ("done", "archived", "failed", "cancelled")
         }
     )
     checkpoint_key = causing[0] if causing else None
@@ -466,8 +498,8 @@ def checkpoint_wait_info(
         "checkpoint_step_key": checkpoint_key,
         "checkpoint_task_id": task_of.get(checkpoint_key),
         "checkpoint_title": title_of.get(checkpoint_key),
-        "held_step_keys": held_now,
-        "held_task_ids": [task_of[k] for k in held_now if task_of.get(k)],
+        "held_step_keys": held_keys,
+        "held_task_ids": [task_of[k] for k in held_keys if task_of.get(k)],
     }
 
 

@@ -248,6 +248,64 @@ def test_reconcile_never_fails_a_run_parked_at_a_checkpoint(stores):
         )
 
 
+def test_reconcile_never_fails_a_run_whose_checkpoint_card_is_blocked(stores):
+    """The 2026-10-02 production incident: the checkpoint card *itself*
+    blocked with `review-required:` (the deliberate human handoff the
+    worker prompt teaches) and sat awaiting review. The hold check only
+    recognised 'checkpoint done + successor in triage', so the sweep
+    auto-failed the run mid-review — then every card completed under a
+    'failed' run. A blocked checkpoint must read as 'waiting on a
+    human', never as stalled."""
+    project = _make_project(autonomy="supervised", max_in_progress=1)
+    steps = [
+        {"key": "s0", "title": "Step 0"},
+        {
+            "key": "s1", "title": "Step 1 (checkpoint)",
+            "depends_on": ["s0"], "checkpoint": True,
+        },
+        {"key": "s2", "title": "Step 2", "depends_on": ["s1"]},
+    ]
+    _save_playbook(project.id, steps)
+    with projects_db.connect_closing() as conn:
+        projects_db.activate_playbook_rev(conn, project.id, 1)
+    result = _start(project.id)
+    run = result["run"]
+    s0_id = result["cards"]["s0"]
+    s1_id = result["cards"]["s1"]
+
+    with kanban_db.connect_closing() as bconn:
+        bconn.execute("UPDATE tasks SET status = 'running' WHERE id = ?", (s0_id,))
+        assert kanban_db.complete_task(bconn, s0_id, result="done")
+        bconn.execute("UPDATE tasks SET status = 'running' WHERE id = ?", (s1_id,))
+        assert kanban_db.block_task(
+            bconn, s1_id, reason="review-required: drafts ready for review"
+        )
+        assert kanban_db.get_task(bconn, s1_id).status == "blocked"
+
+    future = int(run["started_at"]) + 3 * 3600  # past the 2h default threshold
+    results = projects_reconcile.reconcile_all_open_runs(now=future)
+
+    with projects_db.connect_closing() as conn:
+        still = projects_db.get_project_run_by_id(conn, run["id"])
+    assert still["status"] == "running"  # never auto-failed mid-review
+    assert any(
+        r.get("action") == "awaiting_continue" and r.get("run_no") == run["run_no"]
+        for r in results
+    )
+    with projects_db.connect_closing() as conn:
+        p = projects_db.get_project(conn, project.id)
+        cards = [
+            {"step_key": "s0", "status": "done", "task_id": s0_id},
+            {"step_key": "s1", "status": "blocked", "task_id": s1_id,
+             "title": "Step 1 (checkpoint)"},
+            {"step_key": "s2", "status": "triage", "task_id": result["cards"]["s2"]},
+        ]
+        info = projects_run.checkpoint_wait_info(conn, p, run, cards)
+    assert info is not None and info["checkpoint_step_key"] == "s1"
+    assert info["checkpoint_task_id"] == s1_id
+    assert "s2" in info["held_step_keys"]
+
+
 def test_checkpoint_wait_info_is_not_masked_by_a_second_still_open_checkpoint(stores):
     """Regression for the regression (2026-09-14, second recurrence on the
     real project): `checkpoint_wait_info` used to require EVERY checkpoint
