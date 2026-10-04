@@ -1,34 +1,31 @@
 "use client";
 
-import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  useSyncExternalStore,
+  type PointerEvent as ReactPointerEvent,
+} from "react";
 import Link from "next/link";
 
-import { ApprovalModal } from "@/components/chat/ApprovalModal";
+import "./coral.css";
+
 import { Composer } from "@/components/chat/Composer";
-import { LiveActivity } from "@/components/chat/LiveActivity";
-import { MessageBubble } from "@/components/chat/MessageBubble";
-import { StatusIndicator } from "@/components/chat/StatusIndicator";
+import { ChatThread } from "@/components/chat/thread/ChatThread";
 import {
   onLeadChatRequest,
   reportLeadChatOpen,
 } from "@/components/coral/coral-interlock";
 import {
-  attachChatStream,
-  cancelChatTurn,
-  streamChatTurn,
-  type ChatStreamHandlers,
-} from "@/lib/chat/stream";
-import { visibleTurns } from "@/lib/chat/transcript";
-import {
-  decisionText,
-  deriveActivity,
-  emptyActivity,
-  runningTool,
-  STOPPED_NOTE,
-  type TurnActivity,
-} from "@/lib/chat/turn-activity";
+  keyOf,
+  useBusyKeys,
+  useChatController,
+  type ChatController,
+} from "@/lib/chat/chat-controller";
 import { usePersistentState } from "@/lib/use-persistent-state";
-import type { ChatApprovalRequest, ChatAttachment, ChatMessage } from "@/types";
+import type { ChatAttachment } from "@/types";
 
 /** Where the floating panel sits and how big it is, once the user moves it. */
 interface LeadChatRect {
@@ -38,24 +35,149 @@ interface LeadChatRect {
   h: number;
 }
 
+type DragMode = "move" | "resize-br" | "resize-tl";
+type Snap = "half" | "full";
+
+const RECT_KEY = "agent-home:leadchat-rect";
 const MIN_W = 260;
 const MIN_H = 240;
 const EDGE = 8;
+/** Floating panel at and above this width; bottom sheet below it. */
+const DESKTOP_QUERY = "(min-width: 768px)";
+/** Sheet snap heights as a fraction of the viewport (CSS: 55dvh / 92dvh). */
+const SNAP_HALF = 0.55;
+const SNAP_FULL = 0.92;
+/** A sheet dragged below this fraction of the viewport closes. */
+const SHEET_CLOSE = 0.3;
+/** Pointer travel (px) below which a grab-handle press is a tap. */
+const TAP_SLOP = 6;
+
+const REFUSED_TEXT =
+  "The lead conversation could not be reached, so this message was not sent. Try again in a moment.";
+
+const parseRect = (raw: string) => JSON.parse(raw) as LeadChatRect | null;
+const serializeRect = (value: LeadChatRect | null) => JSON.stringify(value);
+
+/** rAF with a timer fallback; returns its cancel function. */
+function nextFrame(cb: () => void): () => void {
+  if (typeof requestAnimationFrame === "function") {
+    const id = requestAnimationFrame(cb);
+    return () => cancelAnimationFrame(id);
+  }
+  const id = setTimeout(cb, 16);
+  return () => clearTimeout(id);
+}
+
+/** SSR-safe media query: the server (and a DOM without matchMedia) gets `fallback`. */
+function useMediaQuery(query: string, fallback: boolean): boolean {
+  const subscribe = useCallback(
+    (cb: () => void) => {
+      if (typeof window === "undefined" || typeof window.matchMedia !== "function") {
+        return () => {};
+      }
+      const mql = window.matchMedia(query);
+      mql.addEventListener?.("change", cb);
+      return () => mql.removeEventListener?.("change", cb);
+    },
+    [query],
+  );
+  const get = useCallback(
+    () =>
+      typeof window !== "undefined" && typeof window.matchMedia === "function"
+        ? window.matchMedia(query).matches
+        : fallback,
+    [query, fallback],
+  );
+  return useSyncExternalStore(subscribe, get, () => fallback);
+}
+
+/** Whether the turn for `key` is winding down after a Stop — a primitive, so streaming never re-renders the host. */
+function useStopping(c: ChatController, key: string): boolean {
+  const subscribe = useCallback((cb: () => void) => c.subscribeLive(key, cb), [c, key]);
+  const get = useCallback(() => c.getLive(key)?.activity.stopping ?? false, [c, key]);
+  return useSyncExternalStore(subscribe, get, () => false);
+}
+
+function computeRect(
+  mode: DragMode,
+  origin: LeadChatRect,
+  dx: number,
+  dy: number,
+): LeadChatRect {
+  if (mode === "move") {
+    const x = Math.min(
+      Math.max(EDGE, origin.x + dx),
+      Math.max(EDGE, window.innerWidth - origin.w - EDGE),
+    );
+    const y = Math.min(
+      Math.max(EDGE, origin.y + dy),
+      Math.max(EDGE, window.innerHeight - 48),
+    );
+    return { x, y, w: origin.w, h: origin.h };
+  }
+  if (mode === "resize-br") {
+    const w = Math.min(Math.max(MIN_W, origin.w + dx), window.innerWidth - 2 * EDGE);
+    const h = Math.min(Math.max(MIN_H, origin.h + dy), window.innerHeight - 2 * EDGE);
+    return { x: origin.x, y: origin.y, w, h };
+  }
+  // Upper-left grip: the bottom-right corner stays anchored while the
+  // top-left edge follows the pointer.
+  const x = Math.min(Math.max(EDGE, origin.x + dx), origin.x + origin.w - MIN_W);
+  const y = Math.min(Math.max(EDGE, origin.y + dy), origin.y + origin.h - MIN_H);
+  return { x, y, w: origin.x + origin.w - x, h: origin.y + origin.h - y };
+}
+
+/**
+ * Fit a saved box into the current viewport (window resized smaller), with
+ * the same bounds a drag allows: fully inside horizontally, header on screen.
+ */
+function clampRect(r: LeadChatRect): LeadChatRect {
+  const vw = window.innerWidth;
+  const vh = window.innerHeight;
+  const w = Math.max(Math.min(r.w, vw - 2 * EDGE), Math.min(MIN_W, vw - 2 * EDGE));
+  const h = Math.max(Math.min(r.h, vh - 2 * EDGE), Math.min(MIN_H, vh - 2 * EDGE));
+  const x = Math.min(Math.max(EDGE, r.x), Math.max(EDGE, vw - w - EDGE));
+  const y = Math.min(Math.max(EDGE, r.y), Math.max(EDGE, vh - 48));
+  return { x, y, w, h };
+}
+
+function setBox(el: HTMLElement, r: LeadChatRect): void {
+  el.style.left = `${r.x}px`;
+  el.style.top = `${r.y}px`;
+  el.style.right = "auto";
+  el.style.bottom = "auto";
+  el.style.width = `${r.w}px`;
+  el.style.height = `${r.h}px`;
+}
+
+/** The server's answer to "which conversation am I", or null if it can't say. */
+async function fetchLeadSession(): Promise<string | null> {
+  try {
+    const res = await fetch("/api/chat/lead");
+    if (!res.ok) return null;
+    const data = (await res.json()) as { sessionId?: string | null };
+    return data.sessionId ?? null;
+  } catch {
+    return null;
+  }
+}
 
 /**
  * Lead chat — the second Coral floating button (bottom-right). Opens a
- * floating panel bound to ONE long-running session, resolved from the server
+ * panel bound to ONE long-running session, resolved from the server
  * (`GET /api/chat/lead`) rather than pinned in this browser: the id is derived
  * from the signed-in principal, so a phone and a desktop open the *same*
  * conversation and a turn still running when you put the phone down is there,
- * mid-flight, when you sign in on the desktop. The Python agent core compacts
- * that session's context automatically when it approaches the context window,
- * which is what makes a session long-running rather than long-forgotten.
+ * mid-flight, when you sign in on the desktop.
  *
- * The panel is a floating window, not a modal: drag the header to move it,
- * drag either corner grip (bottom-right or upper-left) to resize it. The
- * chosen position and size are persisted (`agent-home:leadchat-rect`) and
- * restored the next time it opens.
+ * It runs on the shared chat engine (`ChatController` + `ChatThread`), so
+ * streaming re-renders only the live reply. Minimising hides the panel but
+ * keeps it mounted — transcript, draft and scroll survive and reopening does
+ * not refetch; a reply that lands meanwhile puts an unread dot on the FAB.
+ *
+ * Desktop: a floating window — drag the header to move it, either corner
+ * grip to resize it; the box is persisted (`agent-home:leadchat-rect`).
+ * Phone (<768px): a bottom sheet with half / full snap points on its handle.
  */
 export function LeadChatHost({
   storageEnabled = false,
@@ -64,127 +186,104 @@ export function LeadChatHost({
   storageEnabled?: boolean;
 }) {
   const [open, setOpen] = useState(false);
+  /** Mounted on first open, then kept (hidden) so nothing is lost on close. */
+  const [mounted, setMounted] = useState(false);
+  const [unread, setUnread] = useState(false);
   const [leadSession, setLeadSession] = useState<string | null>(null);
+  const [resolveFailed, setResolveFailed] = useState(false);
+  const [refused, setRefused] = useState(false);
+  const [resolvingSend, setResolvingSend] = useState(false);
+  const [snap, setSnap] = useState<Snap>("half");
   const [rect, setRect] = usePersistentState<LeadChatRect | null>(
-    "agent-home:leadchat-rect",
+    RECT_KEY,
     null,
-    (raw) => JSON.parse(raw) as LeadChatRect | null,
-    (value) => JSON.stringify(value),
+    parseRect,
+    serializeRect,
   );
-  const [dragRect, setDragRect] = useState<LeadChatRect | null>(null);
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
-  // The transcript fetch records which session it last completed; the spinner
-  // derives from that instead of a synchronous setState inside the effect.
-  const [loadedFor, setLoadedFor] = useState<string | null>(null);
-  const [sending, setSending] = useState(false);
-  // The same per-turn activity record as the main chat pane drives the same
-  // phase/elapsed indicator, long-task hint, stall warning and Stop here.
-  const [turn, setTurn] = useState<TurnActivity | null>(null);
-  const [now, setNow] = useState(() => Date.now());
-  const [streamText, setStreamText] = useState("");
-  const [approval, setApproval] = useState<ChatApprovalRequest | null>(null);
-  const [resolvingApproval, setResolvingApproval] = useState(false);
-  /** Inline note after an approval decision or a Stop, like the main chat. */
-  const [note, setNote] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const abortRef = useRef<AbortController | null>(null);
-  const scrollRef = useRef<HTMLDivElement>(null);
-  const fabRef = useRef<HTMLButtonElement>(null);
+  const desktop = useMediaQuery(DESKTOP_QUERY, true);
+
   const panelRef = useRef<HTMLDivElement>(null);
-  /** Bumped on every turn started here, so a slow history load can tell it is stale. */
-  const turnsRef = useRef(0);
+  const fabRef = useRef<HTMLButtonElement>(null);
+  const openRef = useRef(open);
+  const focusFabRef = useRef(false);
+  const openedThreadRef = useRef(false);
+  const resolveRef = useRef<Promise<string | null> | null>(null);
+  const suppressClickRef = useRef(false);
 
-  const effectiveRect = dragRect ?? rect;
+  const controller = useChatController({
+    // A compacted conversation answers under a continuation id; adopting it
+    // would fork this browser's lead chat from every other one.
+    adoptLandedSession: false,
+    onTurnSettled: () => {
+      if (!openRef.current) setUnread(true);
+    },
+  });
+  const key = keyOf(leadSession);
+  const busy = useBusyKeys(controller).includes(key);
+  const stopping = useStopping(controller, key);
 
-  const loading = open && leadSession !== null && loadedFor !== leadSession;
+  const show = useCallback(() => {
+    setMounted(true);
+    setOpen(true);
+    setUnread(false);
+  }, []);
+
+  const hide = useCallback((restoreFocus: boolean) => {
+    focusFabRef.current = restoreFocus;
+    setOpen(false);
+  }, []);
+
+  useEffect(() => {
+    openRef.current = open;
+    if (open) {
+      panelRef.current?.focus({ preventScroll: true });
+    } else if (focusFabRef.current) {
+      focusFabRef.current = false;
+      fabRef.current?.focus();
+    }
+  }, [open]);
+
+  /** One in-flight resolution shared by the open effect and send. */
+  const resolveLead = useCallback((): Promise<string | null> => {
+    resolveRef.current ??= fetchLeadSession().then((sid) => {
+      resolveRef.current = null;
+      if (sid) setLeadSession(sid);
+      else setResolveFailed(true);
+      return sid;
+    });
+    return resolveRef.current;
+  }, []);
 
   // Which conversation this panel is. Asked once the panel opens, so a
   // signed-in page that never opens the lead chat creates no session.
   useEffect(() => {
-    if (!open || leadSession) return;
-    let cancelled = false;
-    void resolveLeadSession().then((sid) => {
-      if (!cancelled && sid) setLeadSession(sid);
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [open, leadSession]);
+    if (open && !leadSession) void resolveLead();
+  }, [open, leadSession, resolveLead]);
 
+  // First page once, as soon as the id is known (even if the panel was
+  // closed meanwhile); reopening serves the kept thread without a refetch.
+  useEffect(() => {
+    if (!leadSession || openedThreadRef.current) return;
+    openedThreadRef.current = true;
+    void controller.open(leadSession);
+  }, [leadSession, controller]);
+
+  // Every open probes for a turn another device left running, and keeps
+  // watching while the panel is up.
   useEffect(() => {
     if (!open || !leadSession) return;
-    let cancelled = false;
-    // A turn begun while this load is in flight is newer than the transcript
-    // it answers with; applying it would erase what the user just sent.
-    const turnsAtStart = turnsRef.current;
-    const stale = () => cancelled || turnsRef.current !== turnsAtStart;
-    fetch(`/api/chat/messages?sessionId=${encodeURIComponent(leadSession)}`)
-      .then((res) => (res.ok ? res.json() : { messages: [] }))
-      .then((data: { messages?: ChatMessage[] }) => {
-        if (!stale()) setMessages(visibleTurns(data.messages ?? []));
-      })
-      .catch(() => {
-        if (!stale()) setMessages([]);
-      })
-      .finally(() => {
-        if (!cancelled) setLoadedFor(leadSession);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [open, leadSession]);
-
-  // Reload mid-turn: the server-side turn outlives the page, so re-attach
-  // to its stream and keep the content flowing instead of staring at a
-  // transcript that ends at the user message.
-  useEffect(() => {
-    if (!open || !leadSession || sending) return;
-    let cancelled = false;
-    fetch(`/api/chat/active?sessionId=${encodeURIComponent(leadSession)}`)
-      .then((res) => (res.ok ? res.json() : { runId: null }))
-      .then((data: { runId?: string | null }) => {
-        if (cancelled || !data.runId) return;
-        const runId = data.runId;
-        beginTurn(runId, leadSession);
-        const controller = new AbortController();
-        abortRef.current = controller;
-        attachChatStream(
-          { sessionId: leadSession, runId, signal: controller.signal },
-          makeHandlers(),
-        )
-          .catch(() => undefined)
-          .finally(endTurn);
-      })
-      .catch(() => undefined);
-    return () => {
-      cancelled = true;
-    };
-  }, [open, leadSession, sending]);
-
-  useEffect(() => {
-    const el = scrollRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
-  }, [messages, streamText, turn, approval, note, error, open]);
-
-  // Wall clock, ticked only while a turn is in flight, so the elapsed counter,
-  // long-task hint and stall warning advance.
-  useEffect(() => {
-    if (!sending) return;
-    const id = window.setInterval(() => setNow(Date.now()), 1000);
-    return () => window.clearInterval(id);
-  }, [sending]);
+    void controller.attachIfActive(leadSession);
+    return controller.watchActive(leadSession);
+  }, [open, leadSession, controller]);
 
   useEffect(() => {
     if (!open) return;
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        setOpen(false);
-        fabRef.current?.focus();
-      }
+      if (e.key === "Escape") hide(true);
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [open]);
+  }, [open, hide]);
 
   // Interlock with the launcher menu (coral-interlock): it parks this panel
   // while the menu is up and opens it back up afterwards.
@@ -193,11 +292,36 @@ export function LeadChatHost({
     return () => reportLeadChatOpen(false);
   }, [open]);
 
-  useEffect(() => onLeadChatRequest((requested) => setOpen(requested)), []);
+  useEffect(
+    () => onLeadChatRequest((requested) => (requested ? show() : hide(false))),
+    [show, hide],
+  );
+
+  // Keep a saved box inside the viewport when the window shrinks.
+  useEffect(() => {
+    if (!open || !desktop || !rect) return;
+    let cancel: (() => void) | null = null;
+    const fit = () => {
+      cancel = null;
+      const next = clampRect(rect);
+      if (next.x !== rect.x || next.y !== rect.y || next.w !== rect.w || next.h !== rect.h) {
+        setRect(next);
+      }
+    };
+    const onResize = () => {
+      cancel ??= nextFrame(fit);
+    };
+    fit();
+    window.addEventListener("resize", onResize);
+    return () => {
+      window.removeEventListener("resize", onResize);
+      cancel?.();
+    };
+  }, [open, desktop, rect, setRect]);
 
   /** The panel's current box — measured from the DOM until the user moves it. */
   function originRect(): LeadChatRect {
-    if (effectiveRect) return effectiveRect;
+    if (rect) return rect;
     const b = panelRef.current?.getBoundingClientRect();
     const origin = b
       ? { x: b.left, y: b.top, w: b.width, h: b.height }
@@ -210,352 +334,251 @@ export function LeadChatHost({
     return origin;
   }
 
-  function computeRect(
-    mode: "move" | "resize-br" | "resize-tl",
-    origin: LeadChatRect,
-    sx: number,
-    sy: number,
-    cx: number,
-    cy: number,
-  ): LeadChatRect {
-    const dx = cx - sx;
-    const dy = cy - sy;
-    if (mode === "move") {
-      const x = Math.min(
-        Math.max(EDGE, origin.x + dx),
-        Math.max(EDGE, window.innerWidth - origin.w - EDGE),
-      );
-      const y = Math.min(
-        Math.max(EDGE, origin.y + dy),
-        Math.max(EDGE, window.innerHeight - 48),
-      );
-      return { x, y, w: origin.w, h: origin.h };
-    }
-    if (mode === "resize-br") {
-      const w = Math.min(Math.max(MIN_W, origin.w + dx), window.innerWidth - 2 * EDGE);
-      const h = Math.min(Math.max(MIN_H, origin.h + dy), window.innerHeight - 2 * EDGE);
-      return { x: origin.x, y: origin.y, w, h };
-    }
-    // Upper-left grip: the bottom-right corner stays anchored while the
-    // top-left edge follows the pointer.
-    const x = Math.min(Math.max(EDGE, origin.x + dx), origin.x + origin.w - MIN_W);
-    const y = Math.min(Math.max(EDGE, origin.y + dy), origin.y + origin.h - MIN_H);
-    return { x, y, w: origin.x + origin.w - x, h: origin.y + origin.h - y };
-  }
-
-  /** Pointer-down starter for the header (move) or a corner grip (resize). */
-  function startPointer(mode: "move" | "resize-br" | "resize-tl") {
+  /**
+   * Header (move) or corner grip (resize). Pointer moves write the transform
+   * and size straight to the DOM once per frame; React state and the
+   * persisted box change only on release.
+   */
+  function startPointer(mode: DragMode) {
     return (e: ReactPointerEvent) => {
       if (e.pointerType === "mouse" && e.button !== 0) return;
+      const el = panelRef.current;
+      if (!el) return;
       e.preventDefault();
       const origin = originRect();
       const sx = e.clientX;
       const sy = e.clientY;
+      let latest = origin;
+      let cancel: (() => void) | null = null;
+      setBox(el, origin);
+      el.classList.add("is-dragging");
+      const paint = () => {
+        cancel = null;
+        el.style.transform = `translate(${latest.x - origin.x}px, ${latest.y - origin.y}px)`;
+        el.style.width = `${latest.w}px`;
+        el.style.height = `${latest.h}px`;
+      };
       const onMove = (ev: PointerEvent) => {
-        setDragRect(computeRect(mode, origin, sx, sy, ev.clientX, ev.clientY));
+        latest = computeRect(mode, origin, ev.clientX - sx, ev.clientY - sy);
+        cancel ??= nextFrame(paint);
       };
       const onUp = (ev: PointerEvent) => {
         window.removeEventListener("pointermove", onMove);
         window.removeEventListener("pointerup", onUp);
-        setDragRect(null);
+        window.removeEventListener("pointercancel", onUp);
+        cancel?.();
+        const final = computeRect(mode, origin, ev.clientX - sx, ev.clientY - sy);
+        el.style.transform = "";
+        el.classList.remove("is-dragging");
+        setBox(el, final);
         // Commit the final box to localStorage so it survives reloads.
-        setRect(computeRect(mode, origin, sx, sy, ev.clientX, ev.clientY));
+        setRect(final);
       };
       window.addEventListener("pointermove", onMove);
       window.addEventListener("pointerup", onUp);
+      window.addEventListener("pointercancel", onUp);
     };
   }
 
-  function beginTurn(runId: string | null, sessionId: string) {
-    setSending(true);
-    setTurn({ ...emptyActivity(runId), sessionId });
-    setStreamText("");
-    setNote(null);
-    setError(null);
-  }
-
-  function endTurn() {
-    setSending(false);
-    setTurn(null);
-    setApproval(null);
-    abortRef.current = null;
-  }
-
-  function makeHandlers(): ChatStreamHandlers {
-    // Every stream event bumps lastEventAt so the stall detector only fires
-    // on genuine silence, not on a long but visibly active step.
-    const touch = (update: (cur: TurnActivity) => Partial<TurnActivity>) =>
-      setTurn((prev) => {
-        const cur = prev ?? emptyActivity();
-        return { ...cur, ...update(cur), lastEventAt: Date.now() };
-      });
-    return {
-      onAccepted: (runId, sid) =>
-        touch((cur) => ({
-          accepted: true,
-          runId: runId || cur.runId,
-          sessionId: sid || cur.sessionId,
-        })),
-      onCancelled: () => {
-        touch(() => ({ stopping: true }));
-        setNote(STOPPED_NOTE);
-      },
-      onDelta: (delta) => {
-        setStreamText((prev) => prev + delta);
-        touch(() => ({ accepted: true }));
-      },
-      onReasoning: (textDelta) =>
-        touch((cur) => ({ reasoning: cur.reasoning + textDelta, accepted: true })),
-      onToolStart: (tool) =>
-        touch((cur) => ({
-          tools: [...cur.tools, { ...tool, done: false }],
-          accepted: true,
-        })),
-      onToolComplete: (tool) =>
-        touch((cur) => ({
-          tools: cur.tools.map((c) => (c.id === tool.id ? { ...c, done: true } : c)),
-        })),
-      onApproval: (req) => {
-        setApproval(req);
-        touch(() => ({}));
-      },
-      onCompleted: (content) => {
-        // Deliberately does NOT re-pin to the id the turn reports: a compacted
-        // conversation answers under a continuation id, and adopting it here
-        // would make this browser's lead chat diverge from every other one.
-        // Every read path resolves the chain from the root id.
-        if (content) {
-          setMessages((prev) => [...prev, { role: "assistant", content }]);
-        }
-        setStreamText("");
-        setApproval(null);
-      },
-      onError: (message) => setError(message),
+  /** Phone sheet handle: drag to resize/close, snap on release (a tap toggles via onClick). */
+  function startSheetDrag(e: ReactPointerEvent) {
+    if (e.pointerType === "mouse" && e.button !== 0) return;
+    const el = panelRef.current;
+    if (!el) return;
+    const vh = window.innerHeight;
+    const startH =
+      el.getBoundingClientRect().height || vh * (snap === "full" ? SNAP_FULL : SNAP_HALF);
+    const sy = e.clientY;
+    let dy = 0;
+    let moved = false;
+    let cancel: (() => void) | null = null;
+    const paint = () => {
+      cancel = null;
+      if (dy >= 0) {
+        el.style.height = "";
+        el.style.transform = `translateY(${dy}px)`;
+      } else {
+        el.style.transform = "";
+        el.style.height = `${Math.min(startH - dy, vh * SNAP_FULL)}px`;
+      }
     };
+    const onMove = (ev: PointerEvent) => {
+      dy = ev.clientY - sy;
+      if (!moved && Math.abs(dy) > TAP_SLOP) {
+        moved = true;
+        el.classList.add("is-dragging");
+      }
+      if (moved) cancel ??= nextFrame(paint);
+    };
+    const onUp = (ev: PointerEvent) => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onUp);
+      cancel?.();
+      el.style.transform = "";
+      el.style.height = "";
+      el.classList.remove("is-dragging");
+      if (!moved) return;
+      suppressClickRef.current = true;
+      setTimeout(() => {
+        suppressClickRef.current = false;
+      }, 0);
+      const h = startH - (ev.clientY - sy);
+      if (h < vh * SHEET_CLOSE) hide(true);
+      else setSnap(h > (vh * (SNAP_HALF + SNAP_FULL)) / 2 ? "full" : "half");
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onUp);
   }
 
-  /** The server's answer to "which conversation am I", or null if it can't say. */
-  async function resolveLeadSession(): Promise<string | null> {
-    try {
-      const res = await fetch("/api/chat/lead");
-      if (!res.ok) return null;
-      const data = (await res.json()) as { sessionId?: string | null };
-      return data.sessionId ?? null;
-    } catch {
-      return null;
-    }
-  }
-
-  async function send(text: string, attachments: ChatAttachment[]) {
-    if (sending) return;
-    // Sending with no session id would start a *new* conversation, which is
-    // the bug this panel used to have in a different shape: a lead chat that
-    // is only this browser's. Better to say so than to fork it silently.
-    const sessionId = leadSession ?? (await resolveLeadSession());
+  async function send(text: string, attachments: ChatAttachment[]): Promise<boolean> {
+    if (busy || resolvingSend) return false;
+    let sessionId = leadSession;
     if (!sessionId) {
-      setMessages((prev) => [
-        ...prev,
-        {
-          role: "assistant",
-          content:
-            "The lead conversation could not be reached, so this message was not sent. Try again in a moment.",
-        },
-      ]);
-      return;
+      setResolvingSend(true);
+      sessionId = await resolveLead();
+      setResolvingSend(false);
     }
-    if (sessionId !== leadSession) setLeadSession(sessionId);
-    turnsRef.current += 1;
-    beginTurn(null, sessionId);
-    const controller = new AbortController();
-    abortRef.current = controller;
-    setMessages((prev) => [...prev, { role: "user", content: text }]);
-    try {
-      await streamChatTurn(
-        { sessionId, message: text, attachments, signal: controller.signal },
-        makeHandlers(),
-      );
-    } catch (err) {
-      const aborted = err instanceof DOMException && err.name === "AbortError";
-      if (!aborted) {
-        setError(err instanceof Error ? err.message : "The turn failed.");
-      }
-    } finally {
-      endTurn();
+    // Sending with no session id would start a *new* conversation — a lead
+    // chat that is only this browser's. Better to say so than to fork it.
+    if (!sessionId) {
+      setRefused(true);
+      return false;
     }
+    setRefused(false);
+    const result = await controller.send(sessionId, text, attachments);
+    return result.ok;
   }
 
-  async function resolveApproval(choice: string) {
-    const req = approval;
-    if (!req || resolvingApproval) return;
-    setResolvingApproval(true);
-    setError(null);
-    try {
-      const res = await fetch("/api/chat/approval", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ runId: req.runId, choice }),
-      });
-      if (!res.ok) {
-        const body = (await res.json().catch(() => ({}))) as { detail?: string };
-        throw new Error(body.detail ?? "Your decision could not be submitted.");
-      }
-      setApproval(null);
-      setNote(decisionText(choice, req));
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Your decision could not be submitted.");
-    } finally {
-      setResolvingApproval(false);
-    }
-  }
-
-  // Stop the in-flight turn. Closing the connection alone would NOT stop the
-  // server-side turn (it survives a closed tab by design), so ask the server
-  // to interrupt the agent and keep the stream open for the partial reply.
-  // Before the server has acknowledged the turn there is no run to cancel.
-  async function stopTurn() {
-    const runId = turn?.runId ?? null;
-    const sid = turn?.sessionId ?? leadSession;
-    if (!runId || !sid || turn?.stopping) {
-      abortRef.current?.abort();
-      return;
-    }
-    setTurn((prev) => (prev ? { ...prev, stopping: true } : prev));
-    try {
-      await cancelChatTurn({ sessionId: sid, runId });
-    } catch (err) {
-      abortRef.current?.abort();
-      setError(err instanceof Error ? err.message : "The agent could not be stopped.");
-    }
-  }
-
-  const activity = deriveActivity({
-    busy: sending,
-    turn,
-    approval: approval !== null,
-    hasOutput: streamText !== "",
-  });
-  const tool = runningTool(turn);
+  const chatsHref = leadSession ? `/chat?session=${encodeURIComponent(leadSession)}` : "/chat";
 
   return (
     <div data-component="LeadChatHost">
-      {open ? (
+      {mounted ? (
         <div
           ref={panelRef}
-          className="leadchat-panel"
+          data-component="LeadChatPanel"
+          data-layout={desktop ? "panel" : "sheet"}
+          data-snap={desktop ? undefined : snap}
+          className={desktop ? "leadchat-panel" : "leadchat-panel leadchat-sheet"}
           role="dialog"
           aria-label="Lead chat"
+          tabIndex={-1}
+          data-state={open ? "open" : "closed"}
+          aria-hidden={open ? undefined : true}
+          inert={!open}
           style={
-            effectiveRect
+            desktop && rect
               ? {
-                  left: effectiveRect.x,
-                  top: effectiveRect.y,
+                  left: rect.x,
+                  top: rect.y,
                   right: "auto",
                   bottom: "auto",
-                  width: effectiveRect.w,
-                  height: effectiveRect.h,
+                  width: rect.w,
+                  height: rect.h,
                 }
               : undefined
           }
         >
-          <div className="mb-2 flex items-start justify-between gap-2 px-1">
-            <div
-              className="leadchat-drag min-w-0 flex-1"
-              onPointerDown={startPointer("move")}
-              title="Drag to move"
+          {desktop ? null : (
+            <button
+              type="button"
+              className="leadchat-grab"
+              aria-label={snap === "full" ? "Shrink lead chat" : "Expand lead chat"}
+              aria-expanded={snap === "full"}
+              title="Tap or drag to resize"
+              onPointerDown={startSheetDrag}
+              onClick={() => {
+                if (suppressClickRef.current) return;
+                setSnap((cur) => (cur === "full" ? "half" : "full"));
+              }}
             >
-              <h3 className="text-sm font-semibold">Lead chat</h3>
-              <p className="text-[11px] text-[var(--color-muted)]">
-                One long-running session, the same on every device.
+              <span aria-hidden className="leadchat-grab-bar" />
+            </button>
+          )}
+          <div className="leadchat-head">
+            <div
+              className={`min-w-0 flex-1 ${desktop ? "leadchat-drag" : ""}`}
+              onPointerDown={desktop ? startPointer("move") : undefined}
+              title={desktop ? "Drag to move" : undefined}
+            >
+              <h3 className="flex items-center gap-1.5 text-sm font-semibold">
+                <span aria-hidden className="text-[var(--color-accent)]">✦</span>
+                Lead chat
+              </h3>
+              <p className="truncate text-[11px] text-[var(--color-muted)]">
+                Same conversation on every device
               </p>
             </div>
-            <div className="flex shrink-0 items-center gap-2 text-sm">
-              <Link
-                href="/chat"
-                className="rounded-lg border border-[var(--color-border)] px-2 py-1 text-xs text-[var(--color-muted)]"
-              >
-                Chats
-              </Link>
-              <button
-                type="button"
-                onClick={() => setOpen(false)}
-                className="text-[var(--color-muted)]"
-              >
-                Close
-              </button>
-            </div>
+            <Link
+              href={chatsHref}
+              title="Open the lead conversation in the Chats page"
+              className="leadchat-headbtn shrink-0 px-2 text-xs"
+            >
+              <span aria-hidden>⤢</span> Open in Chats
+            </Link>
+            <button
+              type="button"
+              onClick={() => hide(true)}
+              aria-label={desktop ? "Minimise" : "Close"}
+              title={desktop ? "Minimise" : "Close"}
+              className="leadchat-headbtn w-8 shrink-0"
+            >
+              <span aria-hidden>{desktop ? "—" : "✕"}</span>
+            </button>
           </div>
-          <div
-            ref={scrollRef}
-            className="leadchat-scroll"
-            style={
-              effectiveRect ? { maxHeight: "none", flex: 1, minHeight: 0 } : undefined
-            }
-          >
-            {loading ? (
-              <p className="text-xs text-[var(--color-muted)]">Loading the conversation…</p>
-            ) : messages.length === 0 && !streamText ? (
+          <ChatThread
+            controller={controller}
+            sessionId={leadSession}
+            density="compact"
+            className="overscroll-contain rounded-xl px-1 py-1"
+            empty={
               <p className="text-xs text-[var(--color-muted)]">
-                The lead session starts with your first message and keeps
-                running from there.
+                {leadSession || resolveFailed
+                  ? "The lead session starts with your first message and keeps running from there."
+                  : "Loading the conversation…"}
               </p>
-            ) : (
-              messages.map((m, i) => <MessageBubble key={i} message={m} msgIndex={i} />)
-            )}
-            {streamText ? (
-              <div className="mt-2 whitespace-pre-wrap rounded-xl bg-[var(--color-surface-2)] px-3 py-2 text-sm">
-                {streamText}
-              </div>
-            ) : null}
-            <LiveActivity reasoning={turn?.reasoning ?? ""} tools={turn?.tools ?? []} />
-            <StatusIndicator
-              activity={activity}
-              detail={tool?.name}
-              elapsedMs={turn ? now - turn.startedAt : undefined}
-              quietMs={turn ? now - turn.lastEventAt : undefined}
-              hasOutput={streamText !== ""}
-            />
-            {note ? (
-              <p
-                role="status"
-                className="mt-2 text-xs text-[var(--color-muted)]"
-              >
-                {note}
-              </p>
-            ) : null}
-            {error ? (
-              <p role="alert" className="mt-2 text-xs text-red-300">
-                {error}
-              </p>
-            ) : null}
-          </div>
+            }
+          />
+          {refused ? (
+            <p role="alert" className="mt-2 px-1 text-xs text-red-300">
+              {REFUSED_TEXT}
+            </p>
+          ) : null}
           <Composer
-            sending={sending}
-            stopping={turn?.stopping ?? false}
+            docked
+            sending={busy || resolvingSend}
+            stopping={stopping}
             storageEnabled={storageEnabled}
             sessionId={leadSession}
-            onSend={(text, attachments) => void send(text, attachments)}
-            onStop={() => void stopTurn()}
+            onSend={send}
+            onStop={() => void controller.stop(key)}
           />
-          <div
-            className="leadchat-resize-tl"
-            onPointerDown={startPointer("resize-tl")}
-            title="Drag to resize"
-            aria-hidden
-          />
-          <div
-            className="leadchat-resize"
-            onPointerDown={startPointer("resize-br")}
-            title="Drag to resize"
-            aria-hidden
-          />
+          {desktop ? (
+            <>
+              <div
+                className="leadchat-resize-tl"
+                onPointerDown={startPointer("resize-tl")}
+                title="Drag to resize"
+                aria-hidden
+              />
+              <div
+                className="leadchat-resize"
+                onPointerDown={startPointer("resize-br")}
+                title="Drag to resize"
+                aria-hidden
+              />
+            </>
+          ) : null}
         </div>
       ) : null}
       <button
         ref={fabRef}
         type="button"
-        onClick={() => setOpen((cur) => !cur)}
+        onClick={show}
         aria-expanded={open}
-        aria-label={open ? "Close lead chat" : "Open lead chat"}
+        aria-label={unread ? "Open lead chat — new reply" : "Open lead chat"}
         hidden={open}
         className="coral-fab fixed z-[60] flex h-14 w-14 items-center justify-center rounded-full text-xl text-[var(--color-accent-fg)]"
         style={{
@@ -566,14 +589,8 @@ export function LeadChatHost({
         }}
       >
         <span aria-hidden>✦</span>
+        {unread ? <span aria-hidden data-component="LeadChatUnread" className="leadchat-unread" /> : null}
       </button>
-      {approval ? (
-        <ApprovalModal
-          request={approval}
-          busy={resolvingApproval}
-          onResolve={(choice) => void resolveApproval(choice)}
-        />
-      ) : null}
     </div>
   );
 }
