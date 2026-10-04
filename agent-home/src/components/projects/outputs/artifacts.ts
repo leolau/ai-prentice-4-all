@@ -198,6 +198,16 @@ export function shortTitle(title: string, max = 18): string {
   return title.length <= max ? title : `${title.slice(0, max).trimEnd()}…`;
 }
 
+/** "自學中文書寫…黃震遐_定稿v2.docx" — middle ellipsis keeps the tail that
+ * tells same-prefix filenames (party names, versions, extensions) apart,
+ * where plain end-truncation makes every tile read identically. */
+export function middleEllipsize(title: string, max = 26): string {
+  if (title.length <= max) return title;
+  const tail = Math.max(8, Math.floor(max * 0.6));
+  const head = max - tail - 1;
+  return `${title.slice(0, head).trimEnd()}…${title.slice(-tail)}`;
+}
+
 /** The deliver-route body that attaches a produced file to an output. */
 export function attachBody(file: ProjectArtifact): Record<string, string> {
   const body: Record<string, string> = { label: file.title };

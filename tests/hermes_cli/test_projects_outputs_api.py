@@ -328,6 +328,58 @@ def test_a_url_linked_by_two_cards_appears_once(env):
     assert [a["link_ref"] for a in items].count(url) == 1
 
 
+def test_rotted_workspace_delivery_opens_the_uploaded_copy(env):
+    """Scratch workspaces are wiped when a card completes, so a workspace
+    delivery rots. When a run recorded an uploaded copy in its metadata
+    (``new_files`` name/link), the deliverable opens that instead."""
+    client, _state, tmp = env
+    project = _project(env)
+    output_id = project["outputs"][0]["id"]
+    ws = tmp / "ws" / "gone"
+    ws.mkdir(parents=True)
+    path = ws / "mou-final.docx"
+    path.write_bytes(b"docx-a")
+    remote = "https://docs.google.com/document/d/abc123/edit"
+    tid = _done_card(
+        project, title="Write + file the MOU", workspace=ws,
+        metadata={"artifacts": [str(path)],
+                  "new_files": [{"name": "mou-final.docx", "link": remote}]},
+    )
+    run = _run(project, [tid])
+    resp = client.post(
+        f"/api/registry/projects/{project['slug']}/outputs/{output_id}/deliver",
+        json={"run_id": run["id"], "task_id": tid, "link_kind": "workspace",
+              "link_ref": str(path), "label": "mou-final.docx"},
+    )
+    assert resp.status_code == 200, resp.text
+    path.unlink()  # scratch cleanup
+
+    item = _artifacts(env, project["slug"])[0]
+    assert item["kind"] == "deliverable"
+    assert item["href"] == remote
+    assert item["location"] == "docs.google.com"
+
+
+def test_rotted_workspace_draft_opens_the_uploaded_copy(env):
+    _client, _state, tmp = env
+    project = _project(env)
+    ws = tmp / "ws" / "gone"
+    ws.mkdir(parents=True)
+    path = ws / "mou-final.docx"
+    path.write_bytes(b"docx-a")
+    remote = "https://docs.google.com/document/d/abc123/edit"
+    _done_card(
+        project, title="Write + file the MOU", workspace=ws,
+        metadata={"artifacts": [str(path)],
+                  "new_files": [{"name": "mou-final.docx", "link": remote}]},
+    )
+    path.unlink()
+
+    item = _artifacts(env, project["slug"])[0]
+    assert item["kind"] == "draft" and item["output_id"] is None
+    assert item["href"] == remote
+
+
 def test_a_claimed_path_outside_the_managed_roots_is_never_served(env):
     client, _state, tmp = env
     project = _project(env)
