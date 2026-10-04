@@ -10,6 +10,7 @@ import type {
 /** The project page's tabs, in order. The Dashboard is the landing tab. */
 export const PROJECT_TABS = [
   "dashboard",
+  "scope",
   "board",
   "outputs",
   "iterations",
@@ -22,6 +23,7 @@ export type ProjectTab = (typeof PROJECT_TABS)[number];
 
 export const PROJECT_TAB_LABEL: Record<ProjectTab, string> = {
   dashboard: "Dashboard",
+  scope: "Scope",
   board: "Board",
   outputs: "Outputs",
   iterations: "Iterations",

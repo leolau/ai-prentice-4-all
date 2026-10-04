@@ -1696,6 +1696,8 @@ export interface ProjectDetail extends Project {
   runs: ProjectRunBrief[];
   card_rollup: ProjectCardRollup;
   recent_events: TaskEventRow[];
+  /** Scope clarification state; absent on older servers. */
+  clarify?: ClarifySummary | null;
 }
 
 /** §8.1: the project's derived score, recomputed on every read. */
@@ -2410,3 +2412,92 @@ export interface ProjectCardsApproveResponse {
   approved: number;
   failed: number;
 }
+
+// ── Projects: scope clarification (agent asks before implementation) ──
+
+export type ClarifyCategory =
+  | "goal"
+  | "scope"
+  | "audience"
+  | "success"
+  | "constraints"
+  | "inputs"
+  | "format"
+  | "other";
+
+/** `not_started` (no round) · `open` (latest round has open questions) ·
+ * `answered` (all answered/skipped, not confirmed) · `confirmed`. */
+export type ClarifyStatus = "not_started" | "open" | "answered" | "confirmed";
+
+export interface ClarifyQuestion {
+  id: string;
+  round_no: number;
+  position: number;
+  category: ClarifyCategory;
+  question: string;
+  /** Why the agent asks — one short line. */
+  why: string | null;
+  /** Suggested answers the person can tap (may be empty). */
+  options: string[];
+  allow_multiple: boolean;
+  status: "open" | "answered" | "skipped";
+  answer: string | null;
+  answered_by: string | null;
+  answered_at: number | null;
+  created_at: number;
+}
+
+export interface ClarifyRound {
+  round_no: number;
+  status: "open" | "answered" | "confirmed";
+  /** The agent's summary of the goal and scope (edited on confirm). */
+  understanding: string | null;
+  /** The agent said it has enough to plan. */
+  done: boolean;
+  focus: string | null;
+  created_by: string;
+  created_at: number;
+  confirmed_by: string | null;
+  confirmed_at: number | null;
+}
+
+/** The background question-generation job (like the plan drafter). */
+export interface ClarifyJob {
+  status: "idle" | "running" | "failed" | "done";
+  detail?: string | null;
+  started_at?: number;
+  finished_at?: number;
+  round_no?: number;
+}
+
+/** `ProjectDetail.clarify` — the compact state the Dashboard reads. */
+export interface ClarifySummary {
+  status: ClarifyStatus;
+  round: number;
+  open_count: number;
+  answered_count: number;
+  /** The latest *confirmed* understanding. */
+  understanding: string | null;
+  confirmed_at: number | null;
+}
+
+/** `GET /api/registry/projects/:slug/clarify` (and every clarify write's answer). */
+export interface ClarifyState extends ClarifySummary {
+  rounds: ClarifyRound[];
+  /** Every round's questions, oldest round first, in order. */
+  questions: ClarifyQuestion[];
+  job: ClarifyJob;
+}
+
+export interface ClarifyAnswerInput {
+  id: string;
+  answer?: string;
+  skip?: boolean;
+}
+
+/** `POST …/clarify/confirm` answer. `plan_draft` is set when a draft was asked for. */
+export interface ClarifyConfirmResult {
+  state: ClarifyState;
+  plan_draft: { status: string; detail?: string | null } | null;
+}
+

@@ -36,6 +36,7 @@ import { LiveStatusBar } from "@/components/projects/live/LiveStatusBar";
 import { BoardTab } from "@/components/projects/tabs/BoardTab";
 import { DashboardTab } from "@/components/projects/tabs/DashboardTab";
 import { InputsTab } from "@/components/projects/tabs/InputsTab";
+import { ScopeTab } from "@/components/projects/tabs/ScopeTab";
 import { IterationsTab } from "@/components/projects/tabs/IterationsTab";
 import { OutputsTab } from "@/components/projects/tabs/OutputsTab";
 import { PlanTab } from "@/components/projects/tabs/PlanTab";
@@ -64,6 +65,7 @@ const HEALTH_TONE: Record<ProjectHealth, Tone> = {
 
 const TAB_COMPONENT: Record<ProjectTab, ComponentType<ProjectTabProps>> = {
   dashboard: DashboardTab,
+  scope: ScopeTab,
   board: BoardTab,
   outputs: OutputsTab,
   iterations: IterationsTab,
