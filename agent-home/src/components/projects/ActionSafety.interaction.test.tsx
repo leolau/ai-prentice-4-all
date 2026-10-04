@@ -336,7 +336,9 @@ const SCENARIOS: Scenario[] = [
         isInstanceAdmin={false}
       />
     ),
-    control: (r) => r.getByRole("button", { name: "Activate" }),
+    // The Dashboard's next-action hero offers the same action; this is the header's.
+    control: (r) =>
+      within(r.container.querySelector("header")!).getByRole("button", { name: "Activate" }),
     pending: "Activating…",
     method: "PATCH",
     path: BASE,

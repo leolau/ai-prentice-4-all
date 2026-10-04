@@ -17,11 +17,11 @@ const ROOT = path.dirname(fileURLToPath(import.meta.url));
  */
 const ALLOW_LIST: Record<string, string> = {
   // Owned by parallel redesign workstreams, migrating their own writes.
-  "AddToProjectSheet.tsx": "not in the safety workstream — Inputs owner migrates",
   "NewProjectForm.tsx": "not in the safety workstream — project creation flow",
   "panels/BoardPanel.tsx": "not in the safety workstream — Board owner migrates",
-  // Upload needs FormData (and progress) which the JSON hook does not send.
-  "panels/FilesPanel.tsx": "FormData upload; links — Inputs owner migrates",
+  // FormData upload with progress, which the JSON hook does not send. It still
+  // sends an Idempotency-Key and its callers hold a useProjectAction-style lock.
+  "inputs/uploadProjectFile.ts": "FormData upload fallback when XHR is unavailable",
 };
 
 const MUTATING_LITERAL = /\bmethod\s*:\s*(["'`])(POST|PATCH|PUT|DELETE)\1/i;
