@@ -1,6 +1,8 @@
 # Plan: per-card toolset narrowing + card tool visibility
 
-Status: **in progress**.
+Status: **shipped** (PR #502, deployed `039264de1`; prod `tasks.toolsets`
+column migrated — existing cards keep full surface, new stamped cards
+get the narrowed list).
 
 ## Problem
 
