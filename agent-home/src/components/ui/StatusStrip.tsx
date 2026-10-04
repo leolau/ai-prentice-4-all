@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import type { StatusSummary } from "@/types";
 
@@ -21,6 +21,20 @@ function fmtAge(ms: number): string {
   return `${Math.floor(m / 60)}h ago`;
 }
 
+/** Short local date/time for the build stamp, e.g. "4 Oct 07:04". */
+export function fmtBuildTime(iso: string | undefined): string | null {
+  if (!iso) return null;
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return null;
+  return d.toLocaleString(undefined, {
+    day: "numeric",
+    month: "short",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  });
+}
+
 function fmtTokens(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
   if (n >= 1_000) return `${Math.round(n / 1_000)}k`;
@@ -33,7 +47,7 @@ function fmtTokens(n: number): string {
  * visible and re-reads on focus; a failed read keeps the last good values
  * (a strip that blanks on every hiccup is worse than a stale one) but the
  * self-ticking "Ns ago" label — amber with "retrying" while fetches fail —
- * always says exactly how old the numbers are.
+ * always says exactly how old the numbers are. The ↻ button re-reads now.
  */
 export function StatusStrip() {
   const [summary, setSummary] = useState<StatusSummary | null>(null);
@@ -42,23 +56,45 @@ export function StatusStrip() {
   // browser clock skew) and a 1s heartbeat so the age label self-ticks.
   const [fetchedAt, setFetchedAt] = useState<number | null>(null);
   const [now, setNow] = useState(() => Date.now());
+  const [refreshing, setRefreshing] = useState(false);
+  const mounted = useRef(true);
+  // One read at a time: the poll, focus wake and the ↻ button share it.
+  const inFlight = useRef<Promise<void> | null>(null);
 
-  useEffect(() => {
-    let cancelled = false;
-    async function tick() {
+  const tick = useCallback((): Promise<void> => {
+    if (inFlight.current) return inFlight.current;
+    const run = (async () => {
       try {
         const res = await fetch("/api/status/summary", { cache: "no-store" });
         if (!res.ok) throw new Error(String(res.status));
         const data = (await res.json()) as StatusSummary;
-        if (!cancelled) {
+        if (mounted.current) {
           setSummary(data);
           setFetchedAt(Date.now());
+          setNow(Date.now());
           setStale(false);
         }
       } catch {
-        if (!cancelled) setStale(true);
+        if (mounted.current) setStale(true);
+      } finally {
+        inFlight.current = null;
       }
+    })();
+    inFlight.current = run;
+    return run;
+  }, []);
+
+  const refreshNow = useCallback(async () => {
+    setRefreshing(true);
+    try {
+      await tick();
+    } finally {
+      if (mounted.current) setRefreshing(false);
     }
+  }, [tick]);
+
+  useEffect(() => {
+    mounted.current = true;
     void tick();
     const interval = setInterval(() => {
       if (document.visibilityState === "visible") void tick();
@@ -69,12 +105,12 @@ export function StatusStrip() {
     document.addEventListener("visibilitychange", wake);
     window.addEventListener("focus", wake);
     return () => {
-      cancelled = true;
+      mounted.current = false;
       clearInterval(interval);
       document.removeEventListener("visibilitychange", wake);
       window.removeEventListener("focus", wake);
     };
-  }, []);
+  }, [tick]);
 
   // Self-ticking clock for the "Ns ago" freshness label — skipped while the
   // tab is hidden so background tabs don't burn a render a second.
@@ -89,6 +125,8 @@ export function StatusStrip() {
   // means this tab is running a pre-deploy bundle — flag it instead of
   // quietly showing old metrics forever.
   const clientBuild = process.env.NEXT_PUBLIC_HERMES_BUILD ?? "dev";
+  const buildTimeIso = process.env.NEXT_PUBLIC_HERMES_BUILD_TIME;
+  const buildTime = fmtBuildTime(buildTimeIso);
   const serverBuild = summary?.build ?? null;
   const buildMismatch = serverBuild !== null && serverBuild !== clientBuild;
 
@@ -147,6 +185,20 @@ export function StatusStrip() {
             {stale ? " · retrying" : ""}
           </span>
         ) : null}
+        <button
+          type="button"
+          onClick={() => void refreshNow()}
+          disabled={refreshing}
+          aria-busy={refreshing || undefined}
+          aria-label="Refresh now"
+          title="Refresh now"
+          data-action="status-refresh"
+          className="inline-flex h-5 w-5 items-center justify-center rounded-full hover:bg-[var(--color-surface-2)] hover:text-[var(--color-fg)] disabled:opacity-50"
+        >
+          <span aria-hidden className={refreshing ? "inline-block animate-spin" : undefined}>
+            ↻
+          </span>
+        </button>
         {buildMismatch ? (
           <button
             type="button"
@@ -159,9 +211,15 @@ export function StatusStrip() {
         ) : (
           <span
             className="ml-auto whitespace-nowrap rounded-full px-2 py-0.5 font-mono"
-            title={`agent-home build ${clientBuild}`}
+            title={`agent-home build ${clientBuild}${buildTimeIso ? `, built ${buildTimeIso}` : ""}`}
           >
             {clientBuild}
+            {buildTime ? (
+              <span data-testid="build-time" className="font-sans">
+                {" · "}
+                {buildTime}
+              </span>
+            ) : null}
           </span>
         )}
       </div>
