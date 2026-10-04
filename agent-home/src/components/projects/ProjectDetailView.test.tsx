@@ -612,14 +612,13 @@ describe("ProjectDetailView", () => {
         isInstanceAdmin={false}
       />,
     );
-    // Progress leads the Dashboard, ahead of Outputs.
-    const progressAt = html.indexOf('id="panel-progress"');
-    expect(progressAt).toBeGreaterThan(-1);
-    expect(progressAt).toBeLessThan(html.indexOf('id="panel-outputs"'));
-    // The next actionable state rides inside Progress: run 14 is waiting.
-    expect(html).toContain('data-component="NextAction"');
+    // The next-action hero leads the Dashboard, ahead of Where it stands.
+    const heroAt = html.indexOf('data-component="NextActionHero"');
+    expect(heroAt).toBeGreaterThan(-1);
+    expect(heroAt).toBeLessThan(html.indexOf('data-component="WhereItStands"'));
+    // Run 14 is waiting: the hero's one click is Continue.
+    expect(html).toContain('data-state="waiting"');
     expect(html).toContain("Continue run 14");
-    expect(html).toContain("1 of 2 outputs accepted");
     // Settings-tab panels stay out of the Dashboard.
     expect(html).not.toContain('data-component="ToolsPanel"');
   });
@@ -638,7 +637,7 @@ describe("ProjectDetailView", () => {
     );
     expect(html).toContain('data-active-tab="settings"');
     expect(html).toContain('data-component="ToolsPanel"');
-    expect(html).not.toContain('id="panel-progress"');
+    expect(html).not.toContain('data-component="DashboardTab"');
     const unknown = renderToStaticMarkup(
       <ProjectDetailView
         project={PROJECT}
@@ -691,9 +690,9 @@ describe("ProjectDetailView", () => {
     );
     expect(html).toContain('data-component="ReadinessChecklist"');
     expect(html).toContain("Before it can run");
-    // Missing outputs + plan link to their panels; the doctor's extra finding rides along.
-    expect(html).toContain('href="#panel-outputs"');
-    expect(html).toContain('href="#panel-plan"');
+    // Missing outputs + plan link to their tabs; the doctor's extra finding rides along.
+    expect(html).toContain('href="?tab=outputs"');
+    expect(html).toContain('href="?tab=plan"');
     expect(html).toContain("The cron job is gone.");
     expect(html).not.toContain("no plan");
     expect(html).toMatch(/<button[^>]*disabled=""[^>]*>Run now<\/button>/);

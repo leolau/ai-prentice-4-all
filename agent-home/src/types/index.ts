@@ -2286,6 +2286,15 @@ export interface ProjectArtifact {
   version: number | null;
   created_at: number;
   created_by: string | null;
+
+// ── Projects redesign: dashboard ──
+/**
+ * Optional, server-derived stall flag on the detail read's run brief (the
+ * full run row already has it). Older builds omit it; the Dashboard then
+ * derives the same rule from the board (`dashboard/derive.ts#runStalled`).
+ */
+export interface ProjectRunBrief {
+  stalled?: boolean;
 }
 
 // ── Projects redesign: changes ──

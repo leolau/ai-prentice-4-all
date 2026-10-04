@@ -1,9 +1,11 @@
 import type { ReadinessItem } from "@/components/projects/readiness";
+import type { ProjectTab } from "@/components/projects/tabs/types";
 
 /**
  * The header's answer to "why can't I run this?" — every precondition the
  * run gate checks, numbered in the order a person would clear them, each
- * with either a link to the panel that fixes it or (for "status") a
+ * with either a link to the tab that fixes it (switched in place via
+ * `onNavigate` when given, else a plain `?tab=` link) or (for "status") a
  * one-click Activate button right here — no need to go find where that
  * button lives. Hidden once the project is runnable so a healthy project
  * keeps a quiet header.
@@ -13,12 +15,15 @@ export function ReadinessChecklist({
   findings,
   onActivate,
   activating = false,
+  onNavigate,
 }: {
   items: ReadinessItem[];
   findings: { code: string; severity: string; text: string }[];
   /** Wired up for the "status" item so Activate is a click, not a hunt. */
   onActivate?: () => void;
   activating?: boolean;
+  /** Switch tab in place instead of following the `?tab=` href. */
+  onNavigate?: (tab: ProjectTab) => void;
 }) {
   const missing = items.filter((item) => !item.ok);
   if (missing.length === 0 && findings.length === 0) return null;
@@ -66,6 +71,14 @@ export function ReadinessChecklist({
                     ) : (
                       <a
                         href={item.anchor}
+                        onClick={
+                          onNavigate && item.tab
+                            ? (event) => {
+                                event.preventDefault();
+                                onNavigate(item.tab as ProjectTab);
+                              }
+                            : undefined
+                        }
                         className="text-[var(--color-accent)] underline-offset-2 hover:underline"
                       >
                         {item.hint}
