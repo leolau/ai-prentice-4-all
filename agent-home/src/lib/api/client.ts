@@ -2349,6 +2349,24 @@ export class HermesApiClient {
   async deleteEnvVar(key: string): Promise<{ ok: boolean; key: string }> {
     return this.request("/api/env", { method: "DELETE", json: { key } });
   }
+
+  // ── Projects redesign: ask ──
+
+  /** Ask the project a read-only question; answered in its own one-shot session. */
+  async askProject(
+    slug: string,
+    body: { question: string; history?: import("@/types").AskProjectHistoryTurn[] },
+    idempotencyKey?: string,
+  ): Promise<import("@/types").AskProjectResponse> {
+    return this.request(
+      `/api/registry/projects/${encodeURIComponent(slug)}/ask`,
+      {
+        method: "POST",
+        json: body,
+        headers: idempotencyKey ? { "Idempotency-Key": idempotencyKey } : undefined,
+      },
+    );
+  }
 }
 
 /**

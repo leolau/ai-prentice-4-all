@@ -2218,3 +2218,35 @@ export interface SeminarSurveySubmitResult {
   ok: boolean;
   already_submitted: boolean;
 }
+
+// ── Projects redesign: ask ──
+
+/** What an "ask the project" answer can cite. */
+export type AskProjectSourceKind =
+  | "card"
+  | "run"
+  | "output"
+  | "requirement"
+  | "plan"
+  | "event";
+
+/** One checked citation: the id is a card id, run number, output id, … */
+export interface AskProjectSource {
+  kind: AskProjectSourceKind;
+  id: string;
+  label: string;
+}
+
+/** A prior question/answer pair sent back as context (max 6). */
+export interface AskProjectHistoryTurn {
+  q: string;
+  a: string;
+}
+
+/** `POST /api/projects/:slug/ask` — read-only, answered in its own session. */
+export interface AskProjectResponse {
+  answer: string;
+  sources: AskProjectSource[];
+  /** A requirement the answer suggests, ready for "Turn into a requirement…". */
+  suggested_requirement?: string;
+}
