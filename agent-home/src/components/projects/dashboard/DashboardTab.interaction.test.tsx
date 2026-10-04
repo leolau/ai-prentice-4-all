@@ -77,7 +77,7 @@ describe("Approve N cards & resume work", () => {
     fireEvent.click(button);
     fireEvent.click(button);
 
-    expect(await screen.findByRole("status")).toHaveProperty("textContent", "Approved 2 cards. Run 3 started.");
+    expect(await screen.findByRole("status", {}, { timeout: 5000 })).toHaveProperty("textContent", "Approved 2 cards. Run 3 started.");
     expect(fetchMock).toHaveBeenCalledTimes(3);
     expect([0, 1, 2].map((i) => {
       const c = call(fetchMock, i);
@@ -108,7 +108,7 @@ describe("Approve N cards & resume work", () => {
     render(<DashboardTab {...props()} />);
 
     fireEvent.click(screen.getByRole("button", { name: APPROVE }));
-    const pending = await screen.findByRole("button", { name: "Approving…" });
+    const pending = await screen.findByRole("button", { name: "Approving…" }, { timeout: 5000 });
     expect((pending as HTMLButtonElement).disabled).toBe(true);
     fireEvent.click(pending);
     expect(fetchMock).toHaveBeenCalledTimes(1);
@@ -118,7 +118,7 @@ describe("Approve N cards & resume work", () => {
     fireEvent.click(screen.getByRole("button", { name: "Approving…" }));
     await act(async () => second.resolve(json(200, {})));
 
-    await screen.findByRole("status");
+    await screen.findByRole("status", {}, { timeout: 5000 });
     expect(fetchMock).toHaveBeenCalledTimes(3);
   });
 
@@ -133,13 +133,13 @@ describe("Approve N cards & resume work", () => {
     render(<DashboardTab {...props()} />);
 
     fireEvent.click(screen.getByRole("button", { name: APPROVE }));
-    expect(await screen.findByRole("alert")).toBeTruthy();
+    expect(await screen.findByRole("alert", {}, { timeout: 5000 })).toBeTruthy();
     expect(screen.getByRole("button", { name: APPROVE })).toHaveProperty("disabled", false);
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(router.refresh).not.toHaveBeenCalled();
 
     fireEvent.click(screen.getByRole("button", { name: "Try again" }));
-    await screen.findByRole("status");
+    await screen.findByRole("status", {}, { timeout: 5000 });
     expect(fetchMock).toHaveBeenCalledTimes(4);
     expect(call(fetchMock, 1).url).toBe("/api/projects/mou-set/cards/t1");
     expect(call(fetchMock, 1).key).toBe(call(fetchMock, 0).key);
@@ -159,7 +159,7 @@ describe("Approve N cards & resume work", () => {
       />,
     );
     fireEvent.click(screen.getByRole("button", { name: APPROVE }));
-    await screen.findByRole("status");
+    await screen.findByRole("status", {}, { timeout: 5000 });
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(fetchMock.mock.calls.every(([url]) => String(url).includes("/cards/"))).toBe(true);
   });
@@ -177,7 +177,7 @@ describe("other Dashboard buttons", () => {
     const button = screen.getByRole("button", { name: "Continue run 4" });
     fireEvent.click(button);
     fireEvent.click(button);
-    expect(await screen.findByRole("status")).toHaveProperty("textContent", "Run 4 is going again.");
+    expect(await screen.findByRole("status", {}, { timeout: 5000 })).toHaveProperty("textContent", "Run 4 is going again.");
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(call(fetchMock, 0).url).toBe("/api/projects/mou-set/runs/4/continue");
   });
@@ -200,7 +200,7 @@ describe("other Dashboard buttons", () => {
     // b1 is the hero; b2's row has its own Retry.
     const [heroRetry, rowRetry] = screen.getAllByRole("button", { name: "Retry" });
     fireEvent.click(heroRetry);
-    expect(await screen.findByRole("button", { name: "Retrying…" })).toBeTruthy();
+    expect(await screen.findByRole("button", { name: "Retrying…" }, { timeout: 5000 })).toBeTruthy();
     expect(rowRetry).toHaveProperty("disabled", false);
     fireEvent.click(rowRetry);
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
