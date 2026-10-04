@@ -328,6 +328,8 @@ export interface ChatMessage {
   timestamp?: number | string | null;
   /** Persisted extended-thinking text (SessionDB `reasoning` column). */
   reasoning?: string | null;
+  /** Stable React key for an optimistic row that has no DB id yet. */
+  clientKey?: string;
 }
 
 /**
@@ -464,6 +466,8 @@ export interface ProfileSuggestionDismissResponse {
 export interface ChatMessagesResponse {
   session_id: string;
   messages: ChatMessage[];
+  /** Present on a paged (`limit`) read: older rows exist on the server. */
+  has_more?: boolean;
 }
 
 /** Token accounting a one-brain turn reports (mirror of the agent usage dict). */

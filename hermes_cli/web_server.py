@@ -10305,15 +10305,36 @@ async def get_session_latest_descendant(session_id: str):
     }
 
 @app.get("/api/sessions/{session_id}/messages")
-async def get_session_messages(session_id: str, profile: Optional[str] = None):
+async def get_session_messages(
+    session_id: str,
+    profile: Optional[str] = None,
+    visible: bool = False,
+    limit: Optional[int] = None,
+    before: Optional[int] = None,
+):
+    """Return a session transcript.
+
+    No query params → every active row (legacy shape). ``visible`` keeps
+    only user/assistant text rows (projected); ``limit`` returns the newest
+    N rows (older than ``before``) and the response adds ``has_more``.
+    """
     db = _open_session_db_for_profile(profile)
     try:
         sid = db.resolve_session_id(session_id)
         if not sid:
             raise HTTPException(status_code=404, detail="Session not found")
         sid = db.resolve_resume_session_id(sid)
-        messages = db.get_messages(sid)
-        return {"session_id": sid, "messages": messages}
+        if not visible and limit is None and before is None:
+            messages = db.get_messages(sid)
+            return {"session_id": sid, "messages": messages}
+        page = db.get_messages_page(
+            sid, visible_only=visible, limit=limit, before=before
+        )
+        return {
+            "session_id": sid,
+            "messages": page["messages"],
+            "has_more": page["has_more"],
+        }
     finally:
         db.close()
 

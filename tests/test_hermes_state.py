@@ -847,6 +847,47 @@ class TestMessageStorage:
         assert msgs[0]["content"] == content
         assert msgs[1]["content"] == "I see a screenshot."
 
+    def test_get_messages_page_visible_limit_before(self, db):
+        db.create_session(session_id="s1", source="cli")
+        parts = [{"type": "text", "text": "look"}, {"type": "image_url", "image_url": {"url": "x"}}]
+        db.append_message("s1", role="system", content="sys")
+        db.append_message("s1", role="user", content=parts)
+        db.append_message(
+            "s1", role="assistant", content="\t\n ",
+            tool_calls=[{"id": "c1", "function": {"name": "t", "arguments": "{}"}}],
+        )
+        db.append_message("s1", role="tool", content="out", tool_call_id="c1")
+        db.append_message("s1", role="assistant", content=None, reasoning="hmm")
+        db.append_message("s1", role="assistant", content="done")
+        gone = db.append_message("s1", role="user", content="rewound")
+        db._conn.execute("UPDATE messages SET active = 0 WHERE id = ?", (gone,))
+        db._conn.commit()
+
+        full = db.get_messages_page("s1", visible_only=True)
+        assert full["has_more"] is False
+        msgs = full["messages"]
+        assert [m["role"] for m in msgs] == ["user", "assistant", "assistant"]
+        assert msgs[0]["content"] == parts  # decoded like get_messages
+        assert msgs[1]["content"] is None and msgs[1]["reasoning"] == "hmm"
+        assert msgs[2]["content"] == "done"
+        assert all(set(m) == {"id", "role", "content", "timestamp", "reasoning"} for m in msgs)
+
+        tail = db.get_messages_page("s1", visible_only=True, limit=2)
+        assert [m["id"] for m in tail["messages"]] == [msgs[1]["id"], msgs[2]["id"]]
+        assert tail["has_more"] is True
+        older = db.get_messages_page(
+            "s1", visible_only=True, limit=2, before=tail["messages"][0]["id"]
+        )
+        assert [m["id"] for m in older["messages"]] == [msgs[0]["id"]]
+        assert older["has_more"] is False
+
+        # Non-visible paging keeps full rows (tool_calls decoded) and all roles.
+        raw = db.get_messages_page("s1", limit=4)
+        assert [m["role"] for m in raw["messages"]] == ["assistant", "tool", "assistant", "assistant"]
+        assert raw["messages"][0]["tool_calls"][0]["id"] == "c1"
+        assert raw["has_more"] is True
+        assert db.get_messages_page("s1", limit=10_000)["messages"] == db.get_messages("s1")
+
     def test_get_messages_as_conversation(self, db):
         db.create_session(session_id="s1", source="cli")
         db.append_message("s1", role="user", content="Hello")

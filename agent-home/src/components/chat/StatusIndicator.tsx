@@ -1,4 +1,7 @@
+"use client";
+
 import { Spinner } from "@/components/ui/Spinner";
+import { useNow } from "@/lib/use-now";
 
 /**
  * Animated agent-activity indicator for the chat pane.
@@ -59,10 +62,13 @@ function Dots() {
 
 export function StatusIndicator({
   activity,
-  elapsedMs,
+  elapsedMs: elapsedProp,
   detail,
-  quietMs,
+  quietMs: quietProp,
   hasOutput = false,
+  startedAt,
+  lastEventAt,
+  compact = false,
 }: {
   activity: ChatActivity;
   /** Time since the user sent the message; omitted → no clock. */
@@ -73,7 +79,25 @@ export function StatusIndicator({
   quietMs?: number;
   /** Whether any assistant text has arrived yet. */
   hasOutput?: boolean;
+  /** Turn start (epoch ms): the clock is computed here when `elapsedMs` is omitted. */
+  startedAt?: number;
+  /** Last stream event (epoch ms): quiet time is computed here when `quietMs` is omitted. */
+  lastEventAt?: number;
+  /** Small inline line (no pill box) for use inside a reply bubble. */
+  compact?: boolean;
 }) {
+  // Self-ticking only when the parent hands timestamps instead of durations,
+  // so the 1-second re-render stays inside this component.
+  const selfTimed =
+    (elapsedProp === undefined && startedAt !== undefined) ||
+    (quietProp === undefined && lastEventAt !== undefined);
+  const now = useNow(selfTimed && activity !== "idle");
+  const elapsedMs =
+    elapsedProp ??
+    (startedAt !== undefined ? Math.max(0, now - startedAt) : undefined);
+  const quietMs =
+    quietProp ??
+    (lastEventAt !== undefined ? Math.max(0, now - lastEventAt) : undefined);
   if (activity === "idle") return null;
   const waiting = activity === "waiting_approval";
   const label =
@@ -88,20 +112,28 @@ export function StatusIndicator({
     !stalled &&
     !hasOutput &&
     (elapsedMs ?? 0) >= LONG_TASK_HINT_MS;
+  const pill = compact
+    ? `inline-flex items-center gap-1.5 text-xs text-[var(--color-muted)] ${
+        waiting ? "animate-pulse text-[var(--color-accent)]" : ""
+      }`
+    : `inline-flex items-center gap-2 rounded-2xl border border-[var(--color-accent)] bg-[var(--color-surface-2)] px-3 py-2 text-sm font-medium text-[var(--color-accent)] ${
+        waiting ? "animate-pulse" : ""
+      }`;
   return (
     <div
       data-component="StatusIndicator"
       data-activity={activity}
+      data-compact={compact ? "true" : undefined}
       role="status"
       aria-live="polite"
-      className="flex flex-col items-start gap-1"
+      className={`flex flex-col items-start ${compact ? "gap-0.5" : "gap-1"}`}
     >
-      <span
-        className={`inline-flex items-center gap-2 rounded-2xl border border-[var(--color-accent)] bg-[var(--color-surface-2)] px-3 py-2 text-sm font-medium text-[var(--color-accent)] ${
-          waiting ? "animate-pulse" : ""
-        }`}
-      >
-        {waiting ? <Dots /> : <Spinner />}
+      <span className={pill}>
+        {waiting ? (
+          <Dots />
+        ) : (
+          <Spinner className={compact ? "text-[var(--color-accent)]" : ""} />
+        )}
         <span>{label}</span>
         {clock ? (
           <span

@@ -505,10 +505,27 @@ export class HermesApiClient {
     return this.request(`/api/sessions?${params.toString()}`);
   }
 
-  /** Load one conversation's persisted transcript (read path). */
-  async sessionMessages(sessionId: string): Promise<ChatMessagesResponse> {
+  /**
+   * Load one conversation's persisted transcript (read path). No options is
+   * the legacy every-row read; `visible` keeps user/assistant turns only,
+   * `limit` returns the newest N rows older than `before` (a message id)
+   * plus `has_more`.
+   */
+  async sessionMessages(
+    sessionId: string,
+    opts: { visible?: boolean; limit?: number; before?: number } = {},
+  ): Promise<ChatMessagesResponse> {
+    const params = new URLSearchParams();
+    if (opts.visible) params.set("visible", "true");
+    if (opts.limit !== undefined && Number.isFinite(opts.limit)) {
+      params.set("limit", String(opts.limit));
+    }
+    if (opts.before !== undefined && Number.isFinite(opts.before)) {
+      params.set("before", String(opts.before));
+    }
+    const query = params.toString();
     return this.request(
-      `/api/sessions/${encodeURIComponent(sessionId)}/messages`,
+      `/api/sessions/${encodeURIComponent(sessionId)}/messages${query ? `?${query}` : ""}`,
     );
   }
 
