@@ -2,8 +2,9 @@
 
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
-import { friendlyError } from "@/components/projects/errors";
 
+import { ActionButton } from "@/components/projects/ActionButton";
+import { useProjectAction } from "@/components/projects/useProjectAction";
 import { Spinner } from "@/components/ui/Spinner";
 import type { ProjectLinkKind, ProjectsResponse } from "@/types";
 
@@ -41,6 +42,10 @@ export interface PromoteInfo {
  * to-do or an arrival it fetches the active projects and lets the user pick.
  * With `promote`, the same sheet offers the §10 promotion — the to-do becomes
  * a card in `triage` and moves to `working` (human-only, one-way).
+ *
+ * Both writes go through `useProjectAction`: one request per click, pending
+ * until the server answers, and a refused write keeps the sheet open with
+ * the reason and Retry (same idempotency key).
  */
 export function AddToProjectSheet({
   onClose,
@@ -65,8 +70,11 @@ export function AddToProjectSheet({
   const [ref, setRef] = useState(prefill?.ref ?? "");
   const [label, setLabel] = useState(prefill?.label ?? "");
   const [profile, setProfile] = useState("");
-  const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const linkAction = useProjectAction();
+  const promoteAction = useProjectAction();
+  const busy = linkAction.busy || promoteAction.busy;
+  const writeError = linkAction.error ?? promoteAction.error;
 
   useEffect(() => {
     if (fixedSlug) return;
@@ -91,72 +99,37 @@ export function AddToProjectSheet({
     };
   }, [fixedSlug]);
 
-  const add = async () => {
+  const add = () => {
     const trimmedRef = ref.trim();
-    if (!slug || !trimmedRef) return;
-    setBusy(true);
-    setError(null);
-    try {
-      const res = await fetch(
-        `/api/projects/${encodeURIComponent(slug)}/links`,
-        {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({
-            kind,
-            ref: trimmedRef,
-            label: label.trim() || undefined,
-            profile: profile.trim() || undefined,
-          }),
-        },
-      );
-      const data = (await res.json().catch(() => ({}))) as {
-        detail?: string;
-      };
-      if (!res.ok) {
-        setError(friendlyError({ status: res.status, detail: data.detail }, "Could not add the link."));
-        return;
-      }
-      onClose();
-    } catch {
-      setError("Could not reach the server.");
-    } finally {
-      setBusy(false);
-    }
+    if (!slug || !trimmedRef || busy) return;
+    promoteAction.clearError();
+    void linkAction.run(`/api/projects/${encodeURIComponent(slug)}/links`, {
+      body: {
+        kind,
+        ref: trimmedRef,
+        label: label.trim() || undefined,
+        profile: profile.trim() || undefined,
+      },
+      // The caller refreshes on close; closing is the confirmed state.
+      skipRefresh: true,
+      onSuccess: () => onClose(),
+    });
   };
 
-  const promoteTodo = async () => {
-    if (!slug || !promote) return;
-    setBusy(true);
-    setError(null);
-    try {
-      const res = await fetch(
-        `/api/projects/${encodeURIComponent(slug)}/cards`,
-        {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          // A promotion always reads the to-do from the profile serving this
-          // request — the sheet knows no foreign profile, so it names none
-          // (the backend refuses any other one; see E2).
-          body: JSON.stringify({
-            from_todo: { id: promote.todoId },
-          }),
-        },
-      );
-      const data = (await res.json().catch(() => ({}))) as {
-        detail?: string;
-      };
-      if (!res.ok) {
-        setError(friendlyError({ status: res.status, detail: data.detail }, "Could not promote the to-do."));
-        return;
-      }
-      onClose();
-      router.push(`/projects/${encodeURIComponent(slug)}`);
-    } catch {
-      setError("Could not reach the server.");
-    } finally {
-      setBusy(false);
-    }
+  const promoteTodo = () => {
+    if (!slug || !promote || busy) return;
+    linkAction.clearError();
+    void promoteAction.run(`/api/projects/${encodeURIComponent(slug)}/cards`, {
+      // A promotion always reads the to-do from the profile serving this
+      // request — the sheet knows no foreign profile, so it names none
+      // (the backend refuses any other one; see E2).
+      body: { from_todo: { id: promote.todoId } },
+      skipRefresh: true,
+      onSuccess: () => {
+        onClose();
+        router.push(`/projects/${encodeURIComponent(slug)}`);
+      },
+    });
   };
 
   const inputClass =
@@ -267,35 +240,48 @@ export function AddToProjectSheet({
           to-do to working.
         </p>
 
-        {error ? (
-          <p className="text-sm text-red-400" role="alert">
-            {error}
+        {error ?? writeError ? (
+          <p className="flex flex-wrap items-center gap-2 text-sm text-red-400" role="alert">
+            {error ?? writeError}
+            {writeError ? (
+              <button
+                type="button"
+                onClick={() =>
+                  void (linkAction.error ? linkAction.retry() : promoteAction.retry())
+                }
+                className="text-xs underline"
+              >
+                Retry
+              </button>
+            ) : null}
           </p>
         ) : null}
 
         {promote ? (
-          <button
-            type="button"
-            onClick={() => void promoteTodo()}
-            disabled={busy || !slug}
+          <ActionButton
+            busy={promoteAction.busy}
+            pendingLabel="Promoting…"
+            onClick={promoteTodo}
+            disabled={linkAction.busy || !slug}
             className="rounded-xl bg-[var(--color-accent)] px-4 py-2.5 text-sm font-medium text-[var(--color-accent-fg)] disabled:opacity-50"
           >
-            {busy ? "Promoting…" : "Promote to card"}
-          </button>
+            Promote to card
+          </ActionButton>
         ) : null}
 
-        <button
-          type="button"
-          onClick={() => void add()}
-          disabled={busy || !slug || !ref.trim()}
+        <ActionButton
+          busy={linkAction.busy}
+          pendingLabel="Adding…"
+          onClick={add}
+          disabled={promoteAction.busy || !slug || !ref.trim()}
           className={
             promote
               ? "rounded-xl border border-[var(--color-border)] px-4 py-2.5 text-sm font-medium disabled:opacity-50"
               : "rounded-xl bg-[var(--color-accent)] px-4 py-2.5 text-sm font-medium text-[var(--color-accent-fg)] disabled:opacity-50"
           }
         >
-          {busy ? "Adding…" : "Add link"}
-        </button>
+          Add link
+        </ActionButton>
       </div>
     </div>
   );

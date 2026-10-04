@@ -1,11 +1,38 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useState } from "react";
+import { useRef, useState } from "react";
 
+import { ActionButton } from "@/components/projects/ActionButton";
 import { friendlyError } from "@/components/projects/errors";
+import { FileDropZone } from "@/components/projects/inputs/FileDropZone";
+import { FileQueueList } from "@/components/projects/inputs/FileQueueList";
+import {
+  FILE_ROLES,
+  memoryLink,
+  memoryTitle,
+  suggestionQuery,
+  type LinkEntry,
+} from "@/components/projects/inputs/inputKinds";
+import { LinkNoteInput } from "@/components/projects/inputs/LinkNoteInput";
+import { MemoryPicker } from "@/components/projects/inputs/MemoryPicker";
+import type { UploadFn } from "@/components/projects/inputs/uploadProjectFile";
+import { useUploadQueue } from "@/components/projects/inputs/useUploadQueue";
+import {
+  WIZARD_STEPS,
+  canLeaveInputs,
+  hasAnyInput,
+  inputsSummary,
+  stepLabel,
+  type WizardStep,
+} from "@/components/projects/inputs/wizard";
+import {
+  newIdempotencyKey,
+  sendProjectAction,
+  useProjectAction,
+} from "@/components/projects/useProjectAction";
 import { BusyRegion } from "@/components/ui/BusyRegion";
-import type { ProjectAutonomy, ProjectCadence } from "@/types";
+import type { MemoryRow, ProjectAutonomy, ProjectCadence } from "@/types";
 
 /** The §2.2 mandatory fields a 422's `missing` list can name. */
 type MandatoryField = "goal" | "description" | "outputs" | "host_profile";
@@ -55,19 +82,48 @@ export const AUTONOMIES: { value: ProjectAutonomy; label: string; explain: strin
 
 type PlanChoice = "agent" | "self";
 
+type PointerStatus = "waiting" | "sending" | "done" | "failed";
+
+/** A memory or link/note to attach once the project exists. */
+interface PendingPointer {
+  id: string;
+  title: string;
+  kindLabel: string;
+  payload: { kind: string; ref: string; label: string };
+}
+
 /**
- * The two-step create form (§13): step 1 is *what* — goal, description and
- * at least one output (everything mandatory); step 2 is *how it runs* —
- * cadence and autonomy, skippable into a `supervised` `one_off`. Ten
- * optional fields on one form would guarantee nobody fills in the four
- * that matter.
+ * The four-step create form (§13):
+ *
+ * 1. **What** — goal, description and at least one output (mandatory).
+ * 2. **Inputs** — files (each a template to match or a reference to read),
+ *    memories and links/notes; must be answered — add something or skip.
+ * 3. **How it runs** — cadence and autonomy (defaults pre-selected).
+ * 4. **Review & plan** — a summary, the plan choice, and Create.
+ *
+ * Nothing is created before step 4. Create then runs once: the project is
+ * POSTed (with a lock and a fixed key), each file is uploaded once to
+ * `/files/upload`, each memory/link is linked once, and only then does the
+ * agent draft the plan. If an input fails the project still exists: the
+ * failures show with Retry (create is never repeated, finished uploads are
+ * never re-sent), or the user can go on to the project and add it there.
  *
  * A refusal maps onto the field that is blank — never a toast — and what
  * was typed survives it: the inputs are state, so a 422 costs nothing.
  */
-export function NewProjectForm({ servingProfile }: { servingProfile: string }) {
+export function NewProjectForm({
+  servingProfile,
+  upload,
+  memoryFetch,
+}: {
+  servingProfile: string;
+  /** Test seam: the file upload transport. */
+  upload?: UploadFn;
+  /** Test seam: the memory search transport. */
+  memoryFetch?: typeof fetch;
+}) {
   const router = useRouter();
-  const [step, setStep] = useState<1 | 2>(1);
+  const [step, setStep] = useState<WizardStep>(1);
   const [goal, setGoal] = useState("");
   const [description, setDescription] = useState("");
   const [name, setName] = useState("");
@@ -75,9 +131,41 @@ export function NewProjectForm({ servingProfile }: { servingProfile: string }) {
   const [cadence, setCadence] = useState<ProjectCadence>("one_off");
   const [autonomy, setAutonomy] = useState<ProjectAutonomy>("supervised");
   const [plan, setPlan] = useState<PlanChoice>("agent");
-  const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [fieldErrors, setFieldErrors] = useState<Partial<Record<MandatoryField, string>>>({});
+
+  // ── Inputs (held locally until the project exists) ──
+  const queue = useUploadQueue({ upload });
+  const [memories, setMemories] = useState<Map<string, MemoryRow>>(() => new Map());
+  const [entries, setEntries] = useState<(LinkEntry & { id: string })[]>([]);
+  const [skipped, setSkipped] = useState(false);
+  const [pointerStatus, setPointerStatus] = useState<Record<string, PointerStatus>>({});
+  const pointerKeys = useRef(new Map<string, string>());
+
+  // ── Create sequencing ──
+  const create = useProjectAction<CreateAnswer>();
+  const submitLock = useRef(false);
+  const [submitting, setSubmitting] = useState(false);
+  const [createdSlug, setCreatedSlug] = useState<string | null>(null);
+  const [partial, setPartial] = useState(false);
+
+  const tally = { files: queue.items.length, memories: memories.size, links: entries.length };
+  const inputsAnswered = canLeaveInputs(tally, skipped);
+
+  const pointers: PendingPointer[] = [
+    ...Array.from(memories.values()).map((row) => ({
+      id: `memory:${row.id}`,
+      title: memoryTitle(row),
+      kindLabel: "Memory",
+      payload: memoryLink(row),
+    })),
+    ...entries.map((entry) => ({
+      id: entry.id,
+      title: entry.label,
+      kindLabel: entry.kind === "url" ? "Link" : "Note",
+      payload: { kind: entry.kind, ref: entry.ref, label: entry.label },
+    })),
+  ];
 
   const validateStep1 = (): boolean => {
     const next: Partial<Record<MandatoryField, string>> = {};
@@ -92,79 +180,132 @@ export function NewProjectForm({ servingProfile }: { servingProfile: string }) {
     return Object.keys(next).length === 0;
   };
 
-  const submit = async () => {
-    setBusy(true);
-    setError(null);
-    setFieldErrors({});
-    try {
-      const res = await fetch("/api/projects", {
+  /** Link every memory/link not yet attached; one fixed key per pointer. */
+  const attachPointers = async (slug: string): Promise<boolean> => {
+    const todo = pointers.filter((p) => pointerStatus[p.id] !== "done");
+    const results = await Promise.all(
+      todo.map(async (pointer) => {
+        let key = pointerKeys.current.get(pointer.id);
+        if (!key) {
+          key = newIdempotencyKey();
+          pointerKeys.current.set(pointer.id, key);
+        }
+        setPointerStatus((prev) => ({ ...prev, [pointer.id]: "sending" }));
+        const res = await sendProjectAction(
+          `/api/projects/${encodeURIComponent(slug)}/links`,
+          key,
+          { method: "POST", body: pointer.payload },
+        );
+        setPointerStatus((prev) => ({ ...prev, [pointer.id]: res.ok ? "done" : "failed" }));
+        return res.ok;
+      }),
+    );
+    return results.every(Boolean);
+  };
+
+  /** Start the agent draft (if chosen) and land on the project page. */
+  const finish = async (slug: string) => {
+    // The project exists but cannot run until a plan is active. Always land
+    // on its page, where the readiness checklist points at the Plan panel;
+    // with the agent choice, start the server-side draft first (after the
+    // inputs are attached, so the agent reads them). A refused draft is not
+    // a failed create — the project exists either way.
+    if (plan === "agent") {
+      await fetch(`/api/projects/${encodeURIComponent(slug)}/playbook/draft`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          goal: goal.trim(),
-          description: description.trim(),
-          name: name.trim() || undefined,
-          host_profile: servingProfile,
-          outputs: outputs
-            .map((title) => title.trim())
-            .filter(Boolean)
-            .map((title) => ({ title })),
-          cadence,
-          autonomy,
-        }),
-      });
-      const data = (await res.json().catch(() => ({}))) as {
-        slug?: string;
-        detail?: unknown;
-        error?: string;
-        missing?: unknown;
-      };
-      if (res.ok && data.slug) {
-        // The project exists but cannot run until a plan is active. Always
-        // land on its page, where the readiness checklist points at the Plan
-        // panel; with the agent choice, start the server-side draft first so
-        // the panel is already waiting on it. A refused draft is not a
-        // failed create — the project exists either way.
-        if (plan === "agent") {
-          await fetch(`/api/projects/${encodeURIComponent(data.slug)}/playbook/draft`, {
-            method: "POST",
-            headers: { "content-type": "application/json" },
-            body: "{}",
-          }).catch(() => undefined);
+        body: "{}",
+      }).catch(() => undefined);
+    }
+    router.push(`/projects/${slug}#panel-plan`);
+  };
+
+  const submit = async () => {
+    if (submitLock.current) return;
+    submitLock.current = true;
+    setSubmitting(true);
+    setError(null);
+    try {
+      let slug = createdSlug;
+      if (!slug) {
+        setFieldErrors({});
+        const res = await create.run("/api/projects", {
+          skipRefresh: true,
+          body: {
+            goal: goal.trim(),
+            description: description.trim(),
+            name: name.trim() || undefined,
+            host_profile: servingProfile,
+            outputs: outputs
+              .map((title) => title.trim())
+              .filter(Boolean)
+              .map((title) => ({ title })),
+            cadence,
+            autonomy,
+          },
+        });
+        if (!res) return;
+        if (!res.ok || !res.data?.slug) {
+          showRefusal(res.status, res.data, res.error);
+          return;
         }
-        router.push(`/projects/${data.slug}#panel-plan`);
+        slug = res.data.slug;
+        setCreatedSlug(slug);
+      }
+      const [filesOk, pointersOk] = await Promise.all([
+        queue.uploadPending(slug),
+        attachPointers(slug),
+      ]);
+      if (!filesOk || !pointersOk) {
+        setPartial(true);
         return;
       }
-      // The 422 names the blank field(s) — the BFF pre-check and the
-      // widened bridge both carry the `missing` list at the top level
-      // beside the string `detail` (U3) — map it onto the form.
-      const missing = Array.isArray(data.missing)
-        ? (data.missing as MandatoryField[])
-        : null;
-      if (missing && missing.length > 0) {
-        const next: Partial<Record<MandatoryField, string>> = {};
-        for (const field of missing) {
-          next[field] = "This field is mandatory.";
-        }
-        setFieldErrors(next);
-        setError(
-          typeof data.detail === "string" && data.detail ? data.detail : null,
-        );
-        if (missing.includes("goal") || missing.includes("description") || missing.includes("outputs")) {
-          setStep(1);
-        }
-        return;
-      }
-      setError(
-        friendlyError(
-          { status: res.status, detail: data.detail },
-          "That didn't go through — check the fields and try again.",
-        ),
-      );
-    } catch {
-      setError("Could not reach the server.");
+      await finish(slug);
     } finally {
-      setBusy(false);
+      submitLock.current = false;
+      setSubmitting(false);
+    }
+  };
+
+  const showRefusal = (status: number, data: CreateAnswer | null, fallback: string | null) => {
+    if (status === 0) {
+      setError("Could not reach the server.");
+      return;
+    }
+    // The 422 names the blank field(s) — the BFF pre-check and the widened
+    // bridge both carry the `missing` list at the top level beside the
+    // string `detail` (U3) — map it onto the form.
+    const missing = Array.isArray(data?.missing) ? (data.missing as MandatoryField[]) : null;
+    if (missing && missing.length > 0) {
+      const next: Partial<Record<MandatoryField, string>> = {};
+      for (const field of missing) {
+        next[field] = "This field is mandatory.";
+      }
+      setFieldErrors(next);
+      setError(typeof data?.detail === "string" && data.detail ? data.detail : null);
+      if (missing.includes("goal") || missing.includes("description") || missing.includes("outputs")) {
+        setStep(1);
+      }
+      return;
+    }
+    setError(
+      friendlyError(
+        { status, detail: data?.detail },
+        fallback ?? "That didn't go through — check the fields and try again.",
+      ),
+    );
+  };
+
+  const goNext = () => {
+    setError(null);
+    if (step === 1) {
+      if (validateStep1()) setStep(2);
+    } else if (step === 2) {
+      if (inputsAnswered) setStep(3);
+    } else if (step === 3) {
+      setStep(4);
+    } else {
+      void submit();
     }
   };
 
@@ -173,26 +314,62 @@ export function NewProjectForm({ servingProfile }: { servingProfile: string }) {
       invalid ? "border-red-400" : "border-[var(--color-border)]"
     }`;
 
+  const busy = submitting || create.busy;
+  const created = createdSlug !== null;
+
+  const primaryLabel =
+    step === 1
+      ? "Next: inputs"
+      : step === 2
+        ? inputsAnswered
+          ? "Next: how it runs"
+          : "Add something or skip"
+        : step === 3
+          ? "Next: review"
+          : partial
+            ? "Retry failed inputs"
+            : plan === "agent"
+              ? "Create project and draft the plan"
+              : "Create project";
+
+  const pendingLabel = created ? "Attaching inputs…" : "Creating the project…";
+
   return (
-    <BusyRegion busy={busy} label="Creating the project…">
+    <BusyRegion busy={busy} label={pendingLabel}>
       <form
         data-component="NewProjectForm"
+        data-step={step}
         className="flex flex-col gap-4 rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface)] p-4"
         onSubmit={(e) => {
           e.preventDefault();
-          if (step === 1) {
-            if (validateStep1()) setStep(2);
-          } else {
-            void submit();
-          }
+          goNext();
         }}
       >
+        <header data-component="WizardStepHeader" className="flex flex-col gap-1">
+          <p className="text-xs uppercase tracking-wide text-[var(--color-muted)]">
+            Step {step} of 4 · {stepLabel(step)}
+          </p>
+          <ol className="flex flex-wrap gap-x-3 gap-y-1 text-xs">
+            {WIZARD_STEPS.map((s) => (
+              <li
+                key={s.step}
+                aria-current={s.step === step ? "step" : undefined}
+                className={
+                  s.step === step
+                    ? "font-semibold text-[var(--color-accent)]"
+                    : s.step < step
+                      ? "text-[var(--color-text)]"
+                      : "text-[var(--color-muted)]"
+                }
+              >
+                {s.step} {s.label}
+              </li>
+            ))}
+          </ol>
+        </header>
+
         {step === 1 ? (
           <>
-            <p className="text-xs uppercase tracking-wide text-[var(--color-muted)]">
-              Step 1 of 2 — what this project is
-            </p>
-
             <label className="flex flex-col gap-1 text-sm">
               <span>Goal — what success means *</span>
               <input
@@ -278,16 +455,100 @@ export function NewProjectForm({ servingProfile }: { servingProfile: string }) {
               </button>
             </div>
           </>
-        ) : (
-          <>
-            <p className="text-xs uppercase tracking-wide text-[var(--color-muted)]">
-              Step 2 of 2 — how it runs
-            </p>
-            <p className="-mt-2 text-xs text-[var(--color-muted)]">
-              Nothing is created until you press the button at the bottom;
-              afterwards you land on the project&rsquo;s own page.
-            </p>
+        ) : null}
 
+        {step === 2 ? (
+          <div data-component="WizardInputsStep" className="flex flex-col gap-4">
+            <div>
+              <h2 className="text-base font-semibold">
+                Do you have anything the agent should use?
+              </h2>
+              <p className="text-xs text-[var(--color-muted)]">
+                Projects with source material get it right first time. Add
+                templates, earlier agreements, notes, or things you&rsquo;ve
+                told the agent before.
+              </p>
+            </div>
+
+            <section className="flex flex-col gap-2">
+              <h3 className="text-sm font-medium">📎 Files</h3>
+              <FileDropZone
+                hint="Drop files here"
+                onFiles={(picked) => {
+                  queue.add(picked);
+                  setSkipped(false);
+                }}
+              />
+              <p className="text-xs text-[var(--color-muted)]">
+                For each file, say whether it is a{" "}
+                {FILE_ROLES.map((r) => r.label.toLowerCase()).join(" or a ")}.
+              </p>
+              <FileQueueList
+                items={queue.items}
+                onRole={queue.setRole}
+                onRemove={queue.remove}
+                waitingCopy="Uploads when you create the project"
+              />
+            </section>
+
+            <section className="flex flex-col gap-2">
+              <h3 className="text-sm font-medium">🧠 Memory</h3>
+              <p className="-mt-1 text-xs text-[var(--color-muted)]">Things the agent already knows</p>
+              <MemoryPicker
+                suggestFrom={suggestionQuery(goal, description)}
+                selected={memories}
+                fetchImpl={memoryFetch}
+                onToggle={(row, checked) => {
+                  setMemories((prev) => {
+                    const next = new Map(prev);
+                    if (checked) next.set(row.id, row);
+                    else next.delete(row.id);
+                    return next;
+                  });
+                  if (checked) setSkipped(false);
+                }}
+              />
+            </section>
+
+            <section className="flex flex-col gap-2">
+              <h3 className="text-sm font-medium">🔗 Links &amp; notes</h3>
+              {entries.length > 0 ? (
+                <ul className="flex flex-col gap-1.5">
+                  {entries.map((entry) => (
+                    <li
+                      key={entry.id}
+                      className="flex items-center gap-2 rounded-xl border border-[var(--color-border)] px-3 py-2 text-sm"
+                    >
+                      <span aria-hidden>{entry.kind === "url" ? "🔗" : "✎"}</span>
+                      <span className="min-w-0 flex-1 truncate">{entry.label}</span>
+                      <button
+                        type="button"
+                        aria-label={`Remove ${entry.label}`}
+                        onClick={() => setEntries((prev) => prev.filter((e) => e.id !== entry.id))}
+                        className="text-[var(--color-muted)]"
+                      >
+                        ✕
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              ) : null}
+              <LinkNoteInput
+                onAdd={(entry) => {
+                  setEntries((prev) =>
+                    prev.some((e) => e.kind === entry.kind && e.ref === entry.ref)
+                      ? prev
+                      : [...prev, { ...entry, id: newIdempotencyKey() }],
+                  );
+                  setSkipped(false);
+                }}
+              />
+            </section>
+          </div>
+        ) : null}
+
+        {step === 3 ? (
+          <>
             <label className="flex flex-col gap-1 text-sm">
               <span>Cadence</span>
               <select
@@ -332,48 +593,6 @@ export function NewProjectForm({ servingProfile }: { servingProfile: string }) {
               </span>
             </label>
 
-            <fieldset
-              data-component="PlanChoice"
-              className="flex flex-col gap-2 rounded-xl border border-[var(--color-border)] p-3 text-sm"
-            >
-              <legend className="px-1 text-sm">Plan — a run needs one</legend>
-              <label className="flex items-start gap-2">
-                <input
-                  type="radio"
-                  name="plan"
-                  value="agent"
-                  checked={plan === "agent"}
-                  onChange={() => setPlan("agent")}
-                  className="mt-1"
-                />
-                <span>
-                  Ask the agent to draft it
-                  <span className="block text-xs text-[var(--color-muted)]">
-                    The agent reads the brief and proposes steps in the
-                    background; you land on the project page and activate the
-                    plan when it looks right.
-                  </span>
-                </span>
-              </label>
-              <label className="flex items-start gap-2">
-                <input
-                  type="radio"
-                  name="plan"
-                  value="self"
-                  checked={plan === "self"}
-                  onChange={() => setPlan("self")}
-                  className="mt-1"
-                />
-                <span>
-                  I&rsquo;ll write it myself
-                  <span className="block text-xs text-[var(--color-muted)]">
-                    You land on the project page with the readiness checklist
-                    and an empty Plan editor.
-                  </span>
-                </span>
-              </label>
-            </fieldset>
-
             <label className="flex flex-col gap-1 text-sm">
               <span>Host profile</span>
               <input
@@ -388,7 +607,148 @@ export function NewProjectForm({ servingProfile }: { servingProfile: string }) {
               </span>
             </label>
           </>
-        )}
+        ) : null}
+
+        {step === 4 ? (
+          <>
+            <p className="-mt-2 text-xs text-[var(--color-muted)]">
+              Nothing is created until you press the button at the bottom;
+              afterwards you land on the project&rsquo;s own page.
+            </p>
+            <dl data-component="WizardSummary" className="flex flex-col gap-2 text-sm">
+              <div>
+                <dt className="text-xs text-[var(--color-muted)]">Goal</dt>
+                <dd>{goal.trim()}</dd>
+              </div>
+              <div>
+                <dt className="text-xs text-[var(--color-muted)]">Outputs</dt>
+                <dd>
+                  <ul className="list-disc pl-5">
+                    {outputs
+                      .map((t) => t.trim())
+                      .filter(Boolean)
+                      .map((t, i) => (
+                        <li key={i}>{t}</li>
+                      ))}
+                  </ul>
+                </dd>
+              </div>
+              <div>
+                <dt className="text-xs text-[var(--color-muted)]">How it runs</dt>
+                <dd>
+                  {CADENCES.find((c) => c.value === cadence)?.label} ·{" "}
+                  {AUTONOMIES.find((a) => a.value === autonomy)?.label}
+                </dd>
+              </div>
+              <div data-component="WizardInputsSummary">
+                <dt className="text-xs text-[var(--color-muted)]">Inputs</dt>
+                <dd className="flex flex-col gap-1.5">
+                  {hasAnyInput(tally) ? (
+                    <>
+                      <span>{inputsSummary(tally)}</span>
+                      <FileQueueList
+                        items={queue.items}
+                        onRetry={createdSlug ? (id) => void queue.retry(id, createdSlug) : undefined}
+                        waitingCopy="Uploads when you create the project"
+                      />
+                      {pointers.length > 0 ? (
+                        <ul className="flex flex-col gap-1">
+                          {pointers.map((p) => {
+                            const status = pointerStatus[p.id] ?? "waiting";
+                            return (
+                              <li key={p.id} data-status={status} className="text-xs">
+                                <span className="text-[var(--color-muted)]">{p.kindLabel}:</span>{" "}
+                                {p.title}
+                                {status === "done" ? (
+                                  <span className="text-emerald-500"> ✓</span>
+                                ) : status === "failed" ? (
+                                  <span className="text-red-400"> ✗ not attached</span>
+                                ) : status === "sending" ? (
+                                  <span className="text-[var(--color-muted)]"> attaching…</span>
+                                ) : null}
+                              </li>
+                            );
+                          })}
+                        </ul>
+                      ) : null}
+                    </>
+                  ) : (
+                    <span className="text-[var(--color-muted)]">
+                      No inputs — you can add files and memories from the
+                      project&rsquo;s Inputs tab later.
+                    </span>
+                  )}
+                </dd>
+              </div>
+            </dl>
+
+            {created ? null : (
+              <fieldset
+                data-component="PlanChoice"
+                className="flex flex-col gap-2 rounded-xl border border-[var(--color-border)] p-3 text-sm"
+              >
+                <legend className="px-1 text-sm">Plan — a run needs one</legend>
+                <label className="flex items-start gap-2">
+                  <input
+                    type="radio"
+                    name="plan"
+                    value="agent"
+                    checked={plan === "agent"}
+                    onChange={() => setPlan("agent")}
+                    className="mt-1"
+                  />
+                  <span>
+                    Ask the agent to draft it
+                    <span className="block text-xs text-[var(--color-muted)]">
+                      The agent reads the brief and your inputs and proposes
+                      steps in the background; you land on the project page
+                      and activate the plan when it looks right.
+                    </span>
+                  </span>
+                </label>
+                <label className="flex items-start gap-2">
+                  <input
+                    type="radio"
+                    name="plan"
+                    value="self"
+                    checked={plan === "self"}
+                    onChange={() => setPlan("self")}
+                    className="mt-1"
+                  />
+                  <span>
+                    I&rsquo;ll write it myself
+                    <span className="block text-xs text-[var(--color-muted)]">
+                      You land on the project page with the readiness checklist
+                      and an empty Plan editor.
+                    </span>
+                  </span>
+                </label>
+              </fieldset>
+            )}
+
+            {partial && createdSlug ? (
+              <div
+                role="alert"
+                data-component="WizardPartialInputs"
+                className="flex flex-col gap-2 rounded-xl border border-red-400/50 p-3 text-sm"
+              >
+                <p>
+                  The project was created, but some inputs didn&rsquo;t attach.
+                  Retry them, or go to the project and add them from its
+                  Inputs tab.
+                </p>
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={() => void finish(createdSlug)}
+                  className="self-start text-xs underline disabled:opacity-50"
+                >
+                  Go to the project without them
+                </button>
+              </div>
+            ) : null}
+          </>
+        ) : null}
 
         {error ? (
           <p role="alert" className="text-sm text-red-400">
@@ -396,31 +756,54 @@ export function NewProjectForm({ servingProfile }: { servingProfile: string }) {
           </p>
         ) : null}
 
-        <div className="flex items-center justify-between gap-2">
-          {step === 2 ? (
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          {step > 1 && !created ? (
             <button
               type="button"
-              onClick={() => setStep(1)}
-              className="rounded-xl border border-[var(--color-border)] px-4 py-2 text-sm"
+              disabled={busy}
+              onClick={() => {
+                setError(null);
+                setStep((s) => (s - 1) as WizardStep);
+              }}
+              className="rounded-xl border border-[var(--color-border)] px-4 py-2 text-sm disabled:opacity-50"
             >
               Back
             </button>
           ) : (
             <span />
           )}
-          <button
-            type="submit"
-            disabled={busy}
-            className="rounded-xl bg-[var(--color-accent)] px-4 py-2 text-sm font-medium text-[var(--color-accent-fg)] disabled:opacity-50"
-          >
-            {step === 1
-              ? "Next: how it runs"
-              : plan === "agent"
-                ? "Create project and draft the plan"
-                : "Create project"}
-          </button>
+          <div className="flex flex-wrap items-center gap-2">
+            {step === 2 && !hasAnyInput(tally) ? (
+              <button
+                type="button"
+                onClick={() => {
+                  setSkipped(true);
+                  setStep(3);
+                }}
+                className="rounded-xl border border-[var(--color-border)] px-4 py-2 text-sm"
+              >
+                I have no inputs — skip
+              </button>
+            ) : null}
+            <ActionButton
+              type="submit"
+              busy={busy}
+              pendingLabel={pendingLabel}
+              disabled={step === 2 && !inputsAnswered}
+              className="rounded-xl bg-[var(--color-accent)] px-4 py-2 text-sm font-medium text-[var(--color-accent-fg)] disabled:opacity-50"
+            >
+              {primaryLabel}
+            </ActionButton>
+          </div>
         </div>
       </form>
     </BusyRegion>
   );
+}
+
+interface CreateAnswer {
+  slug?: string;
+  detail?: unknown;
+  error?: string;
+  missing?: unknown;
 }

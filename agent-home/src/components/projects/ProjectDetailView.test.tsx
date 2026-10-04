@@ -450,14 +450,18 @@ describe("detail panels", () => {
     expect(html).not.toContain("Upload file");
   });
 
-  it("ReferencesPanel and MemoriesPanel hide entirely when empty", () => {
-    expect(renderToStaticMarkup(<ReferencesPanel project={PROJECT} />)).toBe("");
-    expect(renderToStaticMarkup(<MemoriesPanel project={PROJECT} />)).toBe("");
+  it("ReferencesPanel and MemoriesPanel ask for inputs when empty (never hide)", () => {
+    expect(renderToStaticMarkup(<ReferencesPanel project={PROJECT} />)).toContain(
+      "No links or notes yet",
+    );
+    const memories = renderToStaticMarkup(<MemoriesPanel project={PROJECT} />);
+    expect(memories).toContain("No memories linked yet");
+    expect(memories).toContain("Add memory");
   });
 
-  it("ReferencesPanel keeps samples separate from references", () => {
+  it("FilesPanel labels samples as templates and references as reading", () => {
     const html = renderToStaticMarkup(
-      <ReferencesPanel
+      <FilesPanel
         project={{
           ...PROJECT,
           links: {
@@ -467,8 +471,10 @@ describe("detail panels", () => {
         }}
       />,
     );
-    expect(html).toContain("Samples");
-    expect(html.indexOf("Match this")).toBeLessThan(html.indexOf("Read this"));
+    expect(html).toContain("Template to match");
+    expect(html).toContain("Reference to read");
+    expect(html).toContain("Match this");
+    expect(html).toContain("Read this");
   });
 
   it("ToolsPanel splits the CSV narrowing into chips", () => {
