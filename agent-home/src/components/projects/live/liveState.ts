@@ -68,6 +68,8 @@ export interface LiveState {
   done: number;
   inProgress: number;
   total: number;
+  /** Whether done/total count the open run's steps or the whole board. */
+  countScope: "run" | "board";
   triage: number;
   blocked: number;
   /** "Next for you: …" — never empty. */
@@ -140,14 +142,17 @@ export function liveState(
   let total: number;
   let done: number;
   let inProgress: number;
+  let countScope: "run" | "board";
   if (detail && runCards.length > 0) {
     total = runCards.length;
     done = runCards.filter((c) => c.status === "done").length;
     inProgress = runCards.filter((c) => c.status === "running").length;
+    countScope = "run";
   } else {
     total = project.card_rollup.total;
     done = project.card_rollup.done;
     inProgress = running.length;
+    countScope = "board";
   }
 
   const base = {
@@ -158,6 +163,7 @@ export function liveState(
     done,
     inProgress,
     total,
+    countScope,
     triage,
     blocked,
   };
@@ -198,12 +204,16 @@ export function liveState(
 
   if (!open) {
     const last = project.runs[0];
+    // Cards waiting in Triage are the actionable thing — mention them
+    // before the last run's fate so "failed" doesn't bury the real ask.
     const next =
       project.status !== "active"
         ? "activate the project to start running it."
-        : last?.status === "failed"
-          ? `run ${last.run_no} failed — open it to see why, or start the next iteration.`
-          : "start the next iteration when you're ready, or tell the agent what to change below.";
+        : triage > 0
+          ? `approve ${plural(triage, "card")} waiting in Triage, then start the next iteration.`
+          : last?.status === "failed"
+            ? `run ${last.run_no} failed — open it to see why, or start the next iteration.`
+            : "start the next iteration when you're ready, or tell the agent what to change below.";
     return make(
       "idle",
       next,
