@@ -310,6 +310,11 @@ from hermes_cli.email_accounts_api import router as _email_accounts_router  # no
 from hermes_cli.wa_bridge_api import router as _wa_bridge_router  # noqa: E402
 from hermes_cli.goals_api import router as _goals_router  # noqa: E402
 from hermes_cli.projects_api import router as _projects_router  # noqa: E402
+from hermes_cli.projects_ask_api import router as _projects_ask_router  # noqa: E402
+from hermes_cli.projects_outputs_api import router as _projects_outputs_router  # noqa: E402
+from hermes_cli.projects_live_api import router as _projects_live_router  # noqa: E402
+from hermes_cli.projects_changes_api import router as _projects_changes_router  # noqa: E402
+from hermes_cli.projects_board_api import router as _projects_board_router  # noqa: E402
 
 app.include_router(_memory_oauth_router)
 app.include_router(_memory_explorer_router)
@@ -321,6 +326,13 @@ app.include_router(_email_accounts_router)
 app.include_router(_wa_bridge_router)
 app.include_router(_goals_router)
 app.include_router(_projects_router)
+app.include_router(_projects_ask_router)
+app.include_router(_projects_outputs_router)
+app.include_router(_projects_live_router)
+app.include_router(_projects_changes_router)
+app.include_router(_projects_board_router)
+from hermes_cli.projects_idempotency import ProjectsIdempotencyMiddleware  # noqa: E402
+app.add_middleware(ProjectsIdempotencyMiddleware)  # innermost: runs after auth
 
 # ---------------------------------------------------------------------------
 # Session token for protecting sensitive endpoints (reveal).

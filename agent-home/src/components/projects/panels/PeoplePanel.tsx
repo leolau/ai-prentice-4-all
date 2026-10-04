@@ -1,8 +1,10 @@
 "use client";
 
 import { useState } from "react";
-import { friendlyError } from "@/components/projects/errors";
 
+import { ActionButton } from "@/components/projects/ActionButton";
+import { ActionError } from "@/components/projects/ActionError";
+import { useProjectAction } from "@/components/projects/useProjectAction";
 import { BusyRegion } from "@/components/ui/BusyRegion";
 import type {
   ProjectContact,
@@ -34,117 +36,61 @@ export function PeoplePanel({
 
   const [members, setMembers] = useState<ProjectMember[]>(project.members);
   const [contacts, setContacts] = useState<ProjectContact[]>(project.contacts);
-  const [busyId, setBusyId] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
 
   // Add-member form state
   const [memberId, setMemberId] = useState("");
   const [memberRole, setMemberRole] = useState<ProjectMemberRole>("member");
-  const [addingMember, setAddingMember] = useState(false);
+  const memberAction = useProjectAction();
 
   // Add-contact form state
   const [contactName, setContactName] = useState("");
   const [contactRole, setContactRole] = useState("");
   const [contactPlatform, setContactPlatform] = useState("");
   const [contactAddress, setContactAddress] = useState("");
-  const [addingContact, setAddingContact] = useState(false);
+  const contactAction = useProjectAction<ProjectContact>();
 
-  const addMember = async () => {
+  const addMember = () => {
     const id = memberId.trim();
     if (!id) return;
-    setAddingMember(true);
-    setError(null);
-    try {
-      const res = await fetch(`${slugPath}/members`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ user_id: id, role: memberRole }),
-      });
-      const data = (await res.json().catch(() => ({}))) as { detail?: string };
-      if (!res.ok) throw new Error(friendlyError({ status: res.status, detail: data.detail }, "Could not add the member."));
-      setMembers((prev) => [
-        ...prev,
-        {
-          project_id: project.id,
-          user_id: id,
-          role: memberRole,
-          added_by: null,
-          added_at: Math.floor(Date.now() / 1000),
-        },
-      ]);
-      setMemberId("");
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "That didn't go through.");
-    } finally {
-      setAddingMember(false);
-    }
+    const role = memberRole;
+    void memberAction.run(`${slugPath}/members`, {
+      body: { user_id: id, role },
+      skipRefresh: true,
+      onSuccess: () => {
+        setMembers((prev) => [
+          ...prev.filter((m) => m.user_id !== id),
+          {
+            project_id: project.id,
+            user_id: id,
+            role,
+            added_by: null,
+            added_at: Math.floor(Date.now() / 1000),
+          },
+        ]);
+        setMemberId("");
+      },
+    });
   };
 
-  const removeMember = async (userId: string) => {
-    setBusyId(`m:${userId}`);
-    setError(null);
-    try {
-      const res = await fetch(
-        `${slugPath}/members/${encodeURIComponent(userId)}`,
-        { method: "DELETE" },
-      );
-      const data = (await res.json().catch(() => ({}))) as { detail?: string };
-      if (!res.ok) throw new Error(friendlyError({ status: res.status, detail: data.detail }, "Could not remove the member."));
-      setMembers((prev) => prev.filter((m) => m.user_id !== userId));
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "That didn't go through.");
-    } finally {
-      setBusyId(null);
-    }
-  };
-
-  const addContact = async () => {
+  const addContact = () => {
     const name = contactName.trim();
     if (!name) return;
-    setAddingContact(true);
-    setError(null);
-    try {
-      const res = await fetch(`${slugPath}/contacts`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          name,
-          role: contactRole.trim() || undefined,
-          platform: contactPlatform.trim() || undefined,
-          address: contactAddress.trim() || undefined,
-        }),
-      });
-      const data = (await res.json().catch(() => ({}))) as ProjectContact &
-        { detail?: string };
-      if (!res.ok) throw new Error(friendlyError({ status: res.status, detail: data.detail }, "Could not add the contact."));
-      setContacts((prev) => [...prev, data]);
-      setContactName("");
-      setContactRole("");
-      setContactPlatform("");
-      setContactAddress("");
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "That didn't go through.");
-    } finally {
-      setAddingContact(false);
-    }
-  };
-
-  const removeContact = async (contactId: string) => {
-    setBusyId(`c:${contactId}`);
-    setError(null);
-    try {
-      const res = await fetch(
-        `${slugPath}/contacts/${encodeURIComponent(contactId)}`,
-        { method: "DELETE" },
-      );
-      const data = (await res.json().catch(() => ({}))) as { detail?: string };
-      if (!res.ok) throw new Error(friendlyError({ status: res.status, detail: data.detail }, "Could not remove the contact."));
-      setContacts((prev) => prev.filter((c) => c.id !== contactId));
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "That didn't go through.");
-    } finally {
-      setBusyId(null);
-    }
+    void contactAction.run(`${slugPath}/contacts`, {
+      body: {
+        name,
+        role: contactRole.trim() || undefined,
+        platform: contactPlatform.trim() || undefined,
+        address: contactAddress.trim() || undefined,
+      },
+      skipRefresh: true,
+      onSuccess: (created) => {
+        setContacts((prev) => [...prev.filter((c) => c.id !== created.id), created]);
+        setContactName("");
+        setContactRole("");
+        setContactPlatform("");
+        setContactAddress("");
+      },
+    });
   };
 
   const inputClass =
@@ -160,12 +106,6 @@ export function PeoplePanel({
         People
       </h2>
 
-      {error ? (
-        <p className="mt-2 text-sm text-red-300" role="alert">
-          {error}
-        </p>
-      ) : null}
-
       <ul className="mt-2 flex flex-col gap-1.5">
         {members.map((member) => (
           <li
@@ -180,16 +120,13 @@ export function PeoplePanel({
               {member.role}
             </span>
             {archived ? null : (
-              <BusyRegion busy={busyId === `m:${member.user_id}`} label="Removing…">
-                <button
-                  type="button"
-                  onClick={() => void removeMember(member.user_id)}
-                  aria-label={`Remove ${member.user_id}`}
-                  className="shrink-0 text-xs text-[var(--color-muted)] underline disabled:opacity-40"
-                >
-                  Remove
-                </button>
-              </BusyRegion>
+              <RemoveButton
+                path={`${slugPath}/members/${encodeURIComponent(member.user_id)}`}
+                label={`Remove ${member.user_id}`}
+                onRemoved={() =>
+                  setMembers((prev) => prev.filter((m) => m.user_id !== member.user_id))
+                }
+              />
             )}
           </li>
         ))}
@@ -242,16 +179,13 @@ export function PeoplePanel({
                   ) : null}
                 </div>
                 {archived ? null : (
-                  <BusyRegion busy={busyId === `c:${contact.id}`} label="Removing…">
-                    <button
-                      type="button"
-                      onClick={() => void removeContact(contact.id)}
-                      aria-label={`Remove ${contact.name}`}
-                      className="shrink-0 text-xs text-[var(--color-muted)] underline disabled:opacity-40"
-                    >
-                      Remove
-                    </button>
-                  </BusyRegion>
+                  <RemoveButton
+                    path={`${slugPath}/contacts/${encodeURIComponent(contact.id)}`}
+                    label={`Remove ${contact.name}`}
+                    onRemoved={() =>
+                      setContacts((prev) => prev.filter((c) => c.id !== contact.id))
+                    }
+                  />
                 )}
               </li>
             ))}
@@ -271,7 +205,7 @@ export function PeoplePanel({
               Members are people with a box account — they can log in, see the
               project, and run the agent.
             </p>
-            <BusyRegion busy={addingMember} label="Adding…">
+            <BusyRegion busy={memberAction.busy} label="Adding…">
               <div className="mt-1.5 flex flex-col gap-1.5">
                 <div className="flex gap-1.5">
                   <input
@@ -292,14 +226,16 @@ export function PeoplePanel({
                     <option value="viewer">viewer</option>
                   </select>
                 </div>
-                <button
-                  type="button"
-                  onClick={() => void addMember()}
+                <ActionButton
+                  busy={memberAction.busy}
+                  pendingLabel="Adding…"
+                  onClick={addMember}
                   disabled={!memberId.trim()}
                   className="self-start rounded-lg border border-[var(--color-accent)] px-3 py-1.5 text-xs font-medium text-[var(--color-accent)] disabled:opacity-40"
                 >
                   Add member
-                </button>
+                </ActionButton>
+                <ActionError action={memberAction} />
               </div>
             </BusyRegion>
           </div>
@@ -310,7 +246,7 @@ export function PeoplePanel({
               Contacts are people outside the box — a client, a stakeholder —
               no account, no permissions, just someone the work involves.
             </p>
-            <BusyRegion busy={addingContact} label="Adding…">
+            <BusyRegion busy={contactAction.busy} label="Adding…">
               <div className="mt-1.5 flex flex-col gap-1.5">
                 <input
                   className={inputClass}
@@ -338,19 +274,60 @@ export function PeoplePanel({
                   onChange={(e) => setContactAddress(e.target.value)}
                   placeholder="Address (e.g. ricky@example.com)"
                 />
-                <button
-                  type="button"
-                  onClick={() => void addContact()}
+                <ActionButton
+                  busy={contactAction.busy}
+                  pendingLabel="Adding…"
+                  onClick={addContact}
                   disabled={!contactName.trim()}
                   className="self-start rounded-lg border border-[var(--color-accent)] px-3 py-1.5 text-xs font-medium text-[var(--color-accent)] disabled:opacity-40"
                 >
                   Add contact
-                </button>
+                </ActionButton>
+                <ActionError action={contactAction} />
               </div>
             </BusyRegion>
           </div>
         </>
       )}
     </section>
+  );
+}
+
+/**
+ * Remove one member or contact — one lock per row, so removing one person
+ * never freezes (or hides the progress of) another row.
+ */
+function RemoveButton({
+  path,
+  label,
+  onRemoved,
+}: {
+  path: string;
+  label: string;
+  onRemoved: () => void;
+}) {
+  const action = useProjectAction();
+  return (
+    <span className="flex shrink-0 flex-col items-end">
+      <ActionButton
+        busy={action.busy}
+        pendingLabel="Removing…"
+        onClick={() =>
+          void action.run(path, {
+            method: "DELETE",
+            skipRefresh: true,
+            onSuccess: onRemoved,
+          })
+        }
+        aria-label={label}
+        className="shrink-0 text-xs text-[var(--color-muted)] underline disabled:opacity-40"
+      >
+        Remove
+      </ActionButton>
+      <ActionError
+        action={action}
+        className="flex flex-wrap items-center gap-2 text-xs text-red-300"
+      />
+    </span>
   );
 }

@@ -12,16 +12,24 @@ import { NewProjectForm } from "@/components/projects/NewProjectForm";
 describe("NewProjectForm", () => {
   it("step 1 asks for exactly the mandatory what-fields", () => {
     const html = renderToStaticMarkup(<NewProjectForm servingProfile="default" />);
-    expect(html).toContain("Step 1 of 2");
+    expect(html).toContain("Step 1 of 4");
     expect(html).toContain("Goal — what success means");
     expect(html).toContain("Description — the brief the agent works from");
     expect(html).toContain("Outputs — what it delivers");
     expect(html).toContain("Add another output");
-    // Step 2 is not pre-rendered — one step at a time.
-    expect(html).not.toContain("Step 2 of 2");
+    // Later steps are not pre-rendered — one step at a time.
+    expect(html).not.toContain("Do you have anything the agent should use?");
     expect(html).not.toContain("Host profile");
     // Step 1 advances, it does not create.
-    expect(html).toContain("Next");
+    expect(html).toContain("Next: inputs");
     expect(html).not.toContain("Create project");
+  });
+
+  it("the step header names all four steps and marks the current one", () => {
+    const html = renderToStaticMarkup(<NewProjectForm servingProfile="default" />);
+    for (const label of ["1 What", "2 Inputs", "3 How it runs", "4 Review &amp; plan"]) {
+      expect(html).toContain(label);
+    }
+    expect(html).toMatch(/aria-current="step"[^>]*>1 What/);
   });
 });

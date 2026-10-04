@@ -468,12 +468,26 @@ _PROJECT_COLUMN_MIGRATIONS: tuple[tuple[str, str], ...] = (
 )
 
 
+# Columns added to `project_directives` later. `change_meta` is the JSON a
+# requirement change carries (kinds, apply mode, draft/approval outcome) —
+# NULL on every directive that did not come from the change flow.
+_DIRECTIVE_COLUMN_MIGRATIONS: tuple[tuple[str, str], ...] = (
+    ("change_meta", "change_meta TEXT"),
+)
+
+
 def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
     """Add columns introduced after v1 to legacy DBs (safe on every open)."""
     cols = {row["name"] for row in conn.execute("PRAGMA table_info(projects)")}
     for col, ddl in _PROJECT_COLUMN_MIGRATIONS:
         if col not in cols:
             _add_column_if_missing(conn, "projects", col, ddl)
+    dcols = {
+        row["name"] for row in conn.execute("PRAGMA table_info(project_directives)")
+    }
+    for col, ddl in _DIRECTIVE_COLUMN_MIGRATIONS:
+        if col not in dcols:
+            _add_column_if_missing(conn, "project_directives", col, ddl)
 
 
 # ---------------------------------------------------------------------------
@@ -1611,6 +1625,37 @@ def _new_row_id(prefix: str) -> str:
     return f"{prefix}_{secrets.token_hex(6)}"
 
 
+_LITERAL_UNICODE_ESCAPE = re.compile(r"\\u([0-9a-fA-F]{4})")
+
+
+def decode_literal_unicode_escapes(text: Optional[str]) -> Optional[str]:
+    """Turn literal ``\\uXXXX`` sequences back into the characters they name.
+
+    Output titles/specs written by an agent through the CLI or a JSON body
+    that was encoded twice arrive as ``\\u9752\\u7530…`` instead of CJK
+    text. Decoding is idempotent and leaves text without escapes untouched;
+    surrogate pairs are joined, lone surrogates are left as written.
+    """
+    if not text or "\\u" not in text:
+        return text
+
+    def _decode(match: "re.Match[str]") -> str:
+        return chr(int(match.group(1), 16))
+
+    decoded = _LITERAL_UNICODE_ESCAPE.sub(_decode, text)
+    try:
+        return decoded.encode("utf-16", "surrogatepass").decode("utf-16")
+    except UnicodeDecodeError:
+        return text
+
+
+def _decode_output_row(row: dict) -> dict:
+    for key in ("title", "spec"):
+        if isinstance(row.get(key), str):
+            row[key] = decode_literal_unicode_escapes(row[key])
+    return row
+
+
 def add_project_output(
     conn: sqlite3.Connection,
     *,
@@ -1627,7 +1672,8 @@ def add_project_output(
     declaration order. Declaring the deliverable before automating its
     production is what keeps a run from succeeding at nothing (§6.1).
     """
-    title = str(title or "").strip()
+    title = decode_literal_unicode_escapes(str(title or "").strip()) or ""
+    spec = decode_literal_unicode_escapes(spec)
     if not title:
         raise ValueError("output title is required")
     if kind not in VALID_OUTPUT_KINDS:
@@ -1656,7 +1702,7 @@ def get_project_outputs(
 ) -> List[dict]:
     """Read a project's outputs in declaration order."""
     return [
-        dict(r)
+        _decode_output_row(dict(r))
         for r in conn.execute(
             "SELECT * FROM project_outputs WHERE project_id = ? ORDER BY seq",
             (project_id,),
@@ -1685,10 +1731,10 @@ def update_project_output(
         if not t:
             raise ValueError("output title cannot be empty")
         sets.append("title = ?")
-        params.append(t)
+        params.append(decode_literal_unicode_escapes(t))
     if spec is not None:
         sets.append("spec = ?")
-        params.append(spec)
+        params.append(decode_literal_unicode_escapes(spec))
     if kind is not None:
         if kind not in VALID_OUTPUT_KINDS:
             raise ValueError(f"output kind must be one of {sorted(VALID_OUTPUT_KINDS)}")

@@ -1,10 +1,11 @@
 "use client";
 
 import { useState } from "react";
-import { friendlyError } from "@/components/projects/errors";
 
+import { ActionButton } from "@/components/projects/ActionButton";
+import { ActionError } from "@/components/projects/ActionError";
+import { useProjectAction } from "@/components/projects/useProjectAction";
 import { dateTimeLabel } from "@/components/projects/format";
-import { useRefresh } from "@/components/ui/useRefresh";
 import type { ProjectAutonomy, ProjectDetail } from "@/types";
 
 export const AUTONOMY_OPTIONS: {
@@ -29,6 +30,12 @@ export const AUTONOMY_OPTIONS: {
   },
 ];
 
+interface ScheduleAnswer {
+  schedule?: string | null;
+  next_run_at?: number | null;
+  scheduled?: boolean;
+}
+
 const SCHEDULE_EXAMPLES = ["every 60m", "every 1d", "0 9 * * 1"];
 
 /**
@@ -46,14 +53,14 @@ export function SettingsPanel({
   canLead: boolean;
   hasActivePlan: boolean;
 }) {
-  const { refresh, refreshing } = useRefresh();
   const slugPath = `/api/projects/${encodeURIComponent(project.slug)}`;
   const [schedule, setSchedule] = useState(project.schedule ?? "");
   const [autonomy, setAutonomy] = useState<ProjectAutonomy>(project.autonomy);
-  const [saving, setBusy] = useState<"schedule" | "autonomy" | null>(null);
-  const [lastSaved, setLastSaved] = useState<"schedule" | "autonomy" | null>(null);
-  const busy = saving ?? (refreshing ? lastSaved : null);
-  const [error, setError] = useState<string | null>(null);
+  const scheduleAction = useProjectAction<ScheduleAnswer>();
+  const clearAction = useProjectAction<ScheduleAnswer>();
+  const autonomyAction = useProjectAction();
+  const busy = scheduleAction.busy || clearAction.busy || autonomyAction.busy;
+  const [invalid, setInvalid] = useState<string | null>(null);
   const [saved, setSaved] = useState<string | null>(null);
   // The write answers with the new schedule (or its removal); showing it
   // straight away means the summary never contradicts the "saved" note
@@ -66,84 +73,54 @@ export function SettingsPanel({
     next_run_at: project.next_run_at ?? null,
   });
 
-  const call = async (
-    which: "schedule" | "autonomy",
-    path: string,
-    init: RequestInit,
-    okMessage: string,
-  ) => {
-    setBusy(which);
-    setLastSaved(which);
-    setError(null);
-    setSaved(null);
-    try {
-      const res = await fetch(path, init);
-      const data = (await res.json().catch(() => ({}))) as {
-        detail?: string;
-        schedule?: string | null;
-        next_run_at?: number | null;
-        scheduled?: boolean;
-      };
-      if (!res.ok) {
-        setError(friendlyError({ status: res.status, detail: data.detail }, "That did not go through."));
-        return;
-      }
-      if (which === "schedule") {
-        setCurrent(
-          data.scheduled === false
-            ? { schedule: null, next_run_at: null }
-            : {
-                schedule: typeof data.schedule === "string" ? data.schedule : current.schedule,
-                next_run_at: typeof data.next_run_at === "number" ? data.next_run_at : null,
-              },
-        );
-      }
-      setSaved(okMessage);
-      refresh();
-    } catch {
-      setError("Could not reach the server.");
-    } finally {
-      setBusy(null);
-    }
-  };
+  const showSchedule = (data: ScheduleAnswer) =>
+    setCurrent((prev) =>
+      data.scheduled === false
+        ? { schedule: null, next_run_at: null }
+        : {
+            schedule: typeof data.schedule === "string" ? data.schedule : prev.schedule,
+            next_run_at: typeof data.next_run_at === "number" ? data.next_run_at : null,
+          },
+    );
 
   const saveSchedule = () => {
     const value = schedule.trim();
+    setSaved(null);
     if (!value) {
-      setError("Type a schedule — e.g. “every 60m” or a cron line.");
+      setInvalid("Type a schedule — e.g. “every 60m” or a cron line.");
       return;
     }
-    return call(
-      "schedule",
-      `${slugPath}/schedule`,
-      {
-        method: "PUT",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ schedule: value }),
+    setInvalid(null);
+    void scheduleAction.run(`${slugPath}/schedule`, {
+      method: "PUT",
+      body: { schedule: value },
+      onSuccess: (data) => {
+        showSchedule(data);
+        setSaved("Schedule saved.");
       },
-      "Schedule saved.",
-    );
+    });
   };
 
-  const clearSchedule = () =>
-    call(
-      "schedule",
-      `${slugPath}/schedule`,
-      { method: "DELETE" },
-      "Schedule removed — the project only runs when you start it.",
-    );
-
-  const saveAutonomy = () =>
-    call(
-      "autonomy",
-      `${slugPath}/autonomy`,
-      {
-        method: "PATCH",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ autonomy }),
+  const clearSchedule = () => {
+    setSaved(null);
+    setInvalid(null);
+    void clearAction.run(`${slugPath}/schedule`, {
+      method: "DELETE",
+      onSuccess: (data) => {
+        showSchedule({ ...data, scheduled: false });
+        setSaved("Schedule removed — the project only runs when you start it.");
       },
-      "Autonomy updated.",
-    );
+    });
+  };
+
+  const saveAutonomy = () => {
+    setSaved(null);
+    void autonomyAction.run(`${slugPath}/autonomy`, {
+      method: "PATCH",
+      body: { autonomy },
+      onSuccess: () => setSaved("Autonomy updated."),
+    });
+  };
 
   const readOnly = !canLead || project.archived;
   const repeatable = project.cadence === "repeatable";
@@ -200,22 +177,25 @@ export function SettingsPanel({
                   like “0 9 * * 1” (Mondays at 09:00).
                 </p>
                 <div className="flex items-center gap-2">
-                  <button
+                  <ActionButton
                     type="submit"
-                    disabled={busy != null}
+                    busy={scheduleAction.busy}
+                    pendingLabel="Saving…"
+                    disabled={busy}
                     className="rounded-lg bg-[var(--color-accent)] px-3 py-1.5 text-sm font-medium text-[var(--color-accent-fg)] disabled:opacity-50"
                   >
-                    {busy === "schedule" ? "Saving…" : "Save schedule"}
-                  </button>
+                    Save schedule
+                  </ActionButton>
                   {current.schedule ? (
-                    <button
-                      type="button"
-                      onClick={() => void clearSchedule()}
-                      disabled={busy != null}
+                    <ActionButton
+                      busy={clearAction.busy}
+                      pendingLabel="Removing…"
+                      onClick={clearSchedule}
+                      disabled={busy}
                       className="rounded-lg border border-[var(--color-border)] px-3 py-1.5 text-sm disabled:opacity-50"
                     >
                       Remove
-                    </button>
+                    </ActionButton>
                   ) : null}
                 </div>
               </form>
@@ -269,24 +249,28 @@ export function SettingsPanel({
               ))}
             </div>
             {autonomy !== project.autonomy ? (
-              <button
-                type="button"
-                onClick={() => void saveAutonomy()}
-                disabled={busy != null}
+              <ActionButton
+                busy={autonomyAction.busy}
+                pendingLabel="Saving…"
+                onClick={saveAutonomy}
+                disabled={busy}
                 className="mt-1 self-start rounded-lg bg-[var(--color-accent)] px-3 py-1.5 text-sm font-medium text-[var(--color-accent-fg)] disabled:opacity-50"
               >
-                {busy === "autonomy" ? "Saving…" : "Save autonomy"}
-              </button>
+                Save autonomy
+              </ActionButton>
             ) : null}
           </>
         )}
       </div>
 
-      {error ? (
+      {invalid ? (
         <p role="alert" className="mt-2 text-sm text-red-400">
-          {error}
+          {invalid}
         </p>
       ) : null}
+      <ActionError action={scheduleAction} />
+      <ActionError action={clearAction} />
+      <ActionError action={autonomyAction} />
       {saved ? (
         <p role="status" className="mt-2 text-sm text-emerald-400">
           {saved}

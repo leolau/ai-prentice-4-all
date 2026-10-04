@@ -1,225 +1,152 @@
 "use client";
 
-import { useRef, useState } from "react";
-import { friendlyError } from "@/components/projects/errors";
+import { useMemo, useState } from "react";
 
 import { AddToProjectSheet } from "@/components/projects/AddToProjectSheet";
 import { useFileRefOpener } from "@/components/files/FileRefOpener";
-import { LinkRow, friendlyFileName } from "@/components/projects/panels/LinkRow";
-import { BusyRegion } from "@/components/ui/BusyRegion";
+import { FileDropZone } from "@/components/projects/inputs/FileDropZone";
+import { FileQueueList } from "@/components/projects/inputs/FileQueueList";
+import { InputRow } from "@/components/projects/inputs/InputRow";
+import {
+  DEFAULT_FILE_ROLE,
+  FILE_ROLES,
+  groupInputLinks,
+  toProjectLink,
+  upsertLink,
+  withoutLink,
+  type FileRole,
+} from "@/components/projects/inputs/inputKinds";
+import type { UploadFn } from "@/components/projects/inputs/uploadProjectFile";
+import { useUploadQueue } from "@/components/projects/inputs/useUploadQueue";
+import { useRefresh, useServerState } from "@/components/ui/useRefresh";
 import type { ProjectDetail, ProjectLink } from "@/types";
 
 /**
- * Linked /files assets (§11.1). Card attachments join this grid once the
- * board read carries them; today the panel renders what the links store
- * knows. Empty collapses to a single "Add …" affordance rather than
- * disappearing (§13).
- *
- * Three writes live here: **link** an existing pointer (opens the shared
- * sheet), **upload** bytes straight from the browser (Storage → registry →
- * link, one round-trip), and **remove** a pointer (the authority stays in
- * the owning profile; only the link is detached).
+ * The project's files (§11.1): uploads and pointers, each with its role —
+ * a template to match (`sample`) or a reference to read (`reference`) —
+ * plus who added it and when. Files dropped here upload straight away, one
+ * request per file (a second drop of the same file is ignored); a failed
+ * upload stays in the list with Retry, which re-sends the same key.
  */
 export function FilesPanel({
   project,
   archived = false,
+  callerUserId,
+  upload,
 }: {
   project: ProjectDetail;
   archived?: boolean;
+  callerUserId?: string;
+  /** Test seam: the upload transport. */
+  upload?: UploadFn;
 }) {
-  const [files, setFiles] = useState<ProjectLink[]>(project.links.file ?? []);
+  const fromServer = useMemo(() => groupInputLinks(project.links).files, [project.links]);
+  const [files, setFiles] = useServerState<ProjectLink[]>(fromServer);
+  const [role, setRole] = useState<FileRole>(DEFAULT_FILE_ROLE);
   const [sheetOpen, setSheetOpen] = useState(false);
-  const [busyRef, setBusyRef] = useState<string | null>(null);
-  const [uploading, setUploading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
   const fileOpener = useFileRefOpener();
-  const fileInputRef = useRef<HTMLInputElement>(null);
-
+  const { refresh } = useRefresh();
   const slug = project.slug;
-  const slugPath = `/api/projects/${encodeURIComponent(slug)}`;
+  const profile = project.host_profile ?? "default";
 
-  /** Resolve the storage path to its registry row and open the detail. */
-  const open = async (link: ProjectLink) => {
-    setError(null);
-    await fileOpener.open({ ref: link.ref, label: link.label });
-  };
-
-  const remove = async (link: ProjectLink) => {
-    const key = `${link.profile}:${link.ref}`;
-    setBusyRef(key);
-    setError(null);
-    try {
-      const res = await fetch(`${slugPath}/links`, {
-        method: "DELETE",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          kind: link.kind,
-          ref: link.ref,
-          profile: link.profile,
-        }),
-      });
-      if (!res.ok) {
-        const data = (await res.json().catch(() => ({}))) as { detail?: string };
-        throw new Error(friendlyError({ status: res.status, detail: data.detail }, "Could not remove the link."));
-      }
+  const queue = useUploadQueue({
+    upload,
+    autoUploadSlug: archived ? undefined : slug,
+    dropDone: true,
+    onUploaded: (link) => {
       setFiles((prev) =>
-        prev.filter(
-          (f) => !(f.ref === link.ref && f.profile === link.profile),
-        ),
+        upsertLink(prev, toProjectLink(link, { projectId: project.id, profile, addedBy: callerUserId })),
       );
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "That didn't go through.");
-    } finally {
-      setBusyRef(null);
-    }
-  };
-
-  const upload = async (file: File) => {
-    setUploading(true);
-    setError(null);
-    try {
-      const form = new FormData();
-      form.append("file", file);
-      const res = await fetch(`${slugPath}/files/upload`, {
-        method: "POST",
-        body: form,
-      });
-      const data = (await res.json().catch(() => ({}))) as {
-        detail?: string;
-        kind?: string;
-        ref?: string;
-        profile?: string;
-        label?: string | null;
-        added_by?: string | null;
-        added_at?: number;
-        project_id?: string;
-        resolved?: boolean | null;
-      };
-      if (!res.ok) {
-        throw new Error(friendlyError({ status: res.status, detail: data.detail }, "Could not upload the file."));
-      }
-      const link: ProjectLink = {
-        project_id: data.project_id ?? project.id,
-        kind: (data.kind as "file") ?? "file",
-        profile: data.profile ?? project.host_profile ?? "default",
-        ref: data.ref ?? "",
-        label: data.label ?? null,
-        added_by: data.added_by ?? null,
-        added_at: data.added_at ?? Math.floor(Date.now() / 1000),
-        resolved: data.resolved ?? true,
-      };
-      setFiles((prev) => [...prev, link]);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "That didn't go through.");
-    } finally {
-      setUploading(false);
-      if (fileInputRef.current) fileInputRef.current.value = "";
-    }
-  };
+      refresh();
+    },
+  });
 
   return (
     <section
       id="panel-files"
       data-component="FilesPanel"
-      className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface)] p-4"
+      className="flex flex-col gap-3 rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface)] p-4"
     >
-      <h2 className="text-xs uppercase tracking-wide text-[var(--color-muted)]">
-        Files
-      </h2>
-
-      {error ? (
-        <p className="mt-2 text-sm text-red-300" role="alert">
-          {error}
+      <div>
+        <h2 className="text-sm font-semibold">📎 Files</h2>
+        <p className="text-xs text-[var(--color-muted)]">
+          Templates to match · references to read
         </p>
-      ) : null}
+      </div>
 
       {files.length === 0 ? (
-        <p className="mt-2 text-sm text-[var(--color-muted)]">
-          No files yet. Attach anything the project should read, or that a
-          run produced, with the form below — runs can also add their own.
+        <p className="text-sm text-[var(--color-muted)]">
+          No files yet. Add an earlier version, a template or anything the
+          agent should read — runs can also add their own.
         </p>
       ) : (
-        <ul className="mt-2 flex flex-col gap-1.5">
-          {files.map((link) => {
-            const key = `${link.profile}:${link.ref}`;
-            return (
-              <li key={key} className="flex items-center gap-2">
-                {link.kind === "file" ? (
-                  <button
-                    type="button"
-                    onClick={() => void open(link)}
-                    disabled={fileOpener.resolving === link.ref}
-                    aria-label={`Open ${link.label ?? friendlyFileName(link.ref) ?? link.ref}`}
-                    className="min-w-0 flex-1 text-left disabled:opacity-60"
-                  >
-                    <LinkRow link={link} />
-                  </button>
-                ) : (
-                  <div className="min-w-0 flex-1">
-                    <LinkRow link={link} />
-                  </div>
-                )}
-                {archived ? null : (
-                  <BusyRegion busy={busyRef === key} label="Removing…">
-                    <button
-                      type="button"
-                      onClick={() => void remove(link)}
-                      aria-label="Remove link"
-                      className="shrink-0 text-xs text-[var(--color-muted)] underline disabled:opacity-40"
-                    >
-                      Remove
-                    </button>
-                  </BusyRegion>
-                )}
-              </li>
-            );
-          })}
+        <ul className="flex flex-col gap-1.5">
+          {files.map((link) => (
+            <InputRow
+              key={`${link.kind}:${link.profile}:${link.ref}`}
+              slug={slug}
+              link={link}
+              callerUserId={callerUserId}
+              archived={archived}
+              onRemoved={(gone) => setFiles((prev) => withoutLink(prev, gone))}
+              onOpen={
+                link.kind === "file" || link.kind === "sample" || link.kind === "reference"
+                  ? (l) => void fileOpener.open({ ref: l.ref, label: l.label })
+                  : undefined
+              }
+              opening={fileOpener.resolving === link.ref}
+            />
+          ))}
         </ul>
       )}
 
+      <FileQueueList
+        items={queue.items}
+        onRemove={queue.remove}
+        onRetry={(id) => void queue.retry(id, slug)}
+      />
+
       {archived ? (
-        <p className="mt-3 text-xs text-[var(--color-muted)]">
+        <p className="text-xs text-[var(--color-muted)]">
           This project is archived — restore it (⋯) to add files.
         </p>
       ) : (
-        <div className="mt-3 flex flex-wrap gap-2">
+        <>
+          <label className="flex flex-wrap items-center gap-2 text-xs text-[var(--color-muted)]">
+            New files are
+            <select
+              value={role}
+              onChange={(e) => setRole(e.target.value as FileRole)}
+              className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-1 text-xs text-[var(--color-text)]"
+            >
+              {FILE_ROLES.map((option) => (
+                <option key={option.value} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          <FileDropZone
+            compact
+            hint="Drop files to add them to the project"
+            chooseLabel="Upload file"
+            onFiles={(picked) => queue.add(picked, role)}
+          />
           <button
             type="button"
             onClick={() => setSheetOpen(true)}
-            className="rounded-lg border border-[var(--color-accent)] px-3 py-1.5 text-xs font-medium text-[var(--color-accent)]"
+            className="self-start rounded-lg border border-[var(--color-accent)] px-3 py-1.5 text-xs font-medium text-[var(--color-accent)]"
           >
             Add link
           </button>
-          <BusyRegion busy={uploading} label="Uploading…">
-            <button
-              type="button"
-              onClick={() => fileInputRef.current?.click()}
-              disabled={uploading}
-              className="rounded-lg border border-[var(--color-border)] px-3 py-1.5 text-xs font-medium disabled:opacity-40"
-            >
-              {uploading ? "Uploading…" : "Upload file"}
-            </button>
-          </BusyRegion>
-          <input
-            ref={fileInputRef}
-            type="file"
-            className="hidden"
-            onChange={(e) => {
-              const f = e.target.files?.[0];
-              if (f) void upload(f);
-            }}
-          />
-        </div>
+        </>
       )}
 
       {sheetOpen ? (
         <AddToProjectSheet
           onClose={() => {
             setSheetOpen(false);
-            // A link added through the sheet won't be in local state; a refresh
-            // re-reads from the server. Cheap, correct, and matches the rest
-            // of the detail page's post-write pattern.
-            window.location.reload();
+            refresh();
           }}
           fixedSlug={slug}
           fixedName={project.name}

@@ -450,14 +450,18 @@ describe("detail panels", () => {
     expect(html).not.toContain("Upload file");
   });
 
-  it("ReferencesPanel and MemoriesPanel hide entirely when empty", () => {
-    expect(renderToStaticMarkup(<ReferencesPanel project={PROJECT} />)).toBe("");
-    expect(renderToStaticMarkup(<MemoriesPanel project={PROJECT} />)).toBe("");
+  it("ReferencesPanel and MemoriesPanel ask for inputs when empty (never hide)", () => {
+    expect(renderToStaticMarkup(<ReferencesPanel project={PROJECT} />)).toContain(
+      "No links or notes yet",
+    );
+    const memories = renderToStaticMarkup(<MemoriesPanel project={PROJECT} />);
+    expect(memories).toContain("No memories linked yet");
+    expect(memories).toContain("Add memory");
   });
 
-  it("ReferencesPanel keeps samples separate from references", () => {
+  it("FilesPanel labels samples as templates and references as reading", () => {
     const html = renderToStaticMarkup(
-      <ReferencesPanel
+      <FilesPanel
         project={{
           ...PROJECT,
           links: {
@@ -467,8 +471,10 @@ describe("detail panels", () => {
         }}
       />,
     );
-    expect(html).toContain("Samples");
-    expect(html.indexOf("Match this")).toBeLessThan(html.indexOf("Read this"));
+    expect(html).toContain("Template to match");
+    expect(html).toContain("Reference to read");
+    expect(html).toContain("Match this");
+    expect(html).toContain("Read this");
   });
 
   it("ToolsPanel splits the CSV narrowing into chips", () => {
@@ -576,15 +582,16 @@ describe("ProjectDetailView", () => {
     expect(html).toContain("Where this stands");
     expect(html).toContain("Summarised");
     expect(html).toContain("Update summary");
-    for (const label of ["Brief", "Outputs", "Progress", "Board", "Runs", "Plan", "Guidance", "People", "Files", "Tools"]) {
-      expect(html).toContain(label);
+    // Dashboard + tabs: every section is one tab away, the Dashboard leads.
+    expect(html).toContain('data-component="ProjectTabsNav"');
+    for (const label of ["Dashboard", "Board", "Outputs", "Iterations", "Inputs", "Plan", "Settings"]) {
+      expect(html).toContain(`>${label}`);
     }
-    // Empty References/Memories hide — anchors included.
-    expect(html).not.toContain('href="#panel-references"');
-    expect(html).not.toContain('href="#panel-memories"');
+    expect(html).toContain('data-active-tab="dashboard"');
+    expect(html).not.toContain('data-component="PanelAnchors"');
   });
 
-  it("puts Progress first and folds empty People/Files behind a disclosure", () => {
+  it("lands on the Dashboard with Progress ahead of Outputs", () => {
     const html = renderToStaticMarkup(
       <ProjectDetailView
         project={{
@@ -605,22 +612,44 @@ describe("ProjectDetailView", () => {
         isInstanceAdmin={false}
       />,
     );
-    // Progress leads the page, ahead of Outputs and the Brief.
-    const progressAt = html.indexOf('id="panel-progress"');
-    expect(progressAt).toBeGreaterThan(-1);
-    expect(progressAt).toBeLessThan(html.indexOf('id="panel-outputs"'));
-    expect(progressAt).toBeLessThan(html.indexOf('id="panel-brief"'));
-    // The next actionable state rides inside Progress: run 14 is waiting.
-    expect(html).toContain('data-component="NextAction"');
+    // The next-action hero leads the Dashboard, ahead of Where it stands.
+    const heroAt = html.indexOf('data-component="NextActionHero"');
+    expect(heroAt).toBeGreaterThan(-1);
+    expect(heroAt).toBeLessThan(html.indexOf('data-component="WhereItStands"'));
+    // Run 14 is waiting: the hero's one click is Continue.
+    expect(html).toContain('data-state="waiting"');
     expect(html).toContain("Continue run 14");
-    expect(html).toContain("1 of 2 outputs accepted");
-    // No members and no files → collapsed, but still reachable by anchor.
-    expect(html).toContain('data-component="CollapsedPanel"');
-    expect(html).toContain('id="panel-people"');
-    expect(html).toContain('id="panel-files"');
-    expect(html).not.toContain('data-component="AddMemberForm"');
-    // Tools has a toolset configured, so it stays open.
+    // Settings-tab panels stay out of the Dashboard.
+    expect(html).not.toContain('data-component="ToolsPanel"');
+  });
+
+  it("renders the tab named by ?tab=", () => {
+    const html = renderToStaticMarkup(
+      <ProjectDetailView
+        project={PROJECT}
+        board={BOARD}
+        playbook={null}
+        directives={null}
+        callerUserId="leo"
+        isInstanceAdmin={false}
+        initialTab="settings"
+      />,
+    );
+    expect(html).toContain('data-active-tab="settings"');
     expect(html).toContain('data-component="ToolsPanel"');
+    expect(html).not.toContain('data-component="DashboardTab"');
+    const unknown = renderToStaticMarkup(
+      <ProjectDetailView
+        project={PROJECT}
+        board={BOARD}
+        playbook={null}
+        directives={null}
+        callerUserId="leo"
+        isInstanceAdmin={false}
+        initialTab="nope"
+      />,
+    );
+    expect(unknown).toContain('data-active-tab="dashboard"');
   });
 
   it("offers Activate instead of Run now until the project is active", () => {
@@ -656,13 +685,14 @@ describe("ProjectDetailView", () => {
         }}
         callerUserId="leo"
         isInstanceAdmin={false}
+        initialTab="settings"
       />,
     );
     expect(html).toContain('data-component="ReadinessChecklist"');
     expect(html).toContain("Before it can run");
-    // Missing outputs + plan link to their panels; the doctor's extra finding rides along.
-    expect(html).toContain('href="#panel-outputs"');
-    expect(html).toContain('href="#panel-plan"');
+    // Missing outputs + plan link to their tabs; the doctor's extra finding rides along.
+    expect(html).toContain('href="?tab=outputs"');
+    expect(html).toContain('href="?tab=plan"');
     expect(html).toContain("The cron job is gone.");
     expect(html).not.toContain("no plan");
     expect(html).toMatch(/<button[^>]*disabled=""[^>]*>Run now<\/button>/);

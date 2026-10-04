@@ -2218,3 +2218,195 @@ export interface SeminarSurveySubmitResult {
   ok: boolean;
   already_submitted: boolean;
 }
+
+// ── Projects redesign: ask ──
+
+/** What an "ask the project" answer can cite. */
+export type AskProjectSourceKind =
+  | "card"
+  | "run"
+  | "output"
+  | "requirement"
+  | "plan"
+  | "event";
+
+/** One checked citation: the id is a card id, run number, output id, … */
+export interface AskProjectSource {
+  kind: AskProjectSourceKind;
+  id: string;
+  label: string;
+}
+
+/** A prior question/answer pair sent back as context (max 6). */
+export interface AskProjectHistoryTurn {
+  q: string;
+  a: string;
+}
+
+/** `POST /api/projects/:slug/ask` — read-only, answered in its own session. */
+export interface AskProjectResponse {
+  answer: string;
+  sources: AskProjectSource[];
+  /** A requirement the answer suggests, ready for "Turn into a requirement…". */
+  suggested_requirement?: string;
+}
+
+// ── Projects redesign: outputs ──
+
+/** What a produced file is to the project: attached to a declared output
+ * (`deliverable`), a working document a card produced (`draft`), or a
+ * working note / log (`note`). */
+export type ProjectArtifactKind = "deliverable" | "draft" | "note";
+
+/** Where the artifacts read found the file. */
+export type ProjectArtifactSource = "delivery" | "card_file" | "attachment" | "link";
+
+/** `GET /api/registry/projects/:slug/artifacts` — one produced file, newest
+ * first. `output_id` is null when no declared output owns the file. */
+export interface ProjectArtifact {
+  id: string;
+  title: string;
+  kind: ProjectArtifactKind;
+  ext: string | null;
+  mime: string | null;
+  /** Openable URL or app route (`/api/projects/…/content`); null when the
+   * file is not reachable from here (a storage `file` ref opens through
+   * `link_ref` instead). */
+  href: string | null;
+  location: string | null;
+  source: ProjectArtifactSource;
+  link_kind: string | null;
+  link_ref: string | null;
+  run_id: string | null;
+  run_no: number | null;
+  card_id: string | null;
+  card_title: string | null;
+  output_id: string | null;
+  output_title: string | null;
+  version: number | null;
+  created_at: number;
+  created_by: string | null;
+}
+
+// ── Projects redesign: dashboard ──
+/**
+ * Optional, server-derived stall flag on the detail read's run brief (the
+ * full run row already has it). Older builds omit it; the Dashboard then
+ * derives the same rule from the board (`dashboard/derive.ts#runStalled`).
+ */
+export interface ProjectRunBrief {
+  stalled?: boolean;
+}
+
+// ── Projects redesign: changes ──
+/** What a requirement change is about (the sheet's kind chips). */
+export type ProjectChangeKind = "add" | "direction" | "output" | "attach" | "memory";
+/** When a change applies: stop the open run now, queue it, or only record it. */
+export type ProjectChangeApply = "now" | "next" | "record";
+
+/** What the agent understood from a change (from the seeded plan draft). */
+export interface ProjectChangeReading {
+  changes: string[];
+  affected_outputs: { id: string; title: string }[];
+  supersedes: { id: string; body: string }[];
+}
+
+export interface ProjectChangeApproval {
+  rev: number;
+  at: number;
+  by: string;
+  started: boolean;
+  run_no: number | null;
+  superseded: string[];
+}
+
+/** A directive as the change flow shows it — plain directives have `is_change: false`. */
+export interface ProjectChange extends ProjectDirective {
+  kinds: ProjectChangeKind[];
+  apply: ProjectChangeApply | null;
+  is_change: boolean;
+  stopped_run: number | null;
+  draft_rev: number | null;
+  reading: ProjectChangeReading | null;
+  approved: ProjectChangeApproval | null;
+}
+
+/** `GET /playbook/draft` when the draft was seeded by a change. */
+export interface ProjectChangeDraftState extends ProjectPlaybookDraftState {
+  change_id?: string;
+  reading?: ProjectChangeReading;
+}
+
+/** `POST /changes`. */
+export interface ProjectChangeResult {
+  change: ProjectChange;
+  draft: ProjectChangeDraftState;
+  stopped_run: number | null;
+  applies_from?: string;
+  replayed?: boolean;
+}
+
+/** `POST /changes/:id/approve`. */
+export interface ProjectChangeApproveResult {
+  change: ProjectChange;
+  rev: number;
+  active: true;
+  run: ProjectRun | null;
+  superseded: string[];
+  replayed?: boolean;
+}
+
+/** One run in `GET /changes` — the brief plus what the Iterations tab groups by. */
+export interface ProjectHistoryRun extends ProjectRunBrief {
+  id: string;
+  playbook_rev: number | null;
+  deliveries: number;
+  cards_total: number;
+  cards_done: number;
+}
+
+/** `GET /changes` — every directive (retired included) and every run. */
+export interface ProjectChangesHistory {
+  changes: ProjectChange[];
+  runs: ProjectHistoryRun[];
+  applies_from?: string;
+}
+
+// ── Projects redesign: board ──
+
+/** The newest open (running/waiting) run as the board context sees it. */
+export interface ProjectBoardOpenRun {
+  run_no: number;
+  status: string;
+  started_at: number | null;
+  /** The run's cards the caller can see. */
+  card_ids: string[];
+  /** Blocked tasks anywhere in the run's dependency tree. */
+  blocked_tree_count: number;
+  /** The server's `_run_stalled` verdict. */
+  stalled: boolean;
+}
+
+/** `GET /{slug}/board/context` — what the board rows alone cannot say. */
+export interface ProjectBoardContext {
+  /** task id → the run number that created the card. */
+  card_runs: Record<string, number>;
+  open_run: ProjectBoardOpenRun | null;
+}
+
+/** One card's outcome in `POST /{slug}/cards/approve`. */
+export interface ProjectCardApproveResult {
+  task_id: string;
+  ok: boolean;
+  /** Already past approval: nothing was executed. */
+  unchanged?: boolean;
+  card?: ProjectBoardTask;
+  error?: string;
+}
+
+/** `POST /{slug}/cards/approve` — Approve all N. */
+export interface ProjectCardsApproveResponse {
+  results: ProjectCardApproveResult[];
+  approved: number;
+  failed: number;
+}

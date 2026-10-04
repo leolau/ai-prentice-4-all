@@ -25,11 +25,15 @@ export const dynamic = "force-dynamic";
  */
 export default async function Page({
   params,
+  searchParams,
 }: {
   params: Promise<{ slug: string }>;
+  searchParams?: Promise<{ tab?: string | string[] }>;
 }) {
   const principal = await requirePrincipal();
   const { slug } = await params;
+  const rawTab = (await searchParams)?.tab;
+  const initialTab = Array.isArray(rawTab) ? rawTab[0] : rawTab;
   const client = await apiClientForRequest();
 
   // Fetch under the try, render outside it — JSX built inside a try/catch
@@ -77,6 +81,7 @@ export default async function Page({
         doctor={doctor}
         callerUserId={principal.user_id}
         isInstanceAdmin={principal.role === "owner" || principal.role === "admin"}
+        initialTab={initialTab}
       />
     </MobileShell>
   );

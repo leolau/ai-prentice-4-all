@@ -219,6 +219,7 @@ export class HermesApiClient {
     if (json !== undefined) {
       finalHeaders.set("content-type", "application/json");
     }
+    this.applyIdempotencyKey(finalHeaders, rest.method);
     // Latency measurement: every page render fans out through this one seam,
     // so timing here attributes page-load seconds to specific upstream
     // endpoints (visible in `journalctl -u agent-home`). Covers fetch +
@@ -2348,6 +2349,212 @@ export class HermesApiClient {
   /** Remove a `.env` value — disconnects a key-based provider. */
   async deleteEnvVar(key: string): Promise<{ ok: boolean; key: string }> {
     return this.request("/api/env", { method: "DELETE", json: { key } });
+  }
+
+  // ── Projects redesign: ask ──
+
+  /** Ask the project a read-only question; answered in its own one-shot session. */
+  async askProject(
+    slug: string,
+    body: { question: string; history?: import("@/types").AskProjectHistoryTurn[] },
+    idempotencyKey?: string,
+  ): Promise<import("@/types").AskProjectResponse> {
+    return this.request(
+      `/api/registry/projects/${encodeURIComponent(slug)}/ask`,
+      {
+        method: "POST",
+        json: body,
+        headers: idempotencyKey ? { "Idempotency-Key": idempotencyKey } : undefined,
+      },
+    );
+  }
+
+  // ── Projects redesign: outputs ──
+
+  /** Every file the project's runs and cards produced, newest first. */
+  async projectArtifacts(
+    slug: string,
+  ): Promise<import("@/types").ProjectArtifact[]> {
+    return this.request(
+      `/api/registry/projects/${encodeURIComponent(slug)}/artifacts`,
+    );
+  }
+
+  /**
+   * The bytes of one produced file, as the raw upstream `Response` for the
+   * BFF to pipe (like `openChatStream`, the body is not consumed here).
+   */
+  async projectArtifactContent(
+    slug: string,
+    artifactId: string,
+    range?: string | null,
+  ): Promise<Response> {
+    const headers = new Headers();
+    if (this.hermesToken) {
+      headers.set("cookie", `hermes_session_at=${this.hermesToken}`);
+      headers.set("authorization", `Bearer ${this.hermesToken}`);
+    }
+    if (range) headers.set("range", range);
+    const path = this.scopedPath(
+      `/api/registry/projects/${encodeURIComponent(slug)}/artifacts/${encodeURIComponent(artifactId)}/content`,
+    );
+    const res = await fetch(`${this.baseUrl}${path}`, { headers, cache: "no-store" });
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      const parsed = text ? safeJson(text) : undefined;
+      throw new HermesApiError(
+        res.status,
+        upstreamDetail(parsed, "That file could not be opened."),
+        parsed ?? text,
+      );
+    }
+    return res;
+  }
+
+  // ── Projects redesign: live ──
+
+  /**
+   * A board-dispatched card's live reasoning and tool names, as SSE for the
+   * BFF to pipe (`GET /{slug}/cards/{id}/activity?after=`). Same frames as
+   * `openRunActivityStream`; tool arguments and results never cross.
+   */
+  async openCardActivityStream(
+    slug: string,
+    taskId: string,
+    after: number,
+  ): Promise<Response> {
+    const headers = new Headers({ accept: "text/event-stream" });
+    if (this.hermesToken) {
+      headers.set("cookie", `hermes_session_at=${this.hermesToken}`);
+      headers.set("authorization", `Bearer ${this.hermesToken}`);
+    }
+    const res = await fetch(
+      `${this.baseUrl}/api/registry/projects/${encodeURIComponent(slug)}/cards/${encodeURIComponent(taskId)}/activity?after=${encodeURIComponent(after)}`,
+      { headers, cache: "no-store" },
+    );
+    if (!res.ok || !res.body) {
+      const text = res.body ? await res.text().catch(() => "") : "";
+      throw new HermesApiError(
+        res.status,
+        upstreamDetail(
+          text ? safeJson(text) : undefined,
+          "That task has no activity to show.",
+        ),
+        text,
+      );
+    }
+    return res;
+  }
+
+  // ── Projects redesign: changes ──
+  /** Every directive (retired included) with change metadata, and every run. */
+  async projectChanges(slug: string): Promise<import("@/types").ProjectChangesHistory> {
+    return this.request(
+      `/api/registry/projects/${encodeURIComponent(slug)}/changes`,
+    );
+  }
+
+  /** Record a requirement change; `now`/`next` also draft the revised plan. */
+  async createProjectChange(
+    slug: string,
+    payload: {
+      text: string;
+      kinds: import("@/types").ProjectChangeKind[];
+      apply: import("@/types").ProjectChangeApply;
+    },
+    idempotencyKey?: string,
+  ): Promise<import("@/types").ProjectChangeResult> {
+    return this.request(
+      `/api/registry/projects/${encodeURIComponent(slug)}/changes`,
+      {
+        method: "POST",
+        json: payload,
+        headers: idempotencyKey ? { "Idempotency-Key": idempotencyKey } : undefined,
+      },
+    );
+  }
+
+  /** Draft the revised plan again for a recorded change. */
+  async redraftProjectChange(
+    slug: string,
+    changeId: string,
+  ): Promise<{ change: import("@/types").ProjectChange; draft: import("@/types").ProjectChangeDraftState }> {
+    return this.request(
+      `/api/registry/projects/${encodeURIComponent(slug)}/changes/${encodeURIComponent(changeId)}/draft`,
+      { method: "POST", json: {} },
+    );
+  }
+
+  /** Activate the drafted plan and (unless `start: false`) start the next run. */
+  async approveProjectChange(
+    slug: string,
+    changeId: string,
+    payload: { rev: number; start?: boolean; supersedes?: string[] },
+    idempotencyKey?: string,
+  ): Promise<import("@/types").ProjectChangeApproveResult> {
+    return this.request(
+      `/api/registry/projects/${encodeURIComponent(slug)}/changes/${encodeURIComponent(changeId)}/approve`,
+      {
+        method: "POST",
+        json: payload,
+        headers: idempotencyKey ? { "Idempotency-Key": idempotencyKey } : undefined,
+      },
+    );
+  }
+
+  // ── Projects redesign: safety ──
+
+  private idempotencyKey?: string;
+
+  /**
+   * Forward the browser's `Idempotency-Key` on this client's writes, so a
+   * retried click replays upstream instead of acting twice. Never invented
+   * here: no key from the browser means no header upstream.
+   */
+  forwardIdempotencyKey(key: string | null | undefined): this {
+    const trimmed = (key ?? "").trim();
+    this.idempotencyKey = trimmed || undefined;
+    return this;
+  }
+
+  private applyIdempotencyKey(headers: Headers, method: string | undefined): void {
+    if (!this.idempotencyKey || headers.has("idempotency-key")) return;
+    const verb = (method ?? "GET").toUpperCase();
+    if (verb === "POST" || verb === "PATCH" || verb === "PUT" || verb === "DELETE") {
+      headers.set("Idempotency-Key", this.idempotencyKey);
+    }
+  }
+
+  // ── Projects redesign: board ──
+
+  /** Which run created each card, and whether the open run is stalled. */
+  async projectBoardContext(slug: string): Promise<import("@/types").ProjectBoardContext> {
+    return this.request(
+      `/api/registry/projects/${encodeURIComponent(slug)}/board/context`,
+    );
+  }
+
+  /** Approve all N: make several triage cards ready in one judgement act. */
+  async approveProjectCards(
+    slug: string,
+    taskIds: string[],
+  ): Promise<import("@/types").ProjectCardsApproveResponse> {
+    return this.request(
+      `/api/registry/projects/${encodeURIComponent(slug)}/cards/approve`,
+      { method: "POST", json: { task_ids: taskIds } },
+    );
+  }
+
+  /** Blocked → ready, with an optional reason left on the card's thread. */
+  async unblockProjectCard(
+    slug: string,
+    taskId: string,
+    reason?: string,
+  ): Promise<import("@/types").ProjectCardDetail> {
+    return this.request(
+      `/api/registry/projects/${encodeURIComponent(slug)}/cards/${encodeURIComponent(taskId)}/unblock`,
+      { method: "POST", json: reason ? { reason } : {} },
+    );
   }
 }
 

@@ -6,6 +6,9 @@ import { friendlyError } from "@/components/projects/errors";
 import { dateTimeLabel } from "@/components/projects/format";
 import { BusyRegion } from "@/components/ui/BusyRegion";
 import { useRefresh } from "@/components/ui/useRefresh";
+import { ActionButton } from "@/components/projects/ActionButton";
+import { ActionError } from "@/components/projects/ActionError";
+import { useProjectAction } from "@/components/projects/useProjectAction";
 import type {
   PlaybookRev,
   PlaybookStep,
@@ -93,18 +96,16 @@ export function PlanPanel({
   canActivate: boolean;
   archived: boolean;
 }) {
-  const { refresh, refreshing } = useRefresh();
+  const { refresh } = useRefresh();
   const active = playbook?.active ?? null;
   const proposed = (playbook?.revisions ?? []).filter((rev) => !rev.active);
 
   const [editing, setEditing] = useState(false);
   const [body, setBody] = useState("");
   const [steps, setSteps] = useState<StepDraft[]>([{ ...EMPTY_STEP }]);
-  const [saving, setBusy] = useState(false);
-  const busy = saving || refreshing;
-  const [activating, setBusyRev] = useState<number | null>(null);
-  const [lastRev, setLastRev] = useState<number | null>(null);
-  const busyRev = activating ?? (refreshing ? lastRev : null);
+  const saveAction = useProjectAction();
+  const busy = saveAction.busy;
+  const draftAction = useProjectAction<ProjectPlaybookDraftState>();
   const [error, setError] = useState<string | null>(null);
   const [drafting, setDrafting] = useState(false);
   const [draftNotice, setDraftNotice] = useState<string | null>(null);
@@ -172,89 +173,35 @@ export function PlanPanel({
     };
   }, [archived, unavailable, slugPath, drafting, settleDraft]);
 
-  const draftWithAgent = async () => {
+  const draftWithAgent = () => {
     setError(null);
     setDraftNotice(null);
-    try {
-      const res = await fetch(`${slugPath}/playbook/draft`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: "{}",
-      });
-      const data = (await res.json().catch(() => ({}))) as ProjectPlaybookDraftState & {
-        detail?: string;
-      };
-      if (!res.ok) {
-        setError(
-          friendlyError(
-            { status: res.status, detail: data.detail },
-            "The agent could not start drafting.",
-          ),
-        );
-        return;
-      }
-      settleDraft(data);
-    } catch {
-      setError("Could not reach the server.");
-    }
+    void draftAction.run(`${slugPath}/playbook/draft`, {
+      body: {},
+      skipRefresh: true,
+      onSuccess: (data) => settleDraft(data),
+    });
   };
 
   const openEditor = (from: PlaybookRev | null) => {
     setBody(from?.body ?? "");
     setSteps(draftsFromRev(from));
     setError(null);
+    saveAction.clearError();
     setEditing(true);
   };
 
-  const save = async () => {
+  const save = () => {
     const payload = stepsToPayload(steps);
     if (payload.length === 0) {
       setError("A plan needs at least one step with a title.");
       return;
     }
-    setBusy(true);
     setError(null);
-    try {
-      const res = await fetch(`${slugPath}/playbook`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ body: body.trim(), steps: payload }),
-      });
-      const data = (await res.json().catch(() => ({}))) as { detail?: string };
-      if (!res.ok) {
-        setError(friendlyError({ status: res.status, detail: data.detail }, "The plan was not saved."));
-        return;
-      }
-      setEditing(false);
-      refresh();
-    } catch {
-      setError("Could not reach the server.");
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const activate = async (rev: number) => {
-    setBusyRev(rev);
-    setLastRev(rev);
-    setError(null);
-    try {
-      const res = await fetch(`${slugPath}/playbook/${rev}/activate`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({}),
-      });
-      const data = (await res.json().catch(() => ({}))) as { detail?: string };
-      if (!res.ok) {
-        setError(friendlyError({ status: res.status, detail: data.detail }, "Activation was refused."));
-        return;
-      }
-      refresh();
-    } catch {
-      setError("Could not reach the server.");
-    } finally {
-      setBusyRev(null);
-    }
+    void saveAction.run(`${slugPath}/playbook`, {
+      body: { body: body.trim(), steps: payload },
+      onSuccess: () => setEditing(false),
+    });
   };
 
   const inputClass =
@@ -271,15 +218,16 @@ export function PlanPanel({
           Plan
         </h2>
         {!archived && !editing && playbook != null ? (
-          <button
-            type="button"
+          <ActionButton
             data-component="DraftPlanWithAgent"
-            onClick={() => void draftWithAgent()}
+            busy={draftAction.busy}
+            pendingLabel="Starting the draft…"
+            onClick={draftWithAgent}
             disabled={drafting}
             className="rounded-lg border border-[var(--color-border)] px-2.5 py-1 text-xs disabled:opacity-50"
           >
             {drafting ? "Agent is drafting…" : "Draft with the agent"}
-          </button>
+          </ActionButton>
         ) : null}
         {!archived && !editing ? (
           <button
@@ -516,17 +464,19 @@ export function PlanPanel({
                   <button
                     type="button"
                     onClick={() => setEditing(false)}
-                    className="rounded-lg border border-[var(--color-border)] px-3 py-1.5 text-sm"
+                    disabled={busy}
+                    className="rounded-lg border border-[var(--color-border)] px-3 py-1.5 text-sm disabled:opacity-50"
                   >
                     Cancel
                   </button>
-                  <button
+                  <ActionButton
                     type="submit"
-                    disabled={busy}
+                    busy={busy}
+                    pendingLabel="Saving…"
                     className="rounded-lg bg-[var(--color-accent)] px-3 py-1.5 text-sm font-medium text-[var(--color-accent-fg)] disabled:opacity-50"
                   >
                     Save as revision
-                  </button>
+                  </ActionButton>
                 </div>
               </form>
             </BusyRegion>
@@ -566,14 +516,7 @@ export function PlanPanel({
                         {rev.created_by ? ` · by ${rev.created_by}` : ""}
                       </p>
                       {!archived && canActivate ? (
-                        <button
-                          type="button"
-                          onClick={() => void activate(rev.rev)}
-                          disabled={busyRev != null}
-                          className="rounded-lg bg-[var(--color-accent)] px-2.5 py-1 text-xs font-medium text-[var(--color-accent-fg)] disabled:opacity-50"
-                        >
-                          {busyRev === rev.rev ? "Activating…" : "Activate"}
-                        </button>
+                        <ActivateRevision slug={slug} rev={rev.rev} />
                       ) : null}
                       {!archived && !canActivate ? (
                         <span className="text-xs text-[var(--color-muted)]">
@@ -592,8 +535,40 @@ export function PlanPanel({
               {error}
             </p>
           ) : null}
+          <ActionError action={saveAction} />
+          <ActionError action={draftAction} />
         </>
       )}
     </section>
+  );
+}
+
+/**
+ * A lead's Activate on one proposed revision — its own lock, so activating
+ * one revision never leaves another row looking idle mid-write.
+ */
+function ActivateRevision({ slug, rev }: { slug: string; rev: number }) {
+  const action = useProjectAction();
+  return (
+    <>
+      <ActionButton
+        data-action="activate-revision"
+        busy={action.busy}
+        pendingLabel="Activating…"
+        onClick={() =>
+          void action.run(
+            `/api/projects/${encodeURIComponent(slug)}/playbook/${rev}/activate`,
+            { body: {} },
+          )
+        }
+        className="rounded-lg bg-[var(--color-accent)] px-2.5 py-1 text-xs font-medium text-[var(--color-accent-fg)] disabled:opacity-50"
+      >
+        Activate
+      </ActionButton>
+      <ActionError
+        action={action}
+        className="flex w-full flex-wrap items-center gap-2 text-xs text-red-400"
+      />
+    </>
   );
 }

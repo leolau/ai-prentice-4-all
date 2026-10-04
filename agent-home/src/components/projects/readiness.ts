@@ -1,3 +1,4 @@
+import type { ProjectTab } from "@/components/projects/tabs/types";
 import type {
   ProjectDetail,
   ProjectDoctorDetail,
@@ -10,8 +11,11 @@ export interface ReadinessItem {
   ok: boolean;
   /** What to do when not ok — one short sentence. */
   hint: string;
-  /** The panel anchor the item sends the user to. */
+  /** Where the fix lives: a `?tab=` link (or the header for "status"). */
   anchor: string;
+  /** The tab that fixes it — set for every item except "status", whose fix
+   * is the Activate button. */
+  tab?: ProjectTab;
 }
 
 /**
@@ -32,14 +36,16 @@ export function readinessItems(
       label: "At least one output",
       ok: project.outputs.length > 0,
       hint: "Declare what the project delivers.",
-      anchor: "#panel-outputs",
+      anchor: "?tab=outputs",
+      tab: "outputs",
     },
     {
       key: "profile",
       label: "A profile to run on",
       ok: project.profiles.length > 0,
-      hint: "Add the host profile under People.",
-      anchor: "#panel-people",
+      hint: "Add the host profile under Settings → People.",
+      anchor: "?tab=settings",
+      tab: "settings",
     },
     {
       key: "plan",
@@ -53,7 +59,8 @@ export function readinessItems(
               ? "A revision is waiting — activate it."
               : "Write a plan or ask the agent to draft one."
           : "The active plan has no steps.",
-      anchor: "#panel-plan",
+      anchor: "?tab=plan",
+      tab: "plan",
     },
     // The activation gate itself (`PATCH status=active`) refuses on the
     // same outputs/profile prerequisites, so it belongs right after them —
@@ -73,7 +80,8 @@ export function readinessItems(
       label: "A schedule",
       ok: Boolean(project.schedule),
       hint: "Repeatable projects need a schedule to fire.",
-      anchor: "#panel-settings",
+      anchor: "?tab=settings",
+      tab: "settings",
     });
   }
   return items;
