@@ -33,6 +33,7 @@ import json
 import logging
 import os
 import sqlite3
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -124,6 +125,29 @@ class IdempotencyStore:
         self.lease_seconds = lease_seconds
         self.clock = clock
         self._initialized: set[str] = set()
+        self._init_lock = threading.Lock()
+
+    @staticmethod
+    def _initialize(conn: sqlite3.Connection) -> None:
+        """Switch to WAL and create the schema.
+
+        ``PRAGMA journal_mode=WAL`` ignores ``busy_timeout``, so a first
+        connection racing another process (or a writer) gets "database is
+        locked" straight away; retry briefly instead of failing the request.
+        """
+        from hermes_state import apply_wal_with_fallback
+
+        delay = 0.02
+        for attempt in range(8):
+            try:
+                apply_wal_with_fallback(conn, db_label="projects_idempotency.db")
+                conn.executescript(SCHEMA_SQL)
+                return
+            except sqlite3.OperationalError as exc:
+                if "locked" not in str(exc).lower() or attempt == 7:
+                    raise
+                time.sleep(delay)
+                delay = min(delay * 2, 0.5)
 
     @contextlib.contextmanager
     def _connect(self):
@@ -135,11 +159,10 @@ class IdempotencyStore:
             conn.execute("PRAGMA busy_timeout=10000")
             resolved = str(path.resolve())
             if resolved not in self._initialized:
-                from hermes_state import apply_wal_with_fallback
-
-                apply_wal_with_fallback(conn, db_label="projects_idempotency.db")
-                conn.executescript(SCHEMA_SQL)
-                self._initialized.add(resolved)
+                with self._init_lock:
+                    if resolved not in self._initialized:
+                        self._initialize(conn)
+                        self._initialized.add(resolved)
             yield conn
         finally:
             conn.close()
