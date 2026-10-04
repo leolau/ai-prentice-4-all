@@ -928,6 +928,7 @@ def _detail_sync(project, principal, *, include_address: bool) -> dict:
         # ``next_run_at`` is a display cache (§3.2): refreshed on read,
         # the cron store stays authoritative.
         next_run_at = projects_schedule.refresh_next_run(conn, project)
+        clarify = projects_db.clarify_summary(conn, project.id)
 
     detail = _project_payload(project)
     detail.update(
@@ -945,6 +946,7 @@ def _detail_sync(project, principal, *, include_address: bool) -> dict:
             "runs": runs_brief,
             "card_rollup": rollup,
             "recent_events": events,
+            "clarify": clarify,
         }
     )
     return detail
@@ -2451,6 +2453,47 @@ def _plan_draft_job(
         )
 
 
+def start_plan_draft(project, profiles, principal) -> dict:
+    """Start the background plan draft for ``project``; returns the job state.
+
+    Raises ``HTTPException`` 409 while a draft is already running or when
+    the project declares no outputs. Shared by the draft route and the
+    scope-confirm route (``projects_clarify_api``)."""
+    with _PLAN_DRAFTS_LOCK:
+        current = _PLAN_DRAFTS.get(project.id)
+        if current and current.get("status") == "running":
+            raise HTTPException(
+                status_code=409, detail="the agent is already drafting a plan"
+            )
+    with projects_db.connect_closing() as conn:
+        outputs = projects_db.get_project_outputs(conn, project.id)
+    if not outputs:
+        raise HTTPException(
+            status_code=409,
+            detail="declare at least one output before drafting a plan",
+        )
+    profile_names = {p["profile"] for p in profiles}
+    assignee = project.host_profile or (
+        sorted(profile_names)[0] if profile_names else None
+    )
+    state = {"status": "running", "started_at": int(time.time())}
+    with _PLAN_DRAFTS_LOCK:
+        _PLAN_DRAFTS[project.id] = state
+    threading.Thread(
+        target=_plan_draft_job,
+        kwargs={
+            "project_id": project.id,
+            "prompt": _plan_draft_prompt(project, outputs),
+            "assignee": assignee,
+            "profile_names": profile_names,
+            "created_by": principal.user_id,
+        },
+        name=f"plan-draft-{project.slug}",
+        daemon=True,
+    ).start()
+    return dict(state)
+
+
 @router.post("/{slug}/playbook/draft")
 async def draft_playbook_route(request: Request) -> dict[str, Any]:
     """Ask the agent to draft a proposed plan from the brief (§7.2).
@@ -2462,43 +2505,7 @@ async def draft_playbook_route(request: Request) -> dict[str, Any]:
         request, judgement=True
     )
     _refuse_if_archived(project, "drafting its plan")
-
-    def _start_sync() -> dict:
-        with _PLAN_DRAFTS_LOCK:
-            current = _PLAN_DRAFTS.get(project.id)
-            if current and current.get("status") == "running":
-                raise HTTPException(
-                    status_code=409, detail="the agent is already drafting a plan"
-                )
-        with projects_db.connect_closing() as conn:
-            outputs = projects_db.get_project_outputs(conn, project.id)
-        if not outputs:
-            raise HTTPException(
-                status_code=409,
-                detail="declare at least one output before drafting a plan",
-            )
-        profile_names = {p["profile"] for p in profiles}
-        assignee = project.host_profile or (
-            sorted(profile_names)[0] if profile_names else None
-        )
-        state = {"status": "running", "started_at": int(time.time())}
-        with _PLAN_DRAFTS_LOCK:
-            _PLAN_DRAFTS[project.id] = state
-        threading.Thread(
-            target=_plan_draft_job,
-            kwargs={
-                "project_id": project.id,
-                "prompt": _plan_draft_prompt(project, outputs),
-                "assignee": assignee,
-                "profile_names": profile_names,
-                "created_by": principal.user_id,
-            },
-            name=f"plan-draft-{project.slug}",
-            daemon=True,
-        ).start()
-        return dict(state)
-
-    return await asyncio.to_thread(_start_sync)
+    return await asyncio.to_thread(start_plan_draft, project, profiles, principal)
 
 
 @router.get("/{slug}/playbook/draft")

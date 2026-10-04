@@ -311,6 +311,7 @@ from hermes_cli.wa_bridge_api import router as _wa_bridge_router  # noqa: E402
 from hermes_cli.goals_api import router as _goals_router  # noqa: E402
 from hermes_cli.projects_api import router as _projects_router  # noqa: E402
 from hermes_cli.projects_ask_api import router as _projects_ask_router  # noqa: E402
+from hermes_cli.projects_clarify_api import router as _projects_clarify_router  # noqa: E402
 from hermes_cli.projects_outputs_api import router as _projects_outputs_router  # noqa: E402
 from hermes_cli.projects_live_api import router as _projects_live_router  # noqa: E402
 from hermes_cli.projects_changes_api import router as _projects_changes_router  # noqa: E402
@@ -327,6 +328,7 @@ app.include_router(_wa_bridge_router)
 app.include_router(_goals_router)
 app.include_router(_projects_router)
 app.include_router(_projects_ask_router)
+app.include_router(_projects_clarify_router)
 app.include_router(_projects_outputs_router)
 app.include_router(_projects_live_router)
 app.include_router(_projects_changes_router)
