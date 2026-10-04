@@ -20,7 +20,6 @@ const ALLOW_LIST: Record<string, string> = {
   "AddToProjectSheet.tsx": "not in the safety workstream — Inputs owner migrates",
   "NewProjectForm.tsx": "not in the safety workstream — project creation flow",
   "panels/BoardPanel.tsx": "not in the safety workstream — Board owner migrates",
-  "panels/OutputsPanel.tsx": "not in the safety workstream — Outputs owner migrates",
   // Upload needs FormData (and progress) which the JSON hook does not send.
   "panels/FilesPanel.tsx": "FormData upload; links — Inputs owner migrates",
 };

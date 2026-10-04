@@ -357,7 +357,11 @@ const SCENARIOS: Scenario[] = [
         isInstanceAdmin={false}
       />
     ),
-    control: (r) => r.getByRole("button", { name: "Continue run 14" }),
+    // The live status bar offers the same action; this is the header's.
+    control: (r) =>
+      within(r.container.querySelector("header")!).getByRole("button", {
+        name: "Continue run 14",
+      }),
     pending: "Continuing…",
     method: "POST",
     path: `${BASE}/runs/14/continue`,
