@@ -1304,3 +1304,154 @@ def test_resume_refuses_while_another_run_is_open(stores):
                 projects_run.resume_run(conn, bconn, project=fresh, run=failed)
         assert projects_db.get_project_run_by_id(conn, failed["id"])["status"] == "failed"
         assert projects_db.get_project_run_by_id(conn, second["run"]["id"])["status"] == "running"
+
+
+# ---------------------------------------------------------------------------
+# The agreed scope (owner-confirmed clarifications) in the guidance block
+# ---------------------------------------------------------------------------
+
+from hermes_cli import projects_clarify_context as _cc  # noqa: E402
+
+
+def _confirm_scope(pid, understanding, qa=()):
+    with projects_db.connect_closing() as conn:
+        rn = projects_db.add_clarify_round(
+            conn, pid, questions=[{"question": q} for q, _ in qa],
+            understanding=None, done=True, created_by="agent",
+        )
+        rows = projects_db.list_clarifications(conn, pid, round_no=rn)
+        answers = [
+            {"id": r["id"], "skip": True} if a is None else {"id": r["id"], "answer": a}
+            for r, (_, a) in zip(rows, qa)
+        ]
+        if answers:
+            projects_db.answer_clarifications(conn, pid, answers, user_id="leo")
+        projects_db.confirm_clarify_round(
+            conn, pid, user_id="leo", understanding=understanding
+        )
+
+
+def _scope_inputs(project):
+    with projects_db.connect_closing() as conn:
+        return dict(
+            outputs=projects_db.get_project_outputs(conn, project.id),
+            directives=projects_db.list_project_directives(conn, project.id),
+            clarify_lines=_cc.clarify_context_lines(conn, project.id),
+        )
+
+
+def test_guidance_without_scope_is_unchanged(stores):
+    project, _ = _make_project()
+    base = _compile(project)
+    inputs = _scope_inputs(project)
+    assert inputs["clarify_lines"] == []
+    for lines in (None, []):
+        assert projects_run.compile_guidance(
+            project, run_no=1, outputs=inputs["outputs"], deliveries_by_output={},
+            sample_links=[], directives=inputs["directives"], cfg=GUIDE_CFG,
+            clarify_lines=lines,
+        ) == base
+    assert "Agreed scope" not in base
+
+
+def test_guidance_places_scope_after_outputs_before_instructions(stores):
+    project, _ = _make_project()
+    with projects_db.connect_closing() as conn:
+        projects_db.add_project_directive(
+            conn, project_id=project.id, kind="directive",
+            body="Always cc legal", author_user_id="leo",
+        )
+    _confirm_scope(project.id, "Only subscribers in the EU.",
+                   [("Which list?", "EU list"), ("Send time?", None)])
+    inputs = _scope_inputs(project)
+    block = projects_run.compile_guidance(
+        project, run_no=1, outputs=inputs["outputs"], deliveries_by_output={},
+        sample_links=[], directives=inputs["directives"], cfg=GUIDE_CFG,
+        clarify_lines=inputs["clarify_lines"],
+    )
+    assert block.index("### Outputs") < block.index(_cc.SCOPE_HEADING)
+    assert block.index(_cc.SCOPE_HEADING) < block.index("### Standing instructions")
+    assert "Only subscribers in the EU." in block
+    assert "- Which list? → EU list" in block
+    assert "Send time?" not in block  # skipped
+
+
+def test_guidance_cap_eats_brief_then_directives_then_scope_never_outputs(stores):
+    project, _ = _make_project()
+    with projects_db.connect_closing() as conn:
+        for i in range(8):
+            projects_db.add_project_directive(
+                conn, project_id=project.id, kind="directive",
+                body=f"instruction {i} " + "x" * 60, author_user_id="leo",
+            )
+    _confirm_scope(project.id, "Agreed: EU subscribers only.",
+                   [(f"Question {i}?", f"answer {i} " + "y" * 80) for i in range(6)])
+    inputs = _scope_inputs(project)
+    outputs_section = None
+
+    def build(limit):
+        cfg = dict(GUIDE_CFG, guidance_max_chars=limit)
+        return projects_run.compile_guidance(
+            project, run_no=1, outputs=inputs["outputs"], deliveries_by_output={},
+            sample_links=[], directives=inputs["directives"], cfg=cfg,
+            clarify_lines=inputs["clarify_lines"],
+        )
+
+    full = build(100_000)
+    assert "- Question 5? → answer 5" in full
+    outputs_section = full[full.index("### Outputs"):full.index(_cc.SCOPE_HEADING)]
+
+    # Just over: the brief/directives absorb it, the scope stays whole.
+    trimmed = build(len(full) - 200)
+    assert "…[further standing instructions omitted]" in trimmed
+    assert "- Question 5? → answer 5" in trimmed
+    assert _cc.OMITTED_MARKER not in trimmed
+
+    # Far over: directives are down to their floor, then the scope sheds Q→A.
+    tight = build(len(full) - 900)
+    assert "…[further standing instructions omitted]" in tight
+    assert _cc.OMITTED_MARKER in tight
+    assert "- Question 0? → answer 0" in tight
+    assert "- Question 5? → answer 5" not in tight
+    assert "Agreed: EU subscribers only." in tight
+    assert len(tight) <= len(full) - 900
+
+    # Absurdly small: the outputs list survives whole.
+    tiny = build(50)
+    assert outputs_section in tiny
+
+
+def test_trim_scope_lines_drops_empty_headings_and_shortens_understanding():
+    lines = ["", _cc.SCOPE_HEADING, "U" * 500, "", _cc.CLARIFICATIONS_HEADING,
+             "- q → a", "- q2 → a2"]
+    out = projects_run._trim_scope_lines(lines, 30)
+    assert _cc.CLARIFICATIONS_HEADING not in out
+    assert out[-1] == _cc.OMITTED_MARKER
+    out = projects_run._trim_scope_lines(lines, 400)
+    assert out[2].endswith("…[truncated to fit the guidance budget]")
+    assert len("\n".join(out)) <= len("\n".join(lines)) - 400
+    pending_only = ["", _cc.PENDING_HEADING, "- q → a"]
+    assert projects_run._trim_scope_lines(pending_only, 5) == []
+    # An understanding that itself starts with "- " is never mistaken for Q→A.
+    bullet = ["", _cc.SCOPE_HEADING, "- only EU", "", _cc.CLARIFICATIONS_HEADING,
+              "- q → " + "a" * 80, "- q2 → " + "b" * 80]
+    out = projects_run._trim_scope_lines(bullet, 5)
+    assert out[:3] == ["", _cc.SCOPE_HEADING, "- only EU"]
+    assert out[-2:] == ["- q → " + "a" * 80, _cc.OMITTED_MARKER]
+
+
+def test_run_start_compiles_the_agreed_scope_once(stores):
+    project, _ = _make_project()
+    _save_playbook(project.id, [{"key": "one", "title": "One"}])
+    with projects_db.connect_closing() as conn:
+        projects_db.activate_playbook_rev(conn, project.id, 1)
+    first = _start(project.id)
+    assert _cc.SCOPE_HEADING not in first["guidance"]
+    _confirm_scope(project.id, "EU subscribers only.")
+    # The in-flight run's block is frozen; the next run carries the scope.
+    assert "EU subscribers only." not in first["guidance"]
+    with projects_db.connect_closing() as conn:
+        projects_db.update_project_run(conn, first["run"]["id"], status="done")
+    second = _start(project.id)
+    assert _cc.SCOPE_HEADING in second["guidance"]
+    assert "EU subscribers only." in second["guidance"]

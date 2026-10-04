@@ -19,12 +19,13 @@ export function DashboardTab({
   playbook,
   directives,
   callerUserId,
+  canLead,
   readiness,
   onNavigate,
   onChangeRequest,
 }: ProjectTabProps) {
-  const hero = nextAction(project, board, readiness, playbook);
-  const items = needsYouItems({ project, board, readiness, playbook });
+  const hero = nextAction(project, board, readiness, playbook, undefined, canLead);
+  const items = needsYouItems({ project, board, readiness, playbook, canLead });
   return (
     <div
       data-component="DashboardTab"

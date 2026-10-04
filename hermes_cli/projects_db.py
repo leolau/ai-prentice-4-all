@@ -315,6 +315,41 @@ CREATE TABLE IF NOT EXISTS project_skill_candidates (
 );
 CREATE INDEX IF NOT EXISTS idx_project_skill_candidates
     ON project_skill_candidates(project_id, created_at DESC);
+
+-- Scope clarification (before implementation): the agent asks the owner
+-- questions about goal and scope in rounds; the confirmed understanding and
+-- the answers feed the plan draft and every later run's guidance block.
+CREATE TABLE IF NOT EXISTS project_clarify_rounds (
+    project_id    TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    round_no      INTEGER NOT NULL,
+    status        TEXT NOT NULL DEFAULT 'open',   -- open | answered | confirmed
+    understanding TEXT,                           -- the agent's (or edited) summary
+    done          INTEGER NOT NULL DEFAULT 0,     -- agent said it has enough
+    focus         TEXT,                           -- what the owner asked it to probe
+    created_by    TEXT NOT NULL,
+    created_at    INTEGER NOT NULL,
+    confirmed_by  TEXT,
+    confirmed_at  INTEGER,
+    PRIMARY KEY (project_id, round_no)
+);
+CREATE TABLE IF NOT EXISTS project_clarifications (
+    id             TEXT PRIMARY KEY,
+    project_id     TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    round_no       INTEGER NOT NULL,
+    position       INTEGER NOT NULL,
+    category       TEXT NOT NULL DEFAULT 'other',
+    question       TEXT NOT NULL,
+    why            TEXT,
+    options        TEXT,                          -- JSON list of suggested answers
+    allow_multiple INTEGER NOT NULL DEFAULT 0,
+    status         TEXT NOT NULL DEFAULT 'open',  -- open | answered | skipped
+    answer         TEXT,
+    answered_by    TEXT,
+    answered_at    INTEGER,
+    created_at     INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_project_clarifications
+    ON project_clarifications(project_id, round_no, position);
 """
 
 
@@ -2813,3 +2848,250 @@ def import_profile_stores(conn: sqlite3.Connection, root: Path) -> int:
             )
         imported += n
     return imported
+
+
+# ---------------------------------------------------------------------------
+# Scope clarification (agent asks before implementation)
+# ---------------------------------------------------------------------------
+
+CLARIFY_CATEGORIES = (
+    "goal", "scope", "audience", "success", "constraints", "inputs", "format", "other",
+)
+CLARIFY_MAX_QUESTIONS = 7
+_CLARIFY_TEXT_MAX = 2_000
+
+
+def _clarify_question_row(row: sqlite3.Row) -> dict:
+    d = dict(row)
+    try:
+        opts = json.loads(d.get("options") or "[]")
+    except (TypeError, ValueError):
+        opts = []
+    d["options"] = [str(o) for o in opts if str(o).strip()] if isinstance(opts, list) else []
+    d["allow_multiple"] = bool(d.get("allow_multiple"))
+    return d
+
+
+def _clarify_round_row(row: sqlite3.Row) -> dict:
+    d = dict(row)
+    d["done"] = bool(d.get("done"))
+    return d
+
+
+def add_clarify_round(
+    conn: sqlite3.Connection,
+    project_id: str,
+    *,
+    questions: List[dict],
+    understanding: Optional[str],
+    done: bool,
+    created_by: str,
+    focus: Optional[str] = None,
+) -> int:
+    """Record one round of agent questions; returns its ``round_no``.
+
+    Each question: ``{question, why?, category?, options?: [str],
+    allow_multiple?: bool}``. Blank questions are dropped, at most
+    :data:`CLARIFY_MAX_QUESTIONS` are kept, unknown categories become
+    ``other``. A round with no questions is recorded as ``answered``."""
+    if not str(created_by or "").strip():
+        raise ValueError("created_by is required")
+    cleaned: List[dict] = []
+    for q in questions or []:
+        text = str((q or {}).get("question") or "").strip()[:_CLARIFY_TEXT_MAX]
+        if not text:
+            continue
+        cat = str(q.get("category") or "other").strip().lower()
+        opts = q.get("options") or []
+        if not isinstance(opts, list):
+            opts = []
+        cleaned.append({
+            "question": text,
+            "why": (str(q.get("why") or "").strip()[:_CLARIFY_TEXT_MAX] or None),
+            "category": cat if cat in CLARIFY_CATEGORIES else "other",
+            "options": [str(o).strip()[:200] for o in opts if str(o).strip()][:6],
+            "allow_multiple": bool(q.get("allow_multiple")),
+        })
+        if len(cleaned) >= CLARIFY_MAX_QUESTIONS:
+            break
+    now = _now()
+    with write_txn(conn):
+        row = conn.execute(
+            "SELECT COALESCE(MAX(round_no), 0) AS n FROM project_clarify_rounds "
+            "WHERE project_id = ?",
+            (project_id,),
+        ).fetchone()
+        round_no = int(row["n"]) + 1
+        conn.execute(
+            """INSERT INTO project_clarify_rounds
+               (project_id, round_no, status, understanding, done, focus,
+                created_by, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (project_id, round_no, "open" if cleaned else "answered",
+             (str(understanding).strip() or None) if understanding else None,
+             1 if done else 0, (str(focus).strip() or None) if focus else None,
+             str(created_by).strip(), now),
+        )
+        for pos, q in enumerate(cleaned):
+            conn.execute(
+                """INSERT INTO project_clarifications
+                   (id, project_id, round_no, position, category, question, why,
+                    options, allow_multiple, status, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?)""",
+                (_new_row_id("clq"), project_id, round_no, pos, q["category"],
+                 q["question"], q["why"], json.dumps(q["options"], ensure_ascii=False),
+                 1 if q["allow_multiple"] else 0, now),
+            )
+    return round_no
+
+
+def list_clarify_rounds(conn: sqlite3.Connection, project_id: str) -> List[dict]:
+    """Every round, oldest first."""
+    rows = conn.execute(
+        "SELECT * FROM project_clarify_rounds WHERE project_id = ? ORDER BY round_no",
+        (project_id,),
+    ).fetchall()
+    return [_clarify_round_row(r) for r in rows]
+
+
+def list_clarifications(
+    conn: sqlite3.Connection,
+    project_id: str,
+    *,
+    round_no: Optional[int] = None,
+) -> List[dict]:
+    """Questions (with ``options`` decoded), oldest round first, in order."""
+    sql = "SELECT * FROM project_clarifications WHERE project_id = ?"
+    args: list[Any] = [project_id]
+    if round_no is not None:
+        sql += " AND round_no = ?"
+        args.append(int(round_no))
+    sql += " ORDER BY round_no, position"
+    return [_clarify_question_row(r) for r in conn.execute(sql, args).fetchall()]
+
+
+def answer_clarifications(
+    conn: sqlite3.Connection,
+    project_id: str,
+    answers: List[dict],
+    *,
+    user_id: str,
+) -> int:
+    """Apply ``[{id, answer?: str, skip?: bool}]``; returns rows changed.
+
+    An answer may be changed until its round is confirmed; a confirmed
+    round's questions are refused with ``ValueError``. Unknown ids raise
+    ``KeyError``. A round whose questions are all answered/skipped moves to
+    ``answered``."""
+    if not str(user_id or "").strip():
+        raise ValueError("user_id is required")
+    now = _now()
+    changed = 0
+    touched_rounds: set[int] = set()
+    with write_txn(conn):
+        for item in answers or []:
+            qid = str((item or {}).get("id") or "")
+            row = conn.execute(
+                "SELECT q.round_no, r.status AS round_status FROM project_clarifications q "
+                "JOIN project_clarify_rounds r ON r.project_id = q.project_id "
+                "AND r.round_no = q.round_no WHERE q.id = ? AND q.project_id = ?",
+                (qid, project_id),
+            ).fetchone()
+            if row is None:
+                raise KeyError(qid)
+            if row["round_status"] == "confirmed":
+                raise ValueError("that round is already confirmed")
+            if item.get("skip"):
+                status, answer = "skipped", None
+            else:
+                answer = str(item.get("answer") or "").strip()[:_CLARIFY_TEXT_MAX]
+                if not answer:
+                    raise ValueError("an answer must not be empty (or skip it)")
+                status = "answered"
+            conn.execute(
+                "UPDATE project_clarifications SET status = ?, answer = ?, "
+                "answered_by = ?, answered_at = ? WHERE id = ?",
+                (status, answer, str(user_id).strip(), now, qid),
+            )
+            changed += 1
+            touched_rounds.add(int(row["round_no"]))
+        for rn in touched_rounds:
+            open_n = conn.execute(
+                "SELECT COUNT(*) AS n FROM project_clarifications "
+                "WHERE project_id = ? AND round_no = ? AND status = 'open'",
+                (project_id, rn),
+            ).fetchone()["n"]
+            conn.execute(
+                "UPDATE project_clarify_rounds SET status = ? "
+                "WHERE project_id = ? AND round_no = ? AND status != 'confirmed'",
+                ("open" if open_n else "answered", project_id, rn),
+            )
+    return changed
+
+
+def confirm_clarify_round(
+    conn: sqlite3.Connection,
+    project_id: str,
+    *,
+    user_id: str,
+    understanding: Optional[str] = None,
+) -> Optional[dict]:
+    """Confirm the latest round (open questions become ``skipped``), storing
+    an edited ``understanding`` when given. Returns the round, or ``None``
+    when the project has no rounds."""
+    if not str(user_id or "").strip():
+        raise ValueError("user_id is required")
+    now = _now()
+    with write_txn(conn):
+        row = conn.execute(
+            "SELECT * FROM project_clarify_rounds WHERE project_id = ? "
+            "ORDER BY round_no DESC LIMIT 1",
+            (project_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        rn = int(row["round_no"])
+        conn.execute(
+            "UPDATE project_clarifications SET status = 'skipped', answered_by = ?, "
+            "answered_at = ? WHERE project_id = ? AND round_no = ? AND status = 'open'",
+            (str(user_id).strip(), now, project_id, rn),
+        )
+        text = (str(understanding).strip()[:_CLARIFY_TEXT_MAX * 2] if understanding else "")
+        conn.execute(
+            "UPDATE project_clarify_rounds SET status = 'confirmed', confirmed_by = ?, "
+            "confirmed_at = ?, understanding = COALESCE(?, understanding) "
+            "WHERE project_id = ? AND round_no = ?",
+            (str(user_id).strip(), now, text or None, project_id, rn),
+        )
+        out = conn.execute(
+            "SELECT * FROM project_clarify_rounds WHERE project_id = ? AND round_no = ?",
+            (project_id, rn),
+        ).fetchone()
+    return _clarify_round_row(out)
+
+
+def clarify_summary(conn: sqlite3.Connection, project_id: str) -> dict:
+    """The compact state the project detail read carries as ``clarify``.
+
+    ``status``: ``not_started`` (no round) | ``open`` (latest round has open
+    questions) | ``answered`` (all answered/skipped, not confirmed) |
+    ``confirmed``. ``understanding`` is the latest confirmed one."""
+    rounds = list_clarify_rounds(conn, project_id)
+    if not rounds:
+        return {"status": "not_started", "round": 0, "open_count": 0,
+                "answered_count": 0, "understanding": None, "confirmed_at": None}
+    latest = rounds[-1]
+    counts = {r["status"]: r["n"] for r in conn.execute(
+        "SELECT status, COUNT(*) AS n FROM project_clarifications "
+        "WHERE project_id = ? AND round_no = ? GROUP BY status",
+        (project_id, latest["round_no"]),
+    ).fetchall()}
+    confirmed = [r for r in rounds if r["status"] == "confirmed"]
+    return {
+        "status": latest["status"],
+        "round": latest["round_no"],
+        "open_count": int(counts.get("open", 0)),
+        "answered_count": int(counts.get("answered", 0)),
+        "understanding": confirmed[-1]["understanding"] if confirmed else None,
+        "confirmed_at": confirmed[-1]["confirmed_at"] if confirmed else None,
+    }

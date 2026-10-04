@@ -2486,6 +2486,63 @@ export class HermesApiClient {
   }
 
   /** Activate the drafted plan and (unless `start: false`) start the next run. */
+  // ── Projects: scope clarification ──
+
+  /** `GET /{slug}/clarify` — rounds, questions and the generation job. */
+  async projectClarify(slug: string): Promise<import("@/types").ClarifyState> {
+    return this.request(`/api/registry/projects/${encodeURIComponent(slug)}/clarify`);
+  }
+
+  /** `POST /{slug}/clarify/questions` — ask the agent for a (next) round.
+   * Returns at once with `job.status: "running"`; poll `projectClarify`. */
+  async askClarifyQuestions(
+    slug: string,
+    payload: { focus?: string },
+    idempotencyKey?: string,
+  ): Promise<import("@/types").ClarifyState> {
+    return this.request(
+      `/api/registry/projects/${encodeURIComponent(slug)}/clarify/questions`,
+      {
+        method: "POST",
+        json: payload,
+        headers: idempotencyKey ? { "Idempotency-Key": idempotencyKey } : undefined,
+      },
+    );
+  }
+
+  /** `POST /{slug}/clarify/answers` — `[{id, answer} | {id, skip: true}]`. */
+  async answerClarifyQuestions(
+    slug: string,
+    payload: { answers: import("@/types").ClarifyAnswerInput[] },
+    idempotencyKey?: string,
+  ): Promise<import("@/types").ClarifyState> {
+    return this.request(
+      `/api/registry/projects/${encodeURIComponent(slug)}/clarify/answers`,
+      {
+        method: "POST",
+        json: payload,
+        headers: idempotencyKey ? { "Idempotency-Key": idempotencyKey } : undefined,
+      },
+    );
+  }
+
+  /** `POST /{slug}/clarify/confirm` — confirm the understanding (optionally
+   * edited) and, with `draft_plan`, start the plan draft from it. */
+  async confirmClarify(
+    slug: string,
+    payload: { understanding?: string; draft_plan?: boolean },
+    idempotencyKey?: string,
+  ): Promise<import("@/types").ClarifyConfirmResult> {
+    return this.request(
+      `/api/registry/projects/${encodeURIComponent(slug)}/clarify/confirm`,
+      {
+        method: "POST",
+        json: payload,
+        headers: idempotencyKey ? { "Idempotency-Key": idempotencyKey } : undefined,
+      },
+    );
+  }
+
   async approveProjectChange(
     slug: string,
     changeId: string,

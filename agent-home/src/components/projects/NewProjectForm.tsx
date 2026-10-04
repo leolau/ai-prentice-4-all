@@ -19,11 +19,16 @@ import { MemoryPicker } from "@/components/projects/inputs/MemoryPicker";
 import type { UploadFn } from "@/components/projects/inputs/uploadProjectFile";
 import { useUploadQueue } from "@/components/projects/inputs/useUploadQueue";
 import {
+  DEFAULT_PLAN_CHOICE,
+  PLAN_CHOICES,
   WIZARD_STEPS,
   canLeaveInputs,
   hasAnyInput,
   inputsSummary,
+  planChoice,
+  planLanding,
   stepLabel,
+  type PlanChoice,
   type WizardStep,
 } from "@/components/projects/inputs/wizard";
 import {
@@ -80,8 +85,6 @@ export const AUTONOMIES: { value: ProjectAutonomy; label: string; explain: strin
   },
 ];
 
-type PlanChoice = "agent" | "self";
-
 type PointerStatus = "waiting" | "sending" | "done" | "failed";
 
 /** A memory or link/note to attach once the project exists. */
@@ -104,8 +107,8 @@ interface PendingPointer {
  * Nothing is created before step 4. Create then runs once: the project is
  * POSTed (with a lock and a fixed key), each file is uploaded once to
  * `/files/upload`, each memory/link is linked once, and only then does the
- * agent draft the plan. If an input fails the project still exists: the
- * failures show with Retry (create is never repeated, finished uploads are
+ * agent ask its scope questions (the default) or draft the plan. If an
+ * input fails the project still exists: the failures show with Retry (create is never repeated, finished uploads are
  * never re-sent), or the user can go on to the project and add it there.
  *
  * A refusal maps onto the field that is blank — never a toast — and what
@@ -130,7 +133,7 @@ export function NewProjectForm({
   const [outputs, setOutputs] = useState<string[]>([""]);
   const [cadence, setCadence] = useState<ProjectCadence>("one_off");
   const [autonomy, setAutonomy] = useState<ProjectAutonomy>("supervised");
-  const [plan, setPlan] = useState<PlanChoice>("agent");
+  const [plan, setPlan] = useState<PlanChoice>(DEFAULT_PLAN_CHOICE);
   const [error, setError] = useState<string | null>(null);
   const [fieldErrors, setFieldErrors] = useState<Partial<Record<MandatoryField, string>>>({});
 
@@ -148,6 +151,9 @@ export function NewProjectForm({
   const [submitting, setSubmitting] = useState(false);
   const [createdSlug, setCreatedSlug] = useState<string | null>(null);
   const [partial, setPartial] = useState(false);
+  // The scope questions are asked once per created project, with one key.
+  const clarifyKey = useRef<string | null>(null);
+  const clarifyAsked = useRef(false);
 
   const tally = { files: queue.items.length, memories: memories.size, links: entries.length };
   const inputsAnswered = canLeaveInputs(tally, skipped);
@@ -203,21 +209,31 @@ export function NewProjectForm({
     return results.every(Boolean);
   };
 
-  /** Start the agent draft (if chosen) and land on the project page. */
+  /** Start the scope questions or the agent draft (if chosen) and land on the project page. */
   const finish = async (slug: string) => {
     // The project exists but cannot run until a plan is active. Always land
-    // on its page, where the readiness checklist points at the Plan panel;
-    // with the agent choice, start the server-side draft first (after the
-    // inputs are attached, so the agent reads them). A refused draft is not
-    // a failed create — the project exists either way.
-    if (plan === "agent") {
+    // on its page: the Scope tab when the agent asks first, else the Plan
+    // tab. Either server-side job starts after the inputs are attached, so
+    // the agent reads them. A refused job is not a failed create — the
+    // project exists either way, and its Scope/Plan tab can start it again.
+    if (plan === "scope") {
+      if (!clarifyAsked.current) {
+        clarifyAsked.current = true;
+        clarifyKey.current ??= newIdempotencyKey();
+        await sendProjectAction(
+          `/api/projects/${encodeURIComponent(slug)}/clarify/questions`,
+          clarifyKey.current,
+          { method: "POST", body: {} },
+        );
+      }
+    } else if (plan === "agent") {
       await fetch(`/api/projects/${encodeURIComponent(slug)}/playbook/draft`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: "{}",
       }).catch(() => undefined);
     }
-    router.push(`/projects/${slug}#panel-plan`);
+    router.push(planLanding(slug, plan));
   };
 
   const submit = async () => {
@@ -328,9 +344,7 @@ export function NewProjectForm({
           ? "Next: review"
           : partial
             ? "Retry failed inputs"
-            : plan === "agent"
-              ? "Create project and draft the plan"
-              : "Create project";
+            : planChoice(plan).create;
 
   const pendingLabel = created ? "Attaching inputs…" : "Creating the project…";
 
@@ -688,41 +702,24 @@ export function NewProjectForm({
                 className="flex flex-col gap-2 rounded-xl border border-[var(--color-border)] p-3 text-sm"
               >
                 <legend className="px-1 text-sm">Plan — a run needs one</legend>
-                <label className="flex items-start gap-2">
-                  <input
-                    type="radio"
-                    name="plan"
-                    value="agent"
-                    checked={plan === "agent"}
-                    onChange={() => setPlan("agent")}
-                    className="mt-1"
-                  />
-                  <span>
-                    Ask the agent to draft it
-                    <span className="block text-xs text-[var(--color-muted)]">
-                      The agent reads the brief and your inputs and proposes
-                      steps in the background; you land on the project page
-                      and activate the plan when it looks right.
+                {PLAN_CHOICES.map((choice) => (
+                  <label key={choice.value} className="flex items-start gap-2">
+                    <input
+                      type="radio"
+                      name="plan"
+                      value={choice.value}
+                      checked={plan === choice.value}
+                      onChange={() => setPlan(choice.value)}
+                      className="mt-1"
+                    />
+                    <span>
+                      {choice.label}
+                      <span className="block text-xs text-[var(--color-muted)]">
+                        {choice.explain}
+                      </span>
                     </span>
-                  </span>
-                </label>
-                <label className="flex items-start gap-2">
-                  <input
-                    type="radio"
-                    name="plan"
-                    value="self"
-                    checked={plan === "self"}
-                    onChange={() => setPlan("self")}
-                    className="mt-1"
-                  />
-                  <span>
-                    I&rsquo;ll write it myself
-                    <span className="block text-xs text-[var(--color-muted)]">
-                      You land on the project page with the readiness checklist
-                      and an empty Plan editor.
-                    </span>
-                  </span>
-                </label>
+                  </label>
+                ))}
               </fieldset>
             )}
 

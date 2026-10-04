@@ -1,9 +1,12 @@
 import type { ReadinessItem } from "@/components/projects/readiness";
 import type {
+  ClarifyStatus,
+  ClarifySummary,
   ProjectBoardTask,
   ProjectBoardView,
   ProjectDetail,
   ProjectLinkKind,
+  ProjectPlaybookResponse,
   ProjectRunBrief,
 } from "@/types";
 
@@ -169,4 +172,60 @@ export function spanLabel(seconds: number): string {
   if (seconds < 3600) return `${Math.max(1, Math.round(seconds / 60))} min`;
   if (seconds < 86_400) return `${Math.round(seconds / 3600)} h`;
   return `${Math.round(seconds / 86_400)} d`;
+}
+
+/** An active plan revision with at least one step. */
+export function hasActivePlan(playbook: ProjectPlaybookResponse | null): boolean {
+  return (playbook?.active?.steps ?? []).length > 0;
+}
+
+/**
+ * The project's scope clarification summary. Older servers send no
+ * `clarify` at all; that reads as "not started".
+ */
+export function clarifyOf(project: ProjectDetail): ClarifySummary {
+  return (
+    project.clarify ?? {
+      status: "not_started",
+      round: 0,
+      open_count: 0,
+      answered_count: 0,
+      understanding: null,
+      confirmed_at: null,
+    }
+  );
+}
+
+export function clarifyStatus(project: ProjectDetail): ClarifyStatus {
+  return clarifyOf(project).status;
+}
+
+/**
+ * Scope was never discussed, but the project is already past it — it has
+ * an active plan or has run — so asking about scope now would only nag.
+ */
+export function scopeSkipped(
+  project: ProjectDetail,
+  playbook: ProjectPlaybookResponse | null,
+): boolean {
+  return (
+    clarifyStatus(project) === "not_started" &&
+    (hasActivePlan(playbook) || project.runs.length > 0)
+  );
+}
+
+/**
+ * Whether the Dashboard should suggest letting the agent ask about scope
+ * before a plan exists: never discussed, no active plan, no plan revision
+ * waiting, no runs. An unloaded plan (`null`) is unknown, so we stay quiet.
+ */
+export function suggestScopeFirst(
+  project: ProjectDetail,
+  playbook: ProjectPlaybookResponse | null,
+): boolean {
+  if (project.archived || project.status === "done") return false;
+  if (playbook === null) return false;
+  if (clarifyStatus(project) !== "not_started") return false;
+  if (scopeSkipped(project, playbook)) return false;
+  return (playbook.revisions ?? []).length === 0;
 }

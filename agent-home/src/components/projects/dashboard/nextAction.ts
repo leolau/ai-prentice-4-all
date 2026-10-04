@@ -6,6 +6,7 @@ import {
   awaitingAcceptance,
   blockedCards,
   boardTasks,
+  clarifyOf,
   firstUnmet,
   hasInputs,
   latestRun,
@@ -16,6 +17,7 @@ import {
   runStalled,
   runsNewestFirst,
   spanLabel,
+  suggestScopeFirst,
 } from "@/components/projects/dashboard/derive";
 import type {
   PlaybookStep,
@@ -69,15 +71,17 @@ export function isMutation(intent: DashIntent): boolean {
 export type NeedsYouGroup =
   | "run"
   | "triage"
+  | "scope"
   | "blocked"
   | "outputs"
   | "inputs"
   | "readiness";
 
-/** Rank order of the groups — the brief's (a) → (f). */
+/** Rank order of the groups — the brief's (a) → (f), scope after triage. */
 export const NEEDS_YOU_ORDER: NeedsYouGroup[] = [
   "run",
   "triage",
+  "scope",
   "blocked",
   "outputs",
   "inputs",
@@ -124,6 +128,8 @@ export interface DashboardInput {
   board: ProjectBoardView | null;
   readiness: ReadinessItem[];
   playbook: ProjectPlaybookResponse | null;
+  /** Owner, lead or box admin — who may steer the project. Defaults to true. */
+  canLead?: boolean;
   /** Epoch seconds; injectable for tests. */
   now?: number;
 }
@@ -163,6 +169,67 @@ const READINESS_FIX: Record<
   status: { title: "Activate the project", label: "Activate" },
   schedule: { title: "Set a schedule", label: "Open Settings" },
 };
+
+const OPEN_SCOPE: DashAction = {
+  label: "Open Scope",
+  effect: "Opens the Scope tab.",
+  intent: { kind: "navigate", tab: "scope" },
+};
+
+/**
+ * The scope conversation, when it waits on a person: questions to answer,
+ * an understanding to confirm, or — before any plan or run exists — the
+ * suggestion to let the agent ask first. A soft gate: drafting the plan
+ * directly is always offered beside it.
+ */
+function scopeItem(
+  project: ProjectDetail,
+  playbook: ProjectPlaybookResponse | null,
+  canLead: boolean,
+): NeedsYouItem | null {
+  const clarify = clarifyOf(project);
+  if (clarify.status === "open") {
+    const n = Math.max(1, clarify.open_count);
+    return {
+      key: "scope:open",
+      group: "scope",
+      tone: "accent",
+      title: `The agent has ${plural(n, "question")} about scope`,
+      detail: "Answer or skip them; the plan is drafted from what you say.",
+      action: { ...OPEN_SCOPE, label: n === 1 ? "Answer it" : "Answer them" },
+    };
+  }
+  if (clarify.status === "answered") {
+    return {
+      key: "scope:answered",
+      group: "scope",
+      tone: "accent",
+      title: "Confirm the agent's understanding",
+      detail: "Every question is answered or skipped. Check its summary of the goal and scope.",
+      action: { ...OPEN_SCOPE, label: "Review and confirm" },
+    };
+  }
+  if (canLead && suggestScopeFirst(project, playbook)) {
+    return {
+      key: "scope:start",
+      group: "scope",
+      tone: "accent",
+      title: "Let the agent ask about scope first",
+      detail: "It reads the brief and your inputs, then checks the goal, audience and format with you before it plans.",
+      action: {
+        label: "Let the agent ask",
+        effect: "Opens Scope, where the agent asks 3–7 questions about the goal and scope. Nothing runs.",
+        intent: { kind: "navigate", tab: "scope" },
+      },
+      secondary: {
+        label: "Draft the plan directly",
+        effect: "Opens the Plan tab.",
+        intent: { kind: "navigate", tab: "plan" },
+      },
+    };
+  }
+  return null;
+}
 
 function readinessItem(item: ReadinessItem): NeedsYouItem {
   const fix = READINESS_FIX[item.key];
@@ -219,14 +286,16 @@ function stallWhy(
 
 /**
  * Everything a person must act on right now, ranked (a) a waiting, stalled
- * or failed run → (b) the agent's cards waiting in Triage → (c) blocked
- * cards → (d) delivered outputs to accept → (e) no inputs → (f) the first
- * unmet readiness item.
+ * or failed run → (b) the agent's cards waiting in Triage → scope questions
+ * or the understanding to confirm → (c) blocked cards → (d) delivered
+ * outputs to accept → (e) no inputs → (f) the first unmet readiness item.
  */
 export function needsYouItems({
   project,
   board,
   readiness,
+  playbook,
+  canLead = true,
   now = nowSeconds(),
 }: DashboardInput): NeedsYouItem[] {
   if (project.archived) return [];
@@ -318,6 +387,10 @@ export function needsYouItems({
       },
     });
   }
+
+  // scope: questions to answer, an understanding to confirm, or ask first
+  const scope = scopeItem(project, playbook, canLead);
+  if (scope) items.push(scope);
 
   // (c) blocked cards
   for (const card of blockedCards(board)) items.push(blockedItem(card));
@@ -449,6 +522,7 @@ export function nextAction(
   readiness: ReadinessItem[],
   playbook: ProjectPlaybookResponse | null,
   now: number = nowSeconds(),
+  canLead: boolean = true,
 ): NextAction {
   if (project.archived) {
     return {
@@ -467,7 +541,7 @@ export function nextAction(
     };
   }
 
-  const items = needsYouItems({ project, board, readiness, playbook, now });
+  const items = needsYouItems({ project, board, readiness, playbook, canLead, now });
   const top = items[0];
   if (top) {
     if (top.key.startsWith("run:stalled:")) {

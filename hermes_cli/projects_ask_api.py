@@ -2,7 +2,7 @@
 
 The ask box under the project page's live bar. The answer comes from a
 compact, bounded text **snapshot** of the project's current state — brief,
-active requirements (directives), the active plan's steps, recent runs with
+the owner-agreed scope and clarifications, active requirements (directives), the active plan's steps, recent runs with
 their stall state, the caller-visible board, outputs, the last events — sent
 to the auxiliary model in its **own one-shot call**.
 
@@ -32,7 +32,7 @@ from typing import Any, Callable, Optional
 
 from fastapi import APIRouter, HTTPException, Request
 
-from hermes_cli import kanban_db, projects_db
+from hermes_cli import kanban_db, projects_clarify_context, projects_db
 from hermes_cli.projects_api import (
     _board_conn,
     _require_read,
@@ -54,6 +54,7 @@ _MAX_EVENTS = 20
 _MAX_STEPS = 30
 _MAX_REQUIREMENTS = 20
 _MAX_OUTPUTS = 20
+_MAX_CLARIFICATIONS = 12
 
 ASK_TIMEOUT_SECONDS = 60.0
 RATE_LIMIT = 10
@@ -62,7 +63,7 @@ RATE_WINDOW_SECONDS = 60.0
 _ASK_TASK = "projects_ask"
 _ASK_FALLBACK_TASK = "compression"
 
-SOURCE_KINDS = ("card", "run", "output", "requirement", "plan", "event")
+SOURCE_KINDS = ("card", "run", "output", "requirement", "plan", "event", "scope")
 
 # Event payload fields safe to show: short status words only — never tool
 # arguments, worker output or anything else a payload may carry.
@@ -82,7 +83,7 @@ _ASK_SYSTEM = (
 )
 
 _CITATION_RE = re.compile(
-    r"\[(card|run|output|requirement|plan|event):([^\]\s]{1,120})\]"
+    r"\[(" + "|".join(SOURCE_KINDS) + r"):([^\]\s]{1,120})\]"
 )
 _SUGGESTION_RE = re.compile(r"^\s*REQUIREMENT:\s*(.+?)\s*$", re.MULTILINE)
 
@@ -148,6 +149,7 @@ def build_snapshot(project, principal, *, now: Optional[int] = None) -> tuple[st
         outputs = projects_db.get_project_outputs(conn, pid)
         deliveries = projects_db.get_output_deliveries(conn, project_id=pid)
         run_cards = {r["id"]: projects_db.get_run_cards(conn, r["id"]) for r in runs}
+        scope = projects_clarify_context.clarify_context(conn, pid)
 
     lines.append(f"PROJECT: {_clean(project.name)} (status {project.status}, cadence {project.cadence})")
     if project.goal:
@@ -158,6 +160,7 @@ def build_snapshot(project, principal, *, now: Optional[int] = None) -> tuple[st
         lines.append(f"Done when: {_clean(project.definition_of_done, 300)}")
     if project.summary:
         lines.append(f"Where it stands ({_ago(project.summary_at, now)}): {_clean(project.summary, 600)}")
+    lines.extend(_scope_lines(scope, cite))
 
     lines.append("")
     lines.append("REQUIREMENTS (active, newest first):")
@@ -302,6 +305,43 @@ def build_snapshot(project, principal, *, now: Optional[int] = None) -> tuple[st
         # A tag cut off by the cap is no longer citable.
         index = {k: v for k, v in index.items() if f"[{k}]" in text}
     return text, index
+
+
+def _scope_lines(scope: dict, cite: Callable[[str, Any, str], str]) -> list[str]:
+    """The agreed scope + clarifications; ``[]`` when there are none.
+    Citations are ``[scope:<round_no>]``."""
+    tags: dict[int, str] = {}
+
+    def tag(round_no: int) -> str:
+        if round_no not in tags:
+            tags[round_no] = cite("scope", round_no, f"agreed scope, round {round_no}")
+        return tags[round_no]
+
+    out: list[str] = []
+    if scope.get("understanding") and scope.get("round_no"):
+        out += [
+            "",
+            f"AGREED SCOPE (confirmed by the owner) {tag(scope['round_no'])}: "
+            f"{_clean(scope['understanding'], 800)}",
+        ]
+    for heading, pairs in (
+        ("CLARIFICATIONS (the owner's answers):", scope.get("confirmed") or []),
+        ("OWNER'S ANSWERS SO FAR (not yet confirmed):", scope.get("pending") or []),
+    ):
+        if not pairs:
+            continue
+        if not out:
+            out.append("")
+        out.append(heading)
+        newest = pairs[-_MAX_CLARIFICATIONS:]
+        for p in newest:
+            out.append(
+                f"- {tag(p['round_no'])} {_clean(p['question'], 120)} → "
+                f"{_clean(p['answer'], 160)}"
+            )
+        if len(pairs) > len(newest):
+            out.append(f"- … {len(pairs) - len(newest)} earlier answers")
+    return out
 
 
 # ---------------------------------------------------------------------------

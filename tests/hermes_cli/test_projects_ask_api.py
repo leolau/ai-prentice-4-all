@@ -539,3 +539,80 @@ def test_route_is_mounted_on_the_web_server():
 
     paths = {getattr(r, "path", "") for r in web_server.app.routes}
     assert "/api/registry/projects/{slug}/ask" in paths
+
+
+# ---------------------------------------------------------------------------
+# The agreed scope in the snapshot ([scope:<round>] citations)
+# ---------------------------------------------------------------------------
+
+
+def _clarify(pid, qa, *, understanding=None, confirm=True):
+    with projects_db.connect_closing() as conn:
+        rn = projects_db.add_clarify_round(
+            conn, pid, questions=[{"question": q} for q, _ in qa],
+            understanding="agent guess", done=False, created_by="agent",
+        )
+        rows = projects_db.list_clarifications(conn, pid, round_no=rn)
+        items = [
+            {"id": r["id"], "skip": True} if a is None else {"id": r["id"], "answer": a}
+            for r, (_, a) in zip(rows, qa)
+        ]
+        if items:
+            projects_db.answer_clarifications(conn, pid, items, user_id="leo")
+        if confirm:
+            projects_db.confirm_clarify_round(
+                conn, pid, user_id="leo", understanding=understanding
+            )
+    return rn
+
+
+def test_snapshot_without_scope_has_no_scope_section(env):
+    seed = _seed(env)
+    text, index = _snapshot(seed)
+    assert "AGREED SCOPE" not in text and "CLARIFICATIONS" not in text
+    assert not any(k.startswith("scope:") for k in index)
+
+
+def test_snapshot_carries_the_agreed_scope_with_citations(env):
+    seed = _seed(env)
+    pid = seed["project"]["id"]
+    rn = _clarify(pid, [("Which law?", "Hong Kong law"), ("Deadline?", None)],
+                  understanding="Four MOUs under HK law.")
+    text, index = _snapshot(seed)
+    assert f"AGREED SCOPE (confirmed by the owner) [scope:{rn}]: Four MOUs under HK law." in text
+    assert f"- [scope:{rn}] Which law? → Hong Kong law" in text
+    assert "Deadline?" not in text  # skipped
+    assert "agent guess" not in text
+    assert index[f"scope:{rn}"] == {"kind": "scope", "id": str(rn),
+                                    "label": f"agreed scope, round {rn}"}
+    assert text.index("AGREED SCOPE") < text.index("REQUIREMENTS")
+
+
+def test_snapshot_marks_unconfirmed_answers(env):
+    seed = _seed(env)
+    rn = _clarify(seed["project"]["id"], [("Which law?", "HK law")], confirm=False)
+    text, index = _snapshot(seed)
+    assert "AGREED SCOPE" not in text
+    assert "OWNER'S ANSWERS SO FAR (not yet confirmed):" in text
+    assert f"- [scope:{rn}] Which law? → HK law" in text
+    assert f"scope:{rn}" in index
+
+
+def test_parse_answer_accepts_scope_citations():
+    index = {"scope:2": {"kind": "scope", "id": "2", "label": "agreed scope, round 2"}}
+    out = projects_ask_api.parse_answer("Only HK law is in scope [scope:2] [scope:9].", index)
+    assert out["sources"] == [index["scope:2"]]
+    assert out["answer"] == "Only HK law is in scope."
+    assert "scope" in projects_ask_api.SOURCE_KINDS
+
+
+def test_ask_returns_a_scope_source(env, model):
+    client, _ = env
+    seed = _seed(env)
+    rn = _clarify(seed["project"]["id"], [], understanding="HK law only.")
+    model.reply = f"The agreed scope is HK law only [scope:{rn}]."
+    resp = _ask(client, seed["slug"])
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["sources"] == [
+        {"kind": "scope", "id": str(rn), "label": f"agreed scope, round {rn}"}
+    ]

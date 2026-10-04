@@ -114,6 +114,7 @@ describe("sessionStorage persistence", () => {
       JSON.stringify([
         { id: "ok", q: "q", status: "done", a: "a", suggestion: "Add X", sources: [
           { kind: "card", id: "t_1", label: "Draft" },
+          { kind: "scope", id: "2", label: "agreed scope, round 2" },
           { kind: "secret", id: "x", label: "nope" },
           "junk",
         ] },
@@ -125,7 +126,10 @@ describe("sessionStorage persistence", () => {
     );
     const turns = loadThread(s, "a");
     expect(turns.map((t) => t.id)).toEqual(["ok", "err"]);
-    expect(turns[0].sources).toEqual([{ kind: "card", id: "t_1", label: "Draft" }]);
+    expect(turns[0].sources).toEqual([
+      { kind: "card", id: "t_1", label: "Draft" },
+      { kind: "scope", id: "2", label: "agreed scope, round 2" },
+    ]);
     expect(turns[0].suggestion).toBe("Add X");
     expect(turns[1].error).toBe("That did not go through.");
   });
@@ -147,6 +151,9 @@ describe("source links", () => {
     expect(sourceTab({ kind: "requirement", id: "1", label: "" })).toBe("iterations");
     expect(sourceTab({ kind: "plan", id: "1", label: "" })).toBe("plan");
     expect(sourceTab({ kind: "event", id: "1", label: "" })).toBe("board");
+    expect(sourceHref("p", { kind: "scope", id: "2", label: "" })).toBe(
+      "/projects/p?tab=scope",
+    );
   });
 });
 
