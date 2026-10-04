@@ -15830,6 +15830,14 @@ def main(
                         # status lines).  The response is printed once below.
                         cli.agent.stream_delta_callback = None
                         cli.agent.tool_gen_callback = None
+                        if _kanban_task_id:
+                            # Relay the worker's reasoning and tool names to
+                            # the project page (callbacks only; best-effort).
+                            try:
+                                from hermes_cli.card_activity import attach_worker_relay
+                                attach_worker_relay(cli.agent, _kanban_task_id)
+                            except Exception:
+                                pass
                         try:
                             result = cli.agent.run_conversation(
                                 user_message=effective_query,

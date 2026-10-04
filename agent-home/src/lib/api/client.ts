@@ -2388,6 +2388,19 @@ export class HermesApiClient {
     range?: string | null,
   ): Promise<Response> {
     const headers = new Headers();
+  // ── Projects redesign: live ──
+
+  /**
+   * A board-dispatched card's live reasoning and tool names, as SSE for the
+   * BFF to pipe (`GET /{slug}/cards/{id}/activity?after=`). Same frames as
+   * `openRunActivityStream`; tool arguments and results never cross.
+   */
+  async openCardActivityStream(
+    slug: string,
+    taskId: string,
+    after: number,
+  ): Promise<Response> {
+    const headers = new Headers({ accept: "text/event-stream" });
     if (this.hermesToken) {
       headers.set("cookie", `hermes_session_at=${this.hermesToken}`);
       headers.set("authorization", `Bearer ${this.hermesToken}`);
@@ -2404,6 +2417,19 @@ export class HermesApiClient {
         res.status,
         upstreamDetail(parsed, "That file could not be opened."),
         parsed ?? text,
+    const res = await fetch(
+      `${this.baseUrl}/api/registry/projects/${encodeURIComponent(slug)}/cards/${encodeURIComponent(taskId)}/activity?after=${encodeURIComponent(after)}`,
+      { headers, cache: "no-store" },
+    );
+    if (!res.ok || !res.body) {
+      const text = res.body ? await res.text().catch(() => "") : "";
+      throw new HermesApiError(
+        res.status,
+        upstreamDetail(
+          text ? safeJson(text) : undefined,
+          "That task has no activity to show.",
+        ),
+        text,
       );
     }
     return res;
