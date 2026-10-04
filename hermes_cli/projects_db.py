@@ -468,12 +468,26 @@ _PROJECT_COLUMN_MIGRATIONS: tuple[tuple[str, str], ...] = (
 )
 
 
+# Columns added to `project_directives` later. `change_meta` is the JSON a
+# requirement change carries (kinds, apply mode, draft/approval outcome) —
+# NULL on every directive that did not come from the change flow.
+_DIRECTIVE_COLUMN_MIGRATIONS: tuple[tuple[str, str], ...] = (
+    ("change_meta", "change_meta TEXT"),
+)
+
+
 def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
     """Add columns introduced after v1 to legacy DBs (safe on every open)."""
     cols = {row["name"] for row in conn.execute("PRAGMA table_info(projects)")}
     for col, ddl in _PROJECT_COLUMN_MIGRATIONS:
         if col not in cols:
             _add_column_if_missing(conn, "projects", col, ddl)
+    dcols = {
+        row["name"] for row in conn.execute("PRAGMA table_info(project_directives)")
+    }
+    for col, ddl in _DIRECTIVE_COLUMN_MIGRATIONS:
+        if col not in dcols:
+            _add_column_if_missing(conn, "project_directives", col, ddl)
 
 
 # ---------------------------------------------------------------------------

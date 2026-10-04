@@ -2287,3 +2287,77 @@ export interface ProjectArtifact {
   created_at: number;
   created_by: string | null;
 }
+
+// ── Projects redesign: changes ──
+/** What a requirement change is about (the sheet's kind chips). */
+export type ProjectChangeKind = "add" | "direction" | "output" | "attach" | "memory";
+/** When a change applies: stop the open run now, queue it, or only record it. */
+export type ProjectChangeApply = "now" | "next" | "record";
+
+/** What the agent understood from a change (from the seeded plan draft). */
+export interface ProjectChangeReading {
+  changes: string[];
+  affected_outputs: { id: string; title: string }[];
+  supersedes: { id: string; body: string }[];
+}
+
+export interface ProjectChangeApproval {
+  rev: number;
+  at: number;
+  by: string;
+  started: boolean;
+  run_no: number | null;
+  superseded: string[];
+}
+
+/** A directive as the change flow shows it — plain directives have `is_change: false`. */
+export interface ProjectChange extends ProjectDirective {
+  kinds: ProjectChangeKind[];
+  apply: ProjectChangeApply | null;
+  is_change: boolean;
+  stopped_run: number | null;
+  draft_rev: number | null;
+  reading: ProjectChangeReading | null;
+  approved: ProjectChangeApproval | null;
+}
+
+/** `GET /playbook/draft` when the draft was seeded by a change. */
+export interface ProjectChangeDraftState extends ProjectPlaybookDraftState {
+  change_id?: string;
+  reading?: ProjectChangeReading;
+}
+
+/** `POST /changes`. */
+export interface ProjectChangeResult {
+  change: ProjectChange;
+  draft: ProjectChangeDraftState;
+  stopped_run: number | null;
+  applies_from?: string;
+  replayed?: boolean;
+}
+
+/** `POST /changes/:id/approve`. */
+export interface ProjectChangeApproveResult {
+  change: ProjectChange;
+  rev: number;
+  active: true;
+  run: ProjectRun | null;
+  superseded: string[];
+  replayed?: boolean;
+}
+
+/** One run in `GET /changes` — the brief plus what the Iterations tab groups by. */
+export interface ProjectHistoryRun extends ProjectRunBrief {
+  id: string;
+  playbook_rev: number | null;
+  deliveries: number;
+  cards_total: number;
+  cards_done: number;
+}
+
+/** `GET /changes` — every directive (retired included) and every run. */
+export interface ProjectChangesHistory {
+  changes: ProjectChange[];
+  runs: ProjectHistoryRun[];
+  applies_from?: string;
+}

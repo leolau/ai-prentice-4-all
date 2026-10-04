@@ -2444,6 +2444,63 @@ export class HermesApiClient {
     }
     return res;
   }
+
+  // ── Projects redesign: changes ──
+  /** Every directive (retired included) with change metadata, and every run. */
+  async projectChanges(slug: string): Promise<import("@/types").ProjectChangesHistory> {
+    return this.request(
+      `/api/registry/projects/${encodeURIComponent(slug)}/changes`,
+    );
+  }
+
+  /** Record a requirement change; `now`/`next` also draft the revised plan. */
+  async createProjectChange(
+    slug: string,
+    payload: {
+      text: string;
+      kinds: import("@/types").ProjectChangeKind[];
+      apply: import("@/types").ProjectChangeApply;
+    },
+    idempotencyKey?: string,
+  ): Promise<import("@/types").ProjectChangeResult> {
+    return this.request(
+      `/api/registry/projects/${encodeURIComponent(slug)}/changes`,
+      {
+        method: "POST",
+        json: payload,
+        headers: idempotencyKey ? { "Idempotency-Key": idempotencyKey } : undefined,
+      },
+    );
+  }
+
+  /** Draft the revised plan again for a recorded change. */
+  async redraftProjectChange(
+    slug: string,
+    changeId: string,
+  ): Promise<{ change: import("@/types").ProjectChange; draft: import("@/types").ProjectChangeDraftState }> {
+    return this.request(
+      `/api/registry/projects/${encodeURIComponent(slug)}/changes/${encodeURIComponent(changeId)}/draft`,
+      { method: "POST", json: {} },
+    );
+  }
+
+  /** Activate the drafted plan and (unless `start: false`) start the next run. */
+  async approveProjectChange(
+    slug: string,
+    changeId: string,
+    payload: { rev: number; start?: boolean; supersedes?: string[] },
+    idempotencyKey?: string,
+  ): Promise<import("@/types").ProjectChangeApproveResult> {
+    return this.request(
+      `/api/registry/projects/${encodeURIComponent(slug)}/changes/${encodeURIComponent(changeId)}/approve`,
+      {
+        method: "POST",
+        json: payload,
+        headers: idempotencyKey ? { "Idempotency-Key": idempotencyKey } : undefined,
+      },
+    );
+  }
+
 }
 
 /**
