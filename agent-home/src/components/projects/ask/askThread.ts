@@ -68,6 +68,7 @@ const KINDS: ReadonlySet<string> = new Set<AskProjectSourceKind>([
   "requirement",
   "plan",
   "event",
+  "scope",
 ]);
 
 function isSource(value: unknown): value is AskProjectSource {
@@ -158,6 +159,8 @@ export function sourceTab(source: AskProjectSource): ProjectTab | null {
       return "plan";
     case "event":
       return "board";
+    case "scope":
+      return "scope";
     default:
       return null;
   }
