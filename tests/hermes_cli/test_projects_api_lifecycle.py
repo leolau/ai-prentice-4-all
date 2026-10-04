@@ -165,6 +165,84 @@ def _save_and_activate_playbook(env, project) -> int:
 
 
 # ---------------------------------------------------------------------------
+# Playbook revisions — discard is the paired judgement to activate
+# ---------------------------------------------------------------------------
+
+
+def test_discard_removes_a_proposed_revision(env):
+    project = _create_active_project(env)
+    client, _state = env
+    slug = project["slug"]
+    _save_and_activate_playbook(env, project)
+
+    resp = client.post(
+        f"{PREFIX}/{slug}/playbook", json={"body": "v2", "steps": STEPS}
+    )
+    rev2 = resp.json()["rev"]
+    listed = client.get(f"{PREFIX}/{slug}/playbook").json()
+    assert any(r["rev"] == rev2 and not r["active"] for r in listed["revisions"])
+
+    resp = client.delete(f"{PREFIX}/{slug}/playbook/{rev2}")
+    assert resp.status_code == 200, resp.text
+    assert resp.json() == {"rev": rev2, "discarded": True}
+    listed = client.get(f"{PREFIX}/{slug}/playbook").json()
+    assert all(r["rev"] != rev2 for r in listed["revisions"])
+    # Gone for good.
+    assert client.delete(f"{PREFIX}/{slug}/playbook/{rev2}").status_code == 404
+
+
+def test_discard_refuses_the_active_revision_and_pinned_revs(env):
+    project = _create_active_project(env)
+    client, _state = env
+    slug = project["slug"]
+    rev = _save_and_activate_playbook(env, project)
+
+    # The live plan cannot be discarded — activate another revision first.
+    resp = client.delete(f"{PREFIX}/{slug}/playbook/{rev}")
+    assert resp.status_code == 409
+    assert "active" in resp.json()["detail"]
+
+    # A rev a run pinned is that run's recorded plan — history stays.
+    with projects_db.connect_closing() as conn:
+        conn.execute(
+            "INSERT INTO project_runs "
+            "(id, project_id, run_no, trigger, triggered_by, profile, "
+            " playbook_rev, status, started_at, trace_id) "
+            "VALUES ('run_p', ?, 1, 'manual', 'leo', 'default', ?, 'done', "
+            " datetime('now'), NULL)",
+            (project["id"], rev),
+        )
+        conn.commit()
+        # Now supersede it so the pinned rev is inactive.
+        projects_db.save_playbook_rev(
+            conn, project_id=project["id"], body="v2", steps=[], created_by="leo"
+        )
+        projects_db.activate_playbook_rev(conn, project["id"], 2)
+    resp = client.delete(f"{PREFIX}/{slug}/playbook/{rev}")
+    assert resp.status_code == 409
+    assert "run 1" in resp.json()["detail"]
+
+
+def test_discard_is_a_human_act(env):
+    """The §16 gate: a session-less caller (an agent turn) cannot discard
+    a proposed revision, same as it cannot activate one."""
+    project = _create_active_project(env)
+    client, state = env
+    slug = project["slug"]
+    resp = client.post(
+        f"{PREFIX}/{slug}/playbook", json={"body": "v1", "steps": STEPS}
+    )
+    rev = resp.json()["rev"]
+    state["subject"] = ""  # an agent turn, not a verified human
+    try:
+        resp = client.delete(f"{PREFIX}/{slug}/playbook/{rev}")
+        assert resp.status_code == 403
+        assert "human" in resp.json()["detail"].lower()
+    finally:
+        state["subject"] = OWNER.user_id
+
+
+# ---------------------------------------------------------------------------
 # Archive (§13: the ordinary removal verb)
 # ---------------------------------------------------------------------------
 
