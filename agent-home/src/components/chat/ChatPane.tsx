@@ -1,63 +1,49 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState, useTransition } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+  useTransition,
+  type KeyboardEvent as ReactKeyboardEvent,
+} from "react";
 
 import { useRouter } from "next/navigation";
 
-import { ApprovalModal } from "@/components/chat/ApprovalModal";
 import { ArchivedModal } from "@/components/chat/ArchivedModal";
-import { InSessionSearch } from "@/components/chat/InSessionSearch";
-import { LiveActivity } from "@/components/chat/LiveActivity";
-import { DEFAULT_PROFILE, ProfilePicker } from "@/components/chat/ProfilePicker";
-import { MessageBubble } from "@/components/chat/MessageBubble";
 import { Composer } from "@/components/chat/Composer";
+import { ConversationList, titleOf } from "@/components/chat/ConversationList";
+import { InSessionSearch } from "@/components/chat/InSessionSearch";
+import { DEFAULT_PROFILE, ProfilePicker } from "@/components/chat/ProfilePicker";
 import { SessionModal } from "@/components/chat/SessionModal";
 import { SessionSearchBar } from "@/components/chat/SessionSearchBar";
-import { SessionTabs } from "@/components/chat/SessionTabs";
-import {
-  StatusIndicator,
-  type ChatActivity,
-} from "@/components/chat/StatusIndicator";
 import { TagFilterBar } from "@/components/chat/TagFilterBar";
+import { ChatThread } from "@/components/chat/thread/ChatThread";
 import {
   categorizeSession,
   categoryOverrideTagName,
+  CHAT_CATEGORY_LABELS,
   isCategoryOverrideTag,
   type ChatCategory,
 } from "@/lib/chat/categorize";
+import {
+  keyOf,
+  useBusyKeys,
+  useChatController,
+  useThread,
+  type ChatController,
+} from "@/lib/chat/chat-controller";
 import { chatHeaderActionsRef } from "@/lib/chat/header-actions";
-import { markSessionRead } from "@/lib/chat/last-read";
-import { CHAT_SESSION_LIST_LIMIT } from "@/lib/chat/session-limits";
-import {
-  setLastAssistantContent,
-  withLiveTurn,
-  type LiveTurn,
-} from "@/lib/chat/messages";
-import {
-  nextActiveAfterArchive,
-  orderSessions,
-  parseOrder,
-  SESSION_ORDER_STORAGE_KEY,
-} from "@/lib/chat/session-order";
+import { markSessionRead, readLastReadMap, type LastReadMap } from "@/lib/chat/last-read";
 import { withProfileBody, withProfileQuery } from "@/lib/chat/profile";
+import { CHAT_SESSION_LIST_LIMIT } from "@/lib/chat/session-limits";
 import { fetchSessionList } from "@/lib/chat/session-list-fetch";
-import {
-  attachChatStream,
-  cancelChatTurn,
-  streamChatTurn,
-  type ChatStreamHandlers,
-} from "@/lib/chat/stream";
-import {
-  decisionText,
-  deriveActivity,
-  emptyActivity,
-  runningTool,
-  STOPPED_NOTE,
-  type TurnActivity,
-} from "@/lib/chat/turn-activity";
-import { usePersistentState } from "@/lib/use-persistent-state";
+import { nextActiveAfterArchive } from "@/lib/chat/session-order";
 import type {
-  ChatApprovalRequest,
   ChatAttachment,
   ChatMessage,
   ProfileSummary,
@@ -66,14 +52,15 @@ import type {
   TagSuggestion,
 } from "@/types";
 
-/** Map key for a not-yet-created ("New conversation") session. */
-const NEW_KEY = "__new__";
-const keyOf = (id: string | null): string => id ?? NEW_KEY;
-
 export interface ChatPaneProps {
   initialSessions: SessionSummary[];
   initialSessionId: string | null;
+  /** First transcript page of `initialSessionId` (server-rendered). */
   initialMessages: ChatMessage[];
+  /** Older pages exist beyond `initialMessages`. */
+  initialHasMore?: boolean;
+  /** Phone only: open on the list or straight on the thread (deep link). */
+  initialScreen?: "list" | "thread";
   storageEnabled: boolean;
   /** Every profile this box serves (FG-28); one entry means no picker. */
   profiles: ProfileSummary[];
@@ -83,37 +70,100 @@ export interface ChatPaneProps {
   initialDraft?: string;
 }
 
-/** Idle-watch cadence for turns started on other surfaces. */
-const ACTIVE_WATCH_MS = 10_000;
+type Screen = "list" | "thread";
 
-/** Only user/assistant turns are shown in the visible thread. */
-function visible(messages: ChatMessage[]): ChatMessage[] {
-  return messages.filter((m) => m.role === "user" || m.role === "assistant");
+const DESKTOP_QUERY = "(min-width: 1024px)";
+/** `history.state` marker for a thread screen pushed from the list. */
+const PUSHED = "chatThreadPushed";
+
+const isDesktop = () =>
+  typeof window !== "undefined" &&
+  typeof window.matchMedia === "function" &&
+  window.matchMedia(DESKTOP_QUERY).matches;
+
+/** Write `?session=` without a server round trip. */
+function writeSessionUrl(id: string | null, mode: "push" | "replace") {
+  if (typeof window === "undefined") return;
+  const url = new URL(window.location.href);
+  if (id) url.searchParams.set("session", id);
+  else url.searchParams.delete("session");
+  url.searchParams.delete("draft");
+  const href = `${url.pathname}${url.search}${url.hash}`;
+  // Fresh state objects: Next's patched history copies its own router state
+  // in and syncs useSearchParams (an object carrying `__NA` would skip that).
+  if (mode === "push") {
+    window.history.pushState({ [PUSHED]: true }, "", href);
+  } else {
+    window.history.replaceState({ [PUSHED]: wasPushed() }, "", href);
+  }
 }
 
-function dropTrailingEmptyAssistant(prev: ChatMessage[]): ChatMessage[] {
-  const last = prev[prev.length - 1];
-  return last && last.role === "assistant" && last.content === ""
-    ? prev.slice(0, -1)
-    : prev;
-}
+const wasPushed = (): boolean =>
+  typeof window !== "undefined" &&
+  Boolean((window.history.state as Record<string, unknown> | null)?.[PUSHED]);
 
-/** True while the latest assistant turn has streamed no text yet. */
-function assistantIsEmpty(messages: ChatMessage[]): boolean {
-  const last = messages[messages.length - 1];
-  return !last || last.role !== "assistant" || last.content === "";
+/** Only the Stop state of the open turn — re-renders on that flag, not per token. */
+function useStopping(c: ChatController, key: string): boolean {
+  const subscribe = useCallback((cb: () => void) => c.subscribeLive(key, cb), [c, key]);
+  const get = useCallback(() => c.getLive(key)?.activity.stopping ?? false, [c, key]);
+  return useSyncExternalStore(subscribe, get, get);
 }
 
 /**
- * FG-20 Wave C1 — the mobile-first one-brain chat pane. A conversation switcher
- * (sheet), a scrollable message thread, and a composer that sends one turn
- * through the `agent-home` BFF (`/api/chat/*`) to the principal-scoped Python
- * endpoint. It never talks to the AI layer or the model loop directly.
+ * In-conversation search. Pages the whole history in first so matches in
+ * older pages are found; indices line up with ChatThread's `data-msg-index`.
+ */
+function InConversationSearch({
+  controller,
+  sessionId,
+  initialQuery,
+  onClose,
+  highlightRef,
+}: {
+  controller: ChatController;
+  sessionId: string;
+  initialQuery?: string;
+  onClose: () => void;
+  highlightRef: React.RefObject<((msgIndex: number, term: string) => void) | null>;
+}) {
+  const thread = useThread(controller, sessionId);
+  const [loading, setLoading] = useState(true);
+  useEffect(() => {
+    let live = true;
+    void controller.loadAll(sessionId).finally(() => {
+      if (live) setLoading(false);
+    });
+    return () => {
+      live = false;
+    };
+  }, [controller, sessionId]);
+  return (
+    <InSessionSearch
+      messages={thread.messages}
+      initialQuery={initialQuery}
+      loading={loading}
+      onClose={onClose}
+      highlightRef={highlightRef}
+    />
+  );
+}
+
+const iconButton =
+  "flex h-8 min-w-8 shrink-0 items-center justify-center rounded-lg border px-2 text-sm focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-accent)]";
+
+/**
+ * FG-20 Wave C1 — the one-brain Chats page on the shared chat engine. Desktop
+ * (lg+) is a conversation sidebar beside the open thread; a phone shows the
+ * list, then the thread with a back button. Turns run through
+ * `ChatController` (`/api/chat/*` BFF), so a conversation keeps streaming
+ * while another one is on screen. It never talks to the AI layer directly.
  */
 export function ChatPane({
   initialSessions,
   initialSessionId,
   initialMessages,
+  initialHasMore = false,
+  initialScreen = "list",
   storageEnabled,
   profiles,
   profile,
@@ -121,51 +171,19 @@ export function ChatPane({
 }: ChatPaneProps) {
   const router = useRouter();
   const [switchingProfile, startProfileSwitch] = useTransition();
-  // Every client read below carries the selected profile, because a profile is
-  // a whole HERMES_HOME: reading the default profile's sessions while the turn
-  // runs in another is what files one profile's reply in another's history.
+  // Every client read carries the selected profile: a profile is a whole
+  // HERMES_HOME, and reading another one's sessions files replies in the
+  // wrong history.
   const path = (p: string) => withProfileQuery(p, profile);
   const payload = <T extends object>(b: T) => withProfileBody(b, profile);
+
   const [sessions, setSessions] = useState<SessionSummary[]>(initialSessions);
-  // The user's manual left-to-right ordering of the tabs, persisted per-device
-  // as a JSON string (a stable snapshot for useSyncExternalStore). The array is
-  // derived and applied to whatever the server most recently returned.
-  const [orderRaw, setOrderRaw] = usePersistentState<string>(
-    SESSION_ORDER_STORAGE_KEY,
-    "",
-    (raw) => raw,
-    (value) => value,
-  );
-  const orderedSessions = useMemo(
-    () => orderSessions(sessions, parseOrder(orderRaw)),
-    [sessions, orderRaw],
-  );
   const [sessionId, setSessionId] = useState<string | null>(initialSessionId);
-  const [messages, setMessages] = useState<ChatMessage[]>(visible(initialMessages));
+  const [screen, setScreen] = useState<Screen>(initialScreen);
+  const selectedRef = useRef<string | null>(sessionId);
+  const [lastRead, setLastRead] = useState<LastReadMap | null>(null);
   const [detailsSession, setDetailsSession] = useState<SessionSummary | null>(null);
   const [archivedOpen, setArchivedOpen] = useState(false);
-  const [loadingThread, setLoadingThread] = useState(false);
-  // Per-session state, keyed by session id (or NEW_KEY). Turns run per session
-  // so the user can switch conversations at any time without cancelling or
-  // cross-contaminating an in-flight turn.
-  const [sendingKeys, setSendingKeys] = useState<string[]>([]);
-  const [error, setError] = useState<string | null>(null);
-  const [approvals, setApprovals] = useState<Record<string, ChatApprovalRequest>>({});
-  const [decisions, setDecisions] = useState<Record<string, string>>({});
-  const [liveActivity, setLiveActivity] = useState<Record<string, TurnActivity>>({});
-  // Wall clock, ticked once a second only while a turn is in flight, so the
-  // elapsed counter / long-task hint / stall warning advance without a timer
-  // per turn.
-  const [now, setNow] = useState(() => Date.now());
-  const [resolvingApproval, setResolvingApproval] = useState(false);
-  const threadRef = useRef<HTMLDivElement | null>(null);
-  // Mirrors the selected session for use inside async stream callbacks, and
-  // buffers turns whose session is not currently on screen.
-  const selectedRef = useRef<string | null>(sessionId);
-  const liveRef = useRef<Map<string, LiveTurn>>(new Map());
-  // One AbortController per in-flight turn (keyed like the buffers) so the user
-  // can stop the turn for the conversation currently on screen.
-  const abortRef = useRef<Map<string, AbortController>>(new Map());
 
   // ── Tagging state ──
   const [allTags, setAllTags] = useState<SessionTag[]>([]);
@@ -176,84 +194,68 @@ export function ChatPane({
   const [matchMode, setMatchMode] = useState<"any" | "all">("any");
 
   // ── Search state ──
-  const [crossSearchOpen, setCrossSearchOpen] = useState(false);
-  const [inSearchOpen, setInSearchOpen] = useState(false);
+  const [crossSearch, setCrossSearch] = useState<string | null>(null);
+  const [inSearch, setInSearch] = useState<{ query: string } | null>(null);
   const [highlightTerm, setHighlightTerm] = useState<string | undefined>();
-  const highlightCallbackRef = useRef<((msgIndex: number, term: string) => void) | null>(null);
+  const highlightCallbackRef = useRef<((msgIndex: number, term: string) => void) | null>(
+    (_msgIndex: number, term: string) => setHighlightTerm(term || undefined),
+  );
 
-  // Wire the InSessionSearch callback so it sets the highlight term.
-  useEffect(() => {
-    highlightCallbackRef.current = (_msgIndex: number, term: string) => {
-      setHighlightTerm(term || undefined);
-    };
-  }, []);
+  const controller = useChatController({
+    profile,
+    adoptLandedSession: true,
+    onTurnSettled: (key, landed) => {
+      const selected = selectedRef.current;
+      if (keyOf(selected) === key || (landed && landed === selected)) {
+        markRead(landed ?? selected);
+      }
+      void refreshSessions();
+    },
+  });
+  // The server-rendered first page, once, before the first paint.
+  useState(() => {
+    if (initialSessionId) {
+      controller.seed(initialSessionId, initialMessages, initialHasMore);
+    }
+    return null;
+  });
+
+  const busyKeys = useBusyKeys(controller);
+  const selKey = keyOf(sessionId);
+  const selBusy = busyKeys.includes(selKey);
+  const stopping = useStopping(controller, selKey);
+
+  function markRead(id: string | null) {
+    if (!id) return;
+    markSessionRead(id);
+    setLastRead(readLastReadMap());
+  }
 
   useEffect(() => {
     selectedRef.current = sessionId;
   }, [sessionId]);
 
-  // Deep-linked open (notification tap / ?session=…): the transcript is
-  // rendered server-side, so mark it read once on mount for the unread badge.
+  // Last-read markers are browser-local; read them after hydration. A deep
+  // link (or the desktop's open thread) counts as seen.
   useEffect(() => {
-    if (initialSessionId) markSessionRead(initialSessionId);
+    if (initialSessionId && (initialScreen === "thread" || isDesktop())) {
+      markSessionRead(initialSessionId);
+    }
+    setLastRead(readLastReadMap());
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Idle watch: a turn can start on the open conversation from another
-  // surface (Telegram, another device, a scheduled job) or be mid-flight when
-  // the page loads. While no local turn is running, poll `active` on a short
-  // cadence and on wake; when a run appears, attach to its stream so the
-  // reply arrives live instead of on the next manual reload. Also covers the
-  // mount-time "re-attach to the in-flight turn" case the old one-shot
-  // effect handled.
-  const watchBusy = sendingKeys.includes(keyOf(sessionId));
+  // surface (Telegram, another device, a scheduled job) or be mid-flight
+  // when the page loads; the controller attaches to it.
   useEffect(() => {
-    if (!sessionId || watchBusy) return;
-    let cancelled = false;
-    let attaching = false;
-    const check = async () => {
-      if (cancelled || attaching || document.visibilityState !== "visible") {
-        return;
-      }
-      try {
-        const res = await fetch(
-          path(`/api/chat/active?sessionId=${encodeURIComponent(sessionId)}`),
-          { cache: "no-store" },
-        );
-        const data = (await res.json()) as { runId?: string | null };
-        if (cancelled || !res.ok || !data.runId) return;
-        attaching = true;
-        await resumeTurn(sessionId, data.runId);
-        // Reconcile against the persisted transcript whether the attach
-        // succeeded or the turn had already finished.
-        if (!cancelled && selectedRef.current === sessionId) {
-          void reloadTranscript(sessionId);
-        }
-      } catch {
-        // A failed probe is non-fatal — the next tick retries.
-      } finally {
-        attaching = false;
-      }
-    };
-    void check();
-    const interval = window.setInterval(check, ACTIVE_WATCH_MS);
-    const onWake = () => void check();
-    window.addEventListener("focus", onWake);
-    document.addEventListener("visibilitychange", onWake);
-    return () => {
-      cancelled = true;
-      window.clearInterval(interval);
-      window.removeEventListener("focus", onWake);
-      document.removeEventListener("visibilitychange", onWake);
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sessionId, profile, watchBusy]);
+    if (!sessionId) return;
+    return controller.watchActive(sessionId);
+  }, [controller, sessionId]);
 
-  // Register the chat header action callbacks (startNew / openArchived) into the
-  // shared ref so the ChatHeaderActions component in the MobileShell header can
-  // invoke them.  Runs on every render (no deps) so the ref always holds the
-  // latest closures.  The cleanup resets to noops on unmount so a stale ref
-  // can't fire after navigating away from the chat page.
+  // Register the header action callbacks (startNew / openArchived) for the
+  // ChatHeaderActions in the MobileShell header. Every render, so the ref
+  // holds the latest closures; reset to noops on unmount.
   useEffect(() => {
     chatHeaderActionsRef.current.startNew = startNewConversation;
     chatHeaderActionsRef.current.openArchived = () => setArchivedOpen(true);
@@ -267,408 +269,137 @@ export function ChatPane({
     };
   }, []);
 
+  // Browser Back from a pushed thread screen returns to the list (phone).
   useEffect(() => {
-    if (sendingKeys.length === 0) return;
-    const id = window.setInterval(() => setNow(Date.now()), 1000);
-    return () => window.clearInterval(id);
-  }, [sendingKeys.length]);
-
-  const selKey = keyOf(sessionId);
-  const selBusy = sendingKeys.includes(selKey);
-  const selApproval = approvals[selKey] ?? null;
-  const selDecision = decisions[selKey] ?? null;
-  const selTurn = selBusy ? (liveActivity[selKey] ?? null) : null;
-  const selRunningTool = runningTool(selTurn);
-  const selActivity: ChatActivity = deriveActivity({
-    busy: selBusy,
-    turn: selTurn,
-    approval: selApproval !== null,
-    hasOutput: !assistantIsEmpty(messages),
-  });
-
-  // Keep the thread pinned to the bottom as content grows: streamed text, the
-  // status indicator, an approval card, or the decision note. A double rAF lets
-  // late-laid-out nodes (the approval card renders below the scroll box) settle
-  // before we measure, so the newest content is always in view.
-  useEffect(() => {
-    let raf1 = 0;
-    let raf2 = 0;
-    const pin = () => {
-      const el = threadRef.current;
-      if (el) el.scrollTop = el.scrollHeight;
+    const onPop = () => {
+      const id = new URL(window.location.href).searchParams.get("session");
+      if (!id || !wasPushed()) {
+        setScreen("list");
+        return;
+      }
+      setScreen("thread");
+      if (id !== selectedRef.current) {
+        selectedRef.current = id;
+        setSessionId(id);
+        void controller.open(id);
+      }
     };
-    raf1 = requestAnimationFrame(() => {
-      pin();
-      raf2 = requestAnimationFrame(pin);
-    });
+    window.addEventListener("popstate", onPop);
+    return () => window.removeEventListener("popstate", onPop);
+  }, [controller]);
+
+  // ── Layout: fill the viewport below the shell header ─────────────────
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  useLayoutEffect(() => {
+    const el = rootRef.current;
+    if (!el) return;
+    const measure = () => {
+      const top = el.getBoundingClientRect().top + window.scrollY;
+      el.style.setProperty("--chat-pane-top", `${Math.max(0, Math.round(top))}px`);
+    };
+    measure();
+    window.addEventListener("resize", measure);
+    const ro =
+      typeof ResizeObserver === "undefined" ? null : new ResizeObserver(measure);
+    ro?.observe(document.body);
     return () => {
-      cancelAnimationFrame(raf1);
-      cancelAnimationFrame(raf2);
+      window.removeEventListener("resize", measure);
+      ro?.disconnect();
     };
-  }, [messages, sendingKeys, selApproval, selDecision, loadingThread, liveActivity]);
+  }, []);
 
-  const removeSending = (k: string) =>
-    setSendingKeys((prev) => prev.filter((x) => x !== k));
-  function dropKey<T>(rec: Record<string, T>, k: string): Record<string, T> {
-    if (!(k in rec)) return rec;
-    const next = { ...rec };
-    delete next[k];
-    return next;
+  // ── Navigation ───────────────────────────────────────────────────────
+
+  function showThread(id: string | null) {
+    const pushed = !isDesktop() && screen === "list";
+    setScreen("thread");
+    writeSessionUrl(id, pushed ? "push" : "replace");
   }
 
-  async function openConversation(id: string) {
-    // Switching is allowed at any time — a turn in another session keeps
-    // streaming into its own buffer and is overlaid when you return to it.
-    if (id === sessionId) return;
-    setSessionId(id);
-    selectedRef.current = id;
-    setError(null);
-    setLoadingThread(true);
-    // Show any buffered live turn for this session immediately.
-    setMessages(withLiveTurn([], liveRef.current.get(keyOf(id))));
-    try {
-      const res = await fetch(
-        path(`/api/chat/messages?sessionId=${encodeURIComponent(id)}`),
-        { cache: "no-store" },
-      );
-      const body = (await res.json()) as {
-        messages?: ChatMessage[];
-        detail?: string;
-      };
-      if (!res.ok) throw new Error(body.detail ?? "Failed to load conversation.");
-      // Re-read the buffer (it may have grown while the transcript loaded) and
-      // overlay it onto the persisted history.
-      if (selectedRef.current === id) {
-        setMessages(
-          withLiveTurn(visible(body.messages ?? []), liveRef.current.get(keyOf(id))),
-        );
-        markSessionRead(id);
-      }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to load conversation.");
-    } finally {
-      setLoadingThread(false);
+  function selectSession(id: string) {
+    if (id !== sessionId) {
+      markRead(sessionId);
+      selectedRef.current = id;
+      setSessionId(id);
+      setInSearch(null);
+      setHighlightTerm(undefined);
     }
-  }
-
-  /**
-   * Quiet in-place transcript re-read for the session currently on screen —
-   * no loading state, no session switching. Used after the idle watcher
-   * attaches to an externally-started turn so the persisted rows replace the
-   * live overlay, and as the fallthrough when the turn finished before we
-   * could attach.
-   */
-  async function reloadTranscript(id: string) {
-    try {
-      const res = await fetch(
-        path(`/api/chat/messages?sessionId=${encodeURIComponent(id)}`),
-        { cache: "no-store" },
-      );
-      const body = (await res.json()) as { messages?: ChatMessage[] };
-      if (!res.ok) return;
-      if (selectedRef.current === id) {
-        setMessages(
-          withLiveTurn(visible(body.messages ?? []), liveRef.current.get(keyOf(id))),
-        );
-        markSessionRead(id);
-      }
-    } catch {
-      // A stale transcript is non-fatal — the next change retries.
-    }
+    void controller.open(id);
+    markRead(id);
+    showThread(id);
   }
 
   function startNewConversation() {
-    setSessionId(null);
+    if (sessionId !== null) markRead(sessionId);
     selectedRef.current = null;
-    setMessages(withLiveTurn([], liveRef.current.get(NEW_KEY)));
-    setError(null);
+    setSessionId(null);
+    setInSearch(null);
+    setHighlightTerm(undefined);
+    showThread(null);
   }
 
-  /** Start (or reset) the activity record for a turn, stamping its clock. */
-  function beginActivity(turnKey: string, runId: string | null = null) {
-    setLiveActivity((prev) => ({ ...prev, [turnKey]: emptyActivity(runId) }));
-  }
-
-  function makeTurnHandlers(
-    turnKey: string,
-    setLive: (content: string) => void,
-  ): ChatStreamHandlers {
-    // Every stream event bumps lastEventAt so the stall detector only fires
-    // on genuine silence, not on a long but visibly active step.
-    const touch = (
-      update: (cur: TurnActivity) => Partial<TurnActivity>,
-    ) =>
-      setLiveActivity((prev) => {
-        const cur = prev[turnKey] ?? emptyActivity();
-        return {
-          ...prev,
-          [turnKey]: { ...cur, ...update(cur), lastEventAt: Date.now() },
-        };
-      });
-    return {
-      onAccepted: (runId, sid) =>
-        touch(() => ({ accepted: true, runId, sessionId: sid })),
-      onCancelled: () => {
-        touch(() => ({ stopping: true }));
-        setDecisions((prev) => ({ ...prev, [turnKey]: STOPPED_NOTE }));
-      },
-      onDelta: (delta) => {
-        const buf = liveRef.current.get(turnKey);
-        setLive((buf?.assistant ?? "") + delta);
-        touch(() => ({ accepted: true }));
-      },
-      onReasoning: (text) =>
-        touch((cur) => ({ reasoning: cur.reasoning + text, accepted: true })),
-      onToolStart: (tool) =>
-        touch((cur) => ({
-          tools: [...cur.tools, { ...tool, done: false }],
-          accepted: true,
-        })),
-      onToolComplete: (tool) =>
-        touch((cur) => ({
-          tools: cur.tools.map((c) => (c.id === tool.id ? { ...c, done: true } : c)),
-        })),
-      onApproval: (req) => {
-        setApprovals((prev) => ({ ...prev, [turnKey]: req }));
-        touch(() => ({}));
-      },
-      onCompleted: (content) => {
-        setApprovals((prev) => dropKey(prev, turnKey));
-        if (content) setLive(content);
-      },
-      onError: (message) => setError(message),
-    };
-  }
-
-  /**
-   * Reload mid-turn: the server-side turn outlives the page, so re-attach to
-   * its stream and keep the content flowing. The transcript already ends at
-   * the user message; a trailing assistant bubble is added only in that case.
-   */
-  async function resumeTurn(sid: string, runId: string) {
-    const turnKey = keyOf(sid);
-    if (sendingKeys.includes(turnKey)) return; // already attached/attaching
-    setError(null);
-    setSendingKeys((prev) =>
-      prev.includes(turnKey) ? prev : [...prev, turnKey],
-    );
-    liveRef.current.set(turnKey, { user: "", assistant: "" });
-    beginActivity(turnKey, runId);
-    setMessages((prev) => {
-      const last = prev[prev.length - 1];
-      return last && last.role === "user"
-        ? [...prev, { role: "assistant", content: "" }]
-        : prev;
-    });
-    const setLive = (content: string) => {
-      const buf = liveRef.current.get(turnKey);
-      if (buf) buf.assistant = content;
-      if (selectedRef.current === sid) {
-        setMessages((prev) => setLastAssistantContent(prev, content));
-      }
-    };
-    try {
-      await attachChatStream(
-        { sessionId: sid, runId },
-        makeTurnHandlers(turnKey, setLive),
-      );
-      void refreshSessions();
-    } catch {
-      // The grace window may have passed; the next transcript load shows the
-      // finished turn.
-    } finally {
-      removeSending(turnKey);
-      liveRef.current.delete(turnKey);
-      setApprovals((prev) => dropKey(prev, turnKey));
-      setLiveActivity((prev) => dropKey(prev, turnKey));
-    }
-  }
-
-  /**
-   * Send one turn. Returns false only when the message never reached the
-   * agent (transport failure) — the composer restores the draft on that
-   * signal. A user-initiated stop resolves true: the streamed partial stays,
-   * and restoring the draft would read as an error that wasn't.
-   */
-  async function send(text: string, attachments: ChatAttachment[]): Promise<boolean> {
-    // The session this turn belongs to, captured up-front so late-arriving
-    // events are attributed to their origin, not to whatever is selected later.
-    const turnSessionId = sessionId;
-    const turnKey = keyOf(turnSessionId);
-    if (sendingKeys.includes(turnKey)) return false; // one live turn per session
-    setError(null);
-    setApprovals((prev) => dropKey(prev, turnKey));
-    setDecisions((prev) => dropKey(prev, turnKey));
-    setSendingKeys((prev) => [...prev, turnKey]);
-    // Buffer this turn so it survives session switches; the buffer's assistant
-    // text is the single source of truth for accumulated deltas.
-    liveRef.current.set(turnKey, { user: text, assistant: "" });
-    beginActivity(turnKey);
-    const controller = new AbortController();
-    abortRef.current.set(turnKey, controller);
-    setMessages((prev) => [
-      ...prev,
-      { role: "user", content: text },
-      { role: "assistant", content: "" },
-    ]);
-
-    const onThisSession = () => selectedRef.current === turnSessionId;
-    // Update the trailing assistant bubble by position (identity-safe), but
-    // only when this turn's session is the one on screen — otherwise just grow
-    // the buffer so we never write into another session's thread.
-    const setLive = (content: string) => {
-      const buf = liveRef.current.get(turnKey);
-      if (buf) buf.assistant = content;
-      if (onThisSession()) {
-        setMessages((prev) => setLastAssistantContent(prev, content));
-      }
-    };
-
-    try {
-      const { sessionId: landed } = await streamChatTurn(
-        {
-          sessionId: turnSessionId,
-          message: text,
-          attachments,
-          signal: controller.signal,
-          profile,
-        },
-        makeTurnHandlers(turnKey, setLive),
-      );
-      // A brand-new session lands an id only at completion; you cannot have
-      // navigated to it mid-stream, so adopt it only if still on this turn.
-      if (landed && landed !== turnSessionId && onThisSession()) {
-        setSessionId(landed);
-        selectedRef.current = landed;
-      }
-      if (landed && onThisSession()) markSessionRead(landed);
-      // A turn stopped before its first token completes with no text; never
-      // leave a blank reply bubble behind.
-      if (onThisSession()) setMessages(dropTrailingEmptyAssistant);
-      void refreshSessions();
-      return true;
-    } catch (err) {
-      const aborted = err instanceof DOMException && err.name === "AbortError";
-      if (aborted) {
-        // The user stopped the turn. Keep whatever streamed so far; only drop a
-        // trailing empty assistant bubble so we never leave a blank reply.
-        if (onThisSession()) setMessages(dropTrailingEmptyAssistant);
-      } else {
-        if (onThisSession()) {
-          setMessages((prev) => prev.slice(0, Math.max(0, prev.length - 2)));
-        }
-        setError(err instanceof Error ? err.message : "The message could not be sent.");
-      }
-      return !aborted ? false : true;
-    } finally {
-      // Turn is done and now persisted server-side; drop the live buffer so a
-      // later re-open shows the canonical transcript, not a duplicate overlay.
-      removeSending(turnKey);
-      liveRef.current.delete(turnKey);
-      abortRef.current.delete(turnKey);
-      setApprovals((prev) => dropKey(prev, turnKey));
-      setLiveActivity((prev) => dropKey(prev, turnKey));
-    }
-  }
-
-  async function resolveApproval(choice: string) {
-    const req = selApproval;
-    if (!req || resolvingApproval) return;
-    const targetKey = selKey;
-    setResolvingApproval(true);
-    setError(null);
-    try {
-      const res = await fetch("/api/chat/approval", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ runId: req.runId, choice }),
-      });
-      if (!res.ok) {
-        const body = (await res.json().catch(() => ({}))) as { detail?: string };
-        throw new Error(body.detail ?? "Your decision could not be submitted.");
-      }
-      // The turn resumes on the open stream. Clear the card and leave an inline
-      // note so it is clear what the agent will now do (or that it was denied).
-      setApprovals((prev) => dropKey(prev, targetKey));
-      setDecisions((prev) => ({ ...prev, [targetKey]: decisionText(choice, req) }));
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Your decision could not be submitted.");
-    } finally {
-      setResolvingApproval(false);
-    }
-  }
-
-  // Stop the in-flight turn for the conversation currently on screen. Closing
-  // the connection alone would NOT stop the server-side turn (it survives a
-  // closed tab by design), so ask the server to interrupt the agent and keep
-  // the stream open to receive the partial reply. Before the server has
-  // acknowledged the turn there is no run to cancel; aborting the request is
-  // the only option then.
-  async function stopTurn() {
-    const targetKey = selKey;
-    const turn = liveActivity[targetKey];
-    const runId = turn?.runId ?? null;
-    const sid = turn?.sessionId ?? sessionId;
-    if (!runId || !sid || turn?.stopping) {
-      abortRef.current.get(targetKey)?.abort();
+  function backToList() {
+    if (wasPushed()) {
+      window.history.back();
       return;
     }
-    setLiveActivity((prev) => {
-      const cur = prev[targetKey];
-      return cur ? { ...prev, [targetKey]: { ...cur, stopping: true } } : prev;
-    });
-    try {
-      await cancelChatTurn({ sessionId: sid, runId, profile });
-    } catch (err) {
-      abortRef.current.get(targetKey)?.abort();
-      setError(err instanceof Error ? err.message : "The agent could not be stopped.");
+    setScreen("list");
+    writeSessionUrl(null, "replace");
+  }
+
+  function onThreadKeyDown(e: ReactKeyboardEvent<HTMLElement>) {
+    if (e.key !== "Escape" || e.defaultPrevented || isDesktop()) return;
+    const tag = (e.target as HTMLElement).tagName;
+    if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+    e.preventDefault();
+    backToList();
+  }
+
+  // ── Turns ────────────────────────────────────────────────────────────
+
+  async function send(text: string, attachments: ChatAttachment[]): Promise<boolean> {
+    const from = sessionId;
+    const res = await controller.send(from, text, attachments);
+    // A new conversation lands on its id; follow it if still on screen.
+    if (res.sessionId && res.sessionId !== from && selectedRef.current === from) {
+      selectedRef.current = res.sessionId;
+      setSessionId(res.sessionId);
+      markRead(res.sessionId);
+      writeSessionUrl(res.sessionId, "replace");
     }
+    return res.ok;
   }
 
   /**
-   * Switch which profile this chat addresses. This changes the brain AND the
-   * conversation list, so it navigates rather than refetching in place: the
-   * server then loads that profile's sessions and transcript exactly as it does
-   * on first paint, and the URL carries the choice (shareable, reload-safe).
-   * Refused while a turn is streaming — navigating would abandon it.
+   * Switch which profile this chat addresses. Navigates (the server loads
+   * that profile's sessions) and is refused while a turn is streaming.
    */
   function switchProfile(next: string) {
-    if (next === profile || sendingKeys.length > 0) return;
-    // In a transition so the picker can report the wait: the server has to load
-    // another home's sessions and transcript, which is not instant.
+    if (next === profile || busyKeys.length > 0) return;
     startProfileSwitch(() => {
       router.push(
-        next === DEFAULT_PROFILE
-          ? "/chat"
-          : `/chat?profile=${encodeURIComponent(next)}`,
+        next === DEFAULT_PROFILE ? "/chat" : `/chat?profile=${encodeURIComponent(next)}`,
       );
     });
   }
 
-  function reorderSessions(orderedIds: string[]) {
-    setOrderRaw(JSON.stringify(orderedIds));
-  }
+  // ── Sessions ─────────────────────────────────────────────────────────
 
   async function refreshSessions() {
     try {
       const params = new URLSearchParams();
-      // Match the first-paint fetch: a refresh must not shrink the picker to
-      // the upstream's default page size.
+      // Match the first-paint fetch: a refresh must not shrink the list.
       params.set("limit", String(CHAT_SESSION_LIST_LIMIT));
-      // The strip groups cron sessions into their own "Scheduled" row
-      // instead of hiding them — opt in to seeing them (see the BFF
-      // route's doc comment for the empty-string-vs-absent distinction).
+      // Cron sessions are grouped as "Scheduled", not hidden.
       params.set("exclude_sources", "");
       if (includeTags.length > 0) params.set("tags", includeTags.join(","));
       if (excludeTags.length > 0) params.set("exclude_tags", excludeTags.join(","));
       params.set("tag_match", matchMode);
-      // `force`: every caller reaches here right after a mutation — a shared
-      // in-flight GET could answer with pre-mutation state, and the 2 s reuse
-      // window could replay it. A fresh request is the correct read here.
-      const body = await fetchSessionList(
-        path(`/api/chat/sessions?${params.toString()}`),
-        { force: true },
-      );
+      // `force`: callers run right after a mutation; a shared GET could
+      // answer with pre-mutation state.
+      const body = await fetchSessionList(path(`/api/chat/sessions?${params.toString()}`), {
+        force: true,
+      });
       if (body?.sessions) setSessions(body.sessions);
     } catch {
       // A stale conversation list is non-fatal.
@@ -716,19 +447,22 @@ export function ChatPane({
     const s = detailsSession;
     if (!s) return;
     await setArchived(s.id, true);
-    // Drop it from the strip. If it was the open conversation, switch to a
-    // neighbouring conversation (in display order) rather than dropping the
-    // user into a blank "New conversation"; only fall back to the empty state
-    // when no conversations remain.
+    // Archiving the open conversation moves to its neighbour in the list
+    // (newest first), not to a blank "New conversation".
+    const ordered = [...sessions].sort(
+      (a, b) =>
+        (b.last_active ?? b.started_at ?? 0) - (a.last_active ?? a.started_at ?? 0),
+    );
     const nextId = nextActiveAfterArchive(
-      orderedSessions.map((x) => x.id),
+      ordered.map((x) => x.id),
       s.id,
     );
     setSessions((prev) => prev.filter((x) => x.id !== s.id));
     if (sessionId === s.id) {
-      if (nextId) void openConversation(nextId);
+      if (nextId) selectSession(nextId);
       else startNewConversation();
     }
+    controller.evict(s.id);
     void refreshSessions();
   }
 
@@ -737,7 +471,7 @@ export function ChatPane({
     void refreshSessions();
   }
 
-  // ── Tag handlers ──────────────────────────────────────────────────
+  // ── Tag handlers ─────────────────────────────────────────────────────
 
   async function loadAllTags() {
     try {
@@ -746,10 +480,11 @@ export function ChatPane({
         const body = (await res.json()) as { tags?: SessionTag[] };
         if (body.tags) setAllTags(body.tags);
       }
-    } catch { /* non-fatal */ }
+    } catch {
+      /* non-fatal */
+    }
   }
 
-  // Load session tags when the SessionModal opens.
   async function onOpenDetails(s: SessionSummary) {
     setDetailsSession(s);
     setTagSuggestions([]);
@@ -764,7 +499,9 @@ export function ChatPane({
           const body = (await res.json()) as { tags?: SessionTag[] };
           if (body.tags) setSessionTags(body.tags);
         }
-      } catch { /* non-fatal */ }
+      } catch {
+        /* non-fatal */
+      }
     }
   }
 
@@ -780,9 +517,7 @@ export function ChatPane({
     const body = (await res.json()) as { tag?: SessionTag };
     if (body.tag) {
       setSessionTags((prev) =>
-        prev.some((t) => t.name === body.tag!.name)
-          ? prev
-          : [...prev, body.tag!],
+        prev.some((t) => t.name === body.tag!.name) ? prev : [...prev, body.tag!],
       );
       void loadAllTags();
     }
@@ -801,16 +536,11 @@ export function ChatPane({
     void loadAllTags();
   }
 
-  /** Move the open conversation to a different category. Stored as a
-   * reserved `category:<value>` tag (see `lib/chat/categorize.ts`) — a
-   * session should carry at most one, so any existing override is removed
-   * before the new one is added. Refreshes the strip afterward so it
-   * regroups immediately instead of waiting for the next natural refresh. */
+  /** Move the conversation to another category: a reserved `category:<value>`
+   * tag (see `lib/chat/categorize.ts`), at most one per session. */
   async function setSessionCategory(next: ChatCategory) {
     const existing = sessionTags.find((t) => isCategoryOverrideTag(t));
-    if (existing) {
-      await removeTag(existing.id);
-    }
+    if (existing) await removeTag(existing.id);
     await addTag(categoryOverrideTagName(next));
     void refreshSessions();
   }
@@ -840,9 +570,7 @@ export function ChatPane({
     const body = (await res.json()) as { tag?: SessionTag };
     if (body.tag) {
       setSessionTags((prev) =>
-        prev.some((t) => t.name === body.tag!.name)
-          ? prev
-          : [...prev, body.tag!],
+        prev.some((t) => t.name === body.tag!.name) ? prev : [...prev, body.tag!],
       );
       void loadAllTags();
     }
@@ -853,7 +581,7 @@ export function ChatPane({
     setTagSuggestions((prev) => prev.filter((t) => t !== suggestion));
   }
 
-  // Auto-suggest tags when opening the SessionModal if the session has 5+ messages.
+  // Auto-suggest tags when the details open on a session with 5+ messages.
   useEffect(() => {
     if (!detailsSession || detailsSession.message_count < 5 || tagSuggestions.length > 0) {
       return;
@@ -870,8 +598,6 @@ export function ChatPane({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // ── Tag filter handlers ──
-
   function toggleTagFilter(name: string) {
     if (includeTags.includes(name)) {
       // include → exclude
@@ -886,196 +612,226 @@ export function ChatPane({
     }
   }
 
-  // Re-fetch sessions when tag filter changes.
+  // Re-fetch sessions when the tag filter changes.
   useEffect(() => {
     void refreshSessions();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [includeTags, excludeTags, matchMode]);
 
-  // ── Search handlers ──────────────────────────────────────────────
+  // ── Search ───────────────────────────────────────────────────────────
 
-  async function crossSessionSearch(q: string) {
-    const res = await fetch(
-      path(`/api/chat/sessions/search?q=${encodeURIComponent(q)}`),
-      { cache: "no-store" },
-    );
-    if (!res.ok) return [];
-    const body = (await res.json()) as {
-      results?: Array<{
-        session_id: string;
-        snippet: string;
-        role: string;
-        title?: string | null;
-      }>;
-    };
-    return body.results ?? [];
+  const crossSessionSearch = useCallback(
+    async (q: string) => {
+      const res = await fetch(
+        withProfileQuery(`/api/chat/sessions/search?q=${encodeURIComponent(q)}`, profile),
+        { cache: "no-store" },
+      );
+      if (!res.ok) return [];
+      const body = (await res.json()) as {
+        results?: Array<{
+          session_id: string;
+          snippet: string;
+          role: string;
+          title?: string | null;
+        }>;
+      };
+      return body.results ?? [];
+    },
+    [profile],
+  );
+
+  function jumpToSearchResult(result: { session_id: string; snippet: string }) {
+    const term = result.snippet.replace(/>>>/g, "").replace(/<<</g, "").trim().slice(0, 30);
+    selectSession(result.session_id);
+    setHighlightTerm(term || undefined);
+    setInSearch({ query: term });
   }
 
-  async function jumpToSearchResult(
-    result: { session_id: string; snippet: string },
-  ) {
-    await openConversation(result.session_id);
-    // After loading, highlight the snippet text in the message list.
-    const term = result.snippet
-      .replace(/>>>/g, "")
-      .replace(/<<</g, "")
-      .trim()
-      .slice(0, 30);
-    setHighlightTerm(term);
-    setInSearchOpen(true);
-  }
+  // ── Render ───────────────────────────────────────────────────────────
+
+  const selected = useMemo(
+    () => (sessionId ? (sessions.find((s) => s.id === sessionId) ?? null) : null),
+    [sessions, sessionId],
+  );
+  const title = sessionId === null ? "New conversation" : selected ? titleOf(selected) : "Conversation";
+  const category = selected ? categorizeSession(selected) : null;
+  const tags = (selected?.tags ?? []).filter((t) => !isCategoryOverrideTag(t)).slice(0, 3);
+  const filtersActive = includeTags.length > 0 || excludeTags.length > 0;
+
+  const chipClass =
+    "shrink-0 rounded-full border border-[var(--color-border)] px-2 py-0.5 text-[11px] text-[var(--color-muted)]";
 
   return (
-    <div data-component="ChatPane" className="flex min-h-0 flex-1 flex-col">
-      {/* Which profile answers — switching reloads that profile's chats. */}
-      <ProfilePicker
-        profiles={profiles}
-        selected={profile}
-        onSelect={switchProfile}
-        disabled={sendingKeys.length > 0}
-        switching={switchingProfile}
-      />
+    <div
+      ref={rootRef}
+      data-component="ChatPane"
+      data-screen={screen}
+      // Fills the viewport below the shell header down to the shell's bottom
+      // padding, so the composer sits clear of the Coral FABs and the page
+      // itself never scrolls; the list / thread scroll inside.
+      className="flex min-h-0 flex-col overflow-hidden [--chat-pane-bottom:calc(var(--coral-clearance)+var(--safe-bottom)+1rem)] lg:flex-row lg:gap-4 lg:[--chat-pane-bottom:calc(var(--coral-clearance)+var(--safe-bottom))]"
+      style={{
+        height:
+          "calc(100dvh - var(--chat-pane-top, calc(6rem + var(--safe-top))) - var(--chat-pane-bottom))",
+      }}
+    >
+      <aside
+        data-component="ChatSidebar"
+        aria-label="Conversation list"
+        className={`min-h-0 flex-1 flex-col overflow-hidden lg:flex lg:w-80 lg:flex-none lg:rounded-2xl lg:border lg:border-[var(--color-border)] lg:bg-[var(--color-surface)] ${
+          screen === "list" ? "flex" : "hidden"
+        }`}
+      >
+        <ConversationList
+          sessions={sessions}
+          selectedId={sessionId}
+          busyKeys={busyKeys}
+          lastRead={lastRead}
+          onSelect={selectSession}
+          onSelectNew={startNewConversation}
+          header={
+            <ProfilePicker
+              profiles={profiles}
+              selected={profile}
+              onSelect={switchProfile}
+              disabled={busyKeys.length > 0}
+              switching={switchingProfile}
+            />
+          }
+          filters={
+            allTags.length > 0 ? (
+              <TagFilterBar
+                tags={allTags}
+                includeTags={includeTags}
+                excludeTags={excludeTags}
+                matchMode={matchMode}
+                onToggle={toggleTagFilter}
+                onMatchModeChange={setMatchMode}
+              />
+            ) : null
+          }
+          filtersActive={filtersActive}
+          onSearchMessages={(q) => setCrossSearch(q)}
+          searchPanel={
+            crossSearch !== null ? (
+              <SessionSearchBar
+                key={crossSearch}
+                initialQuery={crossSearch}
+                onSearch={crossSessionSearch}
+                onJumpToResult={(result) => jumpToSearchResult(result)}
+                onClose={() => setCrossSearch(null)}
+              />
+            ) : null
+          }
+        />
+      </aside>
 
-      {/* Tag filter bar */}
-      <TagFilterBar
-        tags={allTags}
-        includeTags={includeTags}
-        excludeTags={excludeTags}
-        matchMode={matchMode}
-        onToggle={toggleTagFilter}
-        onMatchModeChange={setMatchMode}
-      />
-
-      {/* Search toggle buttons */}
-      <div className="flex items-center gap-2 border-b border-[var(--color-border)] px-3 py-1">
-        <button
-          type="button"
-          onClick={() => {
-            setCrossSearchOpen((v) => !v);
-            setInSearchOpen(false);
-          }}
-          className={`rounded-lg px-2 py-0.5 text-xs ${
-            crossSearchOpen
-              ? "bg-[var(--color-accent)] text-[var(--color-accent-fg)]"
-              : "text-[var(--color-muted)] border border-[var(--color-border)]"
-          }`}
+      <section
+        data-component="ChatThreadPane"
+        aria-label={title}
+        onKeyDown={onThreadKeyDown}
+        className={`min-h-0 flex-1 flex-col overflow-hidden lg:flex lg:rounded-2xl lg:border lg:border-[var(--color-border)] lg:bg-[var(--color-surface)] ${
+          screen === "thread" ? "flex" : "hidden"
+        }`}
+      >
+        <header
+          data-component="ThreadHeader"
+          className="flex shrink-0 items-center gap-2 border-b border-[var(--color-border)] px-1 py-2 lg:px-3"
         >
-          🔍 All sessions
-        </button>
-        {sessionId && (
           <button
             type="button"
-            onClick={() => {
-              setInSearchOpen((v) => !v);
-              setCrossSearchOpen(false);
+            onClick={backToList}
+            aria-label="Back to conversations"
+            className={`${iconButton} border-transparent text-[var(--color-fg)] lg:hidden`}
+          >
+            <span aria-hidden="true">‹</span>
+          </button>
+          <h2 className="min-w-0 flex-1 truncate text-sm font-semibold text-[var(--color-fg)]">
+            {title}
+          </h2>
+          {category ? (
+            <span data-component="ThreadCategory" className={chipClass}>
+              {CHAT_CATEGORY_LABELS[category]}
+            </span>
+          ) : null}
+          {tags.map((t) => (
+            <span key={t.id} className={`${chipClass} hidden sm:inline`}>
+              #{t.name}
+            </span>
+          ))}
+          {sessionId ? (
+            <button
+              type="button"
+              aria-pressed={inSearch !== null}
+              aria-label="Search in conversation"
+              title="Search in conversation"
+              onClick={() => {
+                setInSearch((v) => (v ? null : { query: "" }));
+                setHighlightTerm(undefined);
+              }}
+              className={`${iconButton} ${
+                inSearch
+                  ? "border-[var(--color-accent)] text-[var(--color-fg)]"
+                  : "border-[var(--color-border)] text-[var(--color-muted)]"
+              }`}
+            >
+              <span aria-hidden="true">⌕</span>
+            </button>
+          ) : null}
+          {selected ? (
+            <button
+              type="button"
+              aria-label="Conversation details"
+              title="Details, rename, tags, archive"
+              onClick={() => void onOpenDetails(selected)}
+              className={`${iconButton} border-[var(--color-border)] text-[var(--color-muted)]`}
+            >
+              <span aria-hidden="true">⋯</span>
+            </button>
+          ) : null}
+        </header>
+
+        {inSearch && sessionId ? (
+          <InConversationSearch
+            key={`${sessionId}:${inSearch.query}`}
+            controller={controller}
+            sessionId={sessionId}
+            initialQuery={inSearch.query}
+            onClose={() => {
+              setInSearch(null);
               setHighlightTerm(undefined);
             }}
-            className={`rounded-lg px-2 py-0.5 text-xs ${
-              inSearchOpen
-                ? "bg-[var(--color-accent)] text-[var(--color-accent-fg)]"
-                : "text-[var(--color-muted)] border border-[var(--color-border)]"
-            }`}
-          >
-            🔍 In conversation
-          </button>
-        )}
-      </div>
-
-      {/* Cross-session search bar */}
-      {crossSearchOpen && (
-        <SessionSearchBar
-          onSearch={crossSessionSearch}
-          onJumpToResult={(result) => void jumpToSearchResult(result)}
-          onClose={() => setCrossSearchOpen(false)}
-        />
-      )}
-
-      {/* In-session search bar */}
-      {inSearchOpen && (
-        <InSessionSearch
-          messages={messages}
-          onClose={() => {
-            setInSearchOpen(false);
-            setHighlightTerm(undefined);
-          }}
-          highlightRef={highlightCallbackRef}
-        />
-      )}
-
-      <SessionTabs
-        sessions={orderedSessions}
-        activeId={sessionId}
-        busyKeys={sendingKeys}
-        onSelect={openConversation}
-        onOpenDetails={onOpenDetails}
-        onNew={startNewConversation}
-        onReorder={reorderSessions}
-      />
-
-      <div
-        ref={threadRef}
-        className="min-h-[42dvh] max-h-[calc(100dvh-19rem)] flex-1 space-y-3 overflow-y-auto rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface)] p-3"
-      >
-        {loadingThread ? (
-          <p className="py-8 text-center text-sm text-[var(--color-muted)]">
-            Loading conversation…
-          </p>
-        ) : messages.length === 0 ? (
-          <p className="py-8 text-center text-sm text-[var(--color-muted)]">
-            {sessionId
-              ? "No messages yet — say hello."
-              : "Start a new conversation with your agent."}
-          </p>
-        ) : (
-          messages
-            .filter((m) => m.role !== "assistant" || m.content !== "")
-            .map((m, i) => (
-              <MessageBubble
-                key={m.id ?? i}
-                message={m}
-                msgIndex={i}
-                highlightTerm={highlightTerm}
-              />
-            ))
-        )}
-        {selDecision ? (
-          <div
-            data-component="DecisionNotice"
-            className="flex justify-start"
-          >
-            <span className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface-2)] px-3 py-1.5 text-xs text-[var(--color-muted)]">
-              {selDecision}
-            </span>
-          </div>
+            highlightRef={highlightCallbackRef}
+          />
         ) : null}
-        <LiveActivity
-          reasoning={liveActivity[selKey]?.reasoning ?? ""}
-          tools={liveActivity[selKey]?.tools ?? []}
-        />
-        <StatusIndicator
-          activity={selActivity}
-          detail={selRunningTool?.name}
-          elapsedMs={selTurn ? now - selTurn.startedAt : undefined}
-          quietMs={selTurn ? now - selTurn.lastEventAt : undefined}
-          hasOutput={!assistantIsEmpty(messages)}
-        />
-      </div>
 
-      {error ? (
-        <p className="mt-2 rounded-lg bg-[var(--color-surface-2)] px-3 py-2 text-sm text-red-300">
-          {error}
-        </p>
-      ) : null}
+        <ChatThread
+          controller={controller}
+          sessionId={sessionId}
+          highlightTerm={highlightTerm}
+          className="px-3 py-3"
+          empty={
+            <p className="py-8 text-center text-sm text-[var(--color-muted)]">
+              {sessionId
+                ? "No messages yet — say hello."
+                : "Start a new conversation with your agent."}
+            </p>
+          }
+        />
 
-      <Composer
-        sending={selBusy}
-        storageEnabled={storageEnabled}
-        sessionId={sessionId}
-        initialText={initialDraft}
-        onSend={send}
-        onStop={() => void stopTurn()}
-        stopping={selTurn?.stopping ?? false}
-      />
+        <div className="shrink-0 px-3 pb-2 lg:pb-3">
+          <Composer
+            docked
+            sending={selBusy}
+            stopping={stopping}
+            storageEnabled={storageEnabled}
+            sessionId={sessionId}
+            initialText={initialDraft}
+            onSend={send}
+            onStop={() => void controller.stop(selKey)}
+          />
+        </div>
+      </section>
 
       {detailsSession ? (
         <SessionModal
@@ -1104,14 +860,6 @@ export function ChatPane({
           onClose={() => setArchivedOpen(false)}
           onUnarchive={unarchiveSession}
           profile={profile}
-        />
-      ) : null}
-
-      {selApproval ? (
-        <ApprovalModal
-          request={selApproval}
-          busy={resolvingApproval}
-          onResolve={resolveApproval}
         />
       ) : null}
     </div>

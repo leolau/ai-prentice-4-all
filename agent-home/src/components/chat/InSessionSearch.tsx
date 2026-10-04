@@ -14,12 +14,18 @@ export function InSessionSearch({
   messages,
   onClose,
   highlightRef,
+  initialQuery = "",
+  loading = false,
 }: {
   messages: ChatMessage[];
   onClose: () => void;
   highlightRef: React.RefObject<((msgIndex: number, term: string) => void) | null>;
+  /** Pre-filled query (a cross-session search jump). */
+  initialQuery?: string;
+  /** Older pages are still loading, so matches may grow. */
+  loading?: boolean;
 }) {
-  const [query, setQuery] = useState("");
+  const [query, setQuery] = useState(initialQuery);
   const [currentIndex, setCurrentIndex] = useState(0);
 
   // Compute match indices — messages whose content includes the query (case-insensitive).
@@ -53,12 +59,17 @@ export function InSessionSearch({
   };
 
   return (
-    <div className="border-b border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2">
+    <div
+      data-component="InSessionSearch"
+      aria-busy={loading}
+      className="shrink-0 border-b border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2"
+    >
       <div className="flex items-center gap-2">
         <input
           type="text"
           value={query}
           autoFocus
+          aria-label="Search in conversation"
           onChange={(e) => {
             setQuery(e.target.value);
             setCurrentIndex(0);
@@ -71,8 +82,8 @@ export function InSessionSearch({
               onClose();
             }
           }}
-          placeholder="Search in conversation…"
-          className="flex-1 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-1.5 text-sm text-[var(--color-fg)]"
+          placeholder={loading ? "Loading history…" : "Search in conversation…"}
+          className="min-w-0 flex-1 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-1.5 text-sm text-[var(--color-fg)]"
         />
         <SearchNav
           current={currentIndex}

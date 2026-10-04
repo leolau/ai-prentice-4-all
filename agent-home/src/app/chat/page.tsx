@@ -1,3 +1,4 @@
+import { CHAT_FIRST_PAGE_SIZE } from "@/app/chat/first-page";
 import { ChatHeaderActions } from "@/components/chat/ChatHeaderActions";
 import { ChatPane } from "@/components/chat/ChatPane";
 import { MobileShell } from "@/components/MobileShell";
@@ -16,9 +17,9 @@ export const dynamic = "force-dynamic";
 /**
  * FG-20 Wave C1 — the one-brain chat tab. BFF: the server resolves the
  * principal and loads the principal's conversations (every source,
- * including cron — see `categorizeSession`/`SessionTabs`, which groups
- * them inline instead of hiding them, and the most recent one's
- * transcript) from the Python API, then hands them to the interactive
+ * including cron — see `categorizeSession`/`ConversationList`, which groups
+ * them inline instead of hiding them, and the first page of the most recent
+ * one's transcript) from the Python API, then hands them to the interactive
  * {@link ChatPane}. Sending routes back through `/api/chat/*` to the
  * principal-scoped `POST /api/sessions/{id}/chat` endpoint.
  */
@@ -43,6 +44,7 @@ export default async function Page({
   let sessions: SessionSummary[] = [];
   let sessionId: string | null = null;
   let messages: ChatMessage[] = [];
+  let hasMore = false;
   let profiles: ProfileSummary[] = [];
   let error: string | null = null;
   try {
@@ -81,15 +83,21 @@ export default async function Page({
       sessionId = sessions[0].id;
     }
     if (sessionId) {
-      const transcript = await client.sessionMessages(sessionId);
+      // First page of visible turns only; older pages load as the reader
+      // scrolls up.
+      const transcript = await client.sessionMessages(sessionId, {
+        visible: true,
+        limit: CHAT_FIRST_PAGE_SIZE,
+      });
       messages = transcript.messages;
+      hasMore = transcript.has_more === true;
     }
   } catch (err) {
     error = err instanceof Error ? err.message : "Failed to load conversations";
   }
 
   return (
-    <MobileShell title="Chat" actions={error ? null : <ChatHeaderActions />}>
+    <MobileShell title="Chat" wide actions={error ? null : <ChatHeaderActions />}>
       {error ? (
         <div
           data-component="ChatError"
@@ -99,9 +107,16 @@ export default async function Page({
         </div>
       ) : (
         <ChatPane
+          // A profile is a whole HERMES_HOME: switching remounts with a fresh
+          // controller instead of carrying the old profile's threads.
+          key={profile}
           initialSessions={sessions}
           initialSessionId={sessionId}
           initialMessages={messages}
+          initialHasMore={hasMore}
+          // A deep link (or a draft to send) opens the thread on a phone;
+          // otherwise the phone starts on the conversation list.
+          initialScreen={requested || draft ? "thread" : "list"}
           storageEnabled={storageConfigured()}
           profiles={profiles}
           profile={profile}
