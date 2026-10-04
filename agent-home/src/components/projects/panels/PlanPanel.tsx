@@ -295,7 +295,7 @@ export function PlanPanel({
                       <span className="min-w-0 flex-1">
                         {step.title}
                         {step.checkpoint ? (
-                          <span className="ml-2 rounded-full bg-amber-500/15 px-2 py-0.5 text-xs text-amber-300">
+                          <span className="ml-2 rounded-full bg-amber-500/15 px-2 py-0.5 text-xs text-[var(--color-warn-text)]">
                             checkpoint
                           </span>
                         ) : null}

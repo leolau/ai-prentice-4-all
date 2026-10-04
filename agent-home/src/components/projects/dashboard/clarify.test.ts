@@ -19,7 +19,7 @@ import {
   needsYouItems,
   nextAction,
 } from "@/components/projects/dashboard/nextAction";
-import { standSteps } from "@/components/projects/dashboard/whereItStands";
+import { standSteps } from "@/components/projects/dashboard/standProgress";
 import { isRunnable, readinessItems } from "@/components/projects/readiness";
 import type { ReadinessItem } from "@/components/projects/readiness";
 import type {

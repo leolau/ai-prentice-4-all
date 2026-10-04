@@ -33,9 +33,9 @@ const STATUS_LABEL: Record<ConnectionStatus, string> = {
 
 const STATUS_TONE: Record<ConnectionStatus, string> = {
   disconnected: "text-[var(--color-muted)]",
-  connecting: "text-amber-400",
+  connecting: "text-[var(--color-warn-text)]",
   connected: "text-emerald-400",
-  reconnecting: "text-amber-400",
+  reconnecting: "text-[var(--color-warn-text)]",
 };
 
 function useConnectionStatus(): ConnectionStatus {
@@ -283,7 +283,7 @@ export function FolderBridgeView() {
                   <button
                     type="button"
                     onClick={() => void handleReapprove(folder.id)}
-                    className="rounded-lg border border-amber-400/50 px-2 py-1 text-xs text-amber-400"
+                    className="rounded-lg border border-amber-400/50 px-2 py-1 text-xs text-[var(--color-warn-text)]"
                   >
                     Needs re-approval
                   </button>

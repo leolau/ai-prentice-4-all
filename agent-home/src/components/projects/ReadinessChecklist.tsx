@@ -47,7 +47,7 @@ export function ReadinessChecklist({
                 className={
                   item.ok
                     ? "text-emerald-400"
-                    : "text-amber-400 tabular-nums"
+                    : "text-[var(--color-warn-text)] tabular-nums"
                 }
               >
                 {item.ok ? "✓" : `${stepFor.get(item.key) ?? 0}.`}
@@ -99,7 +99,7 @@ export function ReadinessChecklist({
             <span
               aria-hidden
               className={
-                finding.severity === "stalled" ? "text-red-400" : "text-amber-400"
+                finding.severity === "stalled" ? "text-red-400" : "text-[var(--color-warn-text)]"
               }
             >
               !

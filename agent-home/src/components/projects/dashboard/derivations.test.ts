@@ -14,7 +14,7 @@ import { activityEntries } from "@/components/projects/dashboard/activity";
 import { plural, quoteTitles, spanLabel } from "@/components/projects/dashboard/derive";
 import { initial, personLabel, requirementsSummary } from "@/components/projects/dashboard/requirements";
 import { confirmedText, mutationSteps } from "@/components/projects/dashboard/steps";
-import { cardsBar, outputsBar, standSteps } from "@/components/projects/dashboard/whereItStands";
+import { cardsBar, outputsBar, standSteps } from "@/components/projects/dashboard/standProgress";
 
 const RUNNING = run({ run_no: 2, status: "running", started_at: NOW - 7_200, ended_at: null });
 

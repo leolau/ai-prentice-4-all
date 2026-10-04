@@ -147,7 +147,7 @@ export function StatusIndicator({
       {stalled ? (
         <p
           data-component="StatusStallWarning"
-          className="max-w-prose px-1 text-xs text-amber-300"
+          className="max-w-prose px-1 text-xs text-[var(--color-warn-text)]"
         >
           No activity for {formatElapsed(quietMs ?? 0)}. The agent may be waiting
           on a slow step — you can Stop and try again if it looks stuck.

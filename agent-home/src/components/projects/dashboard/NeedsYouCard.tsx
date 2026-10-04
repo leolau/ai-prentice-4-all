@@ -34,7 +34,7 @@ export function NeedsYouCard({
           data-component="NeedsYouCount"
           className={`rounded-full px-2 py-0.5 text-xs tabular-nums ${
             items.length > 0
-              ? "bg-amber-500/20 text-amber-300"
+              ? "bg-amber-500/20 text-[var(--color-warn-text)]"
               : "bg-[var(--color-surface-2)] text-[var(--color-muted)]"
           }`}
         >

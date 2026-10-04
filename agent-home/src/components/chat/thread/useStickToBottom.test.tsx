@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { act, cleanup, fireEvent, render } from "@testing-library/react";
-import { useRef } from "react";
+import { useEffect, useRef } from "react";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
@@ -65,15 +65,18 @@ afterAll(() => {
 let api: StickToBottom;
 let harnessRenders = 0;
 function Harness({ threshold }: { threshold?: number }) {
-  harnessRenders += 1;
   const scrollRef = useRef<HTMLDivElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);
-  api = useStickToBottom(scrollRef, contentRef, { threshold });
+  const result = useStickToBottom(scrollRef, contentRef, { threshold });
+  useEffect(() => {
+    harnessRenders += 1;
+    api = result;
+  });
   return (
     <div ref={scrollRef} data-testid="scroller">
       <div ref={contentRef} />
       <span data-testid="state">
-        {api.atBottom ? "bottom" : "up"}/{api.hasNew ? "new" : "none"}
+        {result.atBottom ? "bottom" : "up"}/{result.hasNew ? "new" : "none"}
       </span>
     </div>
   );

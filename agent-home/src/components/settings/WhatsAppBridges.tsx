@@ -25,11 +25,11 @@ type QrState = {
 
 function statusLabel(bridge: WaBridge): { text: string; tone: string } {
   if (bridge.active === "active" && bridge.qr_pending)
-    return { text: "waiting for QR scan", tone: "text-amber-400" };
+    return { text: "waiting for QR scan", tone: "text-[var(--color-warn-text)]" };
   if (bridge.active === "active")
     return { text: bridge.paired ? "connected" : "active", tone: "text-green-400" };
   if (bridge.active === "activating")
-    return { text: "restarting", tone: "text-amber-400" };
+    return { text: "restarting", tone: "text-[var(--color-warn-text)]" };
   return { text: bridge.active, tone: "text-red-400" };
 }
 

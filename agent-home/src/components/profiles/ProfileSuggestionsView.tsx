@@ -236,7 +236,7 @@ function SuggestionCard({
                 className="w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-2)] p-2 text-sm"
                 placeholder="Not a real sub-goal, or already handled elsewhere…"
               />
-              <p className="text-xs text-amber-300">
+              <p className="text-xs text-[var(--color-warn-text)]">
                 This is permanent: a dismissed suggestion is never re-proposed on
                 the same evidence.
               </p>

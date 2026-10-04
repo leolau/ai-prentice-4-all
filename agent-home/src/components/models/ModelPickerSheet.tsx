@@ -350,7 +350,7 @@ export function ModelPickerSheet({
           )
         ) : phase.kind === "confirm-expensive" ? (
           <div className="space-y-3">
-            <p className="rounded-lg bg-amber-500/10 px-3 py-2 text-xs text-amber-300">
+            <p className="rounded-lg bg-amber-500/10 px-3 py-2 text-xs text-[var(--color-warn-text)]">
               {phase.message || "This model may be expensive."}
             </p>
             <div className="flex gap-2">

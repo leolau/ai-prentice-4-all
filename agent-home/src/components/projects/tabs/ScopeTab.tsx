@@ -137,7 +137,7 @@ function ScopeBody({
       {refusal ? (
         <section
           data-component="ClarifyDraftRefused"
-          className="flex flex-wrap items-center gap-2 rounded-2xl border border-amber-500/40 bg-amber-500/10 p-4 text-sm text-amber-200"
+          className="flex flex-wrap items-center gap-2 rounded-2xl border border-amber-500/40 bg-amber-500/10 p-4 text-sm text-[var(--color-warn-text)]"
         >
           <span role="alert" className="min-w-0 flex-1">
             Scope confirmed, but the plan wasn&rsquo;t drafted: {refusal}

@@ -73,7 +73,11 @@ describe("OutputsTab SSR", () => {
     const html = render();
     expect(html).toContain('data-component="UnattachedWarning"');
     expect(html).toContain("Run 1 produced 2 files that aren&#x27;t linked to any output.");
-    expect(html).toContain("Attach to “4 MOUs in docx”");
+    // With several candidate outputs each row shows a target picker plus a
+    // plain Attach button; the group also gets a one-shot Attach-all.
+    expect(html).toContain('data-component="AttachAll"');
+    expect(html).toContain("Attach all 2 to");
+    expect(html).toContain("4 MOUs in docx");
   });
 
   it("has no warning when every draft is attached", () => {

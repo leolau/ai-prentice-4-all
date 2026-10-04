@@ -49,7 +49,7 @@ const RUN_STYLE: Record<ProjectRunStatus, StatusStyle> = {
   },
   waiting: {
     label: "Waiting for you",
-    badge: "bg-amber-500/15 text-amber-300 ring-amber-400/40",
+    badge: "bg-amber-500/15 text-[var(--color-warn-text)] ring-amber-400/40",
     bar: "bg-amber-400",
     edge: "border-l-amber-400",
     animated: false,
@@ -474,7 +474,7 @@ export function RunView({
                   nextAction.tone === "action"
                     ? "border-[var(--color-accent)]/40 bg-[var(--color-accent)]/10"
                     : nextAction.tone === "attention"
-                      ? "border-amber-500/40 bg-amber-500/10 text-amber-200"
+                      ? "border-amber-500/40 bg-amber-500/10 text-[var(--color-warn-text)]"
                       : "border-[var(--color-border)] bg-[var(--color-surface-2)] text-[var(--color-muted)]"
                 }`}
               >
@@ -642,7 +642,7 @@ export function RunView({
               <div
                 data-component="RetryBanner"
                 role="status"
-                className="mt-2 rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm text-amber-200"
+                className="mt-2 rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm text-[var(--color-warn-text)]"
               >
                 <p>
                   {retried.length === 1
@@ -667,7 +667,7 @@ export function RunView({
               <p
                 data-component="StallBanner"
                 role="status"
-                className="mt-2 rounded-lg border border-yellow-500/40 bg-yellow-500/10 px-3 py-2 text-sm text-yellow-300"
+                className="mt-2 rounded-lg border border-yellow-500/40 bg-yellow-500/10 px-3 py-2 text-sm text-[var(--color-warn-text)]"
               >
                 Marked running, but no worker is active on this run — it is
                 stalled. Cancel stops it; retry the blocked work below;
@@ -713,7 +713,7 @@ export function RunView({
               <p
                 data-component="BudgetGate"
                 role="status"
-                className="mt-2 rounded-lg border border-yellow-500/40 bg-yellow-500/10 px-3 py-2 text-sm text-yellow-300"
+                className="mt-2 rounded-lg border border-yellow-500/40 bg-yellow-500/10 px-3 py-2 text-sm text-[var(--color-warn-text)]"
               >
                 {budgetGate}
               </p>
