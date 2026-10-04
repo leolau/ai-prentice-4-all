@@ -2367,6 +2367,7 @@ export class HermesApiClient {
       },
     );
   }
+
   // ── Projects redesign: outputs ──
 
   /** Every file the project's runs and cards produced, newest first. */
@@ -2388,6 +2389,27 @@ export class HermesApiClient {
     range?: string | null,
   ): Promise<Response> {
     const headers = new Headers();
+    if (this.hermesToken) {
+      headers.set("cookie", `hermes_session_at=${this.hermesToken}`);
+      headers.set("authorization", `Bearer ${this.hermesToken}`);
+    }
+    if (range) headers.set("range", range);
+    const path = this.scopedPath(
+      `/api/registry/projects/${encodeURIComponent(slug)}/artifacts/${encodeURIComponent(artifactId)}/content`,
+    );
+    const res = await fetch(`${this.baseUrl}${path}`, { headers, cache: "no-store" });
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      const parsed = text ? safeJson(text) : undefined;
+      throw new HermesApiError(
+        res.status,
+        upstreamDetail(parsed, "That file could not be opened."),
+        parsed ?? text,
+      );
+    }
+    return res;
+  }
+
   // ── Projects redesign: live ──
 
   /**
@@ -2405,18 +2427,6 @@ export class HermesApiClient {
       headers.set("cookie", `hermes_session_at=${this.hermesToken}`);
       headers.set("authorization", `Bearer ${this.hermesToken}`);
     }
-    if (range) headers.set("range", range);
-    const path = this.scopedPath(
-      `/api/registry/projects/${encodeURIComponent(slug)}/artifacts/${encodeURIComponent(artifactId)}/content`,
-    );
-    const res = await fetch(`${this.baseUrl}${path}`, { headers, cache: "no-store" });
-    if (!res.ok) {
-      const text = await res.text().catch(() => "");
-      const parsed = text ? safeJson(text) : undefined;
-      throw new HermesApiError(
-        res.status,
-        upstreamDetail(parsed, "That file could not be opened."),
-        parsed ?? text,
     const res = await fetch(
       `${this.baseUrl}/api/registry/projects/${encodeURIComponent(slug)}/cards/${encodeURIComponent(taskId)}/activity?after=${encodeURIComponent(after)}`,
       { headers, cache: "no-store" },

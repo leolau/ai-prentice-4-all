@@ -2249,6 +2249,8 @@ export interface AskProjectResponse {
   sources: AskProjectSource[];
   /** A requirement the answer suggests, ready for "Turn into a requirement…". */
   suggested_requirement?: string;
+}
+
 // ── Projects redesign: outputs ──
 
 /** What a produced file is to the project: attached to a declared output
