@@ -3897,6 +3897,79 @@ class SessionDB:
             result.append(msg)
         return result
 
+    _PAGE_LIMIT_MAX = 500
+    _VISIBLE_COLUMNS = "id, role, content, timestamp, reasoning"
+    # Whitespace set for SQL TRIM: space, tab, LF, CR.
+    _SQL_WS = "char(32, 9, 10, 13)"
+
+    def get_messages_page(
+        self,
+        session_id: str,
+        *,
+        visible_only: bool = False,
+        limit: Optional[int] = None,
+        before: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Load a page of active messages, newest-first paging, ascending output.
+
+        ``visible_only`` keeps only user/assistant rows, drops assistant
+        rows with blank content AND blank reasoning (tool-call-only steps)
+        and projects each row to ``id, role, content, timestamp, reasoning``.
+        ``limit`` (clamped to 1..500) returns the newest N matching rows;
+        ``before`` restricts to ids strictly below it.
+
+        Returns ``{"messages": [...], "has_more": bool}`` where ``has_more``
+        is true when older matching rows exist before the first returned row.
+        """
+        clauses = ["session_id = ?", "active = 1"]
+        params: List[Any] = [session_id]
+        if visible_only:
+            ws = self._SQL_WS
+            clauses.append("role IN ('user', 'assistant')")
+            clauses.append(
+                "NOT (role = 'assistant'"
+                f" AND TRIM(COALESCE(content, ''), {ws}) = ''"
+                f" AND TRIM(COALESCE(reasoning, ''), {ws}) = '')"
+            )
+        if before is not None:
+            clauses.append("id < ?")
+            params.append(int(before))
+        where = " AND ".join(clauses)
+        columns = self._VISIBLE_COLUMNS if visible_only else "*"
+
+        if limit is not None:
+            limit = max(1, min(int(limit), self._PAGE_LIMIT_MAX))
+            # Fetch one extra row to learn whether older rows exist.
+            sql = (
+                f"SELECT {columns} FROM messages WHERE {where} "
+                "ORDER BY id DESC LIMIT ?"
+            )
+            with self._lock:
+                rows = self._conn.execute(sql, (*params, limit + 1)).fetchall()
+            has_more = len(rows) > limit
+            rows = list(reversed(rows[:limit]))
+        else:
+            sql = f"SELECT {columns} FROM messages WHERE {where} ORDER BY id"
+            with self._lock:
+                rows = self._conn.execute(sql, tuple(params)).fetchall()
+            has_more = False
+
+        result = []
+        for row in rows:
+            msg = dict(row)
+            if "content" in msg:
+                msg["content"] = self._decode_content(msg["content"])
+            if not visible_only and msg.get("tool_calls"):
+                try:
+                    msg["tool_calls"] = json.loads(msg["tool_calls"])
+                except (json.JSONDecodeError, TypeError):
+                    logger.warning(
+                        "Failed to deserialize tool_calls in get_messages_page, falling back to []"
+                    )
+                    msg["tool_calls"] = []
+            result.append(msg)
+        return {"messages": result, "has_more": has_more}
+
     def get_messages_around(
         self,
         session_id: str,

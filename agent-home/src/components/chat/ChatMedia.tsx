@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { mediaRef } from "@/lib/chat/media-ref";
 import type { ChatMediaUrlResponse } from "@/types";
@@ -9,11 +9,26 @@ import type { ChatMediaUrlResponse } from "@/types";
  * One inline media attachment from the **private** media bucket (PR-5).
  *
  * The transcript only carries the object path, so this component asks the BFF
- * (`GET /api/chat/media?path=…`) for a short-lived signed URL when it mounts.
+ * (`GET /api/chat/media?path=…`) for a short-lived signed URL once it is near
+ * the viewport (400px margin), so a long history doesn't sign every image.
  * The server re-checks that the path belongs to the requesting principal before
  * signing, so a tampered path simply renders as unavailable.
  */
+/** Nearest scrolling ancestor, so the margin applies to the chat thread's box. */
+function scrollParent(el: Element): Element | null {
+  for (let p = el.parentElement; p; p = p.parentElement) {
+    const overflow = getComputedStyle(p).overflowY;
+    if (overflow === "auto" || overflow === "scroll") return p;
+  }
+  return null;
+}
+
 export function ChatMedia({ path, alt }: { path: string; alt: string }) {
+  const ref = useRef<HTMLSpanElement>(null);
+  // No IntersectionObserver (old browsers, SSR) → load straight away.
+  const [near, setNear] = useState(
+    () => typeof IntersectionObserver === "undefined",
+  );
   // Keyed by path so a changed path resets to "loading" during render rather
   // than via a setState in the effect body.
   const [resolved, setResolved] = useState<{
@@ -25,6 +40,23 @@ export function ChatMedia({ path, alt }: { path: string; alt: string }) {
     resolved.path === path ? resolved : { url: null, failed: false };
 
   useEffect(() => {
+    const el = ref.current;
+    if (near || !el) return;
+    const io = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((e) => e.isIntersecting)) {
+          setNear(true);
+          io.disconnect();
+        }
+      },
+      { root: scrollParent(el), rootMargin: "400px" },
+    );
+    io.observe(el);
+    return () => io.disconnect();
+  }, [near]);
+
+  useEffect(() => {
+    if (!near) return;
     let active = true;
     (async () => {
       try {
@@ -43,10 +75,10 @@ export function ChatMedia({ path, alt }: { path: string; alt: string }) {
     return () => {
       active = false;
     };
-  }, [path]);
+  }, [path, near]);
 
   return (
-    <span data-component="ChatMedia" className="mt-1 block">
+    <span ref={ref} data-component="ChatMedia" className="mt-1 block">
       {url ? (
         // eslint-disable-next-line @next/next/no-img-element
         <img src={url} alt={alt} className="max-h-64 rounded-lg" />

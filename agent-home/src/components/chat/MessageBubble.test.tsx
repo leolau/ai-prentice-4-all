@@ -188,4 +188,23 @@ describe("MessageBubble", () => {
     expect(html).toContain("Reasoning");
     expect(html).toContain("Let me check the run state…");
   });
+
+  it("lets off-screen rows skip layout via content-visibility", () => {
+    const html = renderToStaticMarkup(
+      <MessageBubble message={{ role: "user", content: "hi" }} />,
+    );
+    expect(html).toContain("content-visibility:auto");
+    expect(html).toContain("contain-intrinsic-size:auto 120px");
+  });
+
+  it("offers a Copy button on assistant replies only", () => {
+    const assistant = renderToStaticMarkup(
+      <MessageBubble message={{ role: "assistant", content: "done" }} />,
+    );
+    expect(assistant).toContain('aria-label="Copy reply"');
+    const user = renderToStaticMarkup(
+      <MessageBubble message={{ role: "user", content: "hi" }} />,
+    );
+    expect(user).not.toContain("Copy reply");
+  });
 });

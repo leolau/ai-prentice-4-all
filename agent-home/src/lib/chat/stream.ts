@@ -130,13 +130,17 @@ export async function streamChatTurn(
  * instead of waiting for the transcript to catch up.
  */
 export async function attachChatStream(
-  params: { sessionId: string; runId: string; signal?: AbortSignal },
+  params: { sessionId: string; runId: string; signal?: AbortSignal; profile?: string },
   handlers: ChatStreamHandlers,
 ): Promise<void> {
   const res = await fetch("/api/chat/attach", {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ sessionId: params.sessionId, runId: params.runId }),
+    body: JSON.stringify({
+      sessionId: params.sessionId,
+      runId: params.runId,
+      ...(params.profile ? { profile: params.profile } : {}),
+    }),
     signal: params.signal,
   });
   if (!res.ok || !res.body) {

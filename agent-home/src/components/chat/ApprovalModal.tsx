@@ -4,15 +4,16 @@ import { useEffect } from "react";
 
 import type { ChatApprovalRequest } from "@/types";
 
-/** Human labels for the approval choices the agent offers, in display order. */
-const CHOICE_LABELS: Record<string, string> = {
+/** Human labels for the approval choices the agent offers. */
+export const CHOICE_LABELS: Record<string, string> = {
   once: "Approve",
   session: "Approve for this chat",
   always: "Always approve",
   deny: "Deny",
 };
 
-const CHOICE_ORDER = ["once", "session", "always", "deny"];
+/** Display order of the approval choices (shared with `ApprovalCard`). */
+export const CHOICE_ORDER: readonly string[] = ["once", "session", "always", "deny"];
 
 export interface ApprovalModalProps {
   request: ChatApprovalRequest;

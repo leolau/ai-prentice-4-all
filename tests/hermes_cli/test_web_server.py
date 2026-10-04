@@ -1019,6 +1019,138 @@ class TestWebServerEndpoints:
         assert payload["session_id"] == "desktop-tip"
         assert [m["content"] for m in payload["messages"]] == ["after compression"]
 
+    def _seed_paging_session(self, sid: str, turns: int = 1) -> None:
+        """Seed ``turns`` x (user, tool-call assistant, tool, reply) rows plus
+        one reasoning-only assistant row."""
+        from hermes_state import SessionDB
+
+        db = SessionDB()
+        try:
+            db.create_session(session_id=sid, source="cli")
+            for i in range(turns):
+                db.append_message(session_id=sid, role="user", content=f"q{i}")
+                db.append_message(
+                    session_id=sid,
+                    role="assistant",
+                    content="  \n",
+                    tool_calls=[{"id": f"c{i}", "function": {"name": "t", "arguments": "{}"}}],
+                )
+                db.append_message(
+                    session_id=sid, role="tool", content="tool out", tool_call_id=f"c{i}"
+                )
+                db.append_message(session_id=sid, role="assistant", content=f"a{i}")
+            db.append_message(
+                session_id=sid, role="assistant", content="", reasoning="thinking only"
+            )
+        finally:
+            db.close()
+
+    def test_get_session_messages_no_params_unchanged(self):
+        from hermes_state import SessionDB
+
+        self._seed_paging_session("page-legacy")
+        db = SessionDB()
+        try:
+            expected = db.get_messages("page-legacy")
+        finally:
+            db.close()
+
+        resp = self.client.get("/api/sessions/page-legacy/messages")
+        assert resp.status_code == 200
+        payload = resp.json()
+        assert set(payload) == {"session_id", "messages"}
+        assert payload["messages"] == expected
+        assert [m["role"] for m in payload["messages"]] == [
+            "user", "assistant", "tool", "assistant", "assistant",
+        ]
+
+    def test_get_session_messages_visible_filters_and_projects(self):
+        self._seed_paging_session("page-visible")
+
+        resp = self.client.get("/api/sessions/page-visible/messages?visible=true")
+        assert resp.status_code == 200
+        payload = resp.json()
+        assert payload["has_more"] is False
+        msgs = payload["messages"]
+        assert [(m["role"], m["content"]) for m in msgs] == [
+            ("user", "q0"), ("assistant", "a0"), ("assistant", ""),
+        ]
+        assert msgs[-1]["reasoning"] == "thinking only"
+        for m in msgs:
+            assert set(m) == {"id", "role", "content", "timestamp", "reasoning"}
+
+    def test_get_session_messages_limit_and_before_cursor(self):
+        self._seed_paging_session("page-cursor", turns=5)
+        # Visible rows: q0 a0 q1 a1 ... q4 a4 + reasoning-only = 11.
+        resp = self.client.get("/api/sessions/page-cursor/messages?visible=1&limit=4")
+        assert resp.status_code == 200
+        first = resp.json()
+        assert first["has_more"] is True
+        contents = [m["content"] for m in first["messages"]]
+        assert contents == ["a3", "q4", "a4", ""]
+        ids = [m["id"] for m in first["messages"]]
+        assert ids == sorted(ids)
+
+        seen = list(contents)
+        before = ids[0]
+        has_more = True
+        pages = 0
+        while has_more:
+            resp = self.client.get(
+                f"/api/sessions/page-cursor/messages?visible=true&limit=4&before={before}"
+            )
+            assert resp.status_code == 200
+            page = resp.json()
+            assert all(m["id"] < before for m in page["messages"])
+            seen = [m["content"] for m in page["messages"]] + seen
+            before = page["messages"][0]["id"]
+            has_more = page["has_more"]
+            pages += 1
+        assert pages == 2
+        assert seen == [
+            "q0", "a0", "q1", "a1", "q2", "a2", "q3", "a3", "q4", "a4", "",
+        ]
+
+    def test_get_session_messages_limit_is_clamped(self):
+        self._seed_paging_session("page-clamp")
+        resp = self.client.get("/api/sessions/page-clamp/messages?limit=0")
+        assert resp.status_code == 200
+        payload = resp.json()
+        assert len(payload["messages"]) == 1
+        assert payload["has_more"] is True
+
+    def test_get_session_messages_paging_follows_compression_tip(self):
+        import time as _time
+
+        from hermes_state import SessionDB
+
+        db = SessionDB()
+        try:
+            db.create_session(session_id="page-root", source="cli")
+            db.append_message(session_id="page-root", role="user", content="before compression")
+            db.end_session("page-root", "compression")
+            now = _time.time()
+            db._conn.execute(
+                "UPDATE sessions SET started_at = ?, ended_at = ? WHERE id = ?",
+                (now - 10, now - 5, "page-root"),
+            )
+            db.create_session(session_id="page-tip", source="cli", parent_session_id="page-root")
+            db._conn.execute("UPDATE sessions SET started_at = ? WHERE id = ?", (now - 4, "page-tip"))
+            db.replace_messages("page-root", [])
+            db.append_message(session_id="page-tip", role="user", content="after compression")
+            db.append_message(session_id="page-tip", role="tool", content="noise", tool_call_id="x")
+            db.append_message(session_id="page-tip", role="assistant", content="reply")
+            db._conn.commit()
+        finally:
+            db.close()
+
+        resp = self.client.get("/api/sessions/page-root/messages?visible=true&limit=40")
+        assert resp.status_code == 200
+        payload = resp.json()
+        assert payload["session_id"] == "page-tip"
+        assert payload["has_more"] is False
+        assert [m["content"] for m in payload["messages"]] == ["after compression", "reply"]
+
     def test_get_sessions_archived_is_boolean(self):
         from hermes_state import SessionDB
 

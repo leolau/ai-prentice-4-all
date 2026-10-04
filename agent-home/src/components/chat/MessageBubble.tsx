@@ -1,4 +1,6 @@
-import { memo, type ReactNode } from "react";
+"use client";
+
+import { memo, useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
 
 import { ChatFile } from "@/components/chat/ChatFile";
 import { ChatMedia } from "@/components/chat/ChatMedia";
@@ -108,6 +110,45 @@ function highlightText(text: string, term: string): ReactNode {
   return parts.length > 1 ? parts : text;
 }
 
+/** Off-screen history rows skip layout/paint; the estimate keeps the scrollbar sane. */
+const ROW_STYLE: CSSProperties = {
+  contentVisibility: "auto",
+  containIntrinsicSize: "auto 120px",
+};
+
+/** Copies the reply's text; visible on hover/focus (always, subtly, on touch). */
+function CopyButton({ text }: { text: string }) {
+  const [copied, setCopied] = useState(false);
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(
+    () => () => {
+      if (timer.current) clearTimeout(timer.current);
+    },
+    [],
+  );
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch {
+      return;
+    }
+    setCopied(true);
+    if (timer.current) clearTimeout(timer.current);
+    timer.current = setTimeout(() => setCopied(false), 1500);
+  };
+  return (
+    <button
+      type="button"
+      data-component="CopyReply"
+      aria-label="Copy reply"
+      onClick={copy}
+      className="shrink-0 self-end rounded-md px-1.5 py-0.5 text-xs text-[var(--color-muted)] opacity-0 transition-opacity hover:text-[var(--color-fg)] focus-visible:opacity-100 group-hover:opacity-100 group-focus-within:opacity-100 [@media(hover:none)]:opacity-60"
+    >
+      {copied ? "Copied" : "Copy"}
+    </button>
+  );
+}
+
 function CompactionDivider() {
   return (
     <div data-component="CompactionDivider" className="flex justify-center">
@@ -153,7 +194,8 @@ export const MessageBubble = memo(function MessageBubble({
       <div
         data-component="MessageBubble"
         data-msg-index={msgIndex}
-        className={`flex ${isUser ? "justify-end" : "justify-start"}`}
+        style={ROW_STYLE}
+        className={`group flex gap-1 ${isUser ? "justify-end" : "justify-start"}`}
       >
         <div
           className={`max-w-[85%] break-words rounded-2xl px-3 py-2 text-sm ${
@@ -176,6 +218,7 @@ export const MessageBubble = memo(function MessageBubble({
             </>
           )}
         </div>
+        {!isUser && content !== "" ? <CopyButton text={content} /> : null}
       </div>
     </>
   );

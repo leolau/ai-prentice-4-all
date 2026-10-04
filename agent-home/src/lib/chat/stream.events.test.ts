@@ -164,6 +164,14 @@ describe("attachChatStream (reload mid-turn)", () => {
     expect(completed).toBe("part one two");
   });
 
+  it("forwards the profile so the attach reads the right profile's run", async () => {
+    const fetchMock = vi.fn(async () => sseResponse("event: done\ndata: {}\n\n"));
+    vi.stubGlobal("fetch", fetchMock);
+    await attachChatStream({ sessionId: "sess_1", runId: "run_9", profile: "work" }, {});
+    const init = (fetchMock.mock.calls[0] as unknown[])[1] as RequestInit;
+    expect(JSON.parse(String(init.body))).toMatchObject({ profile: "work" });
+  });
+
   it("rejects when the run can no longer be attached", async () => {
     vi.stubGlobal(
       "fetch",

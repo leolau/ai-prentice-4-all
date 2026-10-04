@@ -83,3 +83,99 @@ export function stripUiContextLine(content: string): string {
 export function visibleTurns(messages: ChatMessage[]): ChatMessage[] {
   return messages.filter((m) => m.role === "user" || m.role === "assistant");
 }
+
+/** True when two persisted rows would render identically. */
+function sameRow(a: ChatMessage, b: ChatMessage): boolean {
+  return (
+    a.id === b.id &&
+    a.role === b.role &&
+    a.content === b.content &&
+    (a.reasoning ?? null) === (b.reasoning ?? null) &&
+    (a.timestamp ?? null) === (b.timestamp ?? null)
+  );
+}
+
+function sameList(a: ChatMessage[], b: ChatMessage[]): boolean {
+  return a.length === b.length && a.every((m, i) => m === b[i]);
+}
+
+/**
+ * Prepend an older page (`before=<oldest id>`) to a loaded thread. Rows not
+ * strictly older than the thread's oldest persisted row are skipped, so an
+ * overlapping or replayed page never duplicates a turn.
+ */
+export function mergeOlderPage(
+  current: ChatMessage[],
+  older: ChatMessage[],
+): ChatMessage[] {
+  const oldest = current.find((m) => m.id != null)?.id;
+  const add =
+    oldest == null ? older : older.filter((m) => m.id != null && m.id < oldest);
+  return add.length === 0 ? current : [...add, ...current];
+}
+
+export interface TailReconcile {
+  messages: ChatMessage[];
+  /** Rows older than the page were kept, so the thread's own `hasMore` still applies. */
+  keptOlder: boolean;
+}
+
+/**
+ * Reconcile a loaded thread with the newest page from the server: the page
+ * replaces the tail; already-loaded older rows (ids below the page's first
+ * id) are kept only when the page overlaps them — otherwise there may be a
+ * gap and the page alone is the truth. Optimistic rows (no id) are dropped
+ * unless `keep` says they are still pending; a kept optimistic user row the
+ * page already ends with (persisted at turn start) is dropped as a duplicate,
+ * as is a kept row the page now holds as a new persisted row (an assistant
+ * row once any new assistant row lands; a user row by its text).
+ * Unchanged rows keep their object identity, and an unchanged thread returns
+ * `current` itself.
+ */
+export function reconcileTail(
+  current: ChatMessage[],
+  page: ChatMessage[],
+  opts: { pageHasMore: boolean; keep?: (m: ChatMessage) => boolean },
+): TailReconcile {
+  const byId = new Map<number, ChatMessage>();
+  let maxId = -Infinity;
+  for (const m of current) {
+    if (m.id == null) continue;
+    byId.set(m.id, m);
+    if (m.id > maxId) maxId = m.id;
+  }
+  const tail = page.map((m) => {
+    const prev = m.id != null ? byId.get(m.id) : undefined;
+    return prev && sameRow(prev, m) ? prev : m;
+  });
+  const firstId = page.find((m) => m.id != null)?.id;
+  const older =
+    opts.pageHasMore && firstId != null && maxId >= firstId
+      ? current.filter((m) => m.id != null && m.id < firstId)
+      : [];
+  const keep = opts.keep;
+  const fresh = page.filter((m) => m.id != null && m.id > maxId);
+  const persisted = (p: ChatMessage) =>
+    p.role === "assistant"
+      ? fresh.some((f) => f.role === "assistant")
+      : fresh.some(
+          (f) => f.role === p.role && stripUiContextLine(f.content).trim() === p.content.trim(),
+        );
+  const pending = keep
+    ? current.filter((m) => m.id == null && keep(m) && !persisted(m))
+    : [];
+  const last = page[page.length - 1];
+  if (
+    pending[0]?.role === "user" &&
+    last?.role === "user" &&
+    last.id != null &&
+    stripUiContextLine(last.content).trim() === pending[0].content.trim()
+  ) {
+    pending.shift();
+  }
+  const next = [...older, ...tail, ...pending];
+  return {
+    messages: sameList(next, current) ? current : next,
+    keptOlder: older.length > 0,
+  };
+}
