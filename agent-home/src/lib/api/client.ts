@@ -2524,6 +2524,38 @@ export class HermesApiClient {
       headers.set("Idempotency-Key", this.idempotencyKey);
     }
   }
+
+  // ── Projects redesign: board ──
+
+  /** Which run created each card, and whether the open run is stalled. */
+  async projectBoardContext(slug: string): Promise<import("@/types").ProjectBoardContext> {
+    return this.request(
+      `/api/registry/projects/${encodeURIComponent(slug)}/board/context`,
+    );
+  }
+
+  /** Approve all N: make several triage cards ready in one judgement act. */
+  async approveProjectCards(
+    slug: string,
+    taskIds: string[],
+  ): Promise<import("@/types").ProjectCardsApproveResponse> {
+    return this.request(
+      `/api/registry/projects/${encodeURIComponent(slug)}/cards/approve`,
+      { method: "POST", json: { task_ids: taskIds } },
+    );
+  }
+
+  /** Blocked → ready, with an optional reason left on the card's thread. */
+  async unblockProjectCard(
+    slug: string,
+    taskId: string,
+    reason?: string,
+  ): Promise<import("@/types").ProjectCardDetail> {
+    return this.request(
+      `/api/registry/projects/${encodeURIComponent(slug)}/cards/${encodeURIComponent(taskId)}/unblock`,
+      { method: "POST", json: reason ? { reason } : {} },
+    );
+  }
 }
 
 /**

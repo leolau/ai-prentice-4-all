@@ -1,17 +1,20 @@
 "use client";
 
 import Link from "next/link";
-import { useState } from "react";
+import { useRef, useState } from "react";
 
+import { ActionButton } from "@/components/projects/ActionButton";
+import { isTaskRow, reconcileTask } from "@/components/projects/board/model";
 import {
   addTaskToBoard,
   cardMoves,
   moveTaskInBoard,
   newBoardCard,
 } from "@/components/projects/cardMoves";
+import { useProjectAction } from "@/components/projects/useProjectAction";
 import { BusyRegion } from "@/components/ui/BusyRegion";
-import { useRefresh, useServerState } from "@/components/ui/useRefresh";
-import type { ProjectBoardView } from "@/types";
+import { useServerState } from "@/components/ui/useRefresh";
+import type { ProjectBoardTask, ProjectBoardView } from "@/types";
 
 /**
  * Columns a human may start a card in. Every card is born in `triage`
@@ -20,12 +23,15 @@ import type { ProjectBoardView } from "@/types";
  */
 export const NEW_CARD_COLUMNS = ["triage", "ready"] as const;
 
+type BoardUpdate = (fn: (board: ProjectBoardView) => ProjectBoardView) => void;
+
 /**
- * The project's cards, one column per stage. On a phone each column snaps to
- * the screen (‹ › by swipe); from `md:` up the columns flow side by side.
- * Cards move between columns from the row itself; each startable column
- * offers "New card". The board read is fan-out safe: when it is unavailable
- * the rest of the page still renders.
+ * The project's cards, one column per stage — the board's full view
+ * ("Show all 8 stages"). On a phone each column snaps to the screen; from
+ * `md:` up the columns flow side by side. Each card moves from its own row
+ * ("Move to…") with its own action lock; each startable column offers "New
+ * card". The board read is fan-out safe: when it is unavailable the rest of
+ * the page still renders.
  */
 export function BoardPanel({
   slug,
@@ -36,109 +42,12 @@ export function BoardPanel({
   board: ProjectBoardView | null;
   archived?: boolean;
 }) {
-  const { refresh, refreshing } = useRefresh();
   // Optimistic copy of the server-rendered board: moves and new cards apply
   // here the moment they're requested, and the refresh that follows swaps in
-  // the server's authoritative board (see `useServerState`). Until that
-  // lands the card already sits in its new column instead of reading as
-  // ignored for the whole round trip.
+  // the server's authoritative board (see `useServerState`).
   const [liveBoard, setLiveBoard] = useServerState(board);
-  const [pendingId, setBusyId] = useState<string | null>(null);
-  const [lastId, setLastId] = useState<string | null>(null);
-  const busyId = pendingId ?? (refreshing ? lastId : null);
-  const [error, setError] = useState<string | null>(null);
   const [newIn, setNewIn] = useState<string | null>(null);
-  const [newTitle, setNewTitle] = useState("");
-
-  const base = `/api/projects/${encodeURIComponent(slug)}/cards`;
-
-  const request = async (
-    path: string,
-    method: "POST" | "PATCH",
-    body: Record<string, unknown>,
-  ): Promise<Record<string, unknown> | null> => {
-    const res = await fetch(path, {
-      method,
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(body),
-    });
-    const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
-    if (!res.ok) {
-      setError(
-        typeof data.detail === "string" ? data.detail : "That did not go through.",
-      );
-      return null;
-    }
-    return data;
-  };
-
-  const move = async (taskId: string, to: string) => {
-    setBusyId(taskId);
-    setLastId(taskId);
-    setError(null);
-    // Apply the column move immediately; a failure restores the snapshot.
-    const before = liveBoard;
-    if (before) setLiveBoard(moveTaskInBoard(before, taskId, to));
-    try {
-      const ok = await request(
-        `${base}/${encodeURIComponent(taskId)}`,
-        "PATCH",
-        { status: to },
-      );
-      if (ok) {
-        refresh();
-      } else if (before) {
-        setLiveBoard(before);
-      }
-    } catch {
-      if (before) setLiveBoard(before);
-      setError("Could not reach the server.");
-    } finally {
-      setBusyId(null);
-    }
-  };
-
-  const create = async (column: string) => {
-    const title = newTitle.trim();
-    if (!title) {
-      setError("A card needs a title.");
-      return;
-    }
-    setBusyId(`new:${column}`);
-    setLastId(`new:${column}`);
-    setError(null);
-    try {
-      const made = await request(base, "POST", { title });
-      if (!made) return;
-      const taskId = typeof made.task_id === "string" ? made.task_id : null;
-      let finalColumn = column;
-      if (column !== "triage" && taskId) {
-        const moved = await request(
-          `${base}/${encodeURIComponent(taskId)}`,
-          "PATCH",
-          { status: column },
-        );
-        if (!moved) {
-          finalColumn = "triage";
-          setError((prev) => `${prev ?? ""} The card was created in triage.`.trim());
-        }
-      }
-      // The POST only answers with the id — show a minimal card right away
-      // rather than waiting for the refresh to paint it.
-      if (taskId && liveBoard) {
-        setLiveBoard(
-          addTaskToBoard(liveBoard, finalColumn, newBoardCard(taskId, title, finalColumn)),
-        );
-      }
-      setNewTitle("");
-      setNewIn(null);
-      refresh();
-    } catch {
-      setError("Could not reach the server.");
-    } finally {
-      setBusyId(null);
-    }
-  };
+  const update: BoardUpdate = (fn) => setLiveBoard((prev) => (prev ? fn(prev) : prev));
 
   const canStartIn = (column: string) =>
     !archived && (NEW_CARD_COLUMNS as readonly string[]).includes(column);
@@ -182,11 +91,7 @@ export function BoardPanel({
                   {canStartIn(column.name) ? (
                     <button
                       type="button"
-                      onClick={() => {
-                        setError(null);
-                        setNewIn(newIn === column.name ? null : column.name);
-                      }}
-                      disabled={busyId !== null}
+                      onClick={() => setNewIn(newIn === column.name ? null : column.name)}
                       className="rounded-md px-1.5 py-0.5 text-xs text-[var(--color-accent)] disabled:opacity-40"
                     >
                       + New card
@@ -194,107 +99,231 @@ export function BoardPanel({
                   ) : null}
                 </div>
                 {newIn === column.name ? (
-                  <form
-                    data-component="NewCardForm"
-                    className="mb-1.5 flex flex-col gap-1.5"
-                    onSubmit={(e) => {
-                      e.preventDefault();
-                      void create(column.name);
-                    }}
-                  >
-                    <BusyRegion
-                      busy={busyId === `new:${column.name}`}
-                      label="Creating…"
-                    >
-                      <input
-                        autoFocus
-                        value={newTitle}
-                        onChange={(e) => setNewTitle(e.target.value)}
-                        placeholder="What needs doing?"
-                        aria-label={`New card in ${column.name}`}
-                        className="w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-2.5 py-1.5 text-sm outline-none focus:border-[var(--color-accent)]"
-                      />
-                    </BusyRegion>
-                    <div className="flex items-center gap-1.5">
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setNewIn(null);
-                          setNewTitle("");
-                        }}
-                        className="rounded-lg px-2 py-1 text-xs text-[var(--color-muted)]"
-                      >
-                        Cancel
-                      </button>
-                      <span className="flex-1" />
-                      <button
-                        type="submit"
-                        disabled={busyId !== null}
-                        className="rounded-lg bg-[var(--color-accent)] px-2.5 py-1 text-xs font-medium text-[var(--color-accent-fg)] disabled:opacity-40"
-                      >
-                        Create
-                      </button>
-                    </div>
-                  </form>
+                  <ColumnNewCard
+                    slug={slug}
+                    column={column.name}
+                    update={update}
+                    onDone={() => setNewIn(null)}
+                  />
                 ) : null}
                 <ul className="flex flex-col gap-1.5">
-                  {column.tasks.map((task) => {
-                    const moves = archived ? [] : cardMoves(task.status);
-                    return (
-                      <li
-                        key={task.id}
-                        data-component="BoardCard"
-                        className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)]"
-                      >
-                        <Link
-                          href={`/projects/${encodeURIComponent(slug)}/cards/${encodeURIComponent(task.id)}`}
-                          className="block px-2.5 py-2 text-sm active:opacity-70"
-                        >
-                          <span className="block truncate">{task.title}</span>
-                          <span className="block truncate text-xs text-[var(--color-muted)]">
-                            {task.assignee ?? "unassigned"}
-                            {task.current_step_key
-                              ? ` · ${task.current_step_key}`
-                              : ""}
-                          </span>
-                        </Link>
-                        {moves.length > 0 ? (
-                          <div className="flex items-center gap-1 px-2.5 pb-1.5">
-                            <select
-                              aria-label={`Move ${task.title}`}
-                              value=""
-                              disabled={busyId !== null}
-                              onChange={(e) => {
-                                if (e.target.value) void move(task.id, e.target.value);
-                              }}
-                              className="w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-1.5 py-1 text-xs disabled:opacity-40"
-                            >
-                              <option value="">
-                                {busyId === task.id ? "Moving…" : "Move to…"}
-                              </option>
-                              {moves.map((m) => (
-                                <option key={m.to} value={m.to}>
-                                  {m.label}
-                                </option>
-                              ))}
-                            </select>
-                          </div>
-                        ) : null}
-                      </li>
-                    );
-                  })}
+                  {column.tasks.map((task) => (
+                    <StageCard
+                      key={task.id}
+                      slug={slug}
+                      task={task}
+                      archived={archived}
+                      update={update}
+                    />
+                  ))}
                 </ul>
               </div>
             ))}
           </div>
         </>
       )}
+    </section>
+  );
+}
 
-      {error ? (
-        <p role="alert" className="mt-2 text-sm text-red-400">
-          {error}
+/** One card in the full stage view, with its own lock for "Move to…". */
+function StageCard({
+  slug,
+  task,
+  archived,
+  update,
+}: {
+  slug: string;
+  task: ProjectBoardTask;
+  archived: boolean;
+  update: BoardUpdate;
+}) {
+  const action = useProjectAction<ProjectBoardTask>();
+  const before = useRef<ProjectBoardTask>(task);
+  const target = useRef<string | null>(null);
+  const moves = archived ? [] : cardMoves(task.status);
+  const path = `/api/projects/${encodeURIComponent(slug)}/cards/${encodeURIComponent(task.id)}`;
+
+  const send = async (to: string, again: boolean) => {
+    // Apply the column move immediately; a refusal restores the card.
+    update((b) =>
+      to === "archived"
+        ? reconcileTask(b, { ...task, status: "archived" })
+        : moveTaskInBoard(b, task.id, to),
+    );
+    const request = {
+      method: "PATCH" as const,
+      body: { status: to },
+      onSuccess: (data: ProjectBoardTask) => {
+        if (isTaskRow(data)) update((b) => reconcileTask(b, data));
+      },
+    };
+    const result = again ? await action.retry() : await action.run(path, request);
+    if (result && !result.ok) update((b) => reconcileTask(b, before.current));
+  };
+
+  const move = (to: string) => {
+    if (action.busy) return;
+    before.current = task;
+    target.current = to;
+    void send(to, false);
+  };
+
+  return (
+    <li
+      data-component="BoardCard"
+      className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)]"
+    >
+      <Link
+        href={`/projects/${encodeURIComponent(slug)}/cards/${encodeURIComponent(task.id)}`}
+        className="block px-2.5 py-2 text-sm active:opacity-70"
+      >
+        <span className="line-clamp-2 block">{task.title}</span>
+        <span className="block truncate text-xs text-[var(--color-muted)]">
+          {task.assignee ?? "unassigned"}
+          {task.current_step_key ? ` · ${task.current_step_key}` : ""}
+        </span>
+      </Link>
+      {moves.length > 0 ? (
+        <div className="flex items-center gap-1 px-2.5 pb-1.5">
+          <select
+            aria-label={`Move ${task.title}`}
+            value=""
+            disabled={action.busy}
+            aria-busy={action.busy || undefined}
+            onChange={(e) => {
+              if (e.target.value) move(e.target.value);
+            }}
+            className="w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface-2)] px-1.5 py-1 text-xs disabled:opacity-40"
+          >
+            <option value="">{action.busy ? "Moving…" : "Move to…"}</option>
+            {moves.map((m) => (
+              <option key={m.to} value={m.to}>
+                {m.label}
+              </option>
+            ))}
+          </select>
+        </div>
+      ) : null}
+      {action.error ? (
+        <div role="alert" className="flex flex-wrap items-center gap-1.5 px-2.5 pb-1.5 text-xs text-red-300">
+          <span>{action.error}</span>
+          <ActionButton
+            busy={action.busy}
+            pendingLabel="Retrying…"
+            onClick={() => {
+              if (target.current) void send(target.current, true);
+            }}
+            className="rounded-md border border-red-400/50 px-2 py-0.5 text-xs"
+          >
+            Retry
+          </ActionButton>
+        </div>
+      ) : null}
+    </li>
+  );
+}
+
+/**
+ * "New card" in a column: create (lands in triage), then — for a column
+ * past triage — move it there. Each step is its own locked action.
+ */
+function ColumnNewCard({
+  slug,
+  column,
+  update,
+  onDone,
+}: {
+  slug: string;
+  column: string;
+  update: BoardUpdate;
+  onDone: () => void;
+}) {
+  const create = useProjectAction<{ task_id?: string }>();
+  const moveTo = useProjectAction<ProjectBoardTask>();
+  const [title, setTitle] = useState("");
+  const [note, setNote] = useState<string | null>(null);
+  const busy = create.busy || moveTo.busy;
+  const base = `/api/projects/${encodeURIComponent(slug)}/cards`;
+
+  const submit = async () => {
+    const t = title.trim();
+    if (!t) {
+      setNote("A card needs a title.");
+      return;
+    }
+    if (busy) return;
+    setNote(null);
+    const made = await create.run(base, {
+      method: "POST",
+      body: { title: t },
+      skipRefresh: column !== "triage",
+    });
+    if (!made?.ok) return;
+    const taskId = typeof made.data?.task_id === "string" ? made.data.task_id : null;
+    let finalColumn = column;
+    if (column !== "triage" && taskId) {
+      const moved = await moveTo.run(`${base}/${encodeURIComponent(taskId)}`, {
+        method: "PATCH",
+        body: { status: column },
+      });
+      if (!moved?.ok) {
+        finalColumn = "triage";
+        setNote("The card was created in triage.");
+      }
+    }
+    // The POST only answers with the id — show a minimal card right away
+    // rather than waiting for the refresh to paint it.
+    if (taskId) {
+      update((b) => addTaskToBoard(b, finalColumn, newBoardCard(taskId, t, finalColumn)));
+    }
+    setTitle("");
+    if (finalColumn === column) onDone();
+  };
+
+  const error = create.error ?? moveTo.error;
+  return (
+    <form
+      data-component="NewCardForm"
+      className="mb-1.5 flex flex-col gap-1.5"
+      onSubmit={(e) => {
+        e.preventDefault();
+        void submit();
+      }}
+    >
+      <BusyRegion busy={busy} label="Creating…">
+        <input
+          autoFocus
+          value={title}
+          onChange={(e) => setTitle(e.target.value)}
+          placeholder="What needs doing?"
+          aria-label={`New card in ${column}`}
+          className="w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-2.5 py-1.5 text-sm outline-none focus:border-[var(--color-accent)]"
+        />
+      </BusyRegion>
+      <div className="flex items-center gap-1.5">
+        <button
+          type="button"
+          onClick={onDone}
+          className="rounded-lg px-2 py-1 text-xs text-[var(--color-muted)]"
+        >
+          Cancel
+        </button>
+        <span className="flex-1" />
+        <ActionButton
+          type="submit"
+          busy={busy}
+          pendingLabel="Creating…"
+          className="rounded-lg bg-[var(--color-accent)] px-2.5 py-1 text-xs font-medium text-[var(--color-accent-fg)] disabled:opacity-40"
+        >
+          Create
+        </ActionButton>
+      </div>
+      {error || note ? (
+        <p role="alert" className="text-sm text-red-400">
+          {[error, note].filter(Boolean).join(" ")}
         </p>
       ) : null}
-    </section>
+    </form>
   );
 }

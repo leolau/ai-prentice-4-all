@@ -2371,3 +2371,42 @@ export interface ProjectChangesHistory {
   runs: ProjectHistoryRun[];
   applies_from?: string;
 }
+
+// ── Projects redesign: board ──
+
+/** The newest open (running/waiting) run as the board context sees it. */
+export interface ProjectBoardOpenRun {
+  run_no: number;
+  status: string;
+  started_at: number | null;
+  /** The run's cards the caller can see. */
+  card_ids: string[];
+  /** Blocked tasks anywhere in the run's dependency tree. */
+  blocked_tree_count: number;
+  /** The server's `_run_stalled` verdict. */
+  stalled: boolean;
+}
+
+/** `GET /{slug}/board/context` — what the board rows alone cannot say. */
+export interface ProjectBoardContext {
+  /** task id → the run number that created the card. */
+  card_runs: Record<string, number>;
+  open_run: ProjectBoardOpenRun | null;
+}
+
+/** One card's outcome in `POST /{slug}/cards/approve`. */
+export interface ProjectCardApproveResult {
+  task_id: string;
+  ok: boolean;
+  /** Already past approval: nothing was executed. */
+  unchanged?: boolean;
+  card?: ProjectBoardTask;
+  error?: string;
+}
+
+/** `POST /{slug}/cards/approve` — Approve all N. */
+export interface ProjectCardsApproveResponse {
+  results: ProjectCardApproveResult[];
+  approved: number;
+  failed: number;
+}

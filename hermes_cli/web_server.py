@@ -314,6 +314,7 @@ from hermes_cli.projects_ask_api import router as _projects_ask_router  # noqa: 
 from hermes_cli.projects_outputs_api import router as _projects_outputs_router  # noqa: E402
 from hermes_cli.projects_live_api import router as _projects_live_router  # noqa: E402
 from hermes_cli.projects_changes_api import router as _projects_changes_router  # noqa: E402
+from hermes_cli.projects_board_api import router as _projects_board_router  # noqa: E402
 
 app.include_router(_memory_oauth_router)
 app.include_router(_memory_explorer_router)
@@ -329,6 +330,7 @@ app.include_router(_projects_ask_router)
 app.include_router(_projects_outputs_router)
 app.include_router(_projects_live_router)
 app.include_router(_projects_changes_router)
+app.include_router(_projects_board_router)
 from hermes_cli.projects_idempotency import ProjectsIdempotencyMiddleware  # noqa: E402
 app.add_middleware(ProjectsIdempotencyMiddleware)  # innermost: runs after auth
 

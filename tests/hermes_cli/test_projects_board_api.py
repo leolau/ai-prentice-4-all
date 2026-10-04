@@ -1,0 +1,353 @@
+"""The board's human verbs and context read (Projects redesign: board).
+
+Behaviour contracts:
+
+- ``GET /{slug}/board/context`` names the run that created each card and
+  says whether the open run is stalled with the *same* verdict the run
+  detail read gives (``_run_stalled``) — the board must not disagree with
+  the run page;
+- ``POST /{slug}/cards/approve`` makes every listed triage card ready in
+  one request, never executes a card twice (a replay reports it
+  ``unchanged``), and one refusal never undoes the rest;
+- ``POST /{slug}/cards/{id}/unblock`` releases a blocked card and puts the
+  optional reason on its comment thread; anything not blocked is a 409;
+- all three follow the project gates: a viewer reads but never writes, a
+  stranger gets a 404, an archived project refuses the writes.
+"""
+
+from __future__ import annotations
+
+import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+
+from hermes_cli import kanban_db, projects_api, projects_board_api, projects_db
+from hermes_cli.access import Principal
+
+OWNER = Principal(user_id="leo", display="Leo", role="owner")  # type: ignore[arg-type]
+MEMBER_P = Principal(user_id="ada", display="Ada", role="member")  # type: ignore[arg-type]
+VIEWER_P = Principal(user_id="vic", display="Vic", role="member")  # type: ignore[arg-type]
+STRANGER = Principal(user_id="eve", display="Eve", role="member")  # type: ignore[arg-type]
+
+PREFIX = "/api/registry/projects"
+
+
+@pytest.fixture
+def env(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_PROJECTS_DB", str(tmp_path / "projects.db"))
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(tmp_path / "kanban.db"))
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+    state = {"actor": OWNER}
+
+    async def _resolve(request, *, allow_as=True):
+        return state["actor"]
+
+    async def _enrolled(user_id):
+        return set()
+
+    monkeypatch.setattr(
+        "hermes_cli.web_server._comms_resolve_principal", _resolve, raising=False
+    )
+    monkeypatch.setattr(projects_api, "_enrolled_profiles", _enrolled)
+
+    app = FastAPI()
+    app.include_router(projects_api.router)
+    app.include_router(projects_board_api.router)
+    return TestClient(app), state
+
+
+def _project(env) -> dict:
+    client, _state = env
+    resp = client.post(
+        PREFIX,
+        json={
+            "goal": "Ship the Monday digest to every subscriber",
+            "description": "A weekly digest compiled and emailed each Monday.",
+            "host_profile": "default",
+            "outputs": [{"title": "The Monday digest email"}],
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    project = resp.json()
+    with projects_db.connect_closing() as conn:
+        projects_db.add_project_member(
+            conn, project_id=project["id"], user_id="ada", role="member"
+        )
+        projects_db.add_project_member(
+            conn, project_id=project["id"], user_id="vic", role="viewer"
+        )
+        projects_db.set_project_status(conn, project["id"], "active")
+    return project
+
+
+def _card(env, slug, title) -> str:
+    client, _state = env
+    resp = client.post(f"{PREFIX}/{slug}/cards", json={"title": title})
+    assert resp.status_code == 200, resp.text
+    return resp.json()["task_id"]
+
+
+def _status(task_id) -> str:
+    with kanban_db.connect_closing() as bconn:
+        return kanban_db.get_task(bconn, task_id).status
+
+
+def _open_run(project) -> dict:
+    with projects_db.connect_closing() as conn:
+        return projects_db.open_project_run(
+            conn,
+            project_id=project["id"],
+            trigger="manual",
+            triggered_by="leo",
+            profile="default",
+        )
+
+
+def _link(run, task_id, step="step"):
+    with projects_db.connect_closing() as conn:
+        projects_db.link_run_card(conn, run["id"], task_id, step)
+
+
+def _set_status(task_id, status):
+    with kanban_db.connect_closing() as bconn:
+        with kanban_db.write_txn(bconn):
+            bconn.execute(
+                "UPDATE tasks SET status = ? WHERE id = ?", (status, task_id)
+            )
+
+
+# ---------------------------------------------------------------------------
+# GET /{slug}/board/context
+# ---------------------------------------------------------------------------
+
+
+def test_context_without_runs_is_empty(env):
+    client, _state = env
+    project = _project(env)
+    _card(env, project["slug"], "Draft the digest")
+    resp = client.get(f"{PREFIX}/{project['slug']}/board/context")
+    assert resp.status_code == 200, resp.text
+    assert resp.json() == {"card_runs": {}, "open_run": None}
+
+
+def test_context_names_the_run_that_created_each_card(env):
+    client, _state = env
+    project = _project(env)
+    slug = project["slug"]
+    first = _card(env, slug, "Gather arrivals")
+    second = _card(env, slug, "Send the digest")
+    loose = _card(env, slug, "A card nobody's run made")
+    run1 = _open_run(project)
+    _link(run1, first)
+    with projects_db.connect_closing() as conn:
+        projects_db.close_project_run(conn, run1["id"], status="done")
+    run2 = _open_run(project)
+    _link(run2, second)
+    # A card carried into a later run still reads as made by the first.
+    _link(run2, first)
+
+    data = client.get(f"{PREFIX}/{slug}/board/context").json()
+    assert data["card_runs"] == {
+        first: run1["run_no"],
+        second: run2["run_no"],
+    }
+    assert loose not in data["card_runs"]
+    assert data["open_run"]["run_no"] == run2["run_no"]
+    assert set(data["open_run"]["card_ids"]) == {first, second}
+
+
+def test_context_stall_agrees_with_the_run_detail_read(env):
+    client, _state = env
+    project = _project(env)
+    slug = project["slug"]
+    with kanban_db.connect_closing() as bconn:
+        sub = kanban_db.create_task(
+            bconn,
+            title="Extract objectives",
+            project_id=project["id"],
+            owner_user_id="leo",
+            initial_status="running",
+        )
+        card = kanban_db.create_task(
+            bconn,
+            title="Draft the outline",
+            project_id=project["id"],
+            owner_user_id="leo",
+            initial_status="running",
+            parents=[sub],
+        )
+        assert kanban_db.block_task(bconn, sub, reason="worker died")
+    _set_status(card, "todo")
+    run = _open_run(project)
+    _link(run, card)
+
+    ctx = client.get(f"{PREFIX}/{slug}/board/context").json()["open_run"]
+    detail = client.get(f"{PREFIX}/{slug}/runs/{run['run_no']}").json()
+    assert ctx["stalled"] is True
+    assert ctx["stalled"] == detail["stalled"]
+    assert ctx["blocked_tree_count"] == len(detail["blocked_tasks"]) == 1
+
+    # A worker on the card makes the run honest again — on both reads.
+    _set_status(card, "running")
+    ctx = client.get(f"{PREFIX}/{slug}/board/context").json()["open_run"]
+    detail = client.get(f"{PREFIX}/{slug}/runs/{run['run_no']}").json()
+    assert ctx["stalled"] is False and detail["stalled"] is False
+
+
+def test_context_read_gates(env):
+    client, state = env
+    project = _project(env)
+    state["actor"] = VIEWER_P
+    assert client.get(f"{PREFIX}/{project['slug']}/board/context").status_code == 200
+    state["actor"] = STRANGER
+    assert client.get(f"{PREFIX}/{project['slug']}/board/context").status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# POST /{slug}/cards/approve
+# ---------------------------------------------------------------------------
+
+
+def test_approve_all_makes_each_triage_card_ready_once(env):
+    client, state = env
+    project = _project(env)
+    slug = project["slug"]
+    ids = [_card(env, slug, f"Card {n}") for n in range(3)]
+    state["actor"] = MEMBER_P  # approval is a judgement act: members may
+    resp = client.post(
+        f"{PREFIX}/{slug}/cards/approve", json={"task_ids": ids + [ids[0]]}
+    )
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    assert [r["task_id"] for r in data["results"]] == ids  # deduped, in order
+    assert data["approved"] == 3 and data["failed"] == 0
+    assert all(r["card"]["status"] == "ready" for r in data["results"])
+    assert [_status(t) for t in ids] == ["ready"] * 3
+
+    # A replay (lost response, second tab) executes nothing.
+    again = client.post(f"{PREFIX}/{slug}/cards/approve", json={"task_ids": ids}).json()
+    assert again["approved"] == 0 and again["failed"] == 0
+    assert all(r["unchanged"] for r in again["results"])
+
+
+def test_approve_all_reports_refusals_without_undoing_the_rest(env):
+    client, _state = env
+    project = _project(env)
+    other = client.post(
+        PREFIX,
+        json={
+            "goal": "A different project entirely, for isolation",
+            "description": "Someone else's work.",
+            "host_profile": "default",
+            "outputs": [{"title": "Theirs"}],
+        },
+    ).json()
+    mine = _card(env, project["slug"], "Mine")
+    theirs = _card(env, other["slug"], "Theirs")
+    data = client.post(
+        f"{PREFIX}/{project['slug']}/cards/approve",
+        json={"task_ids": [mine, theirs, "task_nope"]},
+    ).json()
+    by_id = {r["task_id"]: r for r in data["results"]}
+    assert by_id[mine]["ok"] is True
+    assert by_id[theirs] == {"task_id": theirs, "ok": False, "error": "card not found"}
+    assert by_id["task_nope"]["ok"] is False
+    assert data["approved"] == 1 and data["failed"] == 2
+    assert _status(mine) == "ready"
+    assert _status(theirs) == "triage"
+
+
+@pytest.mark.parametrize("body", [{}, {"task_ids": []}, {"task_ids": "x"}, {"task_ids": ["", " "]}])
+def test_approve_all_validates_the_list(env, body):
+    client, _state = env
+    project = _project(env)
+    resp = client.post(f"{PREFIX}/{project['slug']}/cards/approve", json=body)
+    assert resp.status_code == 422
+
+
+def test_approve_all_write_gates(env):
+    client, state = env
+    project = _project(env)
+    card = _card(env, project["slug"], "Draft")
+    state["actor"] = VIEWER_P
+    resp = client.post(f"{PREFIX}/{project['slug']}/cards/approve", json={"task_ids": [card]})
+    assert resp.status_code == 403
+    state["actor"] = STRANGER
+    resp = client.post(f"{PREFIX}/{project['slug']}/cards/approve", json={"task_ids": [card]})
+    assert resp.status_code == 404
+    assert _status(card) == "triage"
+    state["actor"] = OWNER
+    assert client.post(f"{PREFIX}/{project['slug']}/archive", json={}).status_code == 200
+    resp = client.post(f"{PREFIX}/{project['slug']}/cards/approve", json={"task_ids": [card]})
+    assert resp.status_code == 409
+    assert _status(card) == "triage"
+
+
+# ---------------------------------------------------------------------------
+# POST /{slug}/cards/{id}/unblock
+# ---------------------------------------------------------------------------
+
+
+def _blocked_card(env, slug) -> str:
+    client, _state = env
+    card = _card(env, slug, "Send the digest")
+    assert client.patch(f"{PREFIX}/{slug}/cards/{card}", json={"status": "ready"}).status_code == 200
+    assert client.patch(f"{PREFIX}/{slug}/cards/{card}", json={"status": "blocked"}).status_code == 200
+    assert _status(card) == "blocked"
+    return card
+
+
+def test_unblock_with_a_reason_comments_then_releases(env):
+    client, state = env
+    project = _project(env)
+    slug = project["slug"]
+    card = _blocked_card(env, slug)
+    state["actor"] = MEMBER_P
+    resp = client.post(
+        f"{PREFIX}/{slug}/cards/{card}/unblock",
+        json={"reason": "The list is attached now."},
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["status"] == "ready"
+    assert _status(card) == "ready"
+    comments = client.get(f"{PREFIX}/{slug}/cards/{card}").json()["comments"]
+    assert comments[-1]["body"] == "The list is attached now."
+    assert comments[-1]["author"] == "user:ada"
+
+
+def test_unblock_without_a_reason_adds_no_comment(env):
+    client, _state = env
+    project = _project(env)
+    slug = project["slug"]
+    card = _blocked_card(env, slug)
+    resp = client.post(f"{PREFIX}/{slug}/cards/{card}/unblock", json={})
+    assert resp.status_code == 200, resp.text
+    assert client.get(f"{PREFIX}/{slug}/cards/{card}").json()["comments"] == []
+
+
+def test_unblock_refuses_a_card_that_is_not_blocked(env):
+    client, _state = env
+    project = _project(env)
+    slug = project["slug"]
+    card = _card(env, slug, "Still in triage")
+    resp = client.post(f"{PREFIX}/{slug}/cards/{card}/unblock", json={"reason": "go"})
+    assert resp.status_code == 409
+    assert "not blocked" in resp.json()["detail"]
+    # The refusal happened before the comment: nothing written.
+    assert client.get(f"{PREFIX}/{slug}/cards/{card}").json()["comments"] == []
+    assert client.post(f"{PREFIX}/{slug}/cards/task_nope/unblock", json={}).status_code == 404
+
+
+def test_unblock_gates(env):
+    client, state = env
+    project = _project(env)
+    slug = project["slug"]
+    card = _blocked_card(env, slug)
+    state["actor"] = VIEWER_P
+    assert client.post(f"{PREFIX}/{slug}/cards/{card}/unblock", json={}).status_code == 403
+    resp = client.post(f"{PREFIX}/{slug}/cards/{card}/unblock", json={"reason": "x" * 2001})
+    assert resp.status_code == 403
+    state["actor"] = OWNER
+    resp = client.post(f"{PREFIX}/{slug}/cards/{card}/unblock", json={"reason": "x" * 2001})
+    assert resp.status_code == 422
+    assert _status(card) == "blocked"

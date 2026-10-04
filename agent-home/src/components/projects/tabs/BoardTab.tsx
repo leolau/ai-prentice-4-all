@@ -1,12 +1,17 @@
 "use client";
 
-import { BoardPanel } from "@/components/projects/panels/BoardPanel";
+import { BoardView } from "@/components/projects/board/BoardView";
 import type { ProjectTabProps } from "@/components/projects/tabs/types";
 
-export function BoardTab({ project, board }: ProjectTabProps) {
+export function BoardTab({ project, board, callerUserId, canLead }: ProjectTabProps) {
   return (
     <div data-component="BoardTab">
-      <BoardPanel slug={project.slug} board={board} archived={project.archived} />
+      <BoardView
+        project={project}
+        board={board}
+        callerUserId={callerUserId}
+        canLead={canLead}
+      />
     </div>
   );
 }
