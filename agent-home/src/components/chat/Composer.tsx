@@ -19,6 +19,7 @@ export function Composer({
   onStop,
   stopping = false,
   initialText = "",
+  docked = false,
 }: {
   sending: boolean;
   /** A Stop was requested and the server is winding the turn down. */
@@ -27,6 +28,12 @@ export function Composer({
   sessionId: string | null;
   /** Pre-filled text (a deep link's `?draft=`); the user still presses send. */
   initialText?: string;
+  /**
+   * The host lays the composer out below its own scroll container (Chats
+   * thread pane, lead panel): no sticky positioning, page background or
+   * Coral-launcher indent.
+   */
+  docked?: boolean;
   /**
    * Resolves `false` when the message never reached the agent (a transport
    * failure, not a mid-turn error) — the composer then puts the draft and
@@ -110,11 +117,12 @@ export function Composer({
   return (
     <div
       data-component="Composer"
-      className="sticky bottom-0 mt-3 bg-[var(--color-bg)] pt-2"
-      style={{
-        bottom: "var(--safe-bottom)",
-        marginLeft: "calc(2.75rem + 0.75rem)",
-      }}
+      className={docked ? "pt-2" : "sticky bottom-0 mt-3 bg-[var(--color-bg)] pt-2"}
+      style={
+        docked
+          ? undefined
+          : { bottom: "var(--safe-bottom)", marginLeft: "calc(2.75rem + 0.75rem)" }
+      }
     >
       {attachments.length > 0 ? (
         <div className="mb-2 flex flex-wrap gap-2">

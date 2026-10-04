@@ -5,8 +5,8 @@ import { chatHeaderActionsRef } from "@/lib/chat/header-actions";
 /**
  * Compact action buttons rendered in the `MobileShell` header bar, next to
  * the "Chat" title.  The "Archived" and "+ New" buttons used to live inside
- * the `SessionTabs` strip where they ate ~150px of horizontal space on a
- * phone; moving them to the header gives the session chips the full width.
+ * the old session-tab strip where they ate ~150px of horizontal space on a
+ * phone; the header keeps them out of the conversation list's way.
  *
  * The callbacks are populated by `ChatPane` via the shared
  * `chatHeaderActionsRef` — see `lib/chat/header-actions.ts` for the rationale.

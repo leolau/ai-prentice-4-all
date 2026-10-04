@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { Spinner } from "@/components/ui/Spinner";
 
@@ -23,12 +23,15 @@ export function SessionSearchBar({
   onSearch,
   onJumpToResult,
   onClose,
+  initialQuery = "",
 }: {
   onSearch: (q: string) => Promise<SearchResult[]>;
   onJumpToResult: (result: SearchResult, index: number, total: number) => void;
   onClose: () => void;
+  /** Searched right away when non-empty. */
+  initialQuery?: string;
 }) {
-  const [query, setQuery] = useState("");
+  const [query, setQuery] = useState(initialQuery);
   const [results, setResults] = useState<SearchResult[]>([]);
   const [loading, setLoading] = useState(false);
   const [currentIndex, setCurrentIndex] = useState(0);
@@ -47,6 +50,14 @@ export function SessionSearchBar({
       setLoading(false);
     }
   }, [query, onSearch]);
+
+  const searchRef = useRef(search);
+  useEffect(() => {
+    searchRef.current = search;
+  });
+  useEffect(() => {
+    if (initialQuery.trim()) void searchRef.current();
+  }, [initialQuery]);
 
   const jump = useCallback(
     (dir: 1 | -1) => {
@@ -78,8 +89,9 @@ export function SessionSearchBar({
               onClose();
             }
           }}
+          aria-label="Search message text in all conversations"
           placeholder="Search all sessions…"
-          className="flex-1 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-1.5 text-sm text-[var(--color-fg)]"
+          className="min-w-0 flex-1 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-1.5 text-sm text-[var(--color-fg)]"
         />
         {showResults && results.length > 0 && (
           <SearchNav
@@ -109,7 +121,7 @@ export function SessionSearchBar({
         )}
       </div>
       {showResults && results.length > 0 && (
-        <div className="mt-2 max-h-40 overflow-y-auto rounded-lg border border-[var(--color-border)]">
+        <div className="mt-2 rounded-lg border border-[var(--color-border)]">
           {results.map((r, i) => (
             <button
               key={i}

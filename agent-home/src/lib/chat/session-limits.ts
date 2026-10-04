@@ -7,11 +7,10 @@
  * that a strip only shows a handful of tabs at once — but that meant any
  * conversation outside the 50 most recent silently vanished from the
  * picker entirely (found via a real report: a session ranked #65 by
- * recency was invisible). Since `SessionTabs` now shows one category's
- * chips at a time behind a dropdown (see `categorize.ts`) instead of
- * every category stacked and rendered simultaneously, a wider fetch no
- * longer means a taller page — only the selected category's row grows,
- * and that's exactly what "load more of this category" should do. If a
+ * recency was invisible). The `ConversationList` sidebar is its own
+ * scroll container filtered by category (see `categorize.ts`), so a wider
+ * fetch no longer means a taller page — only the list grows, and that's
+ * exactly what "load more of this category" should do. If a
  * future perf issue reappears, the fix belongs in the query
  * (`hermes_state.py`'s `list_sessions_rich`), not in silently hiding
  * conversations again.
