@@ -325,16 +325,35 @@ def _card_context(project, principal) -> dict:
     }
 
 
+def _preferred_claim(entries: list[tuple[str, dict]]) -> tuple[str, dict]:
+    """The card that owns a path's claim when several cards name the same
+    file: the one whose workspace contains it (the producer), then the
+    earliest claim."""
+
+    def _rank(entry: tuple[str, dict]) -> tuple[int, int]:
+        _aid, item = entry
+        ws = getattr(item["task"], "workspace_path", None)
+        owns = 0 if ws and item["path"].startswith(ws.rstrip("/") + "/") else 1
+        return (owns, item.get("created_at") or 0)
+
+    return min(entries, key=_rank)
+
+
 def _files_by_id(project, ctx: dict) -> dict[str, dict]:
     """Every local file the project's cards produced, keyed by artifact id,
-    with the resolved path when it can be served."""
+    with the resolved path when it can be served. One row per physical
+    path: a follow-on card that names another card's workspace file must
+    not re-list it."""
     board = project.board_slug or None
+    claims: dict[str, list[tuple[str, dict]]] = {}
     out: dict[str, dict] = {}
     for tid, task in ctx["tasks"].items():
         roots = _managed_roots(task, board)
         for f in _claimed_files(task, ctx["task_runs"].get(tid, [])):
             aid = f"f:{tid}:{_short_hash(f['path'])}"
-            out[aid] = {**f, "task": task, "serve": _servable(f["path"], roots)}
+            claims.setdefault(f["path"], []).append(
+                (aid, {**f, "task": task, "serve": _servable(f["path"], roots)})
+            )
         for att in ctx["attachments"].get(tid, []):
             aid = f"att:{att.id}"
             out[aid] = {
@@ -346,6 +365,9 @@ def _files_by_id(project, ctx: dict) -> dict[str, dict]:
                 "task": task,
                 "serve": _servable(att.stored_path, roots),
             }
+    for entries in claims.values():
+        aid, item = _preferred_claim(entries)
+        out[aid] = item
     return out
 
 
@@ -462,10 +484,12 @@ def build_artifacts(project, ctx: dict) -> list[dict]:
             "created_by": f.get("created_by"),
         })
 
+    seen_link_urls: set[str] = set()
     for tid, task in ctx["tasks"].items():
         for link in _card_links(task, ctx["task_runs"].get(tid, [])):
-            if link["url"] in attached_urls:
+            if link["url"] in attached_urls or link["url"] in seen_link_urls:
                 continue
+            seen_link_urls.add(link["url"])
             title, ext, mime = _url_meta(link["url"])
             label = link["label"] or title
             items.append({
