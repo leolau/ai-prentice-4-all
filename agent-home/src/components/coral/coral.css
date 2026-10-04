@@ -87,24 +87,20 @@
   }
 }
 
-@media (prefers-reduced-motion: reduce) {
-  .coral-panel,
-  .coral-tile,
-  .coral-backdrop,
-  .coral-fab {
-    animation: none;
-  }
-}
 
-/* Lead chat — the second Coral button's floating panel (bottom-right). */
+/* Lead chat — the second Coral button's floating panel (bottom-right, in
+   place of the FAB, which hides while it is open). Hidden, not unmounted,
+   when minimised. */
 .leadchat-panel {
   position: fixed;
   z-index: 50;
-  right: 0.75rem;
-  bottom: calc(var(--safe-bottom) + 5.5rem);
-  width: min(calc(100vw - 1.5rem), 24rem);
+  right: 1rem;
+  bottom: calc(var(--safe-bottom) + 1rem);
+  width: min(calc(100vw - 2rem), 24rem);
+  height: min(calc(100dvh - 2rem - var(--safe-bottom)), 34rem);
   display: flex;
   flex-direction: column;
+  overflow: hidden;
   border: 1px solid var(--color-border);
   border-radius: 1.5rem;
   /* Accent-tinted on purpose: the panel must read as its own working area,
@@ -116,14 +112,65 @@
   animation: coral-panel-in 200ms cubic-bezier(0.2, 0.9, 0.3, 1.05) backwards;
 }
 
-.leadchat-scroll {
-  overflow-y: auto;
-  max-height: min(50dvh, 26rem);
-  padding: 0.25rem;
+/* Minimised: invisible, inert and click-through but still laid out, so the
+   thread keeps its scroll offset (display: none — and so the `hidden`
+   attribute — would reset it). Dropping the animation here makes it replay
+   on reopen. */
+.leadchat-panel[data-state="closed"] {
+  visibility: hidden;
+  pointer-events: none;
+  animation: none;
+}
+
+.leadchat-panel:focus {
+  outline: none;
+}
+
+/* A drag writes transform/size every frame — no easing, no text selection. */
+.leadchat-panel.is-dragging {
+  transition: none;
+  user-select: none;
+  will-change: transform;
+}
+
+.leadchat-head {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0 0.25rem 0.5rem;
+}
+
+.leadchat-headbtn {
+  display: inline-flex;
+  height: 2rem;
+  align-items: center;
+  justify-content: center;
+  gap: 0.25rem;
+  border: 1px solid var(--color-border);
+  border-radius: 0.5rem;
+  color: var(--color-muted);
+  white-space: nowrap;
+}
+
+.leadchat-headbtn:hover {
+  color: var(--color-fg);
+  background: var(--color-surface-2);
+}
+
+.leadchat-headbtn:focus-visible,
+.leadchat-grab:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 1px;
+}
+
+.leadchat-panel [data-component="Composer"] {
+  flex: none;
 }
 
 /* Drag grip — the header area moves the panel; resize grips — two corners:
    bottom-right (.leadchat-resize) and upper-left (.leadchat-resize-tl).
+   Desktop panel only; the phone sheet renders neither.
    touch-action: none lets pointer drags win over page scrolling on touch. */
 .leadchat-drag {
   cursor: grab;
@@ -134,30 +181,104 @@
   cursor: grabbing;
 }
 
-.leadchat-resize {
+.leadchat-resize,
+.leadchat-resize-tl {
   position: absolute;
-  right: 4px;
-  bottom: 4px;
-  width: 32px;
-  height: 32px;
+  width: 18px;
+  height: 18px;
   cursor: nwse-resize;
   touch-action: none;
-  border-right: 3px solid var(--color-border);
-  border-bottom: 3px solid var(--color-border);
-  border-bottom-right-radius: 10px;
   opacity: 0.85;
 }
 
+.leadchat-resize {
+  right: 3px;
+  bottom: 3px;
+  border-right: 3px solid var(--color-border);
+  border-bottom: 3px solid var(--color-border);
+  border-bottom-right-radius: 10px;
+}
+
 .leadchat-resize-tl {
-  position: absolute;
-  left: 4px;
-  top: 4px;
-  width: 32px;
-  height: 32px;
-  cursor: nwse-resize;
-  touch-action: none;
+  left: 3px;
+  top: 3px;
   border-left: 3px solid var(--color-border);
   border-top: 3px solid var(--color-border);
   border-top-left-radius: 10px;
-  opacity: 0.85;
+}
+
+/* Phone (<768px): a full-width bottom sheet above the safe area with two
+   snap points; the handle toggles them on tap and follows a drag. It sits
+   above the Coral launcher button so the composer gets the full width. */
+.leadchat-sheet {
+  z-index: 65;
+  left: 0;
+  right: 0;
+  top: auto;
+  bottom: 0;
+  width: 100%;
+  max-width: 100vw;
+  height: 55dvh;
+  border-bottom: 0;
+  border-radius: 1.25rem 1.25rem 0 0;
+  padding: 0 0.75rem calc(var(--safe-bottom) + 0.5rem);
+  box-shadow: 0 -12px 40px 0 rgb(0 0 0 / 0.45);
+  transform-origin: bottom center;
+  animation: leadchat-sheet-in 220ms cubic-bezier(0.2, 0.9, 0.3, 1) backwards;
+  transition:
+    height 220ms ease,
+    transform 220ms ease;
+}
+
+.leadchat-sheet[data-snap="full"] {
+  height: 92dvh;
+}
+
+@keyframes leadchat-sheet-in {
+  from {
+    transform: translateY(100%);
+  }
+}
+
+.leadchat-grab {
+  display: flex;
+  flex: none;
+  width: 100%;
+  height: 1.75rem;
+  align-items: center;
+  justify-content: center;
+  border-radius: 0.75rem;
+  cursor: grab;
+  touch-action: none;
+}
+
+.leadchat-grab-bar {
+  width: 2.5rem;
+  height: 5px;
+  border-radius: 3px;
+  background: var(--color-border);
+}
+
+/* "New reply" dot on the lead-chat FAB while the panel is minimised. */
+.leadchat-unread {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  width: 0.8rem;
+  height: 0.8rem;
+  border-radius: 9999px;
+  background: #ff5a5f;
+  box-shadow: 0 0 0 2px var(--color-bg);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .coral-panel,
+  .coral-tile,
+  .coral-backdrop,
+  .coral-fab,
+  .leadchat-panel,
+  .leadchat-sheet {
+    animation: none;
+    transition: none;
+  }
 }
