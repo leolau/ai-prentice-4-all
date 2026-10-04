@@ -67,7 +67,7 @@ export function WhereItStands({
       className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface)] p-4"
     >
       <h2 className="text-sm font-semibold">Where it stands</h2>
-      <ol className="mt-3 grid grid-cols-3 gap-y-3 sm:grid-cols-6">
+      <ol className="mt-3 grid grid-cols-4 gap-y-3 sm:grid-cols-7">
         {steps.map((step) => (
           <li
             key={step.key}
