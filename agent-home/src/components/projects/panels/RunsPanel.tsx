@@ -2,8 +2,10 @@
 
 import Link from "next/link";
 import { useState } from "react";
-import { friendlyError } from "@/components/projects/errors";
-import { useRefresh } from "@/components/ui/useRefresh";
+
+import { ActionButton } from "@/components/projects/ActionButton";
+import { ActionError } from "@/components/projects/ActionError";
+import { useProjectAction } from "@/components/projects/useProjectAction";
 
 import {
   agoLabel,
@@ -51,37 +53,6 @@ export function RunsPanel({
   runs: ProjectRunBrief[];
   archived?: boolean;
 }) {
-  const { refresh, refreshing } = useRefresh();
-  const [pendingRun, setBusyRun] = useState<number | null>(null);
-  const [lastRun, setLastRun] = useState<number | null>(null);
-  const busyRun = pendingRun ?? (refreshing ? lastRun : null);
-  const [error, setError] = useState<string | null>(null);
-
-  const post = async (runNo: number, action: "continue" | "cancel" | "stop") => {
-    setBusyRun(runNo);
-    setLastRun(runNo);
-    setError(null);
-    try {
-      const res = await fetch(
-        `/api/projects/${encodeURIComponent(slug)}/runs/${runNo}/${action}`,
-        { method: "POST" },
-      );
-      const data = (await res.json().catch(() => ({}))) as { detail?: string };
-      if (!res.ok) {
-        setError(friendlyError({ status: res.status, detail: data.detail }, "That did not go through."));
-        return;
-      }
-      refresh();
-    } catch {
-      setError("Could not reach the server.");
-    } finally {
-      setBusyRun(null);
-    }
-  };
-
-  const actionClass =
-    "rounded-lg border border-[var(--color-border)] px-2.5 py-1 text-xs disabled:opacity-50";
-
   return (
     <section
       id="panel-runs"
@@ -102,7 +73,6 @@ export function RunsPanel({
         <ul className="mt-2 flex flex-col gap-1.5">
           {runs.map((run) => {
             const live = isLiveRun(run.status);
-            const busy = busyRun === run.run_no;
             return (
               <li
                 key={run.run_no}
@@ -128,52 +98,7 @@ export function RunsPanel({
                   <Pill tone={RUN_TONE[run.status]}>{run.status}</Pill>
                 </Link>
                 {live && !archived ? (
-                  <div
-                    data-component="RunRowActions"
-                    className="flex flex-wrap items-center gap-1.5 px-3 pb-2"
-                  >
-                    {run.status === "waiting" ? (
-                      <button
-                        type="button"
-                        onClick={() => void post(run.run_no, "continue")}
-                        disabled={busy}
-                        className="rounded-lg bg-[var(--color-accent)] px-2.5 py-1 text-xs font-medium text-[var(--color-accent-fg)] disabled:opacity-50"
-                      >
-                        Continue
-                      </button>
-                    ) : null}
-                    <button
-                      type="button"
-                      onClick={() => void post(run.run_no, "cancel")}
-                      disabled={busy}
-                      title="Stop promoting new work; a running card finishes."
-                      className={actionClass}
-                    >
-                      Cancel
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        if (
-                          !window.confirm(
-                            `Stop run ${run.run_no} now? Work in progress is terminated where it stands — Cancel instead lets a running card finish.`,
-                          )
-                        ) {
-                          return;
-                        }
-                        void post(run.run_no, "stop");
-                      }}
-                      disabled={busy}
-                      className={`${actionClass} text-red-400`}
-                    >
-                      Stop now
-                    </button>
-                    {busy ? (
-                      <span className="text-xs text-[var(--color-muted)]">
-                        Working…
-                      </span>
-                    ) : null}
-                  </div>
+                  <RunRowActions slug={slug} runNo={run.run_no} status={run.status} />
                 ) : null}
               </li>
             );
@@ -181,17 +106,97 @@ export function RunsPanel({
         </ul>
       )}
 
-      {error ? (
-        <p role="alert" className="mt-2 text-sm text-red-400">
-          {error}
-        </p>
-      ) : null}
-
       {runs.length > 0 ? (
         <p className="mt-2 text-xs text-[var(--color-muted)]">
           newest run {agoLabel(runs[0].started_at)}
         </p>
       ) : null}
     </section>
+  );
+}
+
+type RunRowAction = "continue" | "cancel" | "stop";
+
+const ROW_PENDING: Record<RunRowAction, string> = {
+  continue: "Continuing…",
+  cancel: "Cancelling…",
+  stop: "Stopping…",
+};
+
+/**
+ * Continue / Cancel / Stop for one live run. Its own action lock, so steering
+ * one run never blocks (or is mistaken for) another row's write.
+ */
+function RunRowActions({
+  slug,
+  runNo,
+  status,
+}: {
+  slug: string;
+  runNo: number;
+  status: ProjectRunStatus;
+}) {
+  const action = useProjectAction();
+  const [which, setWhich] = useState<RunRowAction | null>(null);
+  const fire = (next: RunRowAction) => {
+    if (action.busy) return;
+    setWhich(next);
+    void action.run(
+      `/api/projects/${encodeURIComponent(slug)}/runs/${runNo}/${next}`,
+    );
+  };
+  const actionClass =
+    "rounded-lg border border-[var(--color-border)] px-2.5 py-1 text-xs disabled:opacity-50";
+  const pending = (name: RunRowAction) => action.busy && which === name;
+
+  return (
+    <div
+      data-component="RunRowActions"
+      className="flex flex-wrap items-center gap-1.5 px-3 pb-2"
+    >
+      {status === "waiting" ? (
+        <ActionButton
+          busy={pending("continue")}
+          pendingLabel={ROW_PENDING.continue}
+          onClick={() => fire("continue")}
+          disabled={action.busy}
+          className="rounded-lg bg-[var(--color-accent)] px-2.5 py-1 text-xs font-medium text-[var(--color-accent-fg)] disabled:opacity-50"
+        >
+          Continue
+        </ActionButton>
+      ) : null}
+      <ActionButton
+        busy={pending("cancel")}
+        pendingLabel={ROW_PENDING.cancel}
+        onClick={() => fire("cancel")}
+        disabled={action.busy}
+        title="Stop promoting new work; a running card finishes."
+        className={actionClass}
+      >
+        Cancel
+      </ActionButton>
+      <ActionButton
+        busy={pending("stop")}
+        pendingLabel={ROW_PENDING.stop}
+        onClick={() => {
+          if (
+            !window.confirm(
+              `Stop run ${runNo} now? Work in progress is terminated where it stands — Cancel instead lets a running card finish.`,
+            )
+          ) {
+            return;
+          }
+          fire("stop");
+        }}
+        disabled={action.busy}
+        className={`${actionClass} text-red-400`}
+      >
+        Stop now
+      </ActionButton>
+      <ActionError
+        action={action}
+        className="flex w-full flex-wrap items-center gap-2 text-xs text-red-400"
+      />
+    </div>
   );
 }

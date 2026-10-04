@@ -1,8 +1,10 @@
 "use client";
 
 import { useState } from "react";
-import { friendlyError } from "@/components/projects/errors";
 
+import { ActionButton } from "@/components/projects/ActionButton";
+import { ActionError } from "@/components/projects/ActionError";
+import { useProjectAction } from "@/components/projects/useProjectAction";
 import { BusyRegion } from "@/components/ui/BusyRegion";
 import type { ProjectDetail, ProjectStatus } from "@/types";
 
@@ -14,9 +16,11 @@ interface BriefFields {
   target_audience: string;
 }
 
-const PAUSABLE: Partial<Record<ProjectStatus, { to: ProjectStatus; label: string }>> = {
-  active: { to: "paused", label: "Pause the project" },
-  paused: { to: "active", label: "Resume the project" },
+const PAUSABLE: Partial<
+  Record<ProjectStatus, { to: ProjectStatus; label: string; pending: string }>
+> = {
+  active: { to: "paused", label: "Pause the project", pending: "Pausing…" },
+  paused: { to: "active", label: "Resume the project", pending: "Resuming…" },
 };
 
 /** Only the fields that changed — the API treats every key as an assignment. */
@@ -51,33 +55,23 @@ export function EditBriefSheet({
     target_audience: project.target_audience ?? "",
   };
   const [fields, setFields] = useState<BriefFields>(before);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const saveAction = useProjectAction();
+  const toggleAction = useProjectAction();
+  const busy = saveAction.busy || toggleAction.busy;
   const [fieldErrors, setFieldErrors] = useState<Partial<BriefFields>>({});
 
   const slugPath = `/api/projects/${encodeURIComponent(project.slug)}`;
 
-  const patch = async (body: Record<string, string>) => {
-    setBusy(true);
-    setError(null);
-    try {
-      const res = await fetch(slugPath, {
-        method: "PATCH",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(body),
-      });
-      const data = (await res.json().catch(() => ({}))) as { detail?: string };
-      if (!res.ok) {
-        setError(friendlyError({ status: res.status, detail: data.detail }, "The change was not saved."));
-        return false;
-      }
-      return true;
-    } catch {
-      setError("Could not reach the server.");
-      return false;
-    } finally {
-      setBusy(false);
-    }
+  // The caller refreshes on close and holds its busy state meanwhile.
+  const patchRequest = (body: Record<string, string>) => ({
+    method: "PATCH" as const,
+    body,
+    skipRefresh: true,
+    onSuccess: () => onClose(),
+  });
+  // Never drop the sheet mid-write: the lock would go with it.
+  const close = () => {
+    if (!busy) onClose();
   };
 
   const save = async () => {
@@ -91,7 +85,7 @@ export function EditBriefSheet({
       onClose();
       return;
     }
-    if (await patch(body)) onClose();
+    await saveAction.run(slugPath, patchRequest(body));
   };
 
   const toggle = PAUSABLE[project.status];
@@ -108,7 +102,7 @@ export function EditBriefSheet({
     <div
       data-component="EditBriefSheet"
       className="fixed inset-0 z-50 flex items-end bg-black/50"
-      onClick={onClose}
+      onClick={close}
     >
       <div
         role="dialog"
@@ -121,8 +115,9 @@ export function EditBriefSheet({
           <h2 className="text-sm font-semibold">Edit brief</h2>
           <button
             type="button"
-            onClick={onClose}
-            className="rounded-lg px-2 py-1 text-sm text-[var(--color-muted)]"
+            onClick={close}
+            disabled={busy}
+            className="rounded-lg px-2 py-1 text-sm text-[var(--color-muted)] disabled:opacity-50"
           >
             Close
           </button>
@@ -177,33 +172,33 @@ export function EditBriefSheet({
               />
             </label>
 
-            {error ? (
-              <p role="alert" className="text-sm text-red-400">
-                {error}
-              </p>
-            ) : null}
+            <ActionError action={saveAction} className="flex flex-wrap items-center gap-2 text-sm text-red-400" />
+            <ActionError action={toggleAction} className="flex flex-wrap items-center gap-2 text-sm text-red-400" />
 
             <div className="flex items-center gap-2">
               {toggle ? (
-                <button
-                  type="button"
+                <ActionButton
+                  busy={toggleAction.busy}
+                  pendingLabel={toggle.pending}
                   disabled={busy}
-                  onClick={async () => {
-                    if (await patch({ status: toggle.to })) onClose();
-                  }}
+                  onClick={() =>
+                    void toggleAction.run(slugPath, patchRequest({ status: toggle.to }))
+                  }
                   className="rounded-xl border border-[var(--color-border)] px-3 py-2 text-sm disabled:opacity-50"
                 >
                   {toggle.label}
-                </button>
+                </ActionButton>
               ) : null}
               <span className="flex-1" />
-              <button
+              <ActionButton
                 type="submit"
+                busy={saveAction.busy}
+                pendingLabel="Saving…"
                 disabled={busy}
                 className="rounded-xl bg-[var(--color-accent)] px-4 py-2 text-sm font-medium text-[var(--color-accent-fg)] disabled:opacity-50"
               >
                 Save
-              </button>
+              </ActionButton>
             </div>
           </form>
         </BusyRegion>

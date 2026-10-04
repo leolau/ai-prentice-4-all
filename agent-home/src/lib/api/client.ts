@@ -219,6 +219,7 @@ export class HermesApiClient {
     if (json !== undefined) {
       finalHeaders.set("content-type", "application/json");
     }
+    this.applyIdempotencyKey(finalHeaders, rest.method);
     // Latency measurement: every page render fans out through this one seam,
     // so timing here attributes page-load seconds to specific upstream
     // endpoints (visible in `journalctl -u agent-home`). Covers fetch +
@@ -2501,6 +2502,28 @@ export class HermesApiClient {
     );
   }
 
+  // ── Projects redesign: safety ──
+
+  private idempotencyKey?: string;
+
+  /**
+   * Forward the browser's `Idempotency-Key` on this client's writes, so a
+   * retried click replays upstream instead of acting twice. Never invented
+   * here: no key from the browser means no header upstream.
+   */
+  forwardIdempotencyKey(key: string | null | undefined): this {
+    const trimmed = (key ?? "").trim();
+    this.idempotencyKey = trimmed || undefined;
+    return this;
+  }
+
+  private applyIdempotencyKey(headers: Headers, method: string | undefined): void {
+    if (!this.idempotencyKey || headers.has("idempotency-key")) return;
+    const verb = (method ?? "GET").toUpperCase();
+    if (verb === "POST" || verb === "PATCH" || verb === "PUT" || verb === "DELETE") {
+      headers.set("Idempotency-Key", this.idempotencyKey);
+    }
+  }
 }
 
 /**

@@ -2,8 +2,11 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useCallback, useState, type ComponentType } from "react";
-import { friendlyError } from "@/components/projects/errors";
+import { useCallback, useState, useTransition, type ComponentType } from "react";
+
+import { ActionButton } from "@/components/projects/ActionButton";
+import { ActionError } from "@/components/projects/ActionError";
+import { useProjectAction } from "@/components/projects/useProjectAction";
 
 import {
   AddToProjectSheet,
@@ -101,9 +104,15 @@ export function ProjectDetailView({
 }) {
   const router = useRouter();
   const { refresh, refreshing } = useRefresh();
-  const [requesting, setBusy] = useState(false);
-  const busy = requesting || refreshing;
-  const [error, setError] = useState<string | null>(null);
+  // Header writes: one lock each, held from the click until the refreshed
+  // page (or the new run page) has landed.
+  const runNowAction = useProjectAction<{ run?: { run_no?: number }; run_no?: number }>();
+  const activateAction = useProjectAction();
+  const continueAction = useProjectAction();
+  const [navigating, startNavigation] = useTransition();
+  const headerBusy =
+    runNowAction.busy || activateAction.busy || continueAction.busy || navigating;
+  const busy = headerBusy || refreshing;
   const [addOpen, setAddOpen] = useState(false);
   const [editOpen, setEditOpen] = useState(false);
   const [summariseOpen, setSummariseOpen] = useState(false);
@@ -175,79 +184,27 @@ export function ProjectDetailView({
 
   const slugPath = `/api/projects/${encodeURIComponent(project.slug)}`;
 
-  const post = async (path: string) => {
-    setBusy(true);
-    setError(null);
-    try {
-      const res = await fetch(path, { method: "POST" });
-      const data = (await res.json().catch(() => ({}))) as { detail?: string };
-      if (!res.ok) {
-        setError(friendlyError({ status: res.status, detail: data.detail }, "That did not go through."));
-        return;
-      }
-      refresh();
-    } catch {
-      setError("Could not reach the server.");
-    } finally {
-      setBusy(false);
-    }
-  };
-
   // Run now lands on the run page so the live activity stream is the first
   // thing the user sees; the backend answers `{run: {run_no, …}, …}`.
-  const runNow = async () => {
-    setBusy(true);
-    setError(null);
-    try {
-      const res = await fetch(`${slugPath}/runs`, { method: "POST" });
-      const data = (await res.json().catch(() => ({}))) as {
-        detail?: string;
-        run?: { run_no?: number };
-        run_no?: number;
-      };
-      if (!res.ok) {
-        setError(friendlyError({ status: res.status, detail: data.detail }, "That did not go through."));
-        return;
-      }
-      const runNo = data.run?.run_no ?? data.run_no;
-      if (typeof runNo === "number") {
-        router.push(
-          `/projects/${encodeURIComponent(project.slug)}/runs/${runNo}`,
-        );
-        return;
-      }
-      refresh();
-    } catch {
-      setError("Could not reach the server.");
-    } finally {
-      setBusy(false);
-    }
-  };
+  const runNow = () =>
+    runNowAction.run(`${slugPath}/runs`, {
+      skipRefresh: true,
+      onSuccess: (data) => {
+        const runNo = data.run?.run_no ?? data.run_no;
+        if (typeof runNo === "number") {
+          startNavigation(() =>
+            router.push(`/projects/${encodeURIComponent(project.slug)}/runs/${runNo}`),
+          );
+        } else {
+          refresh();
+        }
+      },
+    });
 
   // Runs require status=active; the backend gate names whatever is missing
-  // (outputs / members / profiles) in its 409 detail, shown in the header
-  // error paragraph.
-  const activate = async () => {
-    setBusy(true);
-    setError(null);
-    try {
-      const res = await fetch(slugPath, {
-        method: "PATCH",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ status: "active" }),
-      });
-      const data = (await res.json().catch(() => ({}))) as { detail?: string };
-      if (!res.ok) {
-        setError(friendlyError({ status: res.status, detail: data.detail }, "That did not go through."));
-        return;
-      }
-      refresh();
-    } catch {
-      setError("Could not reach the server.");
-    } finally {
-      setBusy(false);
-    }
-  };
+  // (outputs / members / profiles) in its 409 detail, shown under the header.
+  const activate = () =>
+    activateAction.run(slugPath, { method: "PATCH", body: { status: "active" } });
 
   const meta = [
     project.status,
@@ -315,8 +272,10 @@ export function ProjectDetailView({
               ) : (
               <>
               {project.status === "active" ? (
-                <button
-                  type="button"
+                <ActionButton
+                  data-action="run-now"
+                  busy={runNowAction.busy || navigating}
+                  pendingLabel="Starting run…"
                   onClick={() => void runNow()}
                   disabled={busy || !runnable || openRun !== undefined}
                   title={
@@ -329,22 +288,26 @@ export function ProjectDetailView({
                   className="rounded-xl bg-[var(--color-accent)] px-4 py-2 text-sm font-medium text-[var(--color-accent-fg)] disabled:opacity-50"
                 >
                   Run now
-                </button>
+                </ActionButton>
               ) : (
-                <button
-                  type="button"
+                <ActionButton
+                  data-action="activate"
+                  busy={activateAction.busy}
+                  pendingLabel="Activating…"
                   onClick={() => void activate()}
                   disabled={busy}
                   className="rounded-xl bg-[var(--color-accent)] px-4 py-2 text-sm font-medium text-[var(--color-accent-fg)] disabled:opacity-50"
                 >
                   Activate
-                </button>
+                </ActionButton>
               )}
               {waitingRun ? (
-                <button
-                  type="button"
+                <ActionButton
+                  data-action="continue-run"
+                  busy={continueAction.busy}
+                  pendingLabel="Continuing…"
                   onClick={() =>
-                    void post(
+                    void continueAction.run(
                       `${slugPath}/runs/${waitingRun.run_no}/continue`,
                     )
                   }
@@ -352,7 +315,7 @@ export function ProjectDetailView({
                   className="rounded-xl border border-[var(--color-accent)] px-4 py-2 text-sm font-medium text-[var(--color-accent)] disabled:opacity-50"
                 >
                   Continue run {waitingRun.run_no}
-                </button>
+                </ActionButton>
               ) : openRun ? (
                 <Link
                   href={`/projects/${encodeURIComponent(project.slug)}/runs/${openRun.run_no}`}
@@ -393,15 +356,13 @@ export function ProjectDetailView({
                 items={readiness}
                 findings={findings}
                 onActivate={() => void activate()}
-                activating={busy}
+                activating={activateAction.busy}
               />
             ) : null}
 
-            {error ? (
-              <p className="mt-2 text-sm text-red-400" role="alert">
-                {error}
-              </p>
-            ) : null}
+            <ActionError action={runNowAction} />
+            <ActionError action={activateAction} />
+            <ActionError action={continueAction} />
           </header>
 
           </div>

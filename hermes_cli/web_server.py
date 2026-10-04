@@ -329,6 +329,8 @@ app.include_router(_projects_ask_router)
 app.include_router(_projects_outputs_router)
 app.include_router(_projects_live_router)
 app.include_router(_projects_changes_router)
+from hermes_cli.projects_idempotency import ProjectsIdempotencyMiddleware  # noqa: E402
+app.add_middleware(ProjectsIdempotencyMiddleware)  # innermost: runs after auth
 
 # ---------------------------------------------------------------------------
 # Session token for protecting sensitive endpoints (reveal).

@@ -1,10 +1,12 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useState } from "react";
+import { useState, useTransition } from "react";
 
+import { ActionButton } from "@/components/projects/ActionButton";
+import { ActionError } from "@/components/projects/ActionError";
+import { useProjectAction } from "@/components/projects/useProjectAction";
 import { BusyRegion } from "@/components/ui/BusyRegion";
-import { useRefresh } from "@/components/ui/useRefresh";
 import type { ProjectDetail } from "@/types";
 
 /**
@@ -26,14 +28,16 @@ export function ProjectLifecycleMenu({
   isInstanceAdmin: boolean;
 }) {
   const router = useRouter();
-  const { refresh, refreshing } = useRefresh();
   const [open, setOpen] = useState(false);
   const [dialog, setDialog] = useState<null | "archive" | "delete">(null);
   const [reason, setReason] = useState("");
   const [typedSlug, setTypedSlug] = useState("");
-  const [requesting, setBusy] = useState(false);
-  const busy = requesting || refreshing;
-  const [error, setError] = useState<string | null>(null);
+  const archiveAction = useProjectAction();
+  const restoreAction = useProjectAction();
+  const deleteAction = useProjectAction();
+  const [navigating, startNavigation] = useTransition();
+  const busy =
+    archiveAction.busy || restoreAction.busy || deleteAction.busy || navigating;
 
   const callerRole =
     project.members.find((member) => member.user_id === callerUserId)?.role ??
@@ -71,92 +75,28 @@ export function ProjectLifecycleMenu({
     setDialog(null);
     setReason("");
     setTypedSlug("");
-    setError(null);
+    archiveAction.clearError();
+    restoreAction.clearError();
+    deleteAction.clearError();
   };
 
-  const detailMessage = (data: {
-    detail?: unknown;
-    error?: string;
-  }): string =>
-    typeof data.detail === "string" && data.detail
-      ? data.detail
-      : typeof data.error === "string" && data.error
-        ? data.error
-        : "That didn't go through.";
+  const archive = () =>
+    archiveAction.run(`${slugPath}/archive`, {
+      body: reason.trim() ? { reason: reason.trim() } : {},
+      // The write answers with the updated row; the refresh shows it shelved.
+      onSuccess: () => closeAll(),
+    });
 
-  const archive = async () => {
-    setBusy(true);
-    setError(null);
-    try {
-      const res = await fetch(`${slugPath}/archive`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(reason.trim() ? { reason: reason.trim() } : {}),
-      });
-      const data = (await res.json().catch(() => ({}))) as {
-        detail?: unknown;
-        error?: string;
-      };
-      if (!res.ok) {
-        setError(detailMessage(data));
-        return;
-      }
-      // The write answers with the updated row; the server read merges it.
-      closeAll();
-      refresh();
-    } catch {
-      setError("Could not reach the server.");
-    } finally {
-      setBusy(false);
-    }
-  };
+  const restore = () =>
+    restoreAction.run(`${slugPath}/restore`, { onSuccess: () => closeAll() });
 
-  const restore = async () => {
-    setBusy(true);
-    setError(null);
-    try {
-      const res = await fetch(`${slugPath}/restore`, { method: "POST" });
-      const data = (await res.json().catch(() => ({}))) as {
-        detail?: unknown;
-        error?: string;
-      };
-      if (!res.ok) {
-        setError(detailMessage(data));
-        return;
-      }
-      closeAll();
-      refresh();
-    } catch {
-      setError("Could not reach the server.");
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const deletePermanently = async () => {
-    setBusy(true);
-    setError(null);
-    try {
-      const res = await fetch(
-        `${slugPath}?confirm=${encodeURIComponent(typedSlug)}`,
-        { method: "DELETE" },
-      );
-      const data = (await res.json().catch(() => ({}))) as {
-        detail?: unknown;
-        error?: string;
-      };
-      if (!res.ok) {
-        setError(detailMessage(data));
-        return;
-      }
+  const deletePermanently = () =>
+    deleteAction.run(`${slugPath}?confirm=${encodeURIComponent(typedSlug)}`, {
+      method: "DELETE",
+      skipRefresh: true,
       // The row is gone — leave before the detail page renders a ghost.
-      router.push("/projects");
-    } catch {
-      setError("Could not reach the server.");
-    } finally {
-      setBusy(false);
-    }
-  };
+      onSuccess: () => startNavigation(() => router.push("/projects")),
+    });
 
   const itemClass =
     "block w-full rounded-lg px-3 py-2 text-left text-sm hover:bg-[var(--color-surface-2)] disabled:cursor-not-allowed disabled:opacity-50";
@@ -190,15 +130,22 @@ export function ProjectLifecycleMenu({
           className={`absolute right-0 z-40 mt-1 w-60 rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] p-1 shadow-lg ${open ? "" : "hidden"}`}
         >
           {project.archived ? (
-            <button
-              type="button"
-              onClick={() => void restore()}
-              disabled={busy || !canLead}
-              title={canLead ? undefined : "Only a lead can restore this project"}
-              className={itemClass}
-            >
-              Restore project
-            </button>
+            <>
+              <ActionButton
+                busy={restoreAction.busy}
+                pendingLabel="Restoring…"
+                onClick={() => void restore()}
+                disabled={busy || !canLead}
+                title={canLead ? undefined : "Only a lead can restore this project"}
+                className={itemClass}
+              >
+                Restore project
+              </ActionButton>
+              <ActionError
+                action={restoreAction}
+                className="flex flex-wrap items-center gap-2 px-3 py-2 text-xs text-red-400"
+              />
+            </>
           ) : (
             <button
               type="button"
@@ -249,27 +196,25 @@ export function ProjectLifecycleMenu({
                   className="w-full rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm outline-none focus:border-[var(--color-accent)]"
                 />
               </label>
-              {error ? (
-                <p role="alert" className="mt-2 text-sm text-red-400">
-                  {error}
-                </p>
-              ) : null}
+              <ActionError action={archiveAction} />
               <div className="mt-3 flex justify-end gap-2">
                 <button
                   type="button"
                   onClick={closeAll}
-                  className="rounded-xl border border-[var(--color-border)] px-4 py-2 text-sm"
+                  disabled={busy}
+                  className="rounded-xl border border-[var(--color-border)] px-4 py-2 text-sm disabled:opacity-50"
                 >
                   Cancel
                 </button>
-                <button
-                  type="button"
+                <ActionButton
+                  busy={archiveAction.busy}
+                  pendingLabel="Archiving…"
                   onClick={() => void archive()}
                   disabled={busy}
                   className="rounded-xl bg-[var(--color-accent)] px-4 py-2 text-sm font-medium text-[var(--color-accent-fg)] disabled:opacity-50"
                 >
                   Archive
-                </button>
+                </ActionButton>
               </div>
             </div>
           </div>
@@ -303,27 +248,25 @@ export function ProjectLifecycleMenu({
                   className="w-full rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 font-mono text-sm outline-none focus:border-[var(--color-accent)]"
                 />
               </label>
-              {error ? (
-                <p role="alert" className="mt-2 text-sm text-red-400">
-                  {error}
-                </p>
-              ) : null}
+              <ActionError action={deleteAction} />
               <div className="mt-3 flex justify-end gap-2">
                 <button
                   type="button"
                   onClick={closeAll}
-                  className="rounded-xl border border-[var(--color-border)] px-4 py-2 text-sm"
+                  disabled={busy}
+                  className="rounded-xl border border-[var(--color-border)] px-4 py-2 text-sm disabled:opacity-50"
                 >
                   Cancel
                 </button>
-                <button
-                  type="button"
+                <ActionButton
+                  busy={deleteAction.busy || navigating}
+                  pendingLabel="Deleting…"
                   onClick={() => void deletePermanently()}
                   disabled={busy || typedSlug !== project.slug}
                   className="rounded-xl bg-red-500 px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
                 >
                   Delete forever
-                </button>
+                </ActionButton>
               </div>
             </div>
           </div>

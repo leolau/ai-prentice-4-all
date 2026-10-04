@@ -1,10 +1,11 @@
 "use client";
 
 import { useState } from "react";
-import { friendlyError } from "@/components/projects/errors";
 
+import { ActionButton } from "@/components/projects/ActionButton";
+import { ActionError } from "@/components/projects/ActionError";
+import { useProjectAction } from "@/components/projects/useProjectAction";
 import { BusyRegion } from "@/components/ui/BusyRegion";
-import { useRefresh } from "@/components/ui/useRefresh";
 
 /**
  * Operator recovery for a card (§12): **Stop** terminates a stuck/running
@@ -25,88 +26,68 @@ export function CardActions({
   taskId: string;
   status: string;
 }) {
-  const { refresh, refreshing } = useRefresh();
-  const [pending, setPending] = useState<Action | null>(null);
+  // One lock for the card: busy from the click until the refreshed page
+  // has rendered.
+  const action = useProjectAction();
   const [last, setLast] = useState<Action | null>(null);
-  // Busy from the click until the refreshed page has rendered.
-  const busy = pending ?? (refreshing ? last : null);
-  const inFlight = busy !== null;
-  const [error, setError] = useState<string | null>(null);
+  const inFlight = action.busy;
+  const busy = inFlight ? last : null;
 
   if (status !== "running" && status !== "ready" && status !== "blocked") {
     return null;
   }
 
-  const act = async (action: Action) => {
-    setPending(action);
-    setLast(action);
-    setError(null);
-    try {
-      const base = `/api/projects/${encodeURIComponent(slug)}/cards/${encodeURIComponent(taskId)}`;
-      const res =
-        action === "ready"
-          ? await fetch(base, {
-              method: "PATCH",
-              headers: { "content-type": "application/json" },
-              body: JSON.stringify({ status: "ready" }),
-            })
-          : await fetch(`${base}/${action}`, { method: "POST" });
-      const data = (await res.json().catch(() => ({}))) as { detail?: string };
-      if (!res.ok) {
-        setError(friendlyError({ status: res.status, detail: data.detail }, "That didn't go through."));
-        return;
-      }
-      refresh();
-    } catch {
-      setError("Could not reach the server.");
-    } finally {
-      setPending(null);
-    }
+  const act = (next: Action) => {
+    if (inFlight) return;
+    setLast(next);
+    const base = `/api/projects/${encodeURIComponent(slug)}/cards/${encodeURIComponent(taskId)}`;
+    void (next === "ready"
+      ? action.run(base, { method: "PATCH", body: { status: "ready" } })
+      : action.run(`${base}/${next}`));
   };
 
   return (
     <div data-component="CardActions" className="mt-3 flex flex-wrap items-center gap-2">
       {status !== "blocked" ? (
         <BusyRegion busy={busy === "stop"} label="Stopping…">
-          <button
-            type="button"
-            onClick={() => void act("stop")}
+          <ActionButton
+            busy={busy === "stop"}
+            pendingLabel="Stopping…"
+            onClick={() => act("stop")}
             disabled={inFlight}
             className="rounded-lg border border-[var(--color-border)] px-3 py-1.5 text-xs font-medium disabled:opacity-40"
           >
             Stop
-          </button>
+          </ActionButton>
         </BusyRegion>
       ) : null}
       {status === "running" ? (
         <BusyRegion busy={busy === "reclaim"} label="Re-queueing…">
-          <button
-            type="button"
-            onClick={() => void act("reclaim")}
+          <ActionButton
+            busy={busy === "reclaim"}
+            pendingLabel="Re-queueing…"
+            onClick={() => act("reclaim")}
             disabled={inFlight}
             className="rounded-lg border border-[var(--color-accent)] px-3 py-1.5 text-xs font-medium text-[var(--color-accent)] disabled:opacity-40"
           >
             Re-run
-          </button>
+          </ActionButton>
         </BusyRegion>
       ) : null}
       {status === "blocked" ? (
         <BusyRegion busy={busy === "ready"} label="Making ready…">
-          <button
-            type="button"
-            onClick={() => void act("ready")}
+          <ActionButton
+            busy={busy === "ready"}
+            pendingLabel="Making ready…"
+            onClick={() => act("ready")}
             disabled={inFlight}
             className="rounded-lg border border-[var(--color-accent)] px-3 py-1.5 text-xs font-medium text-[var(--color-accent)] disabled:opacity-40"
           >
             Make ready
-          </button>
+          </ActionButton>
         </BusyRegion>
       ) : null}
-      {error ? (
-        <p className="text-xs text-red-300" role="alert">
-          {error}
-        </p>
-      ) : null}
+      <ActionError action={action} className="flex w-full flex-wrap items-center gap-2 text-xs text-red-300" />
     </div>
   );
 }

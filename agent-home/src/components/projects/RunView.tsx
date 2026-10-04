@@ -2,8 +2,11 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useState } from "react";
-import { friendlyError } from "@/components/projects/errors";
+import { useState, useTransition } from "react";
+
+import { ActionButton } from "@/components/projects/ActionButton";
+import { ActionError } from "@/components/projects/ActionError";
+import { useProjectAction } from "@/components/projects/useProjectAction";
 
 import {
   dateTimeLabel,
@@ -15,7 +18,7 @@ import { useRunActivity } from "@/components/projects/useRunActivity";
 import { LiveActivity } from "@/components/chat/LiveActivity";
 import { BusyRegion } from "@/components/ui/BusyRegion";
 import { Spinner } from "@/components/ui/Spinner";
-import { useRefresh, useServerState } from "@/components/ui/useRefresh";
+import { useServerState } from "@/components/ui/useRefresh";
 import type {
   ProjectDelivery,
   ProjectRun,
@@ -207,6 +210,8 @@ function deliveryLabel(delivery: ProjectDelivery): string {
   return `${what} — delivered ${how}`;
 }
 
+type RunControl = "continue" | "cancel" | "stop" | "resume" | "repeat";
+
 /**
  * One run's page (§7): what it did — cards, deliveries, cost, outcome — and
  * the two things a human writes about it afterwards, the retro and (step 9b)
@@ -229,11 +234,15 @@ export function RunView({
   archived?: boolean;
 }) {
   const router = useRouter();
-  const { refresh, refreshing } = useRefresh();
   const [run, setRun] = useServerState(initial);
-  const [posting, setPosting] = useState(false);
-  const busy = posting || refreshing;
-  const [error, setError] = useState<string | null>(null);
+  // Run controls share one lock (one move at a time on a run); the retro and
+  // the score are separate writes with their own.
+  const control = useProjectAction<Record<string, unknown>>();
+  const [controlling, setControlling] = useState<RunControl | null>(null);
+  const retroAction = useProjectAction();
+  const scoreAction = useProjectAction();
+  const [navigating, startNavigation] = useTransition();
+  const busy = control.busy || retroAction.busy || scoreAction.busy || navigating;
   const [budgetGate, setBudgetGate] = useState<string | null>(null);
   const [retroDraft, setRetroDraft] = useState(initial.retro ?? "");
   const [retroSaved, setRetroSaved] = useState(false);
@@ -264,72 +273,67 @@ export function RunView({
     hasActiveCard,
   );
 
-  const post = async (
-    path: string,
-    body?: Record<string, unknown>,
-    /** Continue/cancel answer with the updated run row; merge it in. */
-    mergeUpdatedRun = false,
-  ): Promise<boolean> => {
-    setPosting(true);
-    setError(null);
-    try {
-      const res = await fetch(path, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: body !== undefined ? JSON.stringify(body) : undefined,
-      });
-      const data = (await res.json().catch(() => ({}))) as {
-        detail?: string;
-      };
-      if (!res.ok) {
-        setError(friendlyError({ status: res.status, detail: data.detail }, "That did not go through."));
-        return false;
-      }
-      if (mergeUpdatedRun) {
-        // Continue answers with {run, promoted, budget_gate}; cancel with
-        // the bare run row. Unwrap whichever came back.
-        const { run: updated, budgetGate } = unwrapRunEnvelope(
-          data as Record<string, unknown>,
-        );
-        // The bare row carries no derived flags; the hold is answered now.
-        if (updated) {
-          setRun((prev) => ({ ...prev, awaiting_continue: false, ...updated }));
-        }
-        // The thing holding the run must be visible, not silent.
-        setBudgetGate(budgetGate);
-      }
-      refresh(); // revalidate the page's server data after a write
-      return true;
-    } catch {
-      setError("Could not reach the server.");
-      return false;
-    } finally {
-      setPosting(false);
+  /** Continue/cancel/stop/resume answer with the updated run row; merge it in. */
+  const mergeUpdatedRun = (data: Record<string, unknown>) => {
+    // Continue answers with {run, promoted, budget_gate}; cancel with
+    // the bare run row. Unwrap whichever came back.
+    const { run: updated, budgetGate } = unwrapRunEnvelope(data);
+    // The bare row carries no derived flags; the hold is answered now.
+    if (updated) {
+      setRun((prev) => ({ ...prev, awaiting_continue: false, ...updated }));
     }
+    // The thing holding the run must be visible, not silent.
+    setBudgetGate(budgetGate);
   };
 
-  const saveRetro = async () => {
+  const steer = (which: Exclude<RunControl, "repeat">) => {
+    if (control.busy) return;
+    setControlling(which);
+    void control.run(`${runPath}/${which}`, { onSuccess: mergeUpdatedRun });
+  };
+
+  const repeat = () => {
+    if (control.busy) return;
+    setControlling("repeat");
+    void control.run(`${slugPath}/runs`, {
+      body: run.playbook_rev != null ? { playbook_rev: run.playbook_rev } : {},
+      skipRefresh: true,
+      onSuccess: () =>
+        startNavigation(() => router.push(`/projects/${encodeURIComponent(slug)}`)),
+    });
+  };
+
+  const saveRetro = () => {
     const text = retroDraft.trim();
     if (!text) return;
     setRetroSaved(false);
-    if (await post(`${runPath}/retro`, { retro: text })) {
-      setRun({ ...run, retro: text });
-      setRetroSaved(true);
-    }
+    void retroAction.run(`${runPath}/retro`, {
+      body: { retro: text },
+      onSuccess: () => {
+        setRun((prev) => ({ ...prev, retro: text }));
+        setRetroSaved(true);
+      },
+    });
   };
 
   /** §8.1: the human judgement — one tap, editable, never the agent's. */
-  const saveScore = async () => {
+  const saveScore = () => {
     if (scoreDraft == null) return;
     setScoreSaved(false);
     const note = scoreNote.trim();
     const body: Record<string, unknown> = { score: scoreDraft };
     if (note) body.note = note;
-    if (await post(`${runPath}/score`, body)) {
-      setRun({ ...run, score_user: scoreDraft, score_note: note || null });
-      setScoreSaved(true);
-    }
+    const score = scoreDraft;
+    void scoreAction.run(`${runPath}/score`, {
+      body,
+      onSuccess: () => {
+        setRun((prev) => ({ ...prev, score_user: score, score_note: note || null }));
+        setScoreSaved(true);
+      },
+    });
   };
+  const controlPending = (which: RunControl) =>
+    (control.busy || (which === "repeat" && navigating)) && controlling === which;
 
   const deliveries = Array.isArray(run.deliveries) ? run.deliveries : [];
   const cards = run.cards ?? [];
@@ -555,28 +559,31 @@ export function RunView({
 
             <div className="mt-3 flex flex-wrap gap-2">
               {canContinue ? (
-                <button
-                  type="button"
-                  onClick={() => void post(`${runPath}/continue`, undefined, true)}
+                <ActionButton
+                  busy={controlPending("continue")}
+                  pendingLabel="Continuing…"
+                  onClick={() => steer("continue")}
                   disabled={busy}
                   className="rounded-xl bg-[var(--color-accent)] px-4 py-2 text-sm font-medium text-[var(--color-accent-fg)] disabled:opacity-50"
                 >
                   Continue
-                </button>
+                </ActionButton>
               ) : null}
               {live ? (
-                <button
-                  type="button"
-                  onClick={() => void post(`${runPath}/cancel`, undefined, true)}
+                <ActionButton
+                  busy={controlPending("cancel")}
+                  pendingLabel="Cancelling…"
+                  onClick={() => steer("cancel")}
                   disabled={busy}
                   className="rounded-xl border border-red-500/50 px-4 py-2 text-sm text-red-400 disabled:opacity-50"
                 >
                   Cancel
-                </button>
+                </ActionButton>
               ) : null}
               {live ? (
-                <button
-                  type="button"
+                <ActionButton
+                  busy={controlPending("stop")}
+                  pendingLabel="Stopping…"
                   onClick={() => {
                     if (
                       !window.confirm(
@@ -585,27 +592,29 @@ export function RunView({
                     ) {
                       return;
                     }
-                    void post(`${runPath}/stop`, undefined, true);
+                    steer("stop");
                   }}
                   disabled={busy}
                   className="rounded-xl bg-red-500/90 px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
                 >
                   Stop now
-                </button>
+                </ActionButton>
               ) : null}
               {canResume ? (
-                <button
-                  type="button"
-                  onClick={() => void post(`${runPath}/resume`, undefined, true)}
+                <ActionButton
+                  busy={controlPending("resume")}
+                  pendingLabel="Resuming…"
+                  onClick={() => steer("resume")}
                   disabled={busy}
                   className="rounded-xl bg-[var(--color-accent)] px-4 py-2 text-sm font-medium text-[var(--color-accent-fg)] disabled:opacity-50"
                 >
                   Resume
-                </button>
+                </ActionButton>
               ) : null}
               {(!live || stalled) && !archived ? (
-                <button
-                  type="button"
+                <ActionButton
+                  busy={controlPending("repeat")}
+                  pendingLabel="Starting run…"
                   onClick={() => {
                     if (
                       canResume &&
@@ -615,14 +624,7 @@ export function RunView({
                     ) {
                       return;
                     }
-                    void post(
-                      `${slugPath}/runs`,
-                      run.playbook_rev != null
-                        ? { playbook_rev: run.playbook_rev }
-                        : {},
-                    ).then((ok) => {
-                      if (ok) router.push(`/projects/${encodeURIComponent(slug)}`);
-                    });
+                    repeat();
                   }}
                   disabled={busy}
                   className={
@@ -632,7 +634,7 @@ export function RunView({
                   }
                 >
                   {canResume ? "Start over instead" : "Repeat this run"}
-                </button>
+                </ActionButton>
               ) : null}
             </div>
 
@@ -706,11 +708,7 @@ export function RunView({
               </p>
             ) : null}
 
-            {error ? (
-              <p className="mt-2 text-sm text-red-400" role="alert">
-                {error}
-              </p>
-            ) : null}
+            <ActionError action={control} />
             {budgetGate ? (
               <p
                 data-component="BudgetGate"
@@ -858,18 +856,22 @@ export function RunView({
             />
             {!archived ? (
               <div className="mt-2 flex items-center gap-2">
-                <button
-                  type="button"
-                  onClick={() => void saveRetro()}
+                <ActionButton
+                  busy={retroAction.busy}
+                  pendingLabel="Saving…"
+                  onClick={saveRetro}
                   disabled={busy || !retroDraft.trim()}
                   className="rounded-xl bg-[var(--color-accent)] px-4 py-2 text-sm font-medium text-[var(--color-accent-fg)] disabled:opacity-50"
                 >
                   Save retro
-                </button>
+                </ActionButton>
                 {retroSaved ? (
                   <span className="text-xs text-[var(--color-muted)]">saved</span>
                 ) : null}
               </div>
+            ) : null}
+            {!archived ? (
+              <ActionError action={retroAction} />
             ) : null}
           </section>
           {/* ── Score ────────────────────────────────────────────── */}
@@ -917,20 +919,22 @@ export function RunView({
                   }}
                 />
                 <div className="mt-2 flex items-center gap-2">
-                  <button
-                    type="button"
-                    onClick={() => void saveScore()}
+                  <ActionButton
+                    busy={scoreAction.busy}
+                    pendingLabel="Saving…"
+                    onClick={saveScore}
                     disabled={busy || scoreDraft == null}
                     className="rounded-xl bg-[var(--color-accent)] px-4 py-2 text-sm font-medium text-[var(--color-accent-fg)] disabled:opacity-50"
                   >
                     Save score
-                  </button>
+                  </ActionButton>
                   {scoreSaved ? (
                     <span className="text-xs text-[var(--color-muted)]">
                       saved
                     </span>
                   ) : null}
                 </div>
+                <ActionError action={scoreAction} />
               </>
             ) : null}
           </section>

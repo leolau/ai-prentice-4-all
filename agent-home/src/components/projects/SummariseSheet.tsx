@@ -1,8 +1,10 @@
 "use client";
 
 import { useState } from "react";
-import { friendlyError } from "@/components/projects/errors";
 
+import { ActionButton } from "@/components/projects/ActionButton";
+import { ActionError } from "@/components/projects/ActionError";
+import { useProjectAction } from "@/components/projects/useProjectAction";
 import { BusyRegion } from "@/components/ui/BusyRegion";
 
 export const SUMMARY_MAX_CHARS = 4000;
@@ -23,50 +25,40 @@ export function SummariseSheet({
   onClose: () => void;
 }) {
   const [text, setText] = useState(initial);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const action = useProjectAction();
+  const busy = action.busy;
+  const [invalid, setInvalid] = useState<string | null>(null);
 
   const remaining = SUMMARY_MAX_CHARS - text.length;
 
   const save = async () => {
     const summary = text.trim();
     if (!summary) {
-      setError("Summary needs some text.");
+      setInvalid("Summary needs some text.");
       return;
     }
     if (summary.length > SUMMARY_MAX_CHARS) {
-      setError(`Keep the summary under ${SUMMARY_MAX_CHARS} characters.`);
+      setInvalid(`Keep the summary under ${SUMMARY_MAX_CHARS} characters.`);
       return;
     }
-    setBusy(true);
-    setError(null);
-    try {
-      const res = await fetch(
-        `/api/projects/${encodeURIComponent(slug)}/summarise`,
-        {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ summary }),
-        },
-      );
-      const data = (await res.json().catch(() => ({}))) as { detail?: string };
-      if (!res.ok) {
-        setError(friendlyError({ status: res.status, detail: data.detail }, "The summary was not saved."));
-        return;
-      }
-      onClose();
-    } catch {
-      setError("Could not reach the server.");
-    } finally {
-      setBusy(false);
-    }
+    setInvalid(null);
+    await action.run(`/api/projects/${encodeURIComponent(slug)}/summarise`, {
+      body: { summary },
+      // The caller refreshes on close and holds its busy state meanwhile.
+      skipRefresh: true,
+      onSuccess: () => onClose(),
+    });
+  };
+  // Never drop the sheet mid-write: the lock would go with it.
+  const close = () => {
+    if (!busy) onClose();
   };
 
   return (
     <div
       data-component="SummariseSheet"
       className="fixed inset-0 z-50 flex items-end bg-black/50"
-      onClick={onClose}
+      onClick={close}
     >
       <div
         role="dialog"
@@ -81,8 +73,9 @@ export function SummariseSheet({
           </h2>
           <button
             type="button"
-            onClick={onClose}
-            className="rounded-lg px-2 py-1 text-sm text-[var(--color-muted)]"
+            onClick={close}
+            disabled={busy}
+            className="rounded-lg px-2 py-1 text-sm text-[var(--color-muted)] disabled:opacity-50"
           >
             Close
           </button>
@@ -118,20 +111,22 @@ export function SummariseSheet({
               </span>
             </label>
 
-            {error ? (
+            {invalid ? (
               <p role="alert" className="text-sm text-red-400">
-                {error}
+                {invalid}
               </p>
             ) : null}
+            <ActionError action={action} className="flex flex-wrap items-center gap-2 text-sm text-red-400" />
 
             <div className="flex justify-end">
-              <button
+              <ActionButton
                 type="submit"
-                disabled={busy}
+                busy={busy}
+                pendingLabel="Saving…"
                 className="rounded-xl bg-[var(--color-accent)] px-4 py-2 text-sm font-medium text-[var(--color-accent-fg)] disabled:opacity-50"
               >
                 Save summary
-              </button>
+              </ActionButton>
             </div>
           </form>
         </BusyRegion>

@@ -6,6 +6,7 @@
  * lives here once. A route keeps its own validation — only auth and the
  * upstream error translation are shared.
  */
+import { headers } from "next/headers";
 import { NextResponse } from "next/server";
 
 import { HermesApiClient, HermesApiError } from "@/lib/api/client";
@@ -24,6 +25,8 @@ export async function withPrincipal<T>(
   }
   try {
     const client = await apiClientForRequest();
+    const key = await incomingIdempotencyKey();
+    if (key) client.forwardIdempotencyKey(key);
     return NextResponse.json(await handler(client));
   } catch (err) {
     if (err instanceof HermesApiError) {
@@ -69,6 +72,19 @@ export async function withPrincipal<T>(
       { error: "api_unreachable", detail: "The AI layer could not be reached." },
       { status: 502 },
     );
+  }
+}
+
+/**
+ * The browser's `Idempotency-Key` on the request being handled (sent by
+ * `useProjectAction`), or null. Read here so no route file has to thread it.
+ */
+async function incomingIdempotencyKey(): Promise<string | null> {
+  try {
+    return (await headers()).get("idempotency-key");
+  } catch {
+    // Outside a request scope (unit tests calling the bridge directly).
+    return null;
   }
 }
 

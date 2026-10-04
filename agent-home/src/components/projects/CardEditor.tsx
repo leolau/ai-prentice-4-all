@@ -1,11 +1,12 @@
 "use client";
 
 import { useState } from "react";
-import { friendlyError } from "@/components/projects/errors";
 
+import { ActionButton } from "@/components/projects/ActionButton";
+import { ActionError } from "@/components/projects/ActionError";
+import { useProjectAction } from "@/components/projects/useProjectAction";
 import { cardMoves, cardPatch } from "@/components/projects/cardMoves";
 import { BusyRegion } from "@/components/ui/BusyRegion";
-import { useRefresh } from "@/components/ui/useRefresh";
 import type { ProjectCardDetail } from "@/types";
 
 /**
@@ -24,7 +25,6 @@ export function CardEditor({
   /** The project's profiles — the only valid assignees. */
   profiles: string[];
 }) {
-  const { refresh, refreshing } = useRefresh();
   const before = {
     title: card.title,
     body: card.body ?? "",
@@ -32,48 +32,30 @@ export function CardEditor({
   };
   const [editing, setEditing] = useState(false);
   const [fields, setFields] = useState(before);
-  const [saving, setBusy] = useState(false);
-  const busy = saving || refreshing;
-  const [error, setError] = useState<string | null>(null);
+  const action = useProjectAction();
+  const busy = action.busy;
+  const [moving, setMoving] = useState(false);
+  const [invalid, setInvalid] = useState<string | null>(null);
 
-  const patch = async (body: Record<string, unknown>) => {
-    setBusy(true);
-    setError(null);
-    try {
-      const res = await fetch(
-        `/api/projects/${encodeURIComponent(slug)}/cards/${encodeURIComponent(card.id)}`,
-        {
-          method: "PATCH",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify(body),
-        },
-      );
-      const data = (await res.json().catch(() => ({}))) as { detail?: string };
-      if (!res.ok) {
-        setError(friendlyError({ status: res.status, detail: data.detail }, "The change was not saved."));
-        return false;
-      }
-      refresh();
-      return true;
-    } catch {
-      setError("Could not reach the server.");
-      return false;
-    } finally {
-      setBusy(false);
-    }
-  };
+  const patch = (body: Record<string, unknown>, onSaved?: () => void) =>
+    action.run(
+      `/api/projects/${encodeURIComponent(slug)}/cards/${encodeURIComponent(card.id)}`,
+      { method: "PATCH", body, onSuccess: onSaved },
+    );
 
   const save = async () => {
     if (!fields.title.trim()) {
-      setError("A card needs a title.");
+      setInvalid("A card needs a title.");
       return;
     }
+    setInvalid(null);
     const body = cardPatch(before, fields);
     if (Object.keys(body).length === 0) {
       setEditing(false);
       return;
     }
-    if (await patch(body)) setEditing(false);
+    setMoving(false);
+    await patch(body, () => setEditing(false));
   };
 
   const moves = cardMoves(card.status);
@@ -149,7 +131,8 @@ export function CardEditor({
                 disabled={busy}
                 onClick={() => {
                   setFields(before);
-                  setError(null);
+                  setInvalid(null);
+                  action.clearError();
                   setEditing(false);
                 }}
                 className={buttonClass}
@@ -157,13 +140,14 @@ export function CardEditor({
                 Cancel
               </button>
               <span className="flex-1" />
-              <button
+              <ActionButton
                 type="submit"
-                disabled={busy}
+                busy={busy}
+                pendingLabel="Saving…"
                 className="rounded-lg bg-[var(--color-accent)] px-3 py-1.5 text-xs font-medium text-[var(--color-accent-fg)] disabled:opacity-40"
               >
                 Save
-              </button>
+              </ActionButton>
             </div>
           </form>
         ) : (
@@ -185,7 +169,8 @@ export function CardEditor({
                   disabled={busy}
                   onChange={(e) => {
                     const to = e.target.value;
-                    if (!to) return;
+                    if (!to || action.busy) return;
+                    setMoving(true);
                     void patch({ status: to });
                   }}
                   className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-1.5 text-xs"
@@ -199,14 +184,20 @@ export function CardEditor({
                 </select>
               </label>
             ) : null}
+            {busy && moving ? (
+              <span role="status" className="text-xs text-[var(--color-muted)]">
+                Moving…
+              </span>
+            ) : null}
           </div>
         )}
       </BusyRegion>
-      {error ? (
+      {invalid ? (
         <p className="text-xs text-red-300" role="alert">
-          {error}
+          {invalid}
         </p>
       ) : null}
+      <ActionError action={action} className="flex flex-wrap items-center gap-2 text-xs text-red-300" />
     </div>
   );
 }

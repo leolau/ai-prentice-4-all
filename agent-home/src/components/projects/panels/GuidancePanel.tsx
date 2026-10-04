@@ -4,6 +4,9 @@ import { useState } from "react";
 
 import { agoLabel } from "@/components/projects/format";
 import { prependDirective } from "@/components/projects/envelopes";
+import { ActionButton } from "@/components/projects/ActionButton";
+import { ActionError } from "@/components/projects/ActionError";
+import { useProjectAction } from "@/components/projects/useProjectAction";
 import { BusyRegion } from "@/components/ui/BusyRegion";
 import type { ProjectDirective, ProjectDirectivesResponse } from "@/types";
 
@@ -30,79 +33,27 @@ export function GuidancePanel({
     initial?.proposed ?? [],
   );
   const [draft, setDraft] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [busyId, setBusyId] = useState<string | null>(null);
+  const addAction = useProjectAction<ProjectDirective & { applies_from?: string }>();
   const [retired, setRetired] = useState<ProjectDirective[] | null>(null);
   const [loadingRetired, setLoadingRetired] = useState(false);
-  const [error, setError] = useState<string | null>(null);
 
-  const add = async () => {
+  const add = () => {
     const body = draft.trim();
     if (!body) return;
-    setBusy(true);
-    setError(null);
-    try {
-      const res = await fetch(
-        `/api/projects/${encodeURIComponent(slug)}/directives`,
-        {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ body }),
-        },
-      );
-      if (!res.ok) throw new Error("add");
+    void addAction.run(`/api/projects/${encodeURIComponent(slug)}/directives`, {
+      body: { body },
+      skipRefresh: true,
       // The full new row — body, author, date — with `applies_from` riding
       // flat beside it; prepend it so the instruction shows without a reload.
-      const created = (await res.json()) as ProjectDirective & {
-        applies_from?: string;
-      };
-      setDirectives((prev) => prependDirective(prev, created));
-      setDraft("");
-    } catch {
-      setError("That didn't stick — try again.");
-    } finally {
-      setBusy(false);
-    }
+      onSuccess: (created) => {
+        setDirectives((prev) => prependDirective(prev, created));
+        setDraft("");
+      },
+    });
   };
 
-  const retire = async (directiveId: string) => {
-    setBusyId(directiveId);
-    setError(null);
-    try {
-      const res = await fetch(
-        `/api/projects/${encodeURIComponent(slug)}/directives/${encodeURIComponent(directiveId)}/retire`,
-        { method: "POST" },
-      );
-      if (!res.ok) throw new Error("retire");
-      setDirectives((prev) => prev.filter((row) => row.id !== directiveId));
-    } catch {
-      setError("That didn't stick — try again.");
-    } finally {
-      setBusyId(null);
-    }
-  };
-
-  /** §8.2: a run proposed it in its retro; any member may cross it. */
-  const activate = async (directiveId: string) => {
-    setBusyId(directiveId);
-    setError(null);
-    try {
-      const res = await fetch(
-        `/api/projects/${encodeURIComponent(slug)}/directives/${encodeURIComponent(directiveId)}/activate`,
-        { method: "POST" },
-      );
-      if (!res.ok) throw new Error("activate");
-      const row = proposed.find((p) => p.id === directiveId);
-      setProposed((prev) => prev.filter((p) => p.id !== directiveId));
-      if (row) {
-        setDirectives((prev) => [{ ...row, active: 1 }, ...prev]);
-      }
-    } catch {
-      setError("That didn't stick — try again.");
-    } finally {
-      setBusyId(null);
-    }
-  };
+  const directivePath = (directiveId: string, verb: "retire" | "activate") =>
+    `/api/projects/${encodeURIComponent(slug)}/directives/${encodeURIComponent(directiveId)}/${verb}`;
 
   const loadRetired = async () => {
     setLoadingRetired(true);
@@ -152,15 +103,15 @@ export function GuidancePanel({
                     {directive.kind === "feedback" ? " · feedback" : ""}
                   </span>
                   {archived ? null : (
-                    <BusyRegion busy={busyId === directive.id} label="Retiring…">
-                      <button
-                        type="button"
-                        onClick={() => void retire(directive.id)}
-                        className="text-[var(--color-muted)] underline"
-                      >
-                        Retire
-                      </button>
-                    </BusyRegion>
+                    <DirectiveAction
+                      path={directivePath(directive.id, "retire")}
+                      label="Retire"
+                      pendingLabel="Retiring…"
+                      className="text-[var(--color-muted)] underline disabled:opacity-50"
+                      onDone={() =>
+                        setDirectives((prev) => prev.filter((row) => row.id !== directive.id))
+                      }
+                    />
                   )}
                 </p>
               </li>
@@ -191,18 +142,19 @@ export function GuidancePanel({
                         {agoLabel(directive.created_at)}
                       </span>
                       {archived ? null : (
-                        <BusyRegion
-                          busy={busyId === directive.id}
-                          label="Activating…"
-                        >
-                          <button
-                            type="button"
-                            onClick={() => void activate(directive.id)}
-                            className="text-[var(--color-accent)] underline"
-                          >
-                            Activate
-                          </button>
-                        </BusyRegion>
+                        <DirectiveAction
+                          path={directivePath(directive.id, "activate")}
+                          label="Activate"
+                          pendingLabel="Activating…"
+                          className="text-[var(--color-accent)] underline disabled:opacity-50"
+                          onDone={() => {
+                            setProposed((prev) => prev.filter((p) => p.id !== directive.id));
+                            setDirectives((prev) => [
+                              { ...directive, active: 1 },
+                              ...prev.filter((row) => row.id !== directive.id),
+                            ]);
+                          }}
+                        />
                       )}
                     </p>
                   </li>
@@ -211,16 +163,13 @@ export function GuidancePanel({
             </div>
           ) : null}
 
-          {error ? (
-            <p className="mt-2 text-sm text-red-300">{error}</p>
-          ) : null}
 
           {archived ? (
             <p className="mt-3 text-xs text-[var(--color-muted)]">
               This project is archived — restore it (⋯) to add guidance.
             </p>
           ) : (
-            <BusyRegion busy={busy} label="Adding instruction…" className="mt-3">
+            <BusyRegion busy={addAction.busy} label="Adding instruction…" className="mt-3">
               <div className="flex flex-col gap-1.5">
                 <textarea
                   value={draft}
@@ -233,15 +182,17 @@ export function GuidancePanel({
                   <span className="text-xs text-[var(--color-muted)]">
                     {initial.applies_from}
                   </span>
-                  <button
-                    type="button"
-                    onClick={() => void add()}
+                  <ActionButton
+                    busy={addAction.busy}
+                    pendingLabel="Adding…"
+                    onClick={add}
                     disabled={!draft.trim()}
                     className="rounded-lg border border-[var(--color-accent)] px-3 py-1.5 text-xs font-medium text-[var(--color-accent)] disabled:opacity-40"
                   >
                     Add
-                  </button>
+                  </ActionButton>
                 </div>
+                <ActionError action={addAction} />
               </div>
             </BusyRegion>
           )}
@@ -274,5 +225,38 @@ export function GuidancePanel({
         </>
       )}
     </section>
+  );
+}
+
+/** Retire / Activate on one instruction — its own lock per row. */
+function DirectiveAction({
+  path,
+  label,
+  pendingLabel,
+  className,
+  onDone,
+}: {
+  path: string;
+  label: string;
+  pendingLabel: string;
+  className: string;
+  onDone: () => void;
+}) {
+  const action = useProjectAction();
+  return (
+    <span className="flex flex-col items-end">
+      <ActionButton
+        busy={action.busy}
+        pendingLabel={pendingLabel}
+        onClick={() => void action.run(path, { skipRefresh: true, onSuccess: onDone })}
+        className={className}
+      >
+        {label}
+      </ActionButton>
+      <ActionError
+        action={action}
+        className="flex flex-wrap items-center gap-2 text-xs text-red-300"
+      />
+    </span>
   );
 }

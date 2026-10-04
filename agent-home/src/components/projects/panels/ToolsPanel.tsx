@@ -1,8 +1,10 @@
 "use client";
 
 import { useState } from "react";
-import { friendlyError } from "@/components/projects/errors";
 
+import { ActionButton } from "@/components/projects/ActionButton";
+import { ActionError } from "@/components/projects/ActionError";
+import { useProjectAction } from "@/components/projects/useProjectAction";
 import { BusyRegion } from "@/components/ui/BusyRegion";
 import type { ProjectDetail, ProjectToolsResolution } from "@/types";
 
@@ -56,47 +58,28 @@ export function ToolsPanel({
   const [skillsDraft, setSkillsDraft] = useState(
     splitCsv(project.skills).join(", "),
   );
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const action = useProjectAction<ProjectToolsResolution>();
+  const busy = action.busy;
   const [resolution, setResolution] = useState<ProjectToolsResolution | null>(
     null,
   );
 
   const slug = project.slug;
 
-  const save = async () => {
-    setBusy(true);
-    setError(null);
-    try {
-      const res = await fetch(
-        `/api/projects/${encodeURIComponent(slug)}/tools`,
-        {
-          method: "PATCH",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({
-            toolsets: toolsetsDraft
-              .split(",")
-              .map((s) => s.trim())
-              .filter(Boolean),
-            skills: skillsDraft
-              .split(",")
-              .map((s) => s.trim())
-              .filter(Boolean),
-          }),
-        },
-      );
-      const data = (await res.json().catch(() => ({}))) as ProjectToolsResolution &
-        { detail?: string };
-      if (!res.ok) throw new Error(friendlyError({ status: res.status, detail: data.detail }, "Could not set tools."));
-      setToolsets(data.toolsets ?? []);
-      setSkills(data.skills ?? []);
-      setResolution(data);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "That didn't go through.");
-    } finally {
-      setBusy(false);
-    }
-  };
+  const save = () =>
+    action.run(`/api/projects/${encodeURIComponent(slug)}/tools`, {
+      method: "PATCH",
+      body: {
+        toolsets: splitCsv(toolsetsDraft),
+        skills: splitCsv(skillsDraft),
+      },
+      // The answer is what would actually run; show it straight away.
+      onSuccess: (data) => {
+        setToolsets(data.toolsets ?? []);
+        setSkills(data.skills ?? []);
+        setResolution(data);
+      },
+    });
 
   const inputClass =
     "w-full rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-2)] px-3 py-2 text-sm";
@@ -111,11 +94,7 @@ export function ToolsPanel({
         Tools
       </h2>
 
-      {error ? (
-        <p className="mt-2 text-sm text-red-300" role="alert">
-          {error}
-        </p>
-      ) : null}
+      <ActionError action={action} />
 
       {toolsets.length === 0 && skills.length === 0 ? (
         <p className="mt-2 text-sm text-[var(--color-muted)]">
@@ -189,14 +168,14 @@ export function ToolsPanel({
                 placeholder="e.g. digest-writer, canva"
               />
             </label>
-            <button
-              type="button"
+            <ActionButton
+              busy={busy}
+              pendingLabel="Saving…"
               onClick={() => void save()}
-              disabled={busy}
               className="self-start rounded-lg border border-[var(--color-accent)] px-3 py-1.5 text-xs font-medium text-[var(--color-accent)] disabled:opacity-40"
             >
               Save
-            </button>
+            </ActionButton>
           </div>
         </BusyRegion>
       )}
