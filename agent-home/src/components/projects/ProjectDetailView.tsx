@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useState } from "react";
+import { useCallback, useState, type ComponentType } from "react";
 import { friendlyError } from "@/components/projects/errors";
 
 import {
@@ -18,20 +18,6 @@ import {
 } from "@/components/projects/readiness";
 import { agoLabel, dayDistance } from "@/components/projects/format";
 import { SummariseSheet } from "@/components/projects/SummariseSheet";
-import { CollapsedPanel } from "@/components/projects/panels/CollapsedPanel";
-import { BoardPanel } from "@/components/projects/panels/BoardPanel";
-import { BriefPanel } from "@/components/projects/panels/BriefPanel";
-import { FilesPanel } from "@/components/projects/panels/FilesPanel";
-import { GuidancePanel } from "@/components/projects/panels/GuidancePanel";
-import { MemoriesPanel } from "@/components/projects/panels/MemoriesPanel";
-import { OutputsPanel } from "@/components/projects/panels/OutputsPanel";
-import { PeoplePanel } from "@/components/projects/panels/PeoplePanel";
-import { PlanPanel } from "@/components/projects/panels/PlanPanel";
-import { ProgressPanel } from "@/components/projects/panels/ProgressPanel";
-import { ReferencesPanel } from "@/components/projects/panels/ReferencesPanel";
-import { RunsPanel } from "@/components/projects/panels/RunsPanel";
-import { SettingsPanel } from "@/components/projects/panels/SettingsPanel";
-import { ToolsPanel } from "@/components/projects/panels/ToolsPanel";
 import {
   CADENCE_GLYPH,
   CADENCE_LABEL,
@@ -41,6 +27,22 @@ import { BusyRegion } from "@/components/ui/BusyRegion";
 import { Pill, type Tone } from "@/components/ui/Pill";
 import { useRefresh } from "@/components/ui/useRefresh";
 import { useProjectEvents } from "@/components/projects/useProjectEvents";
+import { AskOrChangeBox } from "@/components/projects/ask/AskOrChangeBox";
+import { ChangeRequestSheet } from "@/components/projects/changes/ChangeRequestSheet";
+import { LiveStatusBar } from "@/components/projects/live/LiveStatusBar";
+import { BoardTab } from "@/components/projects/tabs/BoardTab";
+import { DashboardTab } from "@/components/projects/tabs/DashboardTab";
+import { InputsTab } from "@/components/projects/tabs/InputsTab";
+import { IterationsTab } from "@/components/projects/tabs/IterationsTab";
+import { OutputsTab } from "@/components/projects/tabs/OutputsTab";
+import { PlanTab } from "@/components/projects/tabs/PlanTab";
+import { ProjectTabsNav } from "@/components/projects/tabs/ProjectTabsNav";
+import { SettingsTab } from "@/components/projects/tabs/SettingsTab";
+import {
+  parseProjectTab,
+  type ProjectTab,
+  type ProjectTabProps,
+} from "@/components/projects/tabs/types";
 import type {
   ProjectBoardTask,
   ProjectBoardView,
@@ -57,31 +59,20 @@ const HEALTH_TONE: Record<ProjectHealth, Tone> = {
   stalled: "danger",
 };
 
-/**
- * The sticky anchor strip, in panel order: Progress (what is next for you)
- * leads, then the deliverables and the work, then the record. Collapsed
- * panels keep their anchor — the wrapper carries the id.
- */
-const PANEL_ANCHORS: { id: string; label: string }[] = [
-  { id: "panel-progress", label: "Progress" },
-  { id: "panel-outputs", label: "Outputs" },
-  { id: "panel-brief", label: "Brief" },
-  { id: "panel-board", label: "Board" },
-  { id: "panel-runs", label: "Runs" },
-  { id: "panel-plan", label: "Plan" },
-  { id: "panel-settings", label: "Settings" },
-  { id: "panel-guidance", label: "Guidance" },
-  { id: "panel-people", label: "People" },
-  { id: "panel-files", label: "Files" },
-  { id: "panel-references", label: "References" },
-  { id: "panel-memories", label: "Memories" },
-  { id: "panel-tools", label: "Tools" },
-];
+const TAB_COMPONENT: Record<ProjectTab, ComponentType<ProjectTabProps>> = {
+  dashboard: DashboardTab,
+  board: BoardTab,
+  outputs: OutputsTab,
+  iterations: IterationsTab,
+  inputs: InputsTab,
+  plan: PlanTab,
+  settings: SettingsTab,
+};
 
 /**
- * `/projects/[slug]` — the one place (§13). Panels, not tabs: everything the
- * project knows is on one scrollable page; the sticky strip only scrolls you
- * there. Fan-out safe by construction — each separately-fetched resource
+ * `/projects/[slug]` — the one place (§13): a sticky live status bar, an
+ * ask-or-change box, then Dashboard + tabs. The Dashboard answers "what do I
+ * do now"; everything else is one tab away (`?tab=`). Fan-out safe by construction — each separately-fetched resource
  * arrives as `| null` and its panel says "unavailable" instead of failing
  * the page (§16).
  */
@@ -93,6 +84,7 @@ export function ProjectDetailView({
   doctor = null,
   callerUserId,
   isInstanceAdmin,
+  initialTab,
 }: {
   project: ProjectDetail;
   board: ProjectBoardView | null;
@@ -104,6 +96,8 @@ export function ProjectDetailView({
   callerUserId: string;
   /** Box-wide owner/admin outranks the per-project matrix (§11). */
   isInstanceAdmin: boolean;
+  /** From `?tab=`; anything unknown lands on the Dashboard. */
+  initialTab?: string;
 }) {
   const router = useRouter();
   const { refresh, refreshing } = useRefresh();
@@ -140,23 +134,44 @@ export function ProjectDetailView({
       (task) => task.status === "blocked",
     ) ?? [];
 
-  const hasReferences =
-    (project.links.sample ?? []).length > 0 ||
-    (project.links.reference ?? []).length > 0 ||
-    (project.links.url ?? []).length > 0;
-  const hasMemories = (project.links.memory ?? []).length > 0;
-  const hasFiles = (project.links.file ?? []).length > 0;
-  // The owner is a member by construction; People is empty until a second
-  // person or a contact is on it.
-  const hasPeople =
-    project.members.some((m) => m.user_id !== project.owner_user_id) ||
-    project.contacts.length > 0;
-  const hasTools = Boolean(project.toolsets?.trim() || project.skills?.trim());
-  const anchors = PANEL_ANCHORS.filter(
-    (anchor) =>
-      (anchor.id !== "panel-references" || hasReferences) &&
-      (anchor.id !== "panel-memories" || hasMemories),
-  );
+  const [tab, setTab] = useState<ProjectTab>(() => parseProjectTab(initialTab));
+  const selectTab = useCallback((next: ProjectTab) => {
+    setTab(next);
+    if (typeof window !== "undefined") {
+      const url = new URL(window.location.href);
+      if (next === "dashboard") url.searchParams.delete("tab");
+      else url.searchParams.set("tab", next);
+      window.history.replaceState(window.history.state, "", url.toString());
+    }
+  }, []);
+  const [changeOpen, setChangeOpen] = useState(false);
+  const [changeText, setChangeText] = useState<string | undefined>(undefined);
+  const openChange = useCallback((initialText?: string) => {
+    setChangeText(initialText);
+    setChangeOpen(true);
+  }, []);
+
+  const triageCount =
+    board?.columns
+      .flatMap((column) => column.tasks)
+      .filter((task) => task.status === "triage").length ?? 0;
+  const tabBadges: Partial<Record<ProjectTab, number>> = {
+    board: blockedCards.length + triageCount,
+  };
+  const tabProps: ProjectTabProps = {
+    project,
+    board,
+    playbook,
+    directives,
+    doctor,
+    callerUserId,
+    canLead,
+    readiness,
+    runnable,
+    onNavigate: selectTab,
+    onChangeRequest: openChange,
+  };
+  const ActiveTab = TAB_COMPONENT[tab];
 
   const slugPath = `/api/projects/${encodeURIComponent(project.slug)}`;
 
@@ -389,100 +404,21 @@ export function ProjectDetailView({
             ) : null}
           </header>
 
-          {/* ── Sticky panel anchors ───────────────────────────────── */}
-          <nav
-            data-component="PanelAnchors"
-            className="sticky top-0 z-20 -mx-1 overflow-x-auto bg-[var(--color-bg)]/90 px-1 py-2 backdrop-blur"
-          >
-            <ul className="flex w-max gap-1.5">
-              {anchors.map((anchor) => (
-                <li key={anchor.id}>
-                  <a
-                    href={`#${anchor.id}`}
-                    className="block rounded-full border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-1 text-xs whitespace-nowrap"
-                  >
-                    {anchor.label}
-                  </a>
-                </li>
-              ))}
-            </ul>
-          </nav>
-
-          {/* ── Panels — stacked on a phone, two columns from md: ── */}
-          <div className="flex flex-col gap-4 md:grid md:grid-cols-2 md:items-start">
-            <ProgressPanel
-              slug={project.slug}
-              project={project}
-              blockedCards={blockedCards}
-              readiness={readiness}
-            />
-            <OutputsPanel
-              slug={project.slug}
-              outputs={project.outputs}
-              archived={project.archived}
-            />
-            <BriefPanel project={project} />
-            <BoardPanel
-              slug={project.slug}
-              board={board}
-              archived={project.archived}
-            />
-            <RunsPanel
-              slug={project.slug}
-              runs={project.runs}
-              archived={project.archived}
-            />
-            <PlanPanel
-              slug={project.slug}
-              playbook={playbook}
-              profiles={project.profiles.map((row) => row.profile)}
-              canActivate={canLead}
-              archived={project.archived}
-            />
-            <SettingsPanel
-              project={project}
-              canLead={canLead}
-              hasActivePlan={Boolean(playbook?.active)}
-            />
-            <GuidancePanel
-              slug={project.slug}
-              initial={directives}
-              archived={project.archived}
-            />
-            {hasPeople ? (
-              <PeoplePanel project={project} archived={project.archived} />
-            ) : (
-              <CollapsedPanel
-                anchor="panel-people"
-                label="People"
-                hint="just you — add someone"
-              >
-                <PeoplePanel project={project} archived={project.archived} />
-              </CollapsedPanel>
-            )}
-            {hasFiles ? (
-              <FilesPanel project={project} archived={project.archived} />
-            ) : (
-              <CollapsedPanel anchor="panel-files" label="Files" hint="none yet — add one">
-                <FilesPanel project={project} archived={project.archived} />
-              </CollapsedPanel>
-            )}
-            <ReferencesPanel project={project} />
-            <MemoriesPanel project={project} />
-            {hasTools ? (
-              <ToolsPanel project={project} archived={project.archived} />
-            ) : (
-              <CollapsedPanel
-                anchor="panel-tools"
-                label="Tools"
-                hint="full host toolset — narrow it"
-              >
-                <ToolsPanel project={project} archived={project.archived} />
-              </CollapsedPanel>
-            )}
           </div>
-        </div>
       </BusyRegion>
+
+      {/* ── Live status: sticky, above every tab ───────────────── */}
+      <LiveStatusBar project={project} board={board} />
+
+      {!project.archived ? (
+        <AskOrChangeBox project={project} onChangeRequest={openChange} />
+      ) : null}
+
+      <ProjectTabsNav active={tab} onSelect={selectTab} badges={tabBadges} />
+
+      <div data-component="ProjectTabPanel" role="tabpanel" data-active-tab={tab}>
+        <ActiveTab {...tabProps} />
+      </div>
 
       {addOpen ? (
         <AddToProjectSheet
@@ -501,6 +437,19 @@ export function ProjectDetailView({
           initial={project.summary ?? ""}
           onClose={() => {
             setSummariseOpen(false);
+            refresh();
+          }}
+        />
+      ) : null}
+
+      {changeOpen ? (
+        <ChangeRequestSheet
+          project={project}
+          playbook={playbook}
+          directives={directives}
+          initialText={changeText}
+          onClose={() => {
+            setChangeOpen(false);
             refresh();
           }}
         />
