@@ -13,9 +13,18 @@ function resolveBuildSha() {
   }
 }
 
+/** When this bundle was built (ISO-8601) — shown next to the build SHA so a
+ *  stale tab or a slow deploy is obvious. HERMES_BUILD_TIME overrides it. */
+function resolveBuildTime() {
+  return process.env.HERMES_BUILD_TIME || new Date().toISOString();
+}
+
 /** @type {import('next').NextConfig} */
 const nextConfig = {
-  env: { NEXT_PUBLIC_HERMES_BUILD: resolveBuildSha() },
+  env: {
+    NEXT_PUBLIC_HERMES_BUILD: resolveBuildSha(),
+    NEXT_PUBLIC_HERMES_BUILD_TIME: resolveBuildTime(),
+  },
   // Unlike `web/` (a static SPA export served by the Python backend),
   // `agent-home` runs as a real Next.js **server** (App Router + route
   // handlers) behind Caddy on the prod box. It is the BFF (FG-20 Decision 1):

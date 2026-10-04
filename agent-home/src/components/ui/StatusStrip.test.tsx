@@ -1,14 +1,15 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { StatusStrip } from "@/components/ui/StatusStrip";
+import { StatusStrip, fmtBuildTime } from "@/components/ui/StatusStrip";
 import type { StatusSummary } from "@/types";
 
 afterEach(() => {
   cleanup();
   vi.unstubAllEnvs();
   vi.unstubAllGlobals();
+  vi.restoreAllMocks();
 });
 
 const SUMMARY: StatusSummary = {
@@ -51,6 +52,8 @@ describe("StatusStrip", () => {
     // Same SHA on both ends → quiet build tag, no refresh prompt.
     expect(screen.getByTitle("agent-home build abc1234")).toBeTruthy();
     expect(screen.queryByText(/refresh/)).toBeNull();
+    // No build time baked in → no stamp.
+    expect(screen.queryByTestId("build-time")).toBeNull();
     // The self-ticking freshness label.
     expect(await screen.findByText(/just now|\d+[smh] ago/)).toBeTruthy();
   });
@@ -71,5 +74,55 @@ describe("StatusStrip", () => {
     expect(screen.getByTitle("agent-home build abc1234")).toBeTruthy();
     // Metrics render as unknown ("—" on CPU, Disk, and Cron).
     expect(screen.getAllByText("—").length).toBe(3);
+  });
+
+  it("shows when the bundle was built next to the build SHA", async () => {
+    vi.stubEnv("NEXT_PUBLIC_HERMES_BUILD", "abc1234");
+    vi.stubEnv("NEXT_PUBLIC_HERMES_BUILD_TIME", "2026-10-04T07:04:00.000Z");
+    mockSummary();
+    render(<StatusStrip />);
+    const tag = await screen.findByTitle(
+      "agent-home build abc1234, built 2026-10-04T07:04:00.000Z",
+    );
+    const stamp = screen.getByTestId("build-time");
+    expect(tag.contains(stamp)).toBe(true);
+    expect(stamp.textContent).toBe(` · ${fmtBuildTime("2026-10-04T07:04:00.000Z")}`);
+  });
+
+  it("Refresh now re-reads at once, locks while reading, and never doubles up", async () => {
+    vi.stubEnv("NEXT_PUBLIC_HERMES_BUILD", "abc1234");
+    const fetchMock = mockSummary();
+    render(<StatusStrip />);
+    expect(await screen.findByText("42%")).toBeTruthy();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    let release!: (r: Response) => void;
+    fetchMock.mockImplementationOnce(
+      () => new Promise<Response>((resolve) => (release = resolve)),
+    );
+    const btn = screen.getByRole("button", { name: "Refresh now" }) as HTMLButtonElement;
+    fireEvent.click(btn);
+    fireEvent.click(btn);
+    await waitFor(() => expect(btn.disabled).toBe(true));
+    expect(btn.getAttribute("aria-busy")).toBe("true");
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+
+    await act(async () => {
+      release(
+        new Response(JSON.stringify({ ...SUMMARY, cpu_pct: 77 }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+      );
+    });
+    expect(await screen.findByText("77%")).toBeTruthy();
+    await waitFor(() => expect(btn.disabled).toBe(false));
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("formats the build time and ignores missing or bad values", () => {
+    expect(fmtBuildTime(undefined)).toBeNull();
+    expect(fmtBuildTime("not a date")).toBeNull();
+    expect(fmtBuildTime("2026-10-04T07:04:00.000Z")).toMatch(/\d{2}:\d{2}/);
   });
 });
