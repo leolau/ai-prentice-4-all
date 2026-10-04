@@ -239,11 +239,12 @@ describe("NewProjectForm — create sequence", () => {
     expect(body.goal).toBe(GOAL);
     expect(body.host_profile).toBe("default");
     expect(body.outputs).toEqual([{ title: "The Monday digest email" }]);
-    // The user wrote the plan: no draft.
+    // The user wrote the plan: no draft, no scope questions.
     expect(calls(fetchMock, (u) => u.endsWith("/playbook/draft"))).toHaveLength(0);
+    expect(calls(fetchMock, (u) => u.endsWith("/clarify/questions"))).toHaveLength(0);
   });
 
-  it("creates, starts the agent draft server-side and lands on the project page (default choice)", async () => {
+  it("creates, starts the agent draft server-side and lands on the plan (draft right away)", async () => {
     const fetchMock = routedFetch();
     vi.stubGlobal("fetch", fetchMock);
     const utils = render(<NewProjectForm servingProfile="default" />);
@@ -256,13 +257,17 @@ describe("NewProjectForm — create sequence", () => {
     expect(utils.getByText(/pauses at checkpoints/)).toBeTruthy();
     fireEvent.click(utils.getByText("Next: review"));
     expect(utils.getByText(/Nothing is created until/)).toBeTruthy();
+    fireEvent.click(utils.getByText("Let the agent draft the plan right away"));
+    expect(utils.getByText(/proposes steps in the background/)).toBeTruthy();
     fireEvent.click(utils.getByText("Create project and draft the plan"));
 
     await waitFor(() => expect(router.push).toHaveBeenCalled());
     const draft = calls(fetchMock, (u) => u === "/api/projects/monday-digest/playbook/draft");
     expect(draft).toHaveLength(1);
     expect((draft[0][1] as RequestInit).method).toBe("POST");
+    expect(calls(fetchMock, (u) => u.endsWith("/clarify/questions"))).toHaveLength(0);
     expect(router.push).toHaveBeenCalledWith("/projects/monday-digest#panel-plan");
+    expect(router.push).toHaveBeenCalledTimes(1);
   });
 
   it("creates once, uploads each file once with its role's link kind, then links memory and notes", async () => {
@@ -299,7 +304,7 @@ describe("NewProjectForm — create sequence", () => {
     fireEvent.click(utils.getByText("Next: review"));
     expect(utils.getByText("2 files · 1 memory · 1 link or note")).toBeTruthy();
 
-    const create = utils.getByText("Create project and draft the plan").closest("button")!;
+    const create = utils.getByText("Create project and answer a few questions").closest("button")!;
     fireEvent.click(create);
     fireEvent.click(create);
     await waitFor(() => expect(router.push).toHaveBeenCalledTimes(1));
@@ -323,11 +328,15 @@ describe("NewProjectForm — create sequence", () => {
       ]),
     );
     expect(linkBodies).toHaveLength(2);
-    // The draft starts only after inputs are attached.
+    // The agent is asked for scope questions once, only after inputs are
+    // attached (so it reads them), and nothing drafts a plan yet.
+    expect(calls(fetchMock, (u) => u === "/api/projects/monday-digest/clarify/questions")).toHaveLength(1);
+    expect(calls(fetchMock, (u) => u.endsWith("/playbook/draft"))).toHaveLength(0);
     const order = fetchMock.mock.calls.map(([u]) => String(u));
-    expect(order.indexOf("/api/projects/monday-digest/playbook/draft")).toBeGreaterThan(
+    expect(order.indexOf("/api/projects/monday-digest/clarify/questions")).toBeGreaterThan(
       order.lastIndexOf("/api/projects/monday-digest/links"),
     );
+    expect(router.push).toHaveBeenCalledWith("/projects/monday-digest?tab=scope");
   });
 
   it("a failed upload is shown and retried with the same key — never re-creating or re-uploading the rest", async () => {
@@ -352,18 +361,21 @@ describe("NewProjectForm — create sequence", () => {
     pickFiles(utils, [file("good.pdf"), file("broken.pdf")]);
     fireEvent.click(utils.getByText("Next: how it runs"));
     fireEvent.click(utils.getByText("Next: review"));
-    fireEvent.click(utils.getByText("Create project and draft the plan"));
+    fireEvent.click(utils.getByText("Create project and answer a few questions"));
 
     await utils.findByText(/some inputs didn’t attach/);
     expect(utils.getByText("✗ Storage is down.")).toBeTruthy();
     expect(utils.getByText("✓ Attached")).toBeTruthy();
     expect(router.push).not.toHaveBeenCalled();
+    // Questions wait until every input is attached.
+    expect(calls(fetchMock, (u) => u.endsWith("/clarify/questions"))).toHaveLength(0);
     // The project exists now: no Back, no plan choice to change.
     expect(utils.queryByText("Back")).toBeNull();
 
     const firstKey = upload.mock.calls.find(([r]) => r.file.name === "broken.pdf")![0].idempotencyKey;
     fireEvent.click(utils.getByText("Retry failed inputs"));
-    await waitFor(() => expect(router.push).toHaveBeenCalledWith("/projects/monday-digest#panel-plan"));
+    await waitFor(() => expect(router.push).toHaveBeenCalledWith("/projects/monday-digest?tab=scope"));
+    expect(calls(fetchMock, (u) => u === "/api/projects/monday-digest/clarify/questions")).toHaveLength(1);
 
     expect(calls(fetchMock, (u) => u === "/api/projects")).toHaveLength(1);
     const goodCalls = upload.mock.calls.filter(([r]) => r.file.name === "good.pdf");
@@ -416,7 +428,7 @@ describe("NewProjectForm — create sequence", () => {
     const utils = render(<NewProjectForm servingProfile="default" upload={upload} />);
     toStep3(utils);
     fireEvent.click(utils.getByText("Next: review"));
-    fireEvent.click(utils.getByText("Create project and draft the plan"));
+    fireEvent.click(utils.getByText("Create project and answer a few questions"));
 
     // The refusal names the field — never a bare toast…
     await utils.findByText("This field is mandatory.");
@@ -431,6 +443,7 @@ describe("NewProjectForm — create sequence", () => {
         .value,
     ).toBe(GOAL);
     expect(upload).not.toHaveBeenCalled();
+    expect(calls(fetchMock, (u) => u.endsWith("/clarify/questions"))).toHaveLength(0);
   });
 
   it("an unreachable server says so and keeps the form", async () => {
@@ -443,10 +456,112 @@ describe("NewProjectForm — create sequence", () => {
     toStep3(utils);
     fireEvent.click(utils.getByText("Next: review"));
     await act(async () => {
-      fireEvent.click(utils.getByText("Create project and draft the plan"));
+      fireEvent.click(utils.getByText("Create project and answer a few questions"));
     });
     expect(await utils.findByText("Could not reach the server.")).toBeTruthy();
     expect(utils.getByText(/Step 4 of 4/)).toBeTruthy();
     expect(router.push).not.toHaveBeenCalled();
+  });
+});
+
+describe("NewProjectForm — plan choice", () => {
+  function toReview(utils: Utils) {
+    toStep3(utils);
+    fireEvent.click(utils.getByText("Next: review"));
+  }
+
+  it("defaults to letting the agent ask about scope first, with all three choices offered", () => {
+    vi.stubGlobal("fetch", routedFetch());
+    const utils = render(<NewProjectForm servingProfile="default" />);
+    toReview(utils);
+    const radios = Array.from(
+      utils.container.querySelectorAll<HTMLInputElement>('input[type="radio"][name="plan"]'),
+    );
+    expect(radios.map((r) => r.value)).toEqual(["scope", "agent", "self"]);
+    expect(radios.find((r) => r.checked)?.value).toBe("scope");
+    expect(utils.getByText("Answer a few questions first, then the agent drafts the plan")).toBeTruthy();
+    expect(utils.getByText("Let the agent draft the plan right away")).toBeTruthy();
+    expect(utils.getByText("I’ll write it myself")).toBeTruthy();
+    expect(utils.getByText(/asks 3–7 questions/)).toBeTruthy();
+    expect(utils.getByText("Create project and answer a few questions")).toBeTruthy();
+
+    // The button names what the chosen path does.
+    fireEvent.click(utils.getByText("Let the agent draft the plan right away"));
+    expect(utils.getByText("Create project and draft the plan")).toBeTruthy();
+    fireEvent.click(utils.getByText("I’ll write it myself"));
+    expect(utils.getByText("Create project")).toBeTruthy();
+    expect(utils.queryByText("Create project and answer a few questions")).toBeNull();
+  });
+
+  it("(a) asks for scope questions exactly once, even on a double submit, and lands on Scope", async () => {
+    const fetchMock = routedFetch();
+    vi.stubGlobal("fetch", fetchMock);
+    const utils = render(<NewProjectForm servingProfile="default" />);
+    toReview(utils);
+    const create = utils.getByText("Create project and answer a few questions").closest("button")!;
+    fireEvent.click(create);
+    fireEvent.click(create);
+    fireEvent.submit(create.closest("form")!);
+    await waitFor(() => expect(router.push).toHaveBeenCalledTimes(1));
+
+    expect(router.push).toHaveBeenCalledWith("/projects/monday-digest?tab=scope");
+    expect(calls(fetchMock, (u) => u === "/api/projects")).toHaveLength(1);
+    const asks = calls(fetchMock, (u) => u === "/api/projects/monday-digest/clarify/questions");
+    expect(asks).toHaveLength(1);
+    const init = asks[0][1] as RequestInit;
+    expect(init.method).toBe("POST");
+    expect((init.headers as Record<string, string>)["Idempotency-Key"]).toBeTruthy();
+    expect(JSON.parse(String(init.body))).toEqual({});
+    // Nothing drafts a plan or runs yet.
+    expect(calls(fetchMock, (u) => u.endsWith("/playbook/draft"))).toHaveLength(0);
+    expect(calls(fetchMock, (u) => u.endsWith("/run") || u.includes("/runs"))).toHaveLength(0);
+  });
+
+  it("(a) a refused question job still lands on Scope — the project exists and Scope can ask again", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === "/api/projects") return jsonResponse(200, { slug: "monday-digest" });
+      if (url.endsWith("/clarify/questions")) {
+        return jsonResponse(409, { error: "conflict", detail: "A question job is already running." });
+      }
+      return jsonResponse(200, { rows: [], total: 0, limit: 6, offset: 0 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const utils = render(<NewProjectForm servingProfile="default" />);
+    toReview(utils);
+    fireEvent.click(utils.getByText("Create project and answer a few questions"));
+    await waitFor(() =>
+      expect(router.push).toHaveBeenCalledWith("/projects/monday-digest?tab=scope"),
+    );
+    expect(
+      fetchMock.mock.calls.filter(([u]) => String(u).endsWith("/clarify/questions")),
+    ).toHaveLength(1);
+  });
+
+  it("(b) drafting right away keeps the old draft call, once, on a double submit", async () => {
+    const fetchMock = routedFetch();
+    vi.stubGlobal("fetch", fetchMock);
+    const utils = render(<NewProjectForm servingProfile="default" />);
+    toReview(utils);
+    fireEvent.click(utils.getByText("Let the agent draft the plan right away"));
+    const create = utils.getByText("Create project and draft the plan").closest("button")!;
+    fireEvent.click(create);
+    fireEvent.click(create);
+    await waitFor(() => expect(router.push).toHaveBeenCalledTimes(1));
+    expect(router.push).toHaveBeenCalledWith("/projects/monday-digest#panel-plan");
+    expect(calls(fetchMock, (u) => u === "/api/projects/monday-digest/playbook/draft")).toHaveLength(1);
+    expect(calls(fetchMock, (u) => u.endsWith("/clarify/questions"))).toHaveLength(0);
+  });
+
+  it("(c) writing it myself makes no draft or question call", async () => {
+    const fetchMock = routedFetch();
+    vi.stubGlobal("fetch", fetchMock);
+    const utils = render(<NewProjectForm servingProfile="default" />);
+    toReview(utils);
+    fireEvent.click(utils.getByText("I’ll write it myself"));
+    fireEvent.click(utils.getByText("Create project"));
+    await waitFor(() => expect(router.push).toHaveBeenCalledTimes(1));
+    expect(router.push).toHaveBeenCalledWith("/projects/monday-digest#panel-plan");
+    expect(fetchMock.mock.calls.map(([u]) => String(u)).filter((u) => u !== "/api/projects" && !u.startsWith("/api/memory"))).toEqual([]);
   });
 });

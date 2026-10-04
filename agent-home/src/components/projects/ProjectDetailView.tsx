@@ -168,6 +168,7 @@ export function ProjectDetailView({
       .filter((task) => task.status === "triage").length ?? 0;
   const tabBadges: Partial<Record<ProjectTab, number>> = {
     board: blockedCards.length + triageCount,
+    scope: project.clarify?.open_count ?? 0,
   };
   const tabProps: ProjectTabProps = {
     project,

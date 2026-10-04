@@ -3,12 +3,14 @@ import {
   allOutputsAccepted,
   awaitingAcceptance,
   boardTasks,
+  clarifyOf,
   hasInputs,
   latestRun,
   nowSeconds,
   openRun,
   outputCounts,
   runStalled,
+  scopeSkipped,
 } from "@/components/projects/dashboard/derive";
 import type {
   ProjectBoardView,
@@ -19,7 +21,7 @@ import type {
 export type StepState = "done" | "attention" | "current" | "todo";
 
 export interface StandStep {
-  key: "brief" | "inputs" | "plan" | "iteration" | "review" | "done";
+  key: "brief" | "inputs" | "scope" | "plan" | "iteration" | "review" | "done";
   label: string;
   /** Second line, e.g. "rev 4" / "working". */
   sub: string | null;
@@ -27,7 +29,7 @@ export interface StandStep {
 }
 
 /**
- * Brief → Inputs → Plan (rev N) → Iteration N → Review & accept → Done, each
+ * Brief → Inputs → Scope agreed → Plan (rev N) → Iteration N → Review & accept → Done, each
  * ✓ / ! / current / not yet, derived from the record. A stalled or failed
  * iteration is "attention", never "done" or a calm "current".
  */
@@ -79,6 +81,24 @@ export function standSteps(
     iterState = briefOk && planOk ? "current" : "todo";
   }
 
+  const clarify = clarifyOf(project);
+  let scopeSub: string | null = null;
+  let scopeState: StepState;
+  if (clarify.status === "confirmed") {
+    scopeState = "done";
+  } else if (clarify.status === "open") {
+    scopeSub = `${clarify.open_count} open`;
+    scopeState = "attention";
+  } else if (clarify.status === "answered") {
+    scopeSub = "confirm";
+    scopeState = "attention";
+  } else if (scopeSkipped(project, playbook)) {
+    scopeSub = "skipped";
+    scopeState = "done";
+  } else {
+    scopeState = briefOk ? "current" : "todo";
+  }
+
   let reviewState: StepState = "todo";
   if (isDone || accepted) reviewState = "done";
   else if (!open && awaiting > 0) reviewState = "current";
@@ -96,6 +116,7 @@ export function standSteps(
       sub: null,
       state: hasInputs(project) ? "done" : "attention",
     },
+    { key: "scope", label: "Scope agreed", sub: scopeSub, state: scopeState },
     {
       key: "plan",
       label: "Plan",
