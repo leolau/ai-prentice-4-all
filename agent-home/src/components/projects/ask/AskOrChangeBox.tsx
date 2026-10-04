@@ -7,9 +7,10 @@ import type { ProjectDetail } from "@/types";
  * "Add requirement / change" (hands the text to `onChangeRequest`).
  * (Stub — filled in by the ask workstream.)
  */
-export function AskOrChangeBox(_props: {
+export function AskOrChangeBox(props: {
   project: ProjectDetail;
   onChangeRequest: (initialText?: string) => void;
 }) {
+  void props;
   return null;
 }

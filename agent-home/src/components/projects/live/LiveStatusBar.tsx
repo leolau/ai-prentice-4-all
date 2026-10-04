@@ -8,9 +8,10 @@ import type { ProjectBoardView, ProjectDetail } from "@/types";
  * a Stop button; "Stop all" for the run. (Stub — filled in by the live
  * workstream.)
  */
-export function LiveStatusBar(_props: {
+export function LiveStatusBar(props: {
   project: ProjectDetail;
   board: ProjectBoardView | null;
 }) {
+  void props;
   return null;
 }
