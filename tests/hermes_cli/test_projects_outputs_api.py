@@ -285,6 +285,49 @@ def test_versions_count_runs_per_output_and_newest_comes_first(env):
     assert all(a["ext"] == "pdf" for a in items)
 
 
+def test_a_file_claimed_by_two_cards_appears_once(env):
+    """A follow-on card that names another card's workspace file must not
+    re-list it: the row is owned by the card whose workspace holds it, and
+    attaching it leaves no unattached twin."""
+    client, _state, tmp = env
+    project = _project(env)
+    output_id = project["outputs"][0]["id"]
+    ws = tmp / "ws" / "producer"
+    ws.mkdir(parents=True)
+    path = ws / "mou-final.docx"
+    path.write_bytes(b"docx-a")
+    producer = _done_card(project, title="Write the MOU", workspace=ws,
+                          metadata={"artifacts": [str(path)]})
+    consumer = _done_card(project, title="File the MOU away",
+                          metadata={"artifacts": [str(path)]})
+    run = _run(project, [producer, consumer])
+
+    items = _artifacts(env, project["slug"])
+    matches = [a for a in items if a["title"] == "mou-final.docx"]
+    assert len(matches) == 1
+    assert matches[0]["card_id"] == producer
+    assert matches[0]["kind"] == "draft" and matches[0]["output_id"] is None
+
+    resp = client.post(
+        f"/api/registry/projects/{project['slug']}/outputs/{output_id}/deliver",
+        json={"run_id": run["id"], "task_id": consumer, "link_kind": "workspace",
+              "link_ref": str(path), "label": "mou-final.docx"},
+    )
+    assert resp.status_code == 200, resp.text
+    items = _artifacts(env, project["slug"])
+    matches = [a for a in items if a["title"] == "mou-final.docx"]
+    assert len(matches) == 1 and matches[0]["kind"] == "deliverable"
+
+
+def test_a_url_linked_by_two_cards_appears_once(env):
+    project = _project(env)
+    url = "https://docs.google.com/document/d/abc123/edit"
+    _done_card(project, title="Draft", result=f"shared [draft]({url})")
+    _done_card(project, title="Review", result=f"re-checked {url}")
+    items = _artifacts(env, project["slug"])
+    assert [a["link_ref"] for a in items].count(url) == 1
+
+
 def test_a_claimed_path_outside_the_managed_roots_is_never_served(env):
     client, _state, tmp = env
     project = _project(env)
