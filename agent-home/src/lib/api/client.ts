@@ -2367,6 +2367,47 @@ export class HermesApiClient {
       },
     );
   }
+  // ── Projects redesign: outputs ──
+
+  /** Every file the project's runs and cards produced, newest first. */
+  async projectArtifacts(
+    slug: string,
+  ): Promise<import("@/types").ProjectArtifact[]> {
+    return this.request(
+      `/api/registry/projects/${encodeURIComponent(slug)}/artifacts`,
+    );
+  }
+
+  /**
+   * The bytes of one produced file, as the raw upstream `Response` for the
+   * BFF to pipe (like `openChatStream`, the body is not consumed here).
+   */
+  async projectArtifactContent(
+    slug: string,
+    artifactId: string,
+    range?: string | null,
+  ): Promise<Response> {
+    const headers = new Headers();
+    if (this.hermesToken) {
+      headers.set("cookie", `hermes_session_at=${this.hermesToken}`);
+      headers.set("authorization", `Bearer ${this.hermesToken}`);
+    }
+    if (range) headers.set("range", range);
+    const path = this.scopedPath(
+      `/api/registry/projects/${encodeURIComponent(slug)}/artifacts/${encodeURIComponent(artifactId)}/content`,
+    );
+    const res = await fetch(`${this.baseUrl}${path}`, { headers, cache: "no-store" });
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      const parsed = text ? safeJson(text) : undefined;
+      throw new HermesApiError(
+        res.status,
+        upstreamDetail(parsed, "That file could not be opened."),
+        parsed ?? text,
+      );
+    }
+    return res;
+  }
 }
 
 /**

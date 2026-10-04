@@ -1,0 +1,326 @@
+"""The Outputs tab's backend: decoded output specs and the produced-files read.
+
+Behaviour contracts: CJK specs never reach a reader as ``\\uXXXX`` (new
+writes *and* rows stored before the fix), the artifacts read follows the
+project read gate (404 for a stranger), classifies deliverable / draft /
+note, flags files no output owns (``output_id`` null), carries run/card
+provenance newest first, and only streams files from managed roots.
+"""
+
+from __future__ import annotations
+
+import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+
+from hermes_cli import kanban_db, projects_api, projects_db, projects_outputs_api
+from hermes_cli.access import Principal
+
+OWNER = Principal(user_id="leo", display="Leo", role="owner")  # type: ignore[arg-type]
+VIEWER = Principal(user_id="vic", display="Vic", role="member")  # type: ignore[arg-type]
+STRANGER = Principal(user_id="eve", display="Eve", role="member")  # type: ignore[arg-type]
+
+CJK_SPEC = "青田與合作方的兩份諒解備忘錄（中英對照）"
+ESCAPED_SPEC = CJK_SPEC.encode("unicode_escape").decode("ascii")
+
+
+@pytest.fixture
+def env(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_PROJECTS_DB", str(tmp_path / "projects.db"))
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(tmp_path / "kanban.db"))
+    monkeypatch.setenv("HERMES_KANBAN_WORKSPACES_ROOT", str(tmp_path / "ws"))
+    monkeypatch.setenv("HERMES_KANBAN_ATTACHMENTS_ROOT", str(tmp_path / "att"))
+    state = {"actor": OWNER, "enrolled": set(), "subject": "leo"}
+
+    async def _resolve(request, *, allow_as=True):
+        return state["actor"]
+
+    async def _enrolled(user_id):
+        return set(state["enrolled"])
+
+    async def _subject(request):
+        return state["subject"]
+
+    monkeypatch.setattr(
+        "hermes_cli.web_server._comms_resolve_principal", _resolve, raising=False
+    )
+    monkeypatch.setattr(projects_api, "_enrolled_profiles", _enrolled)
+    monkeypatch.setattr(projects_api, "_interactive_subject", _subject)
+
+    app = FastAPI()
+    app.include_router(projects_api.router)
+    app.include_router(projects_outputs_api.router)
+    return TestClient(app), state, tmp_path
+
+
+def _project(env, *, outputs=None) -> dict:
+    client, _state, _tmp = env
+    resp = client.post(
+        "/api/registry/projects",
+        json={
+            "goal": "Sign the MOUs with both partners",
+            "description": "Two bilingual MOUs.",
+            "host_profile": "default",
+            "outputs": outputs or [{"title": "2 MOUs in docx", "spec": CJK_SPEC}],
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    project = resp.json()
+    with projects_db.connect_closing() as conn:
+        projects_db.add_project_member(
+            conn, project_id=project["id"], user_id="vic", role="viewer"
+        )
+    return client.get(f"/api/registry/projects/{project['slug']}").json()
+
+
+def _done_card(project, *, title, result=None, metadata=None, workspace=None):
+    with kanban_db.connect_closing() as bconn:
+        tid = kanban_db.create_task(
+            bconn, title=title, assignee="default", project_id=project["id"],
+            workspace_kind="dir" if workspace else "scratch",
+            workspace_path=str(workspace) if workspace else None,
+        )
+        assert kanban_db.claim_task(bconn, tid, claimer="test:1")
+        assert kanban_db.complete_task(
+            bconn, tid, result=result, summary=result, metadata=metadata
+        )
+    return tid
+
+
+def _run(project, task_ids) -> dict:
+    with projects_db.connect_closing() as conn:
+        run = projects_db.open_project_run(
+            conn, project_id=project["id"], trigger="manual", profile="default"
+        )
+        for tid in task_ids:
+            projects_db.link_run_card(conn, run["id"], tid)
+        conn.execute(
+            "UPDATE project_runs SET status = 'succeeded' WHERE id = ?", (run["id"],)
+        )
+        conn.commit()
+    return run
+
+
+def _artifacts(env, slug):
+    client, _state, _tmp = env
+    resp = client.get(f"/api/registry/projects/{slug}/artifacts")
+    assert resp.status_code == 200, resp.text
+    return resp.json()
+
+
+# ---------------------------------------------------------------------------
+# Escape-code regression
+# ---------------------------------------------------------------------------
+
+
+def test_decode_literal_unicode_escapes_is_idempotent_and_safe():
+    decode = projects_db.decode_literal_unicode_escapes
+    assert decode(ESCAPED_SPEC) == CJK_SPEC
+    assert decode(CJK_SPEC) == CJK_SPEC
+    assert decode(decode(ESCAPED_SPEC)) == CJK_SPEC
+    assert decode("\\ud83d\\ude00 done") == "😀 done"
+    assert decode("C:\\users\\me") == "C:\\users\\me"
+    assert decode(None) is None and decode("") == ""
+
+
+def test_cjk_spec_round_trips_through_create_and_detail(env):
+    project = _project(env)
+    assert project["outputs"][0]["spec"] == CJK_SPEC
+    assert "\\u" not in project["outputs"][0]["spec"]
+
+
+def test_escaped_spec_written_by_an_agent_is_stored_decoded(env):
+    client, _state, _tmp = env
+    project = _project(
+        env, outputs=[{"title": "\\u9752\\u7530 MOU", "spec": ESCAPED_SPEC}]
+    )
+    out = project["outputs"][0]
+    assert out["title"] == "青田 MOU"
+    assert out["spec"] == CJK_SPEC
+    with projects_db.connect_closing() as conn:
+        raw = conn.execute(
+            "SELECT spec FROM project_outputs WHERE id = ?", (out["id"],)
+        ).fetchone()["spec"]
+    assert raw == CJK_SPEC
+
+    resp = client.patch(
+        f"/api/registry/projects/{project['slug']}/outputs/{out['id']}",
+        json={"spec": "\\u5408\\u4f5c"},
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["spec"] == "合作"
+
+
+def test_rows_stored_escaped_before_the_fix_read_decoded(env):
+    client, _state, _tmp = env
+    project = _project(env)
+    with projects_db.connect_closing() as conn:
+        conn.execute(
+            "UPDATE project_outputs SET spec = ? WHERE project_id = ?",
+            (ESCAPED_SPEC, project["id"]),
+        )
+        conn.commit()
+    detail = client.get(f"/api/registry/projects/{project['slug']}").json()
+    assert detail["outputs"][0]["spec"] == CJK_SPEC
+
+
+# ---------------------------------------------------------------------------
+# Artifacts read
+# ---------------------------------------------------------------------------
+
+
+def test_artifacts_empty_project_is_an_empty_list(env):
+    project = _project(env)
+    assert _artifacts(env, project["slug"]) == []
+
+
+def test_artifacts_follow_the_read_gate(env):
+    client, state, _tmp = env
+    project = _project(env)
+    state["actor"] = STRANGER
+    assert client.get(f"/api/registry/projects/{project['slug']}/artifacts").status_code == 404
+    state["actor"] = VIEWER
+    assert client.get(f"/api/registry/projects/{project['slug']}/artifacts").status_code == 200
+    assert client.get("/api/registry/projects/nope/artifacts").status_code == 404
+
+
+def test_artifacts_classify_and_flag_unattached_files(env):
+    client, _state, tmp = env
+    project = _project(env)
+    ws = tmp / "ws" / "mou"
+    ws.mkdir(parents=True)
+    (ws / "mou-qingtian.docx").write_bytes(b"docx-a")
+    (ws / "mou-partner.docx").write_bytes(b"docx-b")
+    (ws / "party-notes.md").write_text("who signs")
+    tid = _done_card(
+        project,
+        title="Draft both MOUs",
+        workspace=ws,
+        metadata={"artifacts": [str(ws / "mou-qingtian.docx"), str(ws / "mou-partner.docx")]},
+        result=(
+            f"Notes in {ws / 'party-notes.md'}; shared "
+            "[MOU draft](https://docs.google.com/document/d/abc123/edit)."
+        ),
+    )
+    run = _run(project, [tid])
+
+    items = _artifacts(env, project["slug"])
+    by_title = {a["title"]: a for a in items}
+    assert set(by_title) == {
+        "mou-qingtian.docx", "mou-partner.docx", "party-notes.md", "MOU draft",
+    }
+    docx = by_title["mou-qingtian.docx"]
+    assert docx["kind"] == "draft"
+    assert docx["output_id"] is None
+    assert docx["ext"] == "docx"
+    assert docx["run_no"] == run["run_no"] == 1
+    assert docx["card_id"] == tid and docx["card_title"] == "Draft both MOUs"
+    assert docx["href"].startswith(f"/api/projects/{project['slug']}/artifacts/")
+    assert by_title["party-notes.md"]["kind"] == "note"
+    link = by_title["MOU draft"]
+    assert link["kind"] == "draft" and link["href"].startswith("https://docs.google.com/")
+    assert link["ext"] == "gdoc"
+
+    # The file opens through the content route.
+    aid = docx["id"]
+    resp = client.get(f"/api/registry/projects/{project['slug']}/artifacts/{aid}/content")
+    assert resp.status_code == 200
+    assert resp.content == b"docx-a"
+
+
+def test_attaching_a_card_file_makes_it_a_versioned_deliverable(env):
+    client, _state, tmp = env
+    project = _project(env)
+    output_id = project["outputs"][0]["id"]
+    ws = tmp / "ws" / "mou"
+    ws.mkdir(parents=True)
+    path = ws / "mou-qingtian.docx"
+    path.write_bytes(b"docx-a")
+    tid = _done_card(project, title="Draft MOU", workspace=ws,
+                     metadata={"artifacts": [str(path)]})
+    run = _run(project, [tid])
+
+    resp = client.post(
+        f"/api/registry/projects/{project['slug']}/outputs/{output_id}/deliver",
+        json={"run_id": run["id"], "task_id": tid, "link_kind": "workspace",
+              "link_ref": str(path), "label": "MOU (Qingtian)"},
+    )
+    assert resp.status_code == 200, resp.text
+
+    items = _artifacts(env, project["slug"])
+    assert len(items) == 1
+    item = items[0]
+    assert item["kind"] == "deliverable"
+    assert item["output_id"] == output_id
+    assert item["title"] == "MOU (Qingtian)"
+    assert item["version"] == 1 and item["run_no"] == 1
+    assert item["card_id"] == tid
+    got = client.get(item["href"].replace("/api/projects/", "/api/registry/projects/"))
+    assert got.status_code == 200 and got.content == b"docx-a"
+
+
+def test_versions_count_runs_per_output_and_newest_comes_first(env):
+    client, _state, _tmp = env
+    project = _project(env)
+    output_id = project["outputs"][0]["id"]
+    slug = project["slug"]
+    run1 = _run(project, [])
+    for label in ("v1 a", "v1 b"):
+        client.post(f"/api/registry/projects/{slug}/outputs/{output_id}/deliver",
+                    json={"run_id": run1["id"], "link_kind": "url",
+                          "link_ref": f"https://x.test/{label.replace(' ', '-')}.pdf",
+                          "label": label})
+    with projects_db.connect_closing() as conn:
+        conn.execute("UPDATE project_output_deliveries SET delivered_at = delivered_at - 100")
+        conn.commit()
+    run2 = _run(project, [])
+    client.post(f"/api/registry/projects/{slug}/outputs/{output_id}/deliver",
+                json={"run_id": run2["id"], "link_kind": "url",
+                      "link_ref": "https://x.test/v2.pdf", "label": "v2"})
+
+    items = _artifacts(env, slug)
+    assert [a["title"] for a in items][0] == "v2"
+    versions = {a["title"]: (a["version"], a["run_no"]) for a in items}
+    assert versions == {"v2": (2, 2), "v1 a": (1, 1), "v1 b": (1, 1)}
+    assert all(a["ext"] == "pdf" for a in items)
+
+
+def test_a_claimed_path_outside_the_managed_roots_is_never_served(env):
+    client, _state, tmp = env
+    project = _project(env)
+    secret = tmp / "secret-report.md"
+    secret.write_text("not yours")
+    _done_card(project, title="Sneaky", metadata={"artifacts": [str(secret)]})
+    items = _artifacts(env, project["slug"])
+    assert len(items) == 1
+    assert items[0]["href"] is None
+    resp = client.get(
+        f"/api/registry/projects/{project['slug']}/artifacts/{items[0]['id']}/content"
+    )
+    assert resp.status_code == 404
+
+
+def test_stranger_cannot_open_content(env):
+    client, state, tmp = env
+    project = _project(env)
+    ws = tmp / "ws" / "c"
+    ws.mkdir(parents=True)
+    (ws / "a.md").write_text("x")
+    _done_card(project, title="c", workspace=ws, metadata={"artifacts": [str(ws / "a.md")]})
+    aid = _artifacts(env, project["slug"])[0]["id"]
+    state["actor"] = STRANGER
+    resp = client.get(f"/api/registry/projects/{project['slug']}/artifacts/{aid}/content")
+    assert resp.status_code == 404
+
+
+def test_pure_helpers():
+    m = projects_outputs_api
+    assert m.ext_of("/a/MOU.v2.DOCX") == "docx"
+    assert m.ext_of("README") is None
+    assert m.classify("run.log", attached=False) == "note"
+    assert m.classify("Final report.pdf", attached=False) == "draft"
+    assert m.classify("notes.md", attached=True) == "deliverable"
+    assert m.links_in_text("see https://example.com/page and https://e.com/f.pdf") == [
+        ("https://e.com/f.pdf", None)
+    ]
+    assert m.paths_in_text("wrote /w/a.md, then /w/b.md.") == ["/w/a.md", "/w/b.md"]

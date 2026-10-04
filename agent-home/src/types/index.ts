@@ -2249,4 +2249,39 @@ export interface AskProjectResponse {
   sources: AskProjectSource[];
   /** A requirement the answer suggests, ready for "Turn into a requirement…". */
   suggested_requirement?: string;
+// ── Projects redesign: outputs ──
+
+/** What a produced file is to the project: attached to a declared output
+ * (`deliverable`), a working document a card produced (`draft`), or a
+ * working note / log (`note`). */
+export type ProjectArtifactKind = "deliverable" | "draft" | "note";
+
+/** Where the artifacts read found the file. */
+export type ProjectArtifactSource = "delivery" | "card_file" | "attachment" | "link";
+
+/** `GET /api/registry/projects/:slug/artifacts` — one produced file, newest
+ * first. `output_id` is null when no declared output owns the file. */
+export interface ProjectArtifact {
+  id: string;
+  title: string;
+  kind: ProjectArtifactKind;
+  ext: string | null;
+  mime: string | null;
+  /** Openable URL or app route (`/api/projects/…/content`); null when the
+   * file is not reachable from here (a storage `file` ref opens through
+   * `link_ref` instead). */
+  href: string | null;
+  location: string | null;
+  source: ProjectArtifactSource;
+  link_kind: string | null;
+  link_ref: string | null;
+  run_id: string | null;
+  run_no: number | null;
+  card_id: string | null;
+  card_title: string | null;
+  output_id: string | null;
+  output_title: string | null;
+  version: number | null;
+  created_at: number;
+  created_by: string | null;
 }
