@@ -35,4 +35,5 @@ row attached and left the identical sibling unattached forever.
 
 - [x] Implemented + regression tests
 - [x] Verified against live production data
-- [ ] Merged / deployed
+- [x] Merged (PR #496) / deployed `3f817065c` — live read now returns
+  28 artifacts / 25 unattached drafts on the MOU project
