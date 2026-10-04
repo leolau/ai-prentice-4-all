@@ -109,6 +109,10 @@ export function PlanPanel({
   const [error, setError] = useState<string | null>(null);
   const [drafting, setDrafting] = useState(false);
   const [draftNotice, setDraftNotice] = useState<string | null>(null);
+  // A proposed revision is a pending decision — the only moves are
+  // Activate or Discard. Starting another draft/write on top of it would
+  // just stack more undecided revisions.
+  const awaitingDecision = !editing && proposed.length > 0;
 
   const slugPath = `/api/projects/${encodeURIComponent(slug)}`;
 
@@ -223,7 +227,12 @@ export function PlanPanel({
             busy={draftAction.busy}
             pendingLabel="Starting the draft…"
             onClick={draftWithAgent}
-            disabled={drafting}
+            disabled={drafting || awaitingDecision}
+            title={
+              awaitingDecision
+                ? "A proposed revision is waiting — activate or discard it first."
+                : undefined
+            }
             className="rounded-lg border border-[var(--color-border)] px-2.5 py-1 text-xs disabled:opacity-50"
           >
             {drafting ? "Agent is drafting…" : "Draft with the agent"}
@@ -233,7 +242,13 @@ export function PlanPanel({
           <button
             type="button"
             onClick={() => openEditor(active)}
-            className="rounded-lg border border-[var(--color-border)] px-2.5 py-1 text-xs"
+            disabled={awaitingDecision}
+            title={
+              awaitingDecision
+                ? "A proposed revision is waiting — activate or discard it first."
+                : undefined
+            }
+            className="rounded-lg border border-[var(--color-border)] px-2.5 py-1 text-xs disabled:opacity-50"
           >
             {active ? "Revise" : "Write plan"}
           </button>
@@ -485,7 +500,7 @@ export function PlanPanel({
           {proposed.length > 0 ? (
             <div className="mt-3" data-component="ProposedRevisions">
               <h3 className="text-xs font-medium text-[var(--color-muted)]">
-                Proposed revisions — awaiting activation
+                Proposed revisions — awaiting a decision
               </h3>
               <ul className="mt-1.5 flex flex-col gap-2">
                 {proposed.map((rev) => (
@@ -516,11 +531,14 @@ export function PlanPanel({
                         {rev.created_by ? ` · by ${rev.created_by}` : ""}
                       </p>
                       {!archived && canActivate ? (
-                        <ActivateRevision slug={slug} rev={rev.rev} />
+                        <>
+                          <DiscardRevision slug={slug} rev={rev.rev} />
+                          <ActivateRevision slug={slug} rev={rev.rev} />
+                        </>
                       ) : null}
                       {!archived && !canActivate ? (
                         <span className="text-xs text-[var(--color-muted)]">
-                          a lead activates
+                          a lead activates or discards
                         </span>
                       ) : null}
                     </div>
@@ -540,6 +558,37 @@ export function PlanPanel({
         </>
       )}
     </section>
+  );
+}
+
+/**
+ * A lead's Discard on one proposed revision — "this draft is wrong",
+ * the paired decision to Activate. Refused server-side when the rev is
+ * active or a run pinned it (then the error surfaces inline).
+ */
+function DiscardRevision({ slug, rev }: { slug: string; rev: number }) {
+  const action = useProjectAction();
+  return (
+    <>
+      <ActionButton
+        data-action="discard-revision"
+        busy={action.busy}
+        pendingLabel="Discarding…"
+        onClick={() =>
+          void action.run(
+            `/api/projects/${encodeURIComponent(slug)}/playbook/${rev}`,
+            { method: "DELETE" },
+          )
+        }
+        className="rounded-lg border border-[var(--color-border)] px-2.5 py-1 text-xs disabled:opacity-50"
+      >
+        Discard
+      </ActionButton>
+      <ActionError
+        action={action}
+        className="flex w-full flex-wrap items-center gap-2 text-xs text-red-400"
+      />
+    </>
   );
 }
 

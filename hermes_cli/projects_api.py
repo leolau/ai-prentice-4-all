@@ -2570,6 +2570,41 @@ async def activate_playbook_route(request: Request, rev: int) -> dict[str, Any]:
     return await asyncio.to_thread(_activate_sync)
 
 
+@router.delete("/{slug}/playbook/{rev}")
+async def discard_playbook_route(request: Request, rev: int) -> dict[str, Any]:
+    """Discard a proposed revision — the paired human judgement to
+    activation (§7.2). Refused for the active rev and for any rev a run
+    pinned (it is that run's recorded plan and stays for history)."""
+    project, _role, _profiles, _principal = await _require_write(request)
+    _refuse_if_archived(project, "discarding a plan revision")
+    await _require_human(request, "discarding a playbook revision")
+
+    def _discard_sync() -> dict:
+        with projects_db.connect_closing() as conn:
+            refusal = projects_db.discard_playbook_rev(conn, project.id, rev)
+        if refusal == "not_found":
+            raise HTTPException(
+                status_code=404, detail=f"playbook revision {rev} not found"
+            )
+        if refusal == "active":
+            raise HTTPException(
+                status_code=409,
+                detail="the active revision cannot be discarded",
+            )
+        if refusal and refusal.startswith("pinned:"):
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"revision {rev} is pinned by run "
+                    f"{refusal.split(':', 1)[1]} — it is that run's recorded "
+                    "plan and stays for history"
+                ),
+            )
+        return {"rev": rev, "discarded": True}
+
+    return await asyncio.to_thread(_discard_sync)
+
+
 @router.get("/{slug}/directives")
 async def list_directives_route(request: Request) -> dict[str, Any]:
     project, _role, _profiles, _principal = await _require_read(request)

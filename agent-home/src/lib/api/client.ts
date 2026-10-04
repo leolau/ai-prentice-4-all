@@ -1926,6 +1926,18 @@ export class HermesApiClient {
     );
   }
 
+  /** Discard a proposed revision — the paired judgement to activation.
+   *  Refused (409) for the active rev or one a run has pinned. */
+  async discardProjectPlaybook(
+    slug: string,
+    rev: number,
+  ): Promise<{ rev: number; discarded: true }> {
+    return this.request(
+      `/api/registry/projects/${encodeURIComponent(slug)}/playbook/${encodeURIComponent(rev)}`,
+      { method: "DELETE" },
+    );
+  }
+
   /** Standing instructions + feedback (§5). */
   async projectDirectives(
     slug: string,

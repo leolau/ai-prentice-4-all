@@ -125,3 +125,103 @@ describe("PlanPanel — Draft with the agent", () => {
     expect(router.push).not.toHaveBeenCalled();
   });
 });
+
+describe("PlanPanel — a proposed revision is the pending decision", () => {
+  const PROPOSED = {
+    active: null,
+    revisions: [
+      {
+        project_id: "prj_1",
+        rev: 2,
+        body: "Draft, review, send.",
+        steps: [{ key: "draft", title: "Draft it" }],
+        active: 0,
+        created_by: "leo",
+        created_at: 1,
+        activated_at: null,
+        note: null,
+      },
+    ],
+  };
+
+  it("locks Draft/Write while a proposal waits, offering Activate and Discard", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() => Promise.resolve(jsonResponse(200, { status: "idle" }))),
+    );
+    const { getByText, container } = render(
+      <PlanPanel {...PROPS} playbook={PROPOSED} />,
+    );
+    expect(
+      (getByText("Draft with the agent") as HTMLButtonElement).disabled,
+    ).toBe(true);
+    expect((getByText("Write plan") as HTMLButtonElement).disabled).toBe(true);
+    expect(getByText("Activate")).toBeTruthy();
+    const discard = container.querySelector('[data-action="discard-revision"]');
+    expect(discard).toBeTruthy();
+    expect((discard as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it("Discard DELETEs the revision, then Draft/Write unlock on refresh", async () => {
+    const fetchMock = vi.fn((_url: string, init?: RequestInit) => {
+      if (init?.method === "DELETE") {
+        return Promise.resolve(jsonResponse(200, { rev: 2, discarded: true }));
+      }
+      return Promise.resolve(jsonResponse(200, { status: "idle" }));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { container, rerender, getByText } = render(
+      <PlanPanel {...PROPS} playbook={PROPOSED} />,
+    );
+    const discard = container.querySelector(
+      '[data-action="discard-revision"]',
+    ) as HTMLButtonElement;
+    fireEvent.click(discard);
+
+    await vi.waitFor(() => {
+      const call = fetchMock.mock.calls.find(
+        ([, init]) => init?.method === "DELETE",
+      );
+      expect(call?.[0]).toBe("/api/projects/monday-digest/playbook/2");
+    });
+    await vi.waitFor(() => expect(router.refresh).toHaveBeenCalled());
+    const del = fetchMock.mock.calls.find(
+      ([, init]) => init?.method === "DELETE",
+    );
+    expect(
+      (del?.[1]?.headers as Record<string, string>)["Idempotency-Key"],
+    ).toBeTruthy();
+
+    // The refreshed tree reports the proposal gone — the doors reopen.
+    rerender(<PlanPanel {...PROPS} playbook={{ active: null, revisions: [] }} />);
+    expect(
+      (getByText("Draft with the agent") as HTMLButtonElement).disabled,
+    ).toBe(false);
+    expect((getByText("Write plan") as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it("a refused discard surfaces the reason in place and keeps the proposal", async () => {
+    const fetchMock = vi.fn((_url: string, init?: RequestInit) => {
+      if (init?.method === "DELETE") {
+        return Promise.resolve(
+          jsonResponse(409, { detail: "the active revision cannot be discarded" }),
+        );
+      }
+      return Promise.resolve(jsonResponse(200, { status: "idle" }));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { container, findByRole, getByText } = render(
+      <PlanPanel {...PROPS} playbook={PROPOSED} />,
+    );
+    fireEvent.click(
+      container.querySelector('[data-action="discard-revision"]')!,
+    );
+    const alert = await findByRole("alert");
+    expect(alert.textContent).toMatch(/cannot be discarded/);
+    // Nothing was lost — the decision row is still there.
+    expect(getByText("Activate")).toBeTruthy();
+    expect(router.refresh).not.toHaveBeenCalled();
+  });
+});

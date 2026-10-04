@@ -347,7 +347,7 @@ describe("detail panels", () => {
     expect(html).toContain("Revise");
   });
 
-  it("PlanPanel shows a retro's proposed revision awaiting activation", () => {
+  it("PlanPanel shows a retro's proposed revision awaiting a decision", () => {
     const playbook: ProjectPlaybookResponse = {
       active: null,
       revisions: [
@@ -368,15 +368,21 @@ describe("detail panels", () => {
       <PlanPanel {...PLAN_PROPS} playbook={playbook} />,
     );
     expect(html).toContain('data-component="ProposedRevisions"');
-    expect(html).toContain("awaiting activation");
+    expect(html).toContain("awaiting a decision");
     expect(html).toContain("proposed by run 14");
     expect(html).toContain(">Activate<");
+    expect(html).toContain('data-action="discard-revision"');
+    // A pending proposal is the only decision on the table — drafting or
+    // writing on top of it would just stack another undecided revision.
+    expect(html.match(/disabled=""/g)).toHaveLength(2);
+    expect(html).toContain("activate or discard it first");
 
     const member = renderToStaticMarkup(
       <PlanPanel {...PLAN_PROPS} canActivate={false} playbook={playbook} />,
     );
     expect(member).not.toContain(">Activate<");
-    expect(member).toContain("a lead activates");
+    expect(member).not.toContain('data-action="discard-revision"');
+    expect(member).toContain("a lead activates or discards");
   });
 
   it("GuidancePanel shows proposed directives with the member's Activate", () => {
