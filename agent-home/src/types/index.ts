@@ -2286,6 +2286,7 @@ export interface ProjectArtifact {
   version: number | null;
   created_at: number;
   created_by: string | null;
+}
 
 // ── Projects redesign: dashboard ──
 /**

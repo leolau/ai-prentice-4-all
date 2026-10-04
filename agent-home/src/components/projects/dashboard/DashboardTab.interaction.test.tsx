@@ -4,6 +4,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 const router = vi.hoisted(() => ({ push: vi.fn(), refresh: vi.fn() }));
 vi.mock("next/navigation", () => ({ useRouter: () => router }));
+// The shelf reads artifacts on mount; it has its own tests (Outputs workstream).
+vi.mock("@/components/projects/outputs/LatestOutputsShelf", () => ({ LatestOutputsShelf: () => null }));
 
 import { ReadinessChecklist } from "@/components/projects/ReadinessChecklist";
 import {
