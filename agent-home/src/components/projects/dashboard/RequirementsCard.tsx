@@ -55,7 +55,7 @@ export function RequirementsCard({
                 </span>
                 {line.isNew ? (
                   <span className="mt-1 flex items-center gap-1.5 pl-4 text-xs text-[var(--color-muted)]">
-                    <span className="rounded-full bg-amber-500/20 px-1.5 text-[10px] font-medium uppercase text-amber-300">
+                    <span className="rounded-full bg-amber-500/20 px-1.5 text-[10px] font-medium uppercase text-[var(--color-warn-text)]">
                       new
                     </span>
                     {who ? (

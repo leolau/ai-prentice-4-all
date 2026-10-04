@@ -289,7 +289,7 @@ export function ModelsView({
                     {c.project_name} · {c.status}
                   </span>
                 </span>
-                <span className="ml-auto shrink-0 text-[13px] text-amber-300">
+                <span className="ml-auto shrink-0 text-[13px] text-[var(--color-warn-text)]">
                   {c.model}
                 </span>
               </Link>

@@ -79,7 +79,7 @@ export function UserRow({
             {member.role}
           </span>
           {member.enrolled ? null : (
-            <span className="rounded-full bg-[var(--color-surface-2)] px-2 py-1 text-amber-300">
+            <span className="rounded-full bg-[var(--color-surface-2)] px-2 py-1 text-[var(--color-warn-text)]">
               suspended here
             </span>
           )}

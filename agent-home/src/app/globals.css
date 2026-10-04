@@ -17,6 +17,11 @@
   --color-muted: #8b93a7;
   --color-accent: #5b8cff;
   --color-accent-fg: #ffffff;
+  /* Warning (amber) accent — hardcoded amber-2xx/3xx text classes read
+   * near-white and vanish on light surfaces, so warn text goes through
+   * this token and each theme picks a readable amber. */
+  --color-warn: #f59e0b;
+  --color-warn-text: #fcd34d;
 }
 
 :root {
@@ -45,6 +50,8 @@
   --color-muted: #8b93a7;
   --color-accent: #5b8cff;
   --color-accent-fg: #ffffff;
+  --color-warn: #f59e0b;
+  --color-warn-text: #fcd34d;
 }
 
 [data-theme="light"] {
@@ -58,6 +65,8 @@
   --color-muted: #4a5567;
   --color-accent: #2f6bff;
   --color-accent-fg: #ffffff;
+  --color-warn: #b45309;
+  --color-warn-text: #b45309;
 }
 
 [data-theme="colourful"] {
@@ -71,6 +80,8 @@
   --color-muted: #c3b1e8;
   --color-accent: #ff5db8;
   --color-accent-fg: #1a0f2e;
+  --color-warn: #f59e0b;
+  --color-warn-text: #fcd34d;
 }
 
 html,

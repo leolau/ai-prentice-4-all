@@ -88,7 +88,7 @@ export function UnderstandingCard({
             </ActionButton>
           </div>
           {confirmBlocked ? (
-            <p className="mt-2 text-xs text-amber-300">{confirmBlocked}</p>
+            <p className="mt-2 text-xs text-[var(--color-warn-text)]">{confirmBlocked}</p>
           ) : null}
           <ActionError action={actions.confirmDraft} />
           <ActionError action={actions.confirm} />

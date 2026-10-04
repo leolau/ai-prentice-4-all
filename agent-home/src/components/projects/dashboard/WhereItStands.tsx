@@ -1,5 +1,5 @@
-import type { BarSegment, StandStep, StepState } from "@/components/projects/dashboard/whereItStands";
-import type { CardsBar, OutputsBar } from "@/components/projects/dashboard/whereItStands";
+import type { BarSegment, StandStep, StepState } from "@/components/projects/dashboard/standProgress";
+import type { CardsBar, OutputsBar } from "@/components/projects/dashboard/standProgress";
 
 const STEP_MARK: Record<StepState, string> = {
   done: "✓",
@@ -10,7 +10,7 @@ const STEP_MARK: Record<StepState, string> = {
 
 const STEP_CLASS: Record<StepState, string> = {
   done: "border-emerald-500/60 bg-emerald-500/15 text-emerald-300",
-  attention: "border-amber-500/70 bg-amber-500/15 text-amber-300",
+  attention: "border-amber-500/70 bg-amber-500/15 text-[var(--color-warn-text)]",
   current: "border-[var(--color-accent)] bg-[var(--color-accent)]/15 text-[var(--color-accent)]",
   todo: "border-[var(--color-border)] text-[var(--color-muted)]",
 };

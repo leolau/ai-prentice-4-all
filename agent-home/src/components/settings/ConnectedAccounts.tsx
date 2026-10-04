@@ -413,7 +413,7 @@ export function ConnectedAccounts() {
                     />
                     {s.label}
                     {flagged && !granted && (
-                      <span className="text-amber-400">(not granted)</span>
+                      <span className="text-[var(--color-warn-text)]">(not granted)</span>
                     )}
                   </label>
                 );

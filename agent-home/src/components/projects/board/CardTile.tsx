@@ -15,7 +15,7 @@ import {
 import type { ProjectBoardTask } from "@/types";
 
 const PILL: Record<StatusTone, string> = {
-  warn: "bg-amber-500/15 text-amber-300",
+  warn: "bg-amber-500/15 text-[var(--color-warn-text)]",
   accent: "bg-[var(--color-accent)]/15 text-[var(--color-accent)]",
   ok: "bg-emerald-500/15 text-emerald-300",
   muted: "bg-[var(--color-surface-2)] text-[var(--color-muted)]",

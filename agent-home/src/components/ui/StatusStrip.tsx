@@ -179,7 +179,7 @@ export function StatusStrip() {
         {fetchedAt !== null ? (
           <span
             title="How old these numbers are — the strip re-reads the server every 30s"
-            className={stale ? "text-amber-400" : undefined}
+            className={stale ? "text-[var(--color-warn-text)]" : undefined}
           >
             {fmtAge(now - fetchedAt)}
             {stale ? " · retrying" : ""}
@@ -204,7 +204,7 @@ export function StatusStrip() {
             type="button"
             onClick={() => window.location.reload()}
             title={`This tab is running ${clientBuild} but the server is on ${serverBuild} — tap to reload`}
-            className="ml-auto inline-flex items-center gap-1 whitespace-nowrap rounded-full bg-amber-500/20 px-2 py-0.5 font-medium text-amber-400"
+            className="ml-auto inline-flex items-center gap-1 whitespace-nowrap rounded-full bg-amber-500/20 px-2 py-0.5 font-medium text-[var(--color-warn-text)]"
           >
             update {serverBuild} · refresh
           </button>

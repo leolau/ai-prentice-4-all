@@ -85,7 +85,7 @@ function StateDot({ kind }: { kind: LiveState["kind"] }) {
 
 const LABEL_COLOUR: Partial<Record<LiveState["kind"], string>> = {
   stalled: "text-red-500",
-  needs_you: "text-amber-500",
+  needs_you: "text-[var(--color-warn-text)]",
 };
 
 function ToolChips({ tools }: { tools: ToolChip[] }) {
@@ -161,7 +161,7 @@ function RowMeta({
 }) {
   const level = silenceLevel(silentFor);
   const tone =
-    level === "silent" ? "text-red-500 font-medium" : level === "quiet" ? "text-amber-500 font-medium" : "";
+    level === "silent" ? "text-red-500 font-medium" : level === "quiet" ? "text-[var(--color-warn-text)] font-medium" : "";
   return (
     <div className="truncate text-xs text-[var(--color-muted)]">
       {parts.filter(Boolean).join(" · ")}

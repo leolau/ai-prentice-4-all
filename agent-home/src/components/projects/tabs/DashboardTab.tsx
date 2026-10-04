@@ -8,7 +8,7 @@ import { WhereItStands } from "@/components/projects/dashboard/WhereItStands";
 import { activityEntries } from "@/components/projects/dashboard/activity";
 import { needsYouItems, nextAction } from "@/components/projects/dashboard/nextAction";
 import { requirementsSummary } from "@/components/projects/dashboard/requirements";
-import { cardsBar, outputsBar, standSteps } from "@/components/projects/dashboard/whereItStands";
+import { cardsBar, outputsBar, standSteps } from "@/components/projects/dashboard/standProgress";
 import { LatestOutputsShelf } from "@/components/projects/outputs/LatestOutputsShelf";
 import type { ProjectTabProps } from "@/components/projects/tabs/types";
 
