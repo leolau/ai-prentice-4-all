@@ -9,6 +9,7 @@ import {
   groupVersions,
   isOpenable,
   latestShelfItems,
+  middleEllipsize,
   newestFirst,
   outputStateLabel,
   provenanceLabel,
@@ -186,6 +187,14 @@ describe("small helpers", () => {
     expect(outputStateLabel("in_progress")).toBe("in progress");
     expect(shortTitle("2 MOUs in docx, bilingual")).toBe("2 MOUs in docx, bi…");
     expect(shortTitle("short")).toBe("short");
+    // Same-prefix filenames stay distinguishable: the tail is preserved.
+    expect(
+      middleEllipsize("自學中文書寫功夫AR卡項目_合作備忘錄_ConnectAR_黃震遐_定稿v2.docx"),
+    ).toMatch(/黃震遐_定稿v2\.docx$/);
+    expect(
+      middleEllipsize("自學中文書寫功夫AR卡項目_合作備忘錄_ConnectAR_陳耀良_定稿v2.docx"),
+    ).toMatch(/陳耀良_定稿v2\.docx$/);
+    expect(middleEllipsize("short.md")).toBe("short.md");
     expect(provenanceLabel(ARTIFACT())).toBe("run 1 · Draft both MOUs");
     expect(provenanceLabel(ARTIFACT({ run_no: null, card_title: null, kind: "deliverable" }))).toBe(
       "added by hand",

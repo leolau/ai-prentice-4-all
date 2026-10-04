@@ -1,7 +1,7 @@
 "use client";
 
 import { useFileRefOpener } from "@/components/files/FileRefOpener";
-import { latestShelfItems } from "@/components/projects/outputs/artifacts";
+import { latestShelfItems, middleEllipsize } from "@/components/projects/outputs/artifacts";
 import { FileBadge } from "@/components/projects/outputs/FileBadge";
 import { OpenArtifact } from "@/components/projects/outputs/OpenArtifact";
 import { useProjectArtifacts } from "@/components/projects/outputs/useProjectArtifacts";
@@ -85,7 +85,9 @@ export function LatestOutputsShelf({
               >
                 <FileBadge file={file} />
                 <span className="min-w-0 flex-1">
-                  <span className="block truncate text-sm">{file.title}</span>
+                  <span className="block truncate text-sm" title={file.title}>
+                    {middleEllipsize(file.title)}
+                  </span>
                   <span className="flex items-center gap-1.5 text-xs text-[var(--color-muted)]">
                     <Pill tone={pill.tone}>{pill.label}</Pill>
                     <span className="truncate">{where || file.output_title || ""}</span>

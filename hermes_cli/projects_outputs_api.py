@@ -192,6 +192,55 @@ def sort_newest(items: list[dict]) -> list[dict]:
     return sorted(items, key=lambda a: (-(a.get("created_at") or 0), a["id"]))
 
 
+_LINK_KEYS = ("link", "url", "webViewLink", "web_view_link")
+_NAME_KEYS = ("name", "filename", "title")
+
+
+def _uploaded_copies(ctx: dict) -> dict[str, str]:
+    """basename -> document URL for remote copies a run recorded in its
+    metadata (e.g. a Drive upload step's ``new_files`` name/link entries).
+
+    Scratch workspaces are wiped on card completion, so a claimed path or a
+    ``workspace`` delivery rots; when a run recorded an uploaded copy this
+    map lets the artifact still open it.
+    """
+    copies: dict[str, str] = {}
+    budget = 5000  # metadata can be large — bound the walk
+
+    def _walk(node: Any, depth: int) -> None:
+        nonlocal budget
+        if depth > 6 or budget <= 0:
+            return
+        if isinstance(node, dict):
+            budget -= 1
+            for key in _LINK_KEYS:
+                val = node.get(key)
+                if isinstance(val, str) and is_document_url(val):
+                    name = next(
+                        (node[k] for k in _NAME_KEYS if isinstance(node.get(k), str)),
+                        None,
+                    )
+                    base = (
+                        os.path.basename(str(name))
+                        if name
+                        else unquote(urlparse(val).path.rstrip("/").rsplit("/", 1)[-1])
+                    )
+                    if base:
+                        copies.setdefault(base, val)
+            for v in node.values():
+                _walk(v, depth + 1)
+        elif isinstance(node, (list, tuple)):
+            for v in node:
+                _walk(v, depth + 1)
+
+    for runs in ctx["task_runs"].values():
+        for r in runs:
+            meta = getattr(r, "metadata", None)
+            if isinstance(meta, dict):
+                _walk(meta, 0)
+    return copies
+
+
 # ---------------------------------------------------------------------------
 # Collection
 # ---------------------------------------------------------------------------
@@ -381,6 +430,7 @@ def build_artifacts(project, ctx: dict) -> list[dict]:
     files = _files_by_id(project, ctx)
     path_to_id = {f["path"]: aid for aid, f in files.items() if aid.startswith("f:")}
     versions = assign_versions(ctx["deliveries"])
+    uploaded = _uploaded_copies(ctx)
     attached_ids: set[str] = set()
     attached_urls: set[str] = set()
     items: list[dict] = []
@@ -430,6 +480,13 @@ def build_artifacts(project, ctx: dict) -> list[dict]:
             location = _location(f["path"], f["task"])
             if f["serve"] is not None:
                 href = _content_href(slug, f"d:{d['id']}")
+        if href is None and ref and kind in ("workspace", "file"):
+            # The scratch workspace may be gone — open the uploaded copy
+            # a run recorded instead of a dead local path.
+            remote = uploaded.get(os.path.basename(ref))
+            if remote:
+                href = remote
+                location = urlparse(remote).hostname
         fname = (
             f["filename"] if file_id and files[file_id].get("filename")
             else (os.path.basename(ref) if ref and kind != "url" else ref)
@@ -464,14 +521,21 @@ def build_artifacts(project, ctx: dict) -> list[dict]:
         task = f["task"]
         name = f.get("filename") or os.path.basename(f["path"])
         is_att = aid.startswith("att:")
+        href = _content_href(slug, aid) if f["serve"] is not None else None
+        location = "card attachments" if is_att else _location(f["path"], task)
+        if href is None and not is_att:
+            remote = uploaded.get(name)
+            if remote:
+                href = remote
+                location = urlparse(remote).hostname
         items.append({
             "id": aid,
             "title": name,
             "kind": classify(name, attached=False),
             "ext": ext_of(name),
             "mime": mime_of(name, f.get("content_type")),
-            "href": _content_href(slug, aid) if f["serve"] is not None else None,
-            "location": "card attachments" if is_att else _location(f["path"], task),
+            "href": href,
+            "location": location,
             "source": "attachment" if is_att else "card_file",
             "link_kind": "attachment" if is_att else "workspace",
             "link_ref": aid.split(":", 1)[1] if is_att else f["path"],

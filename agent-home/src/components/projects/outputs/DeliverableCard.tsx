@@ -7,6 +7,7 @@ import {
   decodeEscapes,
   deliveryTitle,
   groupVersions,
+  middleEllipsize,
   outputStateLabel,
   versionLabel,
 } from "@/components/projects/outputs/artifacts";
@@ -116,7 +117,9 @@ export function DeliverableCard({
                       className="flex items-center gap-2 rounded-lg bg-[var(--color-surface-2)] px-2 py-1.5"
                     >
                       <FileBadge file={{ ...file, title: name }} />
-                      <span className="min-w-0 flex-1 truncate text-sm">{name}</span>
+                      <span className="min-w-0 flex-1 truncate text-sm" title={name}>
+                        {middleEllipsize(name)}
+                      </span>
                       {delivery.link_ref || artifact?.href ? (
                         <OpenArtifact file={{ ...file, title: name }} onOpenFile={onOpenFile} resolving={resolving} />
                       ) : null}
