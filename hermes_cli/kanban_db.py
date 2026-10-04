@@ -911,6 +911,11 @@ class Task:
     # the defaults; empty list = explicitly no extra skills.
     skills: Optional[list] = None
     model_override: Optional[str] = None
+    # Per-task toolset narrowing (passed via --toolsets). Stored as a JSON
+    # array of toolset names, resolved once when the card is created
+    # (projects: step.toolsets ∪ floor ∩ profile-enabled). None = the
+    # worker gets the assignee profile's full CLI surface, as before.
+    toolsets: Optional[list] = None
     # Per-task override for the consecutive-failure circuit breaker.
     # The value is the failure count at which the breaker trips — e.g.
     # ``max_retries=1`` blocks on the first failure (zero retries),
@@ -965,6 +970,14 @@ class Task:
                     skills_value = [str(s) for s in parsed if s]
             except Exception:
                 skills_value = None
+        toolsets_value: Optional[list] = None
+        if "toolsets" in keys and row["toolsets"]:
+            try:
+                parsed = json.loads(row["toolsets"])
+                if isinstance(parsed, list):
+                    toolsets_value = [str(s) for s in parsed if s]
+            except Exception:
+                toolsets_value = None
         return cls(
             id=row["id"],
             title=row["title"],
@@ -1016,6 +1029,7 @@ class Task:
             ),
             skills=skills_value,
             model_override=row["model_override"] if "model_override" in keys and row["model_override"] else None,
+            toolsets=toolsets_value,
             max_retries=(
                 row["max_retries"] if "max_retries" in keys else None
             ),
@@ -1192,6 +1206,11 @@ CREATE TABLE IF NOT EXISTS tasks (
     -- to the worker, overriding the profile's default model. NULL = use
     -- the profile default.
     model_override       TEXT,
+    -- Per-task toolset narrowing, stored as JSON. Resolved at card
+    -- creation (projects: requested ∩ profile-enabled ∪ core floor) and
+    -- passed to the worker via --toolsets. NULL = the worker gets the
+    -- assignee profile's full CLI surface, as before this column existed.
+    toolsets             TEXT,
     -- Per-task override for the consecutive-failure circuit breaker.
     -- The value is the failure count at which the breaker trips — e.g.
     -- ``max_retries=1`` blocks on the first failure. NULL (the common
@@ -2062,6 +2081,12 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
         # human-only behaviour they had before this migration.
         _add_column_if_missing(conn, "tasks", "retry_at", "retry_at INTEGER")
 
+    if "toolsets" not in cols:
+        # Per-task toolset narrowing (see the column comment in SCHEMA_SQL).
+        # Existing rows get NULL — the worker keeps receiving the assignee
+        # profile's full CLI surface, same as before this column existed.
+        _add_column_if_missing(conn, "tasks", "toolsets", "toolsets TEXT")
+
     # Indexes over additive ``tasks`` columns must be created after the
     # columns exist. Keeping them in SCHEMA_SQL breaks legacy boards: SQLite
     # parses each statement in ``executescript`` against the live schema, so a
@@ -2516,6 +2541,7 @@ def create_task(
     idempotency_key: Optional[str] = None,
     max_runtime_seconds: Optional[int] = None,
     skills: Optional[Iterable[str]] = None,
+    toolsets: Optional[Iterable[str]] = None,
     max_retries: Optional[int] = None,
     goal_mode: bool = False,
     goal_max_turns: Optional[int] = None,
@@ -2548,6 +2574,12 @@ def create_task(
     each name to ``hermes --skills ...``. Use this to pin a task to a
     specialist skill (e.g. ``skills=["translation"]`` so the worker loads the
     translation skill regardless of the profile's default config).
+
+    ``toolsets`` is an optional narrowed tool surface for the worker —
+    already resolved by the caller (e.g. projects intersect the playbook
+    step's request with the assignee profile's enabled set). Stored as
+    JSON; the dispatcher passes it via ``hermes --toolsets``. ``None``
+    means the worker gets the assignee profile's full CLI surface.
     """
     assignee = _canonical_assignee(assignee)
     owner_user_id, visibility = _resolve_task_scope(
@@ -2669,6 +2701,27 @@ def create_task(
             )
         skills_list = cleaned
 
+    toolsets_list: Optional[list[str]] = None
+    if toolsets is not None:
+        ts_cleaned: list[str] = []
+        ts_seen: set[str] = set()
+        for t in toolsets:
+            if not t:
+                continue
+            name = str(t).strip()
+            if not name:
+                continue
+            if "," in name:
+                raise ValueError(
+                    f"toolset name cannot contain comma: {name!r} "
+                    f"(pass a list of separate names instead of a comma-joined string)"
+                )
+            if name in ts_seen:
+                continue
+            ts_seen.add(name)
+            ts_cleaned.append(name)
+        toolsets_list = ts_cleaned
+
     # Idempotency check — return the existing task instead of creating a
     # duplicate. Done BEFORE entering write_txn to keep the fast path fast
     # and to avoid holding a write lock during the lookup. Race is
@@ -2769,8 +2822,8 @@ def create_task(
                         workspace_kind, workspace_path,
                         branch_name, project_id, tenant, idempotency_key,
                         max_runtime_seconds,
-                        skills, max_retries, goal_mode, goal_max_turns, session_id
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        skills, toolsets, max_retries, goal_mode, goal_max_turns, session_id
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         task_id,
@@ -2791,6 +2844,7 @@ def create_task(
                         idempotency_key,
                         int(max_runtime_seconds) if max_runtime_seconds is not None else None,
                         json.dumps(skills_list) if skills_list is not None else None,
+                        json.dumps(toolsets_list) if toolsets_list is not None else None,
                         int(max_retries) if max_retries is not None else None,
                         1 if goal_mode else 0,
                         int(goal_max_turns) if goal_max_turns is not None else None,
@@ -8137,7 +8191,16 @@ def _default_spawn(
                 cmd.extend(["--skills", sk])
     if task.model_override:
         cmd.extend(["-m", task.model_override])
-    worker_toolsets = _resolve_worker_cli_toolsets(env.get("HERMES_HOME"))
+    # A task-scoped toolset list (resolved at card creation, e.g. a
+    # playbook step's declared surface ∩ the assignee profile's enabled
+    # set) wins over the profile's full CLI surface — the whole point of
+    # stamping it on the card is a smaller prompt per worker call. When
+    # the card carries none, fall back to the profile pin as before.
+    worker_toolsets = (
+        [str(t) for t in task.toolsets if t]
+        if task.toolsets
+        else _resolve_worker_cli_toolsets(env.get("HERMES_HOME"))
+    )
     if worker_toolsets:
         cmd.extend(["--toolsets", ",".join(worker_toolsets)])
     cmd.extend([

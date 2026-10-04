@@ -149,6 +149,42 @@ def resolve_toolsets(
     return effective, dropped
 
 
+#: Always-present tool surface for a narrowed card worker — without these
+#: the worker cannot even touch its own workspace or ask for help. The
+#: floor is intersected with profile-enabled too (§4.1 is never a union):
+#: a profile that genuinely lacks ``terminal`` does not get it granted.
+#: ``kanban`` guarantees the lifecycle tools (complete/block/comment) are
+#: loaded even on configurations where HERMES_KANBAN_TASK's auto-append
+#: path changes.
+CARD_TOOLSET_FLOOR: tuple[str, ...] = (
+    "kanban",
+    "file",
+    "terminal",
+    "clarify",
+    "todo",
+)
+
+
+def resolve_card_toolsets(
+    requested: Sequence[str], enabled: Sequence[str]
+) -> tuple[Optional[List[str]], List[str]]:
+    """The tool surface stamped on one run card.
+
+    ``requested`` is the step's declared ``toolsets`` falling back to the
+    project's ``toolsets`` column — empty means "no opinion", the worker
+    keeps the profile's full surface (``None``). Otherwise the effective
+    set is ``enabled ∩ requested`` plus the :data:`CARD_TOOLSET_FLOOR`
+    members the profile enables. Returns ``(stamped_or_None, dropped)``.
+    """
+    if not requested:
+        return None, []
+    effective, dropped = resolve_toolsets(requested, enabled)
+    for floor in CARD_TOOLSET_FLOOR:
+        if floor in enabled and floor not in effective:
+            effective.append(floor)
+    return effective or None, dropped
+
+
 def resolve_skills(
     requested: Sequence[str],
     available: Sequence[str],
@@ -526,11 +562,16 @@ def instantiate_run_cards(
     run_no: int,
     steps: Sequence[dict],
     created_by: str,
+    card_toolsets: Optional[Dict[str, List[str]]] = None,
 ) -> Dict[str, Any]:
     """Write every step as a card carrying ``project_id`` + parent links,
     then record the run → card mapping (§7.1). Cards are always CREATED in
     ``triage`` — promotion is a separate, autonomy-aware step — and never
     ``ready``/``running`` at creation (the store would refuse it anyway).
+
+    ``card_toolsets`` maps step keys to the tool surface already resolved
+    for that card (see :func:`resolve_card_toolsets`); absent or a missing
+    key means the worker gets the assignee profile's full CLI surface.
 
     Returns ``{"cards": {step_key: task_id}, "inline": [step, ...]}``.
     """
@@ -567,6 +608,7 @@ def instantiate_run_cards(
             project_id=project.id,
             owner_user_id=created_by,
             visibility="shared",
+            toolsets=(card_toolsets or {}).get(step["key"]),
         )
         card_ids[step["key"]] = tid
 
@@ -1060,6 +1102,26 @@ def start_run(
             "Toolsets requested but NOT enabled by host profile "
             f"'{host}' (dropped): {', '.join(ts_dropped)}"
         )
+    # Per-card tool surface: a step's declared ``toolsets`` narrows the
+    # worker's prompt (fewer tool schemas per API call). Step wins over
+    # the project's ``toolsets`` column; neither = full profile surface.
+    card_toolsets: Dict[str, List[str]] = {}
+    for step in steps:
+        if step.get("mode") == "inline":
+            continue
+        step_own = parse_csv_field(step.get("toolsets"))
+        stamped, step_dropped = resolve_card_toolsets(
+            step_own or requested, enabled
+        )
+        if stamped is not None:
+            card_toolsets[step["key"]] = stamped
+        # Inherited drops are already named by the project-level line
+        # above; only a step's own request earns a per-step note.
+        if step_own and step_dropped:
+            prelude_bits.append(
+                f"Step '{step['key']}' toolsets not enabled by host "
+                f"profile '{host}' (dropped): {', '.join(step_dropped)}"
+            )
     if sk_dropped:
         prelude_bits.append(
             f"Skills not found in host profile (dropped): {', '.join(sk_dropped)}"
@@ -1097,6 +1159,7 @@ def start_run(
         run_no=run["run_no"],
         steps=steps,
         created_by=triggered_by or "projects",
+        card_toolsets=card_toolsets,
     )
     held = held_step_keys(steps)
     autonomy = project.autonomy or "supervised"

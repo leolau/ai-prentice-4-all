@@ -857,6 +857,37 @@ describe("CardDetailView", () => {
     expect(html).toContain('data-component="CardBlockedReason"');
     expect(html).toContain("No reason was recorded for this block.");
   });
+
+  // The card carries the tool surface its worker was spawned with —
+  // stamped at creation (step's toolsets ∩ profile-enabled ∪ floor).
+  // Users must be able to see why a worker could (or couldn't) use a
+  // given tool, so a narrowed card names its sets and an unstamped one
+  // says it loads the profile's full surface.
+  it("names the narrowed tool surface stamped on the card", () => {
+    const html = renderToStaticMarkup(
+      <CardDetailView
+        slug="s"
+        card={{
+          ...CARD({ status: "running" }),
+          toolsets: ["file", "terminal", "kanban"],
+          age: null,
+        }}
+        profiles={[]}
+      />,
+    );
+    expect(html).toContain("worker tools: file, terminal, kanban");
+  });
+
+  it("says an unstamped card loads the profile's full tool surface", () => {
+    const html = renderToStaticMarkup(
+      <CardDetailView
+        slug="s"
+        card={{ ...CARD({ status: "running" }), age: null }}
+        profiles={[]}
+      />,
+    );
+    expect(html).toContain("worker tools: full profile surface");
+  });
 });
 
 describe("CardActions", () => {

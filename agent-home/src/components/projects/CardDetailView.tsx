@@ -126,6 +126,11 @@ export function CardDetailView({
             .join(" · ")}
         </p>
         <p className="mt-1 text-xs text-[var(--color-muted)]">
+          {card.toolsets && card.toolsets.length > 0
+            ? `worker tools: ${card.toolsets.join(", ")}`
+            : "worker tools: full profile surface"}
+        </p>
+        <p className="mt-1 text-xs text-[var(--color-muted)]">
           {timing.join(" · ")}
         </p>
         {card.status === "blocked" ? (
