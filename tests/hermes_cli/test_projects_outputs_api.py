@@ -328,6 +328,66 @@ def test_a_url_linked_by_two_cards_appears_once(env):
     assert [a["link_ref"] for a in items].count(url) == 1
 
 
+def test_a_bare_doc_link_takes_its_recorded_filename(env):
+    """A bare docs.google.com URL in a summary/result names the file the
+    run recorded for it (``new_files`` name/link), not the generic
+    "Google Doc" — and the mention need not match the recorded link
+    byte-for-byte (edit vs view, extra query)."""
+    project = _project(env)
+    url = "https://docs.google.com/document/d/abc123def456/view?usp=sharing"
+    _done_card(
+        project, title="Upload the MOU", result=f"uploaded {url}",
+        metadata={"new_files": [{
+            "name": "MOU-final-v2.docx",
+            "link": "https://docs.google.com/document/d/abc123def456/edit",
+        }]},
+    )
+    items = _artifacts(env, project["slug"])
+    link = next(a for a in items if a["link_ref"] == url)
+    assert link["title"] == "MOU-final-v2.docx"
+
+
+def test_a_bare_doc_link_takes_the_recorded_drive_id_name(env):
+    """The confirm-upload card's ``files`` entries record
+    ``{"stored_name": …, "id": <drive id>}`` with no link field — the
+    /d/<id>/ in a bare mention still resolves the filename."""
+    project = _project(env)
+    url = "https://docs.google.com/document/d/1j6AvJD2hu4V7PWJ1UKcgmA6xh/edit"
+    _done_card(
+        project, title="Confirm upload", result=f"confirmed {url}",
+        metadata={"files": [
+            {"stored_name": "01_黃震遐醫生_版權授權及版稅協議 (1).docx",
+             "id": "1j6AvJD2hu4V7PWJ1UKcgmA6xh"},
+        ]},
+    )
+    items = _artifacts(env, project["slug"])
+    link = next(a for a in items if a["link_ref"] == url)
+    assert link["title"] == "01_黃震遐醫生_版權授權及版稅協議 (1).docx"
+
+
+def test_a_markdown_link_label_still_wins_over_the_recorded_name(env):
+    """An explicit ``[label](url)`` is the author's chosen title — the
+    recorded filename only fills in when the mention is bare."""
+    project = _project(env)
+    url = "https://docs.google.com/document/d/abc123def456/edit"
+    _done_card(
+        project, title="Upload the MOU", result=f"see [signed copy]({url})",
+        metadata={"new_files": [{"name": "MOU-final-v2.docx", "link": url}]},
+    )
+    items = _artifacts(env, project["slug"])
+    link = next(a for a in items if a["link_ref"] == url)
+    assert link["title"] == "signed copy"
+
+
+def test_an_unnamed_doc_link_keeps_the_generic_title(env):
+    project = _project(env)
+    url = "https://docs.google.com/document/d/abc123def456/edit"
+    _done_card(project, title="Note", result=f"link {url}")
+    items = _artifacts(env, project["slug"])
+    link = next(a for a in items if a["link_ref"] == url)
+    assert link["title"] == "Google Doc"
+
+
 def test_rotted_workspace_delivery_opens_the_uploaded_copy(env):
     """Scratch workspaces are wiped when a card completes, so a workspace
     delivery rots. When a run recorded an uploaded copy in its metadata

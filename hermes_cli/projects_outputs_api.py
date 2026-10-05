@@ -193,18 +193,39 @@ def sort_newest(items: list[dict]) -> list[dict]:
 
 
 _LINK_KEYS = ("link", "url", "webViewLink", "web_view_link")
-_NAME_KEYS = ("name", "filename", "title")
+_NAME_KEYS = ("name", "filename", "title", "stored_name", "file_name")
+_ID_KEYS = ("id", "file_id", "fileId", "document_id", "doc_id")
+_GDOC_ID_RE = re.compile(r"/d/([A-Za-z0-9_-]{10,})|/folders/([A-Za-z0-9_-]{10,})")
+_GFILE_ID_RE = re.compile(r"[A-Za-z0-9_-]{25,}")
 
 
-def _uploaded_copies(ctx: dict) -> dict[str, str]:
-    """basename -> document URL for remote copies a run recorded in its
-    metadata (e.g. a Drive upload step's ``new_files`` name/link entries).
+def _doc_url_key(url: str) -> str:
+    """Identity key for a document URL. Google links identify the file in
+    ``/d/<id>`` (or ``/folders/<id>``) — normalising to that id lets a
+    bare mention (``…/edit?usp=sharing``) match the link a run recorded
+    (``…/view``) or an ``id`` field in run metadata. Everything else keys
+    on the URL itself."""
+    host = (urlparse(url).hostname or "").lower()
+    if host == "docs.google.com" or host == "drive.google.com":
+        m = _GDOC_ID_RE.search(urlparse(url).path)
+        if m:
+            return m.group(1) or m.group(2)
+    return url
 
-    Scratch workspaces are wiped on card completion, so a claimed path or a
-    ``workspace`` delivery rots; when a run recorded an uploaded copy this
-    map lets the artifact still open it.
+
+def _uploaded_copies(ctx: dict) -> tuple[dict[str, str], dict[str, str]]:
+    """``(basename -> URL, url-key -> name)`` for remote copies a run
+    recorded in its metadata (e.g. a Drive upload step's ``new_files``
+    name/link entries).
+
+    Scratch workspaces are wiped on card completion, so a claimed path or
+    a ``workspace`` delivery rots; the first map lets the artifact still
+    open it. The second names a link: a bare docs.google.com URL in a
+    summary otherwise titles itself "Google Doc", which is useless when
+    four of them sit in a list.
     """
     copies: dict[str, str] = {}
+    url_names: dict[str, str] = {}
     budget = 5000  # metadata can be large — bound the walk
 
     def _walk(node: Any, depth: int) -> None:
@@ -213,13 +234,17 @@ def _uploaded_copies(ctx: dict) -> dict[str, str]:
             return
         if isinstance(node, dict):
             budget -= 1
+            name = next(
+                (node[k] for k in _NAME_KEYS if isinstance(node.get(k), str)),
+                None,
+            )
             for key in _LINK_KEYS:
                 val = node.get(key)
                 if isinstance(val, str) and is_document_url(val):
-                    name = next(
-                        (node[k] for k in _NAME_KEYS if isinstance(node.get(k), str)),
-                        None,
-                    )
+                    if name:
+                        url_names.setdefault(
+                            _doc_url_key(val), os.path.basename(str(name))
+                        )
                     base = (
                         os.path.basename(str(name))
                         if name
@@ -227,6 +252,14 @@ def _uploaded_copies(ctx: dict) -> dict[str, str]:
                     )
                     if base:
                         copies.setdefault(base, val)
+            if name:
+                # Drive file-id fields — {"id": "<google id>", "stored_name":
+                # "…docx"} — let a bare ``/d/<id>/`` mention resolve to the
+                # recorded name even when no ``link`` field exists.
+                for key in _ID_KEYS:
+                    fid = node.get(key)
+                    if isinstance(fid, str) and _GFILE_ID_RE.fullmatch(fid):
+                        url_names.setdefault(fid, os.path.basename(str(name)))
             for v in node.values():
                 _walk(v, depth + 1)
         elif isinstance(node, (list, tuple)):
@@ -238,7 +271,7 @@ def _uploaded_copies(ctx: dict) -> dict[str, str]:
             meta = getattr(r, "metadata", None)
             if isinstance(meta, dict):
                 _walk(meta, 0)
-    return copies
+    return copies, url_names
 
 
 # ---------------------------------------------------------------------------
@@ -430,7 +463,7 @@ def build_artifacts(project, ctx: dict) -> list[dict]:
     files = _files_by_id(project, ctx)
     path_to_id = {f["path"]: aid for aid, f in files.items() if aid.startswith("f:")}
     versions = assign_versions(ctx["deliveries"])
-    uploaded = _uploaded_copies(ctx)
+    uploaded, uploaded_names = _uploaded_copies(ctx)
     attached_ids: set[str] = set()
     attached_urls: set[str] = set()
     items: list[dict] = []
@@ -464,7 +497,7 @@ def build_artifacts(project, ctx: dict) -> list[dict]:
             attached_urls.add(ref)
             location = urlparse(ref).hostname
             if not d.get("label"):
-                name = _url_meta(ref)[0]
+                name = uploaded_names.get(_doc_url_key(ref)) or _url_meta(ref)[0]
         elif kind == "workspace" and ref:
             file_id = path_to_id.get(ref)
         elif kind == "attachment" and ref:
@@ -555,7 +588,11 @@ def build_artifacts(project, ctx: dict) -> list[dict]:
                 continue
             seen_link_urls.add(link["url"])
             title, ext, mime = _url_meta(link["url"])
-            label = link["label"] or title
+            label = (
+                link["label"]
+                or uploaded_names.get(_doc_url_key(link["url"]))
+                or title
+            )
             items.append({
                 "id": f"u:{tid}:{_short_hash(link['url'])}",
                 "title": label,
