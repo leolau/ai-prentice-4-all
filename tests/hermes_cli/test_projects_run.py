@@ -1119,21 +1119,26 @@ def test_toolsets_resolve_from_the_host_profile_not_the_caller():
 
     home = Path(os.environ["HERMES_HOME"])
     # The calling process's (default) profile enables "web"…
-    (home / "config.yaml").write_text("toolsets:\n  - web\n")
-    # …while host profile "alpha" enables only "shell".
+    (home / "config.yaml").write_text(
+        "platform_toolsets:\n  cli:\n    - web\n"
+    )
+    # …while host profile "alpha" enables only "file".
     alpha = profiles.get_profile_dir("alpha")
     alpha.mkdir(parents=True, exist_ok=True)
-    (alpha / "config.yaml").write_text("toolsets:\n  - shell\n")
+    (alpha / "config.yaml").write_text(
+        "platform_toolsets:\n  cli:\n    - file\n"
+    )
 
-    assert _REAL_ENABLED_TOOLSETS("alpha") == ["shell"]
-    assert _REAL_ENABLED_TOOLSETS("default") == ["web"]
+    assert "file" in _REAL_ENABLED_TOOLSETS("alpha")
+    assert "web" not in _REAL_ENABLED_TOOLSETS("alpha")
+    assert "web" in _REAL_ENABLED_TOOLSETS("default")
     # Unknown profile → fail closed: no grant.
     assert _REAL_ENABLED_TOOLSETS("ghost") == []
 
 
 def test_narrowing_never_grants_beyond_the_host_profile(stores, monkeypatch):
-    """H3 end-to-end: a project hosted by profile 'alpha' (toolsets:
-    [shell]) requesting 'web' gets it DROPPED — the host's set is the
+    """H3 end-to-end: a project hosted by profile 'alpha' (CLI surface:
+    [file]) requesting 'web' gets it DROPPED — the host's set is the
     ceiling, whatever the calling process enables."""
     import os
     from pathlib import Path
@@ -1145,10 +1150,12 @@ def test_narrowing_never_grants_beyond_the_host_profile(stores, monkeypatch):
     )
     alpha = profiles.get_profile_dir("alpha")
     alpha.mkdir(parents=True, exist_ok=True)
-    (alpha / "config.yaml").write_text("toolsets:\n  - shell\n")
+    (alpha / "config.yaml").write_text(
+        "platform_toolsets:\n  cli:\n    - file\n"
+    )
     # The caller's own profile enables "web" — it must not leak in.
     (Path(os.environ["HERMES_HOME"]) / "config.yaml").write_text(
-        "toolsets:\n  - web\n"
+        "platform_toolsets:\n  cli:\n    - web\n"
     )
 
     with projects_db.connect_closing() as conn:
@@ -1169,14 +1176,14 @@ def test_narrowing_never_grants_beyond_the_host_profile(stores, monkeypatch):
         projects_db.add_project_output(
             conn, project_id=pid, title="The output", required=True,
         )
-        projects_db.update_project_fields(conn, pid, {"toolsets": "web,shell"})
+        projects_db.update_project_fields(conn, pid, {"toolsets": "web,file"})
         projects_db.set_project_status(conn, pid, "active")
 
     _save_playbook(pid, [{"key": "one", "title": "One"}])
     with projects_db.connect_closing() as conn:
         projects_db.activate_playbook_rev(conn, pid, 1)
     result = _start(pid)
-    assert result["toolsets_effective"] == ["shell"]
+    assert result["toolsets_effective"] == ["file"]
     assert result["toolsets_dropped"] == ["web"]
     assert "NOT enabled by host profile 'alpha'" in result["run"]["summary"]
 
