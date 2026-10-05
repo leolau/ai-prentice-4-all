@@ -1,6 +1,8 @@
 # Plan: link artifacts show the recorded filename, not "Google Doc"
 
-Status: **in progress**.
+Status: **shipped** (PR #506, deployed `ed226f408`; verified live — the
+four "Google Doc" rows now show `01_黃震遐醫生_…docx` etc., the folder
+row shows "Agreements").
 
 ## Problem
 
