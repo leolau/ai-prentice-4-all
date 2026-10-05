@@ -13,7 +13,6 @@ import {
   newestFirst,
   outputStateLabel,
   provenanceLabel,
-  shortTitle,
   suggestedOutput,
   unattachedByRun,
   unattachedFiles,
@@ -185,8 +184,6 @@ describe("small helpers", () => {
   it("labels states, titles and provenance", () => {
     expect(outputStateLabel("dropped")).toBe("superseded");
     expect(outputStateLabel("in_progress")).toBe("in progress");
-    expect(shortTitle("2 MOUs in docx, bilingual")).toBe("2 MOUs in docx, bi…");
-    expect(shortTitle("short")).toBe("short");
     // Same-prefix filenames stay distinguishable: the tail is preserved.
     expect(
       middleEllipsize("自學中文書寫功夫AR卡項目_合作備忘錄_ConnectAR_黃震遐_定稿v2.docx"),

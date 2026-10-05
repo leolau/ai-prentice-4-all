@@ -6,7 +6,6 @@ import { ActionButton } from "@/components/projects/ActionButton";
 import { ActionError } from "@/components/projects/outputs/ActionError";
 import {
   attachBody,
-  shortTitle,
   suggestedOutput,
   unattachedByRun,
   unattachedSentence,
@@ -250,7 +249,7 @@ function AttachRow({
     <li data-component="AttachRow" className="rounded-lg bg-[var(--color-surface)] px-2 py-1.5">
       <div className="flex flex-wrap items-center gap-2">
         <FileBadge file={file} />
-        <span className="min-w-0 flex-1 truncate text-sm">{file.title}</span>
+        <span className="min-w-0 flex-1 break-all text-sm">{file.title}</span>
         <OpenArtifact file={file} onOpenFile={onOpenFile} resolving={resolving} />
       </div>
       {!archived && target ? (
@@ -273,7 +272,7 @@ function AttachRow({
             }
             className="rounded-lg border border-[var(--color-warn)] px-3 py-1 text-xs font-medium text-[var(--color-warn-text)] disabled:opacity-50"
           >
-            {targets.length > 1 ? "Attach" : `Attach to “${shortTitle(target.title)}”`}
+            {targets.length > 1 ? "Attach" : `Attach to “${target.title}”`}
           </ActionButton>
         </div>
       ) : null}

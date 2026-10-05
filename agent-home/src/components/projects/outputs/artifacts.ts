@@ -193,11 +193,6 @@ export function suggestedOutput(
   );
 }
 
-/** "2 MOUs in docx…" — a title cut to fit a button. */
-export function shortTitle(title: string, max = 18): string {
-  return title.length <= max ? title : `${title.slice(0, max).trimEnd()}…`;
-}
-
 /** "自學中文書寫…黃震遐_定稿v2.docx" — middle ellipsis keeps the tail that
  * tells same-prefix filenames (party names, versions, extensions) apart,
  * where plain end-truncation makes every tile read identically. */
