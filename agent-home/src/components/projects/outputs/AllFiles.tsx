@@ -102,7 +102,7 @@ export function AllFiles({
             >
               <FileBadge file={file} />
               <span className="min-w-0 flex-1">
-                <span className="block truncate text-sm">{file.title}</span>
+                <span className="block break-all text-sm">{file.title}</span>
                 <span className="block truncate text-xs text-[var(--color-muted)]">
                   {provenanceLabel(file)} · {dateTimeLabel(file.created_at)}
                 </span>
