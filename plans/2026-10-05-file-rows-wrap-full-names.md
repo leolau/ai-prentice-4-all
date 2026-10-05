@@ -1,6 +1,6 @@
 # Plan: file rows wrap the full name instead of truncating
 
-Status: **in progress**.
+Status: **shipped** (PR #504, deployed `7b76af935`).
 
 ## Problem
 
