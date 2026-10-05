@@ -107,7 +107,13 @@ def test_cost_reader_default_is_none_without_a_configured_dsn(monkeypatch):
 # ---------------------------------------------------------------------------
 
 def _write_yaml(path: Path, toolsets: list[str]) -> None:
-    lines = ["toolsets:"] + [f"  - {t}" for t in toolsets]
+    """Write a profile config whose CLI surface is exactly ``toolsets`` —
+    ``platform_toolsets.cli`` is what the dispatcher actually pins on a
+    worker (composites like ``hermes-cli`` expand to their members)."""
+    lines = (
+        ["platform_toolsets:", "  cli:"]
+        + [f"    - {t}" for t in toolsets]
+    )
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
@@ -128,11 +134,36 @@ def test_toolsets_default_reads_the_profile_home_not_the_caller(
     )
 
     got = projects_run._enabled_toolsets_for_profile("worker")
-    assert got == ["web", "file"]
+    assert "file" in got and "web" in got
+    # ``kanban`` is recovered into every profile's surface by
+    # _get_platform_tools (non-configurable member of the platform
+    # composite) — the same set the worker pin carries.
+    assert "kanban" in got
     assert "caller_only" not in got
 
     # Unknown profile → fail closed: no grant.
     assert projects_run._enabled_toolsets_for_profile("ghost") == []
+
+
+def test_toolsets_expands_composites_like_the_spawn_pin(
+    tmp_path, monkeypatch
+):
+    """A profile whose config only names the ``hermes-cli`` composite (the
+    production default) reports the composite's member toolsets — the same
+    set the worker is pinned with — not the bundle name itself. A bare
+    name would make every per-card intersection drop to nothing."""
+    profiles_root = tmp_path / "profiles"
+    worker_home = profiles_root / "worker"
+    worker_home.mkdir(parents=True)
+    (worker_home / "config.yaml").write_text(
+        "toolsets:\n  - hermes-cli\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(
+        "hermes_cli.profiles._get_profiles_root", lambda: profiles_root
+    )
+    got = projects_run._enabled_toolsets_for_profile("worker")
+    assert "hermes-cli" not in got
+    assert "file" in got and "terminal" in got and "kanban" in got
 
 
 # ---------------------------------------------------------------------------

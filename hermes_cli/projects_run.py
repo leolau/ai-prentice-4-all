@@ -1614,21 +1614,29 @@ def projects_db_close_and_fetch(
 def _enabled_toolsets_for_profile(profile: str) -> List[str]:
     """The host profile's enabled toolsets — the superset a project may
     intersect with (§4.1). Read inside the profile's runtime scope — never
-    the calling process's config; an unknown profile grants nothing."""
+    the calling process's config; an unknown profile grants nothing.
+
+    Resolved through the same ``_get_platform_tools(cfg, "cli")`` the
+    dispatcher pins on workers: composite names (``hermes-cli``) expand
+    to the individual toolsets they grant, so a bare ``toolsets:
+    [hermes-cli]`` profile correctly reports its real surface instead of
+    one unsplittable bundle name — which would make every per-card
+    intersection drop to nothing (found live, 2026-10-05).
+    """
     try:
         from agent.profile_runtime import profile_runtime_scope
         from hermes_cli import profiles
         from hermes_cli.config import load_config_readonly
+        from hermes_cli.tools_config import _get_platform_tools
 
         home = profiles.get_profile_dir(profile)
         if not home.is_dir():
             return []  # unknown profile → fail closed: no grant
         with profile_runtime_scope(home):
             cfg = load_config_readonly() or {}
-            ts = cfg.get("toolsets")
+        return sorted(_get_platform_tools(cfg, "cli"))
     except Exception:  # noqa: BLE001 — fail closed: no grant
         return []
-    return [str(t) for t in ts] if isinstance(ts, list) else []
 
 
 def _available_skill_names(profile: str) -> List[str]:

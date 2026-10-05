@@ -1,8 +1,20 @@
 # Plan: per-card toolset narrowing + card tool visibility
 
-Status: **shipped** (PR #502, deployed `039264de1`; prod `tasks.toolsets`
+Status: **shipped** (PR #502 deployed `039264de1`; prod `tasks.toolsets`
 column migrated — existing cards keep full surface, new stamped cards
 get the narrowed list).
+
+### Follow-up fix (found verifying on prod)
+
+`_enabled_toolsets_for_profile` read the raw `cfg["toolsets"]` list —
+which on prod is the unexpanded `["hermes-cli"]` composite, not the real
+surface. Every declared toolset dropped → nothing ever stamped. Now
+resolved through `_get_platform_tools(cfg, "cli")`, the same function
+the dispatcher pins workers with — prod reports the real 27-name
+surface and a convert card stamps `clarify, code_execution, file,
+kanban, terminal, todo` (6 vs 27). Seam tests updated: profiles
+configure their surface via `platform_toolsets.cli`; assertions are
+membership-contracts, not snapshots.
 
 ## Problem
 
