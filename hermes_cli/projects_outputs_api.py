@@ -192,7 +192,7 @@ def sort_newest(items: list[dict]) -> list[dict]:
     return sorted(items, key=lambda a: (-(a.get("created_at") or 0), a["id"]))
 
 
-_LINK_KEYS = ("link", "url", "webViewLink", "web_view_link")
+_LINK_KEYS = ("link", "url", "webViewLink", "web_view_link", "doc_url")
 _NAME_KEYS = ("name", "filename", "title", "stored_name", "file_name")
 _ID_KEYS = ("id", "file_id", "fileId", "document_id", "doc_id")
 _GDOC_ID_RE = re.compile(r"/d/([A-Za-z0-9_-]{10,})|/folders/([A-Za-z0-9_-]{10,})")
@@ -287,9 +287,15 @@ def _content_href(slug: str, artifact_id: str) -> str:
 
 
 def _managed_roots(task, board: Optional[str]) -> list[Path]:
+    """Where a card's files may be served from: the board's scratch
+    workspaces, its attachment store, and the ``artifacts`` folder beside
+    the workspaces that workers keep handoff files in (scratch workspaces
+    are wiped when a card completes)."""
     roots: list[Path] = []
     try:
-        roots.append(kanban_db.workspaces_root(board=board))
+        workspaces = kanban_db.workspaces_root(board=board)
+        roots.append(workspaces)
+        roots.append(workspaces.parent / "artifacts")
         roots.append(kanban_db.attachments_root(board=board))
     except Exception:
         pass
@@ -316,6 +322,20 @@ def _servable(path_str: str, roots: list[Path]) -> Optional[Path]:
         if path.is_relative_to(base):
             return path
     return None
+
+
+def _uploaded_copy(uploaded: dict[str, str], name: str) -> Optional[str]:
+    """The remote copy a run recorded for a local file: same file name, or
+    a native document (no extension) named after the file's stem — a
+    ``Quote v1.0.docx`` converted into the Google Doc ``Quote v1.0``."""
+    if name in uploaded:
+        return uploaded[name]
+    stem, dot, _ext = name.rpartition(".")
+    return uploaded.get(stem) if dot and stem else None
+
+
+def _is_web_url(ref: Optional[str]) -> bool:
+    return bool(ref) and urlparse(str(ref)).scheme in ("http", "https")
 
 
 def _location(path_str: str, task) -> str:
@@ -482,8 +502,8 @@ def build_artifacts(project, ctx: dict) -> list[dict]:
 
     for d in ctx["deliveries"]:
         output = ctx["outputs"].get(d["output_id"])
-        kind = d.get("link_kind")
         ref = d.get("link_ref")
+        kind = d.get("link_kind") or ("url" if _is_web_url(ref) else None)
         task = ctx["tasks"].get(d.get("task_id") or "")
         run = ctx["runs"].get(d.get("run_id") or "") or (
             ctx["run_of_task"].get(task.id) if task else None
@@ -516,10 +536,14 @@ def build_artifacts(project, ctx: dict) -> list[dict]:
         if href is None and ref and kind in ("workspace", "file"):
             # The scratch workspace may be gone — open the uploaded copy
             # a run recorded instead of a dead local path.
-            remote = uploaded.get(os.path.basename(ref))
+            remote = _uploaded_copy(uploaded, os.path.basename(ref))
             if remote:
                 href = remote
                 location = urlparse(remote).hostname
+        missing = (
+            href is None and kind == "workspace" and bool(ref)
+            and not os.path.lexists(ref)
+        )
         fname = (
             f["filename"] if file_id and files[file_id].get("filename")
             else (os.path.basename(ref) if ref and kind != "url" else ref)
@@ -537,6 +561,7 @@ def build_artifacts(project, ctx: dict) -> list[dict]:
             "href": href,
             "location": location,
             "source": "delivery",
+            "missing": missing,
             "link_kind": kind,
             "link_ref": ref,
             **_run_fields(run),
@@ -557,10 +582,11 @@ def build_artifacts(project, ctx: dict) -> list[dict]:
         href = _content_href(slug, aid) if f["serve"] is not None else None
         location = "card attachments" if is_att else _location(f["path"], task)
         if href is None and not is_att:
-            remote = uploaded.get(name)
+            remote = _uploaded_copy(uploaded, name)
             if remote:
                 href = remote
                 location = urlparse(remote).hostname
+        missing = href is None and not os.path.lexists(f["path"])
         items.append({
             "id": aid,
             "title": name,
@@ -570,6 +596,7 @@ def build_artifacts(project, ctx: dict) -> list[dict]:
             "href": href,
             "location": location,
             "source": "attachment" if is_att else "card_file",
+            "missing": missing,
             "link_kind": "attachment" if is_att else "workspace",
             "link_ref": aid.split(":", 1)[1] if is_att else f["path"],
             **_run_fields(ctx["run_of_task"].get(task.id)),
@@ -602,6 +629,7 @@ def build_artifacts(project, ctx: dict) -> list[dict]:
                 "href": link["url"],
                 "location": urlparse(link["url"]).hostname,
                 "source": "link",
+                "missing": False,
                 "link_kind": "url",
                 "link_ref": link["url"],
                 **_run_fields(ctx["run_of_task"].get(tid)),

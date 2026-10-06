@@ -6,6 +6,8 @@ import { ActionButton } from "@/components/projects/ActionButton";
 import { ActionError } from "@/components/projects/outputs/ActionError";
 import {
   attachBody,
+  otherFilesHeading,
+  outputsAwaitingDelivery,
   suggestedOutput,
   unattachedByRun,
   unattachedSentence,
@@ -27,11 +29,13 @@ export interface AttachResult {
 }
 
 /**
- * Files a run produced that no declared output owns — the reason a project
- * can read "pending" while the work is sitting right there. Each file gets
- * one Attach action (its own lock) through the existing deliver route, and
- * a run group gets one "Attach all" for the common case where every file
- * answers the same output.
+ * Files a run produced that no declared output owns. While an open output
+ * has nothing delivered, they are a warning — one of them may be what it
+ * should deliver — with one "Add to" action per file (its own lock) through
+ * the existing deliver route, plus an "Add all" for the common case where
+ * every file answers the same output. Once every output has a delivery they
+ * are just the run's working files: a collapsed list whose action adds a
+ * file as a new version.
  */
 export function UnattachedWarning({
   slug,
@@ -53,7 +57,56 @@ export function UnattachedWarning({
   const groups = unattachedByRun(artifacts);
   if (groups.length === 0) return null;
   const targets = outputs.filter((o) => o.status !== "accepted" && o.status !== "dropped");
+  const awaiting = outputsAwaitingDelivery(outputs);
+  const quiet = awaiting.length === 0 && outputs.some((o) => o.status !== "dropped");
   const suggested = suggestedOutput(outputs);
+  const rows = (group: (typeof groups)[number]) => (
+    <ul className="mt-2 flex flex-col gap-1.5">
+      {group.files.map((file) => (
+        <AttachRow
+          key={file.id}
+          slug={slug}
+          file={file}
+          targets={targets}
+          suggestedId={suggested?.id ?? null}
+          archived={archived}
+          quiet={quiet}
+          onAttached={onAttached}
+          onOpenFile={onOpenFile}
+          resolving={resolving}
+        />
+      ))}
+    </ul>
+  );
+
+  if (quiet) {
+    return (
+      <section data-component="OtherRunFiles" className="flex flex-col gap-2">
+        {groups.map((group) => (
+          <details
+            key={String(group.runNo)}
+            className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface)] p-4"
+          >
+            <summary className="cursor-pointer text-sm font-medium">{otherFilesHeading(group)}</summary>
+            <p className="mt-1 text-xs text-[var(--color-muted)]">
+              Working files the run made along the way — research, templates,
+              drafts. Every output already has a delivery, so nothing here
+              needs adding.
+              {!archived && targets.length > 0
+                ? " Use “Add as a new version” only if one of these files should become the output’s latest version."
+                : ""}
+            </p>
+            {rows(group)}
+          </details>
+        ))}
+      </section>
+    );
+  }
+
+  const awaitingLine =
+    awaiting.length === 1
+      ? `“${awaiting[0].title}” has nothing delivered yet.`
+      : `${awaiting.length} outputs have nothing delivered yet.`;
   return (
     <section
       data-component="UnattachedWarning"
@@ -63,11 +116,13 @@ export function UnattachedWarning({
       {groups.map((group) => (
         <div key={String(group.runNo)} className="mb-3 last:mb-0">
           <p className="text-sm font-medium text-[var(--color-warn-text)]">{unattachedSentence(group)}</p>
-          <p className="mt-0.5 text-xs text-[var(--color-muted)]">
-            Pick the output each file delivers, then Attach — or attach them
-            all to the same output at once. Unattached files leave the output
-            they belong to reading as pending.
-          </p>
+          {targets.length > 0 ? (
+            <p className="mt-0.5 text-xs text-[var(--color-muted)]">
+              {awaitingLine} If one of these files is what it should deliver,
+              add it to that output — the output then reads as delivered.
+              Files that are only working material can stay where they are.
+            </p>
+          ) : null}
           {!archived && targets.length > 0 && group.files.length > 1 ? (
             <AttachAll
               slug={slug}
@@ -77,26 +132,12 @@ export function UnattachedWarning({
               onAttached={onAttached}
             />
           ) : null}
-          <ul className="mt-2 flex flex-col gap-1.5">
-            {group.files.map((file) => (
-              <AttachRow
-                key={file.id}
-                slug={slug}
-                file={file}
-                targets={targets}
-                suggestedId={suggested?.id ?? null}
-                archived={archived}
-                onAttached={onAttached}
-                onOpenFile={onOpenFile}
-                resolving={resolving}
-              />
-            ))}
-          </ul>
+          {rows(group)}
         </div>
       ))}
       {targets.length === 0 && !archived ? (
         <p className="mt-2 text-xs text-[var(--color-muted)]">
-          Declare an output below to attach these files to it.
+          Declare an output below to add these files to it.
         </p>
       ) : null}
     </section>
@@ -145,7 +186,7 @@ function initialTarget(
     : (targets[0]?.id ?? "");
 }
 
-/** Attach every file in the group to one output — sequential deliver calls,
+/** Add every file in the group to one output — sequential deliver calls,
  * so a stop-on-error leaves the rest still attachable by hand. */
 function AttachAll({
   slug,
@@ -199,7 +240,7 @@ function AttachAll({
       className="mt-2 flex flex-wrap items-center gap-2 rounded-lg bg-[var(--color-surface)] px-2 py-1.5"
     >
       <span className="text-xs font-medium text-[var(--color-fg)]">
-        Attach all {files.length} to
+        Add all {files.length} to
       </span>
       <TargetSelect
         targets={targets}
@@ -210,11 +251,11 @@ function AttachAll({
       />
       <ActionButton
         busy={busy}
-        pendingLabel={`Attaching ${done}/${files.length}…`}
+        pendingLabel={`Adding ${done}/${files.length}…`}
         onClick={() => void attachAll()}
         className="rounded-lg border border-[var(--color-warn)] px-3 py-1 text-xs font-medium text-[var(--color-warn-text)] disabled:opacity-50"
       >
-        Attach all
+        Add all
       </ActionButton>
       {error ? <span className="text-xs text-red-400">{error}</span> : null}
     </div>
@@ -227,6 +268,7 @@ function AttachRow({
   targets,
   suggestedId,
   archived,
+  quiet,
   onAttached,
   onOpenFile,
   resolving,
@@ -236,6 +278,7 @@ function AttachRow({
   targets: ProjectOutputWithDeliveries[];
   suggestedId: string | null;
   archived: boolean;
+  quiet: boolean;
   onAttached: (file: ProjectArtifact, result: AttachResult) => void;
   onOpenFile?: OpenFile;
   resolving?: string | null;
@@ -263,16 +306,26 @@ function AttachRow({
           />
           <ActionButton
             busy={action.busy}
-            pendingLabel="Attaching…"
+            pendingLabel="Adding…"
             onClick={() =>
               void action.run(
                 `/api/projects/${encodeURIComponent(slug)}/outputs/${encodeURIComponent(target.id)}/deliver`,
                 { body: attachBody(file), onSuccess: (data) => onAttached(file, data) },
               )
             }
-            className="rounded-lg border border-[var(--color-warn)] px-3 py-1 text-xs font-medium text-[var(--color-warn-text)] disabled:opacity-50"
+            className={
+              quiet
+                ? "rounded-lg border border-[var(--color-border)] px-3 py-1 text-xs disabled:opacity-50"
+                : "rounded-lg border border-[var(--color-warn)] px-3 py-1 text-xs font-medium text-[var(--color-warn-text)] disabled:opacity-50"
+            }
           >
-            {targets.length > 1 ? "Attach" : `Attach to “${target.title}”`}
+            {quiet
+              ? targets.length > 1
+                ? "Add as a new version"
+                : `Add as a new version of “${target.title}”`
+              : targets.length > 1
+                ? "Add to output"
+                : `Add to “${target.title}”`}
           </ActionButton>
         </div>
       ) : null}

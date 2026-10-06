@@ -105,7 +105,10 @@ export function DeliverableCard({
                   const name = artifact?.title ?? deliveryTitle(delivery, title);
                   const file = artifact ?? {
                     title: name,
-                    href: delivery.link_kind === "url" ? delivery.link_ref : null,
+                    href:
+                      delivery.link_kind === "url" || /^https?:\/\//i.test(delivery.link_ref ?? "")
+                        ? delivery.link_ref
+                        : null,
                     link_kind: delivery.link_kind,
                     link_ref: delivery.link_ref,
                     ext: null,
