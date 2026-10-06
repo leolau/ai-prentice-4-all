@@ -169,7 +169,7 @@ describe("Attach to output", () => {
     const { container } = mount();
     const rows = container.querySelectorAll('[data-component="AttachRow"]');
     expect(rows).toHaveLength(2);
-    const first = button(rows[0] as HTMLElement, /^Attach$/);
+    const first = button(rows[0] as HTMLElement, /^Add to output$/);
     fireEvent.click(first);
     fireEvent.click(first);
     expect(writes).toHaveLength(1);
@@ -179,9 +179,9 @@ describe("Attach to output", () => {
       run_id: "run_a",
       task_id: "t_1",
     });
-    await waitFor(() => expect(button(rows[0] as HTMLElement, /Attaching…/).disabled).toBe(true));
+    await waitFor(() => expect(button(rows[0] as HTMLElement, /Adding…/).disabled).toBe(true));
     // The other row is not locked by this one.
-    expect(button(rows[1] as HTMLElement, /^Attach$/).disabled).toBe(false);
+    expect(button(rows[1] as HTMLElement, /^Add to output$/).disabled).toBe(false);
     await act(async () => {
       gate.resolve(json(200, { delivery_id: "d_new", output_id: "out_2", by: "leo" }));
     });
@@ -197,9 +197,9 @@ describe("Attach to output", () => {
     mutationFetch(async () => json(404, { detail: "unknown output" }));
     const { container } = mount();
     const row = container.querySelector('[data-component="AttachRow"]') as HTMLElement;
-    fireEvent.click(button(row, /^Attach$/));
+    fireEvent.click(button(row, /^Add to output$/));
     await waitFor(() => expect(row.querySelector('[role="alert"]')).not.toBeNull());
-    expect(button(row, /^Attach$/).disabled).toBe(false);
+    expect(button(row, /^Add to output$/).disabled).toBe(false);
     expect(container.querySelectorAll('[data-component="AttachRow"]')).toHaveLength(2);
   });
 });

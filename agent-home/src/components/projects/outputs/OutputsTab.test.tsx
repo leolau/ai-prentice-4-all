@@ -74,9 +74,9 @@ describe("OutputsTab SSR", () => {
     expect(html).toContain('data-component="UnattachedWarning"');
     expect(html).toContain("Run 1 produced 2 files that aren&#x27;t linked to any output.");
     // With several candidate outputs each row shows a target picker plus a
-    // plain Attach button; the group also gets a one-shot Attach-all.
+    // plain "Add to output" button; the group also gets a one-shot Add-all.
     expect(html).toContain('data-component="AttachAll"');
-    expect(html).toContain("Attach all 2 to");
+    expect(html).toContain("Add all 2 to");
     expect(html).toContain("4 MOUs in docx");
   });
 
@@ -85,11 +85,56 @@ describe("OutputsTab SSR", () => {
     expect(html).not.toContain('data-component="UnattachedWarning"');
   });
 
+  it("once every output has a delivery, unlinked files are a collapsed 'other files' list", () => {
+    const html = render({ outputs: [DELIVERED] });
+    expect(html).not.toContain('data-component="UnattachedWarning"');
+    expect(html).not.toContain("aren&#x27;t linked to any output");
+    expect(html).toContain('data-component="OtherRunFiles"');
+    expect(html).toContain("<details");
+    expect(html).toContain("Other files from Run 1 (2)");
+    expect(html).toContain("nothing here");
+    expect(html).toContain("Add as a new version of “2 MOUs in docx”");
+    expect(html).not.toContain('data-component="AttachAll"');
+  });
+
+  it("the warning names the output still waiting for a delivery", () => {
+    const html = render();
+    expect(html).toContain("“4 MOUs in docx” has nothing delivered yet.");
+  });
+
+  it("a file cleared with its card's workspace says so instead of a dead Open", () => {
+    const html = render({}, [
+      ARTIFACT({ id: "f:gone", title: "quote.pdf", href: null, missing: true }),
+      ARTIFACT({ id: "f:far", title: "far.md", href: null, location: "/srv" }),
+    ]);
+    expect(html).toContain('data-testid="file-missing"');
+    expect(html).toContain("Deleted when its card finished");
+    expect(html).not.toContain('aria-label="Open quote.pdf"');
+    expect(html).toMatch(/<button[^>]*disabled=""[^>]*aria-label="Open far.md"/);
+  });
+
+  it("a delivery recorded as a bare web link still opens without the files read", () => {
+    const project = PROJECT({
+      outputs: [
+        OUTPUT({
+          status: "delivered",
+          deliveries: [
+            DELIVERY({ id: "dg", link_kind: null, link_ref: "https://docs.google.com/document/d/abc/edit" }),
+          ],
+        }),
+      ],
+    });
+    const html = renderToStaticMarkup(
+      <OutputsTab {...TAB_PROPS(project)} initialArtifacts={[]} />,
+    );
+    expect(html).toContain('href="https://docs.google.com/document/d/abc/edit"');
+  });
+
   it("an archived project shows files but no write verbs", () => {
     const html = render({ archived: true });
     expect(html).toContain("restore it");
     expect(html).not.toContain("Mark superseded");
-    expect(html).not.toContain("Attach to");
+    expect(html).not.toContain("Add to");
     expect(html).not.toContain('data-component="AddOutputForm"');
     expect(html).toContain("mou-qingtian.docx");
   });

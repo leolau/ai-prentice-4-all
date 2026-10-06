@@ -2290,6 +2290,9 @@ export interface ProjectArtifact {
    * `link_ref` instead). */
   href: string | null;
   location: string | null;
+  /** The local file is gone (e.g. its card's scratch workspace was cleared
+   * on completion) and no remote copy was recorded. Older builds omit it. */
+  missing?: boolean;
   source: ProjectArtifactSource;
   link_kind: string | null;
   link_ref: string | null;

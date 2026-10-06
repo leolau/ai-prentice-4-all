@@ -440,6 +440,110 @@ def test_rotted_workspace_draft_opens_the_uploaded_copy(env):
     assert item["href"] == remote
 
 
+def test_a_handoff_file_in_the_kanban_artifacts_folder_opens(env):
+    """Workers keep handoff files in ``<kanban>/artifacts`` beside the
+    scratch workspaces because those are wiped on completion."""
+    client, _state, tmp = env
+    project = _project(env)
+    store = tmp / "artifacts"
+    store.mkdir()
+    path = store / "t_1-quotation-draft.md"
+    path.write_text("draft")
+    _done_card(project, title="Draft the quote", metadata={"deliverable": str(path)},
+               result=f"Draft at {path}")
+    item = _artifacts(env, project["slug"])[0]
+    assert item["title"] == "t_1-quotation-draft.md"
+    assert item["missing"] is False
+    got = client.get(item["href"].replace("/api/projects/", "/api/registry/projects/"))
+    assert got.status_code == 200 and got.content == b"draft"
+
+
+def test_a_file_wiped_with_its_scratch_workspace_reads_missing(env):
+    _client, _state, tmp = env
+    project = _project(env)
+    ws = tmp / "ws" / "gone"
+    ws.mkdir(parents=True)
+    path = ws / "quote.pdf"
+    path.write_bytes(b"pdf")
+    _done_card(project, title="Render the quote", workspace=ws,
+               metadata={"artifacts": [str(path)]})
+    path.unlink()
+    item = _artifacts(env, project["slug"])[0]
+    assert item["href"] is None
+    assert item["missing"] is True
+    assert item["location"] == "card workspace"
+
+
+def test_a_wiped_docx_opens_the_google_doc_made_from_it(env):
+    """A run that converts ``Quote v1.0.docx`` into the Google Doc
+    ``Quote v1.0`` records ``name`` + ``doc_url``; the wiped local docx
+    opens that doc."""
+    _client, _state, tmp = env
+    project = _project(env)
+    ws = tmp / "ws" / "gone"
+    ws.mkdir(parents=True)
+    path = ws / "Quote v1.0.docx"
+    path.write_bytes(b"docx")
+    remote = "https://docs.google.com/document/d/1tt0J-wj8e2TbKXhEX1k8o_4sp4K/edit"
+    _done_card(project, title="Create the Google Doc", workspace=ws,
+               metadata={"artifacts": [str(path)], "name": "Quote v1.0",
+                         "doc_url": remote})
+    path.unlink()
+    item = next(a for a in _artifacts(env, project["slug"]) if a["source"] == "card_file")
+    assert item["title"] == "Quote v1.0.docx"
+    assert item["href"] == remote
+    assert item["missing"] is False
+
+
+def test_a_web_link_delivered_without_a_kind_is_a_url_delivery(env):
+    """An agent delivering ``link_ref=<Google Doc URL>`` with no
+    ``link_kind`` gets an openable, named deliverable."""
+    client, _state, _tmp = env
+    project = _project(env)
+    output_id = project["outputs"][0]["id"]
+    doc_id = "1tt0J-wj8e2TbKXhEX1k8o_4sp4KaH8YsVMViSbHhY1w"
+    url = f"https://docs.google.com/document/d/{doc_id}/edit"
+    _done_card(project, title="Create the Google Doc",
+               metadata={"doc_id": doc_id, "doc_name": "x", "name": "Quote v1.0"})
+    with projects_db.connect_closing() as conn:
+        did = projects_db.record_output_delivery(conn, output_id=output_id, link_ref=url)
+        legacy = projects_db.record_output_delivery(
+            conn, output_id=output_id, link_ref=url + "?legacy=1"
+        )
+        conn.execute(
+            "UPDATE project_output_deliveries SET link_kind = NULL WHERE id = ?",
+            (legacy,),
+        )
+        conn.commit()
+        stored = {
+            d["id"]: d["link_kind"]
+            for d in projects_db.get_output_deliveries(conn, output_id=output_id)
+        }
+    assert stored[did] == "url"
+
+    items = {a["id"]: a for a in _artifacts(env, project["slug"])}
+    for key in (f"d:{did}", f"d:{legacy}"):
+        item = items[key]
+        assert item["link_kind"] == "url"
+        assert item["href"].startswith(url)
+        assert item["title"] == "Quote v1.0"
+        assert item["location"] == "docs.google.com"
+
+
+def test_a_local_path_delivered_without_a_kind_is_not_a_url(env):
+    _client, _state, _tmp = env
+    project = _project(env)
+    output_id = project["outputs"][0]["id"]
+    with projects_db.connect_closing() as conn:
+        did = projects_db.record_output_delivery(
+            conn, output_id=output_id, link_ref="/tmp/quote.docx"
+        )
+        kinds = [d["link_kind"] for d in projects_db.get_output_deliveries(conn, output_id=output_id)]
+    assert kinds == [None]
+    item = _artifacts(env, project["slug"])[0]
+    assert item["id"] == f"d:{did}" and item["href"] is None
+
+
 def test_a_claimed_path_outside_the_managed_roots_is_never_served(env):
     client, _state, tmp = env
     project = _project(env)

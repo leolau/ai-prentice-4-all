@@ -39,6 +39,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, List, Optional
+from urllib.parse import urlparse
 
 from hermes_cli.sqlite_util import add_column_if_missing as _add_column_if_missing, write_txn
 from hermes_constants import get_hermes_home
@@ -1863,7 +1864,10 @@ def record_output_delivery(
     note: Optional[str] = None,
 ) -> str:
     """One delivery row per produced output (§6.1). Recurring outputs
-    accumulate one row per run."""
+    accumulate one row per run. A web link recorded without a kind is a
+    ``url`` delivery."""
+    if not link_kind and link_ref and urlparse(link_ref).scheme in ("http", "https"):
+        link_kind = "url"
     did = _new_row_id("d")
     with write_txn(conn):
         exists = conn.execute(

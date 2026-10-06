@@ -114,6 +114,24 @@ export function unattachedSentence(group: UnattachedGroup): string {
   return `${who} produced ${what} linked to any output.`;
 }
 
+/** "Other files from Run 1" — the heading when no output is waiting on
+ * these files. */
+export function otherFilesHeading(group: UnattachedGroup): string {
+  const n = group.files.length;
+  const who = group.runNo != null ? `Run ${group.runNo}` : "cards";
+  return `Other files from ${who} (${n})`;
+}
+
+/** Open outputs with nothing delivered yet — the ones an unlinked file may
+ * be holding up. */
+export function outputsAwaitingDelivery(
+  outputs: ProjectOutputWithDeliveries[],
+): ProjectOutputWithDeliveries[] {
+  return outputs.filter(
+    (o) => o.status !== "accepted" && o.status !== "dropped" && o.deliveries.length === 0,
+  );
+}
+
 export interface VersionFile {
   delivery: ProjectDelivery;
   artifact: ProjectArtifact | null;
