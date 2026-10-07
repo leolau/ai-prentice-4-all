@@ -39,8 +39,42 @@ logger = logging.getLogger(__name__)
 # regardless — replaying the full transcript would just cold-write it. So when
 # (and only when) routed to a different model, we replay a compact DIGEST to
 # minimise cold-written tokens. Same model -> full replay; different model ->
-# digest. That's the whole policy.
+# digest. On the main model a very large conversation is digested too: above
+# ``auxiliary.background_review.digest_above_tokens`` every review call
+# re-reading the whole warm transcript costs more than one cold digest whose
+# prefix the review's own later calls then reuse.
 # ---------------------------------------------------------------------------
+
+DEFAULT_DIGEST_ABOVE_TOKENS = 100_000
+
+
+def _digest_above_tokens() -> int:
+    """Main-model replay size above which the review replays a digest
+    (``auxiliary.background_review.digest_above_tokens``; 0 disables)."""
+    try:
+        from hermes_cli.config import load_config
+        cfg = load_config()
+    except Exception:
+        return DEFAULT_DIGEST_ABOVE_TOKENS
+    aux = cfg.get("auxiliary", {}) if isinstance(cfg.get("auxiliary"), dict) else {}
+    task = aux.get("background_review", {}) if isinstance(aux.get("background_review"), dict) else {}
+    raw = task.get("digest_above_tokens", DEFAULT_DIGEST_ABOVE_TOKENS)
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return DEFAULT_DIGEST_ABOVE_TOKENS
+    return max(value, 0)
+
+
+def _review_replays_digest(messages_snapshot: List[Dict], routed: bool) -> bool:
+    if routed:
+        return True
+    limit = _digest_above_tokens()
+    if not limit:
+        return False
+    from agent.model_metadata import estimate_messages_tokens_rough
+
+    return estimate_messages_tokens_rough(list(messages_snapshot or [])) > limit
 
 
 def _resolve_review_runtime(agent: Any) -> Dict[str, Any]:
@@ -775,11 +809,12 @@ def _run_review_in_thread(
                 pass
 
             try:
-                # Routed to a different model -> replay a digest (cache is cold
-                # on that model anyway, so minimise cold-written tokens). Same
-                # model -> replay the full snapshot (warm cache reads).
+                # Routed to a different model, or a conversation too large to
+                # re-read on every review call -> replay a digest. Otherwise
+                # replay the full snapshot (warm cache reads).
                 _review_history = (
-                    _digest_history(messages_snapshot) if _routed
+                    _digest_history(messages_snapshot)
+                    if _review_replays_digest(messages_snapshot, _routed)
                     else messages_snapshot
                 )
                 review_agent.run_conversation(

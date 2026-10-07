@@ -890,6 +890,25 @@ def _cmd_playbook(api: _Api, args) -> int:
             return _fail(resp)
         print(f"Playbook revision {rev} is now active.")
         return 0
+    if action == "toolsets":
+        resp = api.request("POST", f"/{slug}/playbook/toolsets", json_body={})
+        if resp.status_code != 200:
+            return _fail(resp)
+        data = resp.json()
+        if args.json:
+            _print_json(data)
+            return 0
+        filled = set(data.get("filled") or [])
+        print(
+            f"Saved playbook revision {data.get('rev')} — rev "
+            f"{data.get('from_rev')} with tool lists on {len(filled)} step(s):"
+        )
+        for step in data.get("steps") or []:
+            mark = "+" if step.get("key") in filled else " "
+            tools = ", ".join(step.get("toolsets") or []) or "(full tool surface)"
+            print(f"  {mark} {step.get('key')}: {tools}")
+        print(f"Activate it with `playbook activate {data.get('rev')}`.")
+        return 0
     print(f"projects: unknown playbook action: {action}", file=sys.stderr)
     return 2
 
@@ -1320,7 +1339,7 @@ def register_projects_subparser(
     playbook.add_argument("slug")
     playbook.add_argument(
         "playbook_action", nargs="?", default="show",
-        choices=["show", "save", "activate"],
+        choices=["show", "save", "activate", "toolsets"],
     )
     playbook.add_argument("file_or_rev", nargs="?", default="")
     playbook.add_argument("--note", default=None)

@@ -2457,6 +2457,147 @@ def _call_plan_model(prompt: str) -> str:
     return response.choices[0].message.content or ""
 
 
+_STEP_TOOLSETS_SYSTEM = (
+    "You assign tool lists to the steps of an existing execution plan. Each "
+    "step runs as its own AI worker; every toolset a worker does not need "
+    "shrinks its prompt and speeds it up. Reply with ONE JSON object and "
+    'nothing else, shaped as {"toolsets": {"<step key>": ["<toolset name>"]}}, '
+    "giving each listed step the minimal subset of the available toolsets it "
+    "needs (e.g. file + terminal for document work, web + browser for "
+    "research, the matching service toolset for Google Drive or Canva work). "
+    "Use only the available toolset names. Leave a step out only when it "
+    "genuinely needs the full tool surface."
+)
+
+
+def _step_toolsets_prompt(project, steps: list[dict], enabled_toolsets: list[str]) -> str:
+    lines = [f"Project: {project.name}", f"Goal: {project.goal or ''}", ""]
+    lines.append("Available toolsets: " + ", ".join(enabled_toolsets))
+    lines += ["", "Steps:"]
+    for step in steps:
+        lines.append(f"- {step['key']}: {step.get('title') or ''}")
+        if (step.get("body") or "").strip():
+            lines.append(f"  {step['body'].strip()}")
+    return "\n".join(lines)
+
+
+def _call_step_toolsets_model(prompt: str) -> str:
+    from agent.auxiliary_client import _get_auxiliary_task_config, call_llm
+
+    task = (
+        _PLAN_DRAFT_TASK
+        if _get_auxiliary_task_config(_PLAN_DRAFT_TASK).get("provider")
+        else _PLAN_DRAFT_FALLBACK_TASK
+    )
+    response = call_llm(
+        task,
+        messages=[
+            {"role": "system", "content": _STEP_TOOLSETS_SYSTEM},
+            {"role": "user", "content": prompt},
+        ],
+        temperature=0.2,
+        max_tokens=1500,
+    )
+    return response.choices[0].message.content or ""
+
+
+def fill_missing_step_toolsets(
+    steps: list[dict], suggested: Any, enabled_toolsets: list[str]
+) -> tuple[list[dict], list[str]]:
+    """Copy ``steps`` with the model's ``suggested`` lists on every card step
+    that has none. Names outside ``enabled_toolsets`` are dropped; a step the
+    model left out (or gave nothing usable) keeps the full surface. Returns
+    ``(steps, filled_keys)``."""
+    enabled_set = set(enabled_toolsets)
+    by_key = suggested if isinstance(suggested, dict) else {}
+    out: list[dict] = []
+    filled: list[str] = []
+    for step in steps:
+        step = dict(step)
+        if step.get("mode") != "inline" and not step.get("toolsets"):
+            raw = by_key.get(step["key"])
+            names = list(dict.fromkeys(
+                str(t).strip() for t in (raw if isinstance(raw, list) else [])
+                if isinstance(t, str) and str(t).strip() in enabled_set
+            ))
+            if names:
+                step["toolsets"] = names
+                filled.append(step["key"])
+        out.append(step)
+    return out, filled
+
+
+@router.post("/{slug}/playbook/toolsets")
+async def fill_playbook_toolsets_route(request: Request) -> dict[str, Any]:
+    """Propose the active plan again with a tool list on every step that
+    lacks one, so its card workers load only what they need. Lands as an
+    ordinary inactive revision — activation stays human (§7.2)."""
+    project, _role, _profiles, principal = await _require_write(
+        request, judgement=True
+    )
+    _refuse_if_archived(project, "revising its plan")
+
+    def _fill_sync() -> dict:
+        with projects_db.connect_closing() as conn:
+            active = projects_db.get_playbook(conn, project.id)
+        if not active:
+            raise HTTPException(status_code=409, detail="the project has no active plan")
+        steps = active.get("steps") or []
+        missing = [
+            s for s in steps if s.get("mode") != "inline" and not s.get("toolsets")
+        ]
+        if not missing:
+            raise HTTPException(
+                status_code=409, detail="every step already has a tool list"
+            )
+        enabled = projects_run._enabled_toolsets_for_profile(
+            project.host_profile or ""
+        )
+        if not enabled:
+            raise HTTPException(
+                status_code=409,
+                detail="the host profile's toolsets are unavailable",
+            )
+        try:
+            data = _extract_json_object(
+                _call_step_toolsets_model(
+                    _step_toolsets_prompt(project, missing, enabled)
+                )
+            )
+        except Exception as exc:  # noqa: BLE001 — reported, not raised raw
+            raise HTTPException(
+                status_code=502, detail=_plan_draft_error_detail(exc)
+            )
+        new_steps, filled = fill_missing_step_toolsets(
+            steps, data.get("toolsets"), enabled
+        )
+        if not filled:
+            raise HTTPException(
+                status_code=502, detail="the model suggested no usable tool lists"
+            )
+        with projects_db.connect_closing() as conn:
+            rev = projects_db.save_playbook_rev(
+                conn,
+                project_id=project.id,
+                body=str(active.get("body") or ""),
+                steps=new_steps,
+                created_by=principal.user_id,
+                note=f"tool lists added to rev {active.get('rev')} by the agent",
+            )
+        return {
+            "rev": rev,
+            "active": False,
+            "from_rev": active.get("rev"),
+            "filled": filled,
+            "steps": [
+                {"key": s["key"], "title": s.get("title"), "toolsets": s.get("toolsets") or []}
+                for s in new_steps
+            ],
+        }
+
+    return await asyncio.to_thread(_fill_sync)
+
+
 def _plan_draft_error_detail(exc: Exception) -> str:
     """Translate provider failures into an actionable detail for the UI."""
     err = str(exc)
