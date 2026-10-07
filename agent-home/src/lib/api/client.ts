@@ -50,6 +50,7 @@ import type {
   ModelOptionsResponse,
   ModelSetResponse,
   ModelsAnalyticsResponse,
+  ModelsPerformanceResponse,
   AuxiliaryModelsResponse,
   ProviderValidateResponse,
   MemoryProjection,
@@ -2357,6 +2358,16 @@ export class HermesApiClient {
   /** Per-model usage/cost analytics for the "In use" list. */
   async modelsAnalytics(days = 30): Promise<ModelsAnalyticsResponse> {
     return this.request(`/api/analytics/models?days=${days}`);
+  }
+
+  /** Per-call latency/failure/token telemetry for the Performance section. */
+  async modelsPerformance(
+    days = 7,
+    months = 6,
+  ): Promise<ModelsPerformanceResponse> {
+    return this.request(
+      `/api/analytics/models/performance?days=${days}&months=${months}`,
+    );
   }
 
   /** Live-probe a provider credential before persisting it. */

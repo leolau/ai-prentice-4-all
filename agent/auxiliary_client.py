@@ -41,6 +41,7 @@ Payment / credit exhaustion fallback:
 """
 
 import contextlib
+import functools
 import json
 import logging
 import os
@@ -5902,7 +5903,7 @@ def _obj_get(obj: Any, key: str, default: Any = None) -> Any:
     return value
 
 
-def call_llm(
+def _call_llm_impl(
     task: str = None,
     *,
     provider: str = None,
@@ -6513,7 +6514,7 @@ def extract_content_or_reasoning(response) -> str:
     return ""
 
 
-async def async_call_llm(
+async def _async_call_llm_impl(
     task: str = None,
     *,
     provider: str = None,
@@ -6941,3 +6942,113 @@ async def async_call_llm(
                 logger.debug("Auxiliary (async): cache eviction after connection error failed",
                              exc_info=True)
         raise
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Public entry points — thin telemetry shells over the implementations
+# above. Every auxiliary provider call lands in the per-profile
+# ``api_call_log`` (Models ▸ Performance) so aux-role models show their real
+# latency/failure rates; the impl functions own request lifecycle unchanged.
+# ─────────────────────────────────────────────────────────────────────────
+
+def _aux_usage_dict(response) -> Dict[str, int]:
+    """Normalize an aux response's usage object/dict to api_call_log keys."""
+    usage = getattr(response, "usage", None)
+    if usage is None:
+        return {}
+
+    def _get(*names: str) -> int:
+        for name in names:
+            if isinstance(usage, dict):
+                v = usage.get(name)
+            else:
+                v = getattr(usage, name, None)
+            if v:
+                try:
+                    return int(v)
+                except (TypeError, ValueError):
+                    continue
+        return 0
+
+    return {
+        "input_tokens": _get("input_tokens", "prompt_tokens"),
+        "output_tokens": _get("output_tokens", "completion_tokens"),
+        "cache_read_tokens": _get("cache_read_tokens"),
+        "reasoning_tokens": _get("reasoning_tokens"),
+    }
+
+
+def _aux_telemetry_labels(task, kwargs) -> Tuple[Optional[str], Optional[str]]:
+    """Best-effort (provider, model) for the log row — a config read only,
+    so an error raised mid-resolution still records with what resolved."""
+    try:
+        provider, model, *_ = _resolve_task_provider_model(
+            task,
+            kwargs.get("provider"),
+            kwargs.get("model"),
+            kwargs.get("base_url"),
+            kwargs.get("api_key"),
+        )
+        return provider, model
+    except Exception:
+        return None, None
+
+
+def _record_aux_api_call(
+    task, started_at: float, status: str,
+    *, provider=None, model=None, response=None, exc: BaseException = None,
+) -> None:
+    """One aux-call attempt into api_call_log — fire-and-forget."""
+    try:
+        from hermes_state import record_api_call as _record
+        _record(
+            None,
+            started_at=started_at,
+            ts=time.time(),
+            caller=f"aux:{task}" if task else "aux",
+            model=(getattr(response, "model", None) or model) if response else model,
+            provider=provider,
+            duration_ms=(time.time() - started_at) * 1000,
+            status=status,
+            error_type=type(exc).__name__ if exc else None,
+            status_code=getattr(exc, "status_code", None) or getattr(exc, "code", None),
+            usage=_aux_usage_dict(response) if response is not None else {},
+        )
+    except Exception:
+        pass
+
+
+@functools.wraps(_call_llm_impl)
+def call_llm(task: str = None, **kwargs) -> Any:
+    """Synchronous auxiliary LLM call — ``_call_llm_impl`` plus api_call_log
+    telemetry. ``stream=True`` responses return unlogged: the iterator is
+    consumed by the caller, so duration here would only measure setup."""
+    started = time.time()
+    provider, model = _aux_telemetry_labels(task, kwargs)
+    try:
+        response = _call_llm_impl(task, **kwargs)
+    except Exception as exc:
+        _record_aux_api_call(task, started, "error",
+                             provider=provider, model=model, exc=exc)
+        raise
+    if kwargs.get("stream"):
+        return response
+    _record_aux_api_call(task, started, "ok",
+                         provider=provider, model=model, response=response)
+    return response
+
+
+@functools.wraps(_async_call_llm_impl)
+async def async_call_llm(task: str = None, **kwargs) -> Any:
+    """Async twin of ``call_llm`` — same telemetry shell."""
+    started = time.time()
+    provider, model = _aux_telemetry_labels(task, kwargs)
+    try:
+        response = await _async_call_llm_impl(task, **kwargs)
+    except Exception as exc:
+        _record_aux_api_call(task, started, "error",
+                             provider=provider, model=model, exc=exc)
+        raise
+    _record_aux_api_call(task, started, "ok",
+                         provider=provider, model=model, response=response)
+    return response

@@ -4139,6 +4139,31 @@ def run_conversation(
                     assistant_message.content = str(raw)
 
             try:
+                # Always-on per-call ledger (Models ▸ Performance) — separate
+                # from the hook below, which only fires when a plugin
+                # subscribes. Fire-and-forget: never blocks the loop.
+                from hermes_state import record_api_call as _record_api_call
+                _record_api_call(
+                    getattr(agent, "_session_db", None),
+                    request_id=api_request_id,
+                    started_at=api_start_time,
+                    ts=api_start_time + api_duration,
+                    session_id=agent.session_id or "",
+                    task_id=effective_task_id,
+                    platform=agent.platform or "",
+                    caller="main",
+                    model=getattr(response, "model", None) or agent.model,
+                    provider=agent.provider,
+                    duration_ms=api_duration * 1000,
+                    status="ok",
+                    finish_reason=finish_reason,
+                    retry_count=retry_count,
+                    usage=agent._usage_summary_for_api_request_hook(response),
+                )
+            except Exception:
+                pass
+
+            try:
                 from hermes_cli.plugins import (
                     has_hook,
                     invoke_hook as _invoke_hook,

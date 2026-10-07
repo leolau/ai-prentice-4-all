@@ -2100,6 +2100,66 @@ export interface ModelsAnalyticsResponse {
   period_days: number;
 }
 
+/* ── Models ▸ Performance (per-call ledger) ────────────────────────── */
+
+/** One day of one model's attempts inside the summary window. */
+export interface ModelPerfDaily {
+  date: string;
+  calls: number;
+  failures: number;
+  tokens: number;
+  avg_ms: number | null;
+}
+
+/** One model's stats over the summary window (last `days` days). */
+export interface ModelPerformanceEntry {
+  model: string;
+  provider: string;
+  /** Which slots the calls came through: "main", "vision", "compression"… */
+  caller_roles: string[];
+  calls: number;
+  failures: number;
+  /** (calls − failures) / calls; null when calls is 0. */
+  success_rate: number | null;
+  latency_ms: {
+    min: number | null;
+    avg: number | null;
+    p95: number | null;
+    max: number | null;
+  };
+  tokens: {
+    input: number;
+    output: number;
+    cache_read: number;
+    reasoning: number;
+  };
+  /** Session-table cost over the same window, keyed by model. */
+  cost_usd: number;
+  daily: ModelPerfDaily[];
+}
+
+/**
+ * One model's stats for one calendar month. `avg_ms`/`failures` are null
+ * for months that predate the api_call_log ledger — those months still
+ * report calls/tokens from the sessions table.
+ */
+export interface ModelPerfMonth {
+  month: string;
+  model: string;
+  calls: number;
+  tokens: number;
+  avg_ms: number | null;
+  failures: number | null;
+}
+
+export interface ModelsPerformanceResponse {
+  period: { days: number; months: number };
+  models: ModelPerformanceEntry[];
+  monthly: ModelPerfMonth[];
+  /** True when the ledger has no rows yet — show a "collecting" note. */
+  collecting: boolean;
+}
+
 /** Aggregated payload the page's BFF route returns in one shot. */
 export interface ModelsOverviewResponse {
   info: ModelInfo;

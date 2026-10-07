@@ -33,6 +33,27 @@ function jsonResponse(status: number, body: unknown): Response {
   });
 }
 
+/** Empty performance payload — the Models page lazy-fetches it alongside
+ * pinned; tests route by URL so each section gets its own body. */
+const EMPTY_PERF = {
+  period: { days: 7, months: 6 },
+  models: [],
+  monthly: [],
+  collecting: true,
+};
+
+/** fetch stub that answers /api/models/pinned with `pinnedBody` and
+ * /api/models/performance with an empty (still-collecting) read. */
+function pinnedFetch(pinnedBody: unknown) {
+  return vi.fn().mockImplementation((input: RequestInfo | URL) => {
+    const url = String(input);
+    if (url.includes("/api/models/performance")) {
+      return Promise.resolve(jsonResponse(200, EMPTY_PERF));
+    }
+    return Promise.resolve(jsonResponse(200, pinnedBody));
+  });
+}
+
 afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
@@ -40,20 +61,18 @@ afterEach(() => {
 
 describe("ModelsView pinned cards", () => {
   it("shows pinned cards with model, status and a link to the card", async () => {
-    const fetchMock = vi.fn().mockResolvedValue(
-      jsonResponse(200, {
-        pinned: [
-          {
-            project_slug: "canva-deck",
-            project_name: "Canva deck",
-            task_id: "t_abc",
-            title: "Generate slide 118",
-            model: "deepseek-chat",
-            status: "blocked",
-          },
-        ],
-      }),
-    );
+    const fetchMock = pinnedFetch({
+      pinned: [
+        {
+          project_slug: "canva-deck",
+          project_name: "Canva deck",
+          task_id: "t_abc",
+          title: "Generate slide 118",
+          model: "deepseek-chat",
+          status: "blocked",
+        },
+      ],
+    });
     vi.stubGlobal("fetch", fetchMock);
 
     const { findByText, container } = render(<ModelsView initial={OVERVIEW} />);
@@ -65,9 +84,7 @@ describe("ModelsView pinned cards", () => {
   });
 
   it("renders no section when nothing is pinned", async () => {
-    const fetchMock = vi
-      .fn()
-      .mockResolvedValue(jsonResponse(200, { pinned: [] }));
+    const fetchMock = pinnedFetch({ pinned: [] });
     vi.stubGlobal("fetch", fetchMock);
 
     const { container } = render(<ModelsView initial={OVERVIEW} />);

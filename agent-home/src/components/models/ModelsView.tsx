@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
+import { ModelPerformance } from "@/components/models/ModelPerformance";
 import { ModelPickerSheet } from "@/components/models/ModelPickerSheet";
 import { Pill } from "@/components/ui/Pill";
 import { Spinner } from "@/components/ui/Spinner";
@@ -10,6 +11,7 @@ import { withProfileQuery } from "@/lib/chat/profile";
 import type {
   AuxTaskAssignment,
   ModelsOverviewResponse,
+  ModelsPerformanceResponse,
   ModelUsageEntry,
   PinnedModelCard,
 } from "@/types";
@@ -96,6 +98,27 @@ export function ModelsView({
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [pinned, setPinned] = useState<PinnedModelCard[] | null>(null);
+  const [perf, setPerf] = useState<ModelsPerformanceResponse | null>(null);
+
+  // Lazy: the per-call ledger read is additive — it loads after first
+  // paint so the config sections never wait on it.
+  useEffect(() => {
+    let active = true;
+    (async () => {
+      try {
+        const res = await fetch(withProfileQuery("/api/models/performance", profile), {
+          cache: "no-store",
+        });
+        if (!res.ok) return;
+        if (active) setPerf((await res.json()) as ModelsPerformanceResponse);
+      } catch {
+        // Section stays hidden on failure — additive, not critical.
+      }
+    })();
+    return () => {
+      active = false;
+    };
+  }, [profile]);
 
   // Lazy: the pinned-cards fan-out (projects list → per-project boards) is
   // too heavy for first paint, so it loads after the page is up. `null`
@@ -239,6 +262,9 @@ export function ModelsView({
           ) : null}
         </div>
       </section>
+
+      {/* ── Performance (per-call telemetry) ── */}
+      <ModelPerformance perf={perf} />
 
       {/* ── In use ── */}
       <section>
