@@ -351,3 +351,115 @@ def test_unblock_gates(env):
     resp = client.post(f"{PREFIX}/{slug}/cards/{card}/unblock", json={"reason": "x" * 2001})
     assert resp.status_code == 422
     assert _status(card) == "blocked"
+
+
+# ---------------------------------------------------------------------------
+# POST /{slug}/cards/{id}/approvals — a worker's approval, answered here
+# ---------------------------------------------------------------------------
+
+
+def _ask_approval(card, key, label=None):
+    with kanban_db.connect_closing() as bconn:
+        return kanban_db.request_task_approval(
+            bconn, card, [(key, label or key)], detail=f"{key} {{}}"
+        )
+
+
+def _pending_on_board(client, slug, card):
+    board = client.get(f"{PREFIX}/{slug}/board").json()
+    for column in board["columns"]:
+        for task in column["tasks"]:
+            if task["id"] == card:
+                return task.get("pending_approvals")
+    raise AssertionError(f"{card} is not on the board")
+
+
+def test_board_shows_what_a_blocked_card_waits_to_be_allowed(env):
+    client, _state = env
+    project = _project(env)
+    slug = project["slug"]
+    card = _blocked_card(env, slug)
+    assert _ask_approval(card, "mcp_canva_create_upload_url") == "pending"
+    pending = _pending_on_board(client, slug, card)
+    assert [p["key"] for p in pending] == ["mcp_canva_create_upload_url"]
+    assert pending[0]["detail"] == "mcp_canva_create_upload_url {}"
+
+
+def test_allowing_the_last_approval_comments_and_releases_the_card(env):
+    client, state = env
+    project = _project(env)
+    slug = project["slug"]
+    card = _blocked_card(env, slug)
+    _ask_approval(card, "mcp_canva_create_upload_url")
+    state["actor"] = MEMBER_P
+    resp = client.post(
+        f"{PREFIX}/{slug}/cards/{card}/approvals",
+        json={"key": "mcp_canva_create_upload_url", "decision": "approve"},
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["status"] == "ready"
+    assert resp.json()["pending_approvals"] == []
+    assert _status(card) == "ready"
+    comments = client.get(f"{PREFIX}/{slug}/cards/{card}").json()["comments"]
+    assert comments[-1]["author"] == "user:ada"
+    assert "Approved for this card: mcp_canva_create_upload_url" in comments[-1]["body"]
+    # The worker's next ask goes through.
+    assert _ask_approval(card, "mcp_canva_create_upload_url") == "approved"
+
+
+def test_denying_records_it_for_the_next_worker(env):
+    client, _state = env
+    project = _project(env)
+    slug = project["slug"]
+    card = _blocked_card(env, slug)
+    _ask_approval(card, "mcp_canva_publish_brand_template")
+    resp = client.post(
+        f"{PREFIX}/{slug}/cards/{card}/approvals",
+        json={"key": "mcp_canva_publish_brand_template", "decision": "deny"},
+    )
+    assert resp.status_code == 200, resp.text
+    assert _status(card) == "ready"
+    body = client.get(f"{PREFIX}/{slug}/cards/{card}").json()["comments"][-1]["body"]
+    assert body.startswith("Denied for this card: mcp_canva_publish_brand_template")
+    assert _ask_approval(card, "mcp_canva_publish_brand_template") == "denied"
+
+
+def test_a_card_stays_blocked_while_another_approval_is_pending(env):
+    client, _state = env
+    project = _project(env)
+    slug = project["slug"]
+    card = _blocked_card(env, slug)
+    _ask_approval(card, "mcp_canva_create_upload_url")
+    _ask_approval(card, "mcp_canva_get_design_pages")
+    resp = client.post(
+        f"{PREFIX}/{slug}/cards/{card}/approvals",
+        json={"key": "mcp_canva_create_upload_url", "decision": "approve"},
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["status"] == "blocked"
+    assert [p["key"] for p in resp.json()["pending_approvals"]] == [
+        "mcp_canva_get_design_pages"
+    ]
+    assert _status(card) == "blocked"
+
+
+def test_approval_refusals_and_gates(env):
+    client, state = env
+    project = _project(env)
+    slug = project["slug"]
+    card = _blocked_card(env, slug)
+    url = f"{PREFIX}/{slug}/cards/{card}/approvals"
+    # Nothing pending under that key: 409, and no comment written.
+    resp = client.post(url, json={"key": "mcp_canva_x", "decision": "approve"})
+    assert resp.status_code == 409
+    assert client.get(f"{PREFIX}/{slug}/cards/{card}").json()["comments"] == []
+    assert client.post(url, json={"key": "k", "decision": "maybe"}).status_code == 422
+    assert client.post(url, json={"decision": "approve"}).status_code == 422
+    assert client.post(
+        f"{PREFIX}/{slug}/cards/task_nope/approvals",
+        json={"key": "k", "decision": "approve"},
+    ).status_code == 404
+    _ask_approval(card, "mcp_canva_x")
+    state["actor"] = VIEWER_P
+    assert client.post(url, json={"key": "mcp_canva_x", "decision": "approve"}).status_code == 403
+    assert _status(card) == "blocked"

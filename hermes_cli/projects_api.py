@@ -1665,9 +1665,21 @@ async def project_board(request: Request) -> dict[str, Any]:
 
     def _board_sync() -> dict:
         with _board_conn(project) as bconn:
-            return kanban_view.build_board_view(
+            view = kanban_view.build_board_view(
                 bconn, project_id=project.id, principal=principal
             )
+            blocked = [
+                task
+                for column in view["columns"]
+                for task in column["tasks"]
+                if task["status"] == "blocked"
+            ]
+            pending = kanban_db.list_task_approvals(
+                bconn, [task["id"] for task in blocked]
+            )
+            for task in blocked:
+                task["pending_approvals"] = pending.get(task["id"], [])
+            return view
 
     return await asyncio.to_thread(_board_sync)
 

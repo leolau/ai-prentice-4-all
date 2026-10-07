@@ -1,6 +1,6 @@
 """The Projects board's human verbs and its context read (redesign: board).
 
-Three small, additive routes beside ``projects_api``'s card routes:
+Small, additive routes beside ``projects_api``'s card routes:
 
 - ``GET  /{slug}/board/context`` — what the board alone cannot say: which
   run created each card, and whether the open run is stalled (the same
@@ -10,6 +10,9 @@ Three small, additive routes beside ``projects_api``'s card routes:
   made ready in one request, each through the same column-move routing as
   ``PATCH /{slug}/cards/{id}`` (one request, one idempotency key, so a
   repeated click can never approve a card twice from the browser).
+- ``POST /{slug}/cards/{task_id}/approvals`` — answer an approval a card's
+  worker recorded (it had no human to prompt); releases the card once
+  nothing else is pending.
 - ``POST /{slug}/cards/{task_id}/unblock`` — blocked → ready with an
   optional reason, which lands on the card's comment thread first so the
   worker that picks the card up reads why it was released.
@@ -247,6 +250,74 @@ async def unblock_card(request: Request, task_id: str) -> dict[str, Any]:
             if not kanban_db.unblock_task(bconn, task_id):
                 raise ValueError("the card is not blocked")
             return kanban_view.task_dict(kanban_db.get_task(bconn, task_id))
+
+    try:
+        return await asyncio.to_thread(_sync)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="card not found")
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+
+
+# ---------------------------------------------------------------------------
+# POST /{slug}/cards/{task_id}/approvals
+# ---------------------------------------------------------------------------
+
+
+@router.post("/{slug}/cards/{task_id}/approvals")
+async def decide_card_approval(request: Request, task_id: str) -> dict[str, Any]:
+    """Answer an approval a card's worker asked for, ``{key, decision}``.
+
+    ``decision`` is ``approve`` or ``deny``. The answer lands on the card's
+    comment thread, and once nothing else is pending on a blocked card it
+    is released, so the next worker either makes the approved call or
+    reads that it was denied.
+    """
+    project, _role, _profiles, principal = await _require_write(
+        request, judgement=True
+    )
+    _refuse_if_archived(project, "answering a card's approval")
+    body = await _json_object(request)
+    key = str(body.get("key") or "").strip()
+    decision = str(body.get("decision") or "").strip()
+    if not key:
+        raise HTTPException(status_code=422, detail="key is required")
+    if decision not in ("approve", "deny"):
+        raise HTTPException(
+            status_code=422, detail="decision must be 'approve' or 'deny'"
+        )
+    approve = decision == "approve"
+    actor = f"user:{principal.user_id}"
+
+    def _sync() -> dict:
+        with _board_conn(project) as bconn:
+            task = kanban_db.get_task(bconn, task_id)
+            if task is None or task.project_id != project.id:
+                raise KeyError(task_id)
+            label = kanban_db.decide_task_approval(
+                bconn, task_id, key, approve=approve, actor=actor
+            )
+            if label is None:
+                raise ValueError("nothing is waiting for that approval")
+            kanban_db.add_comment(
+                bconn,
+                task_id,
+                actor,
+                f"Approved for this card: {label}. The call will go through now."
+                if approve
+                else f"Denied for this card: {label}. Do not use it or get the "
+                "same effect another way; finish without it, or block the card "
+                "and say what cannot be done without it.",
+            )
+            pending = kanban_db.list_task_approvals(bconn, [task_id]).get(task_id, [])
+            if task.status == "blocked" and not pending:
+                kanban_db.unblock_task(bconn, task_id)
+            refreshed = kanban_db.get_task(bconn, task_id)
+            if refreshed is None:
+                raise KeyError(task_id)
+            out = kanban_view.task_dict(refreshed)
+            out["pending_approvals"] = pending
+            return out
 
     try:
         return await asyncio.to_thread(_sync)

@@ -146,6 +146,17 @@ def _block_message(tool_name: str, reason: str) -> str:
             f"'{tool_name}' requires user approval before it runs and the user "
             f"did not respond in time. {tail}"
         )
+    if reason == "card_pending":
+        return (
+            f"'{tool_name}' requires user approval before it runs, and a card "
+            "worker cannot ask them directly. The call was NOT executed; the "
+            "request is now recorded on your card. Do NOT retry it or get the "
+            "same effect another way (a different tool, a script, or a saved "
+            "credential). Call kanban_block with kind=\"needs_input\" and a "
+            f"reason that starts \"Approval needed: {tool_name}\" and says what "
+            "you want it for, then stop. Once the user approves it on the "
+            "project page the card runs again and the call will go through."
+        )
     if reason in ("no_surface", "undeliverable", "error"):
         detail = {
             "no_surface": (

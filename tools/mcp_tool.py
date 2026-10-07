@@ -96,7 +96,7 @@ import threading
 import time
 from typing import Callable
 from datetime import datetime
-from typing import Any, Coroutine, Dict, List, Optional
+from typing import Any, Coroutine, Dict, Iterable, List, Optional
 from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
@@ -4474,7 +4474,26 @@ def register_mcp_servers(servers: Dict[str, dict]) -> List[str]:
     return _existing_tool_names()
 
 
-def discover_mcp_tools() -> List[str]:
+def mcp_servers_for_toolsets(
+    servers: Dict[str, dict], toolsets: Iterable[str]
+) -> Dict[str, dict]:
+    """The configured servers a session limited to ``toolsets`` can reach.
+
+    A server's tools register under the ``mcp-<name>`` toolset with ``<name>``
+    as its alias (see ``_register_server_tools``), so either spelling reaches
+    it; ``all`` / ``*`` reach every server.
+    """
+    wanted = {name.strip() for name in toolsets if name and name.strip()}
+    if wanted & {"all", "*"}:
+        return dict(servers)
+    return {
+        name: cfg
+        for name, cfg in servers.items()
+        if name in wanted or f"mcp-{name}" in wanted
+    }
+
+
+def discover_mcp_tools(only_toolsets: Optional[Iterable[str]] = None) -> List[str]:
     """Entry point: load config, connect to MCP servers, register tools.
 
     Called from ``model_tools`` after ``discover_builtin_tools()``. Safe to call even when
@@ -4482,6 +4501,10 @@ def discover_mcp_tools() -> List[str]:
 
     Idempotent for already-connected servers. If some servers failed on a
     previous call, only the missing ones are retried.
+
+    ``only_toolsets`` limits the connection to the servers those toolsets
+    reach (``mcp_servers_for_toolsets``) — a one-shot run that can only call
+    its own toolsets never spawns the rest. ``None`` connects every server.
 
     Returns:
         List of all registered MCP tool names.
@@ -4491,6 +4514,15 @@ def discover_mcp_tools() -> List[str]:
         return []
 
     servers = _load_mcp_config()
+    if servers and only_toolsets is not None:
+        scoped = mcp_servers_for_toolsets(servers, only_toolsets)
+        skipped = sorted(set(servers) - set(scoped))
+        if skipped:
+            logger.info(
+                "MCP: not starting %d server(s) outside this run's toolsets: %s",
+                len(skipped), ", ".join(skipped),
+            )
+        servers = scoped
     if not servers:
         logger.debug("No MCP servers configured")
         return []

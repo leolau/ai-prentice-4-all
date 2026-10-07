@@ -2642,6 +2642,20 @@ export class HermesApiClient {
       { method: "POST", json: reason ? { reason } : {} },
     );
   }
+
+  /** Answer an approval the card's worker asked for; releases the card once
+   * nothing else is pending. */
+  async decideProjectCardApproval(
+    slug: string,
+    taskId: string,
+    key: string,
+    decision: "approve" | "deny",
+  ): Promise<import("@/types").ProjectBoardTask> {
+    return this.request(
+      `/api/registry/projects/${encodeURIComponent(slug)}/cards/${encodeURIComponent(taskId)}/approvals`,
+      { method: "POST", json: { key, decision } },
+    );
+  }
 }
 
 /**
