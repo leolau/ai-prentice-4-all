@@ -131,3 +131,91 @@ def test_idle_status_and_archived_refusal(env):
     with projects_db.connect_closing() as conn:
         assert projects_db.archive_project(conn, created["id"])
     assert client.post(f"/api/registry/projects/{slug}/playbook/draft").status_code == 409
+
+
+def _active_plan(env, steps) -> tuple[str, int]:
+    created = _create(env)
+    with projects_db.connect_closing() as conn:
+        rev = projects_db.save_playbook_rev(
+            conn, project_id=created["id"], body="The approach.", steps=steps
+        )
+        assert projects_db.activate_playbook_rev(conn, created["id"], rev)
+    return created["slug"], rev
+
+
+def test_toolsets_fill_proposes_lists_for_unstamped_steps(env, monkeypatch):
+    client, _state = env
+    slug, rev = _active_plan(env, [
+        {"key": "research", "title": "Research the brief"},
+        {"key": "draft", "title": "Draft the doc", "depends_on": ["research"],
+         "toolsets": ["file"]},
+        {"key": "upload", "title": "Upload to Drive", "depends_on": ["draft"]},
+    ])
+    monkeypatch.setattr(
+        projects_api.projects_run, "_enabled_toolsets_for_profile",
+        lambda profile: ["file", "terminal", "web", "google-workspace"],
+    )
+    seen = {}
+
+    def fake_model(prompt):
+        seen["prompt"] = prompt
+        return json.dumps({"toolsets": {
+            "research": ["web", "file", "made-up"],
+            "draft": ["terminal"],
+            "upload": ["google-workspace"],
+        }})
+
+    monkeypatch.setattr(projects_api, "_call_step_toolsets_model", fake_model)
+
+    resp = client.post(f"/api/registry/projects/{slug}/playbook/toolsets")
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    assert data["rev"] == rev + 1 and data["active"] is False
+    assert data["filled"] == ["research", "upload"]
+    assert "Upload to Drive" in seen["prompt"]
+    assert "Draft the doc" not in seen["prompt"]
+    assert "google-workspace" in seen["prompt"]
+
+    playbook = client.get(f"/api/registry/projects/{slug}/playbook").json()
+    assert playbook["active"]["rev"] == rev
+    with projects_db.connect_closing() as conn:
+        proj = projects_db.get_project(conn, slug)
+        proposed = projects_db.get_playbook(conn, proj.id, rev=data["rev"])
+    by_key = {s["key"]: s for s in proposed["steps"]}
+    assert by_key["research"]["toolsets"] == ["web", "file"]
+    assert by_key["draft"]["toolsets"] == ["file"]
+    assert by_key["upload"]["toolsets"] == ["google-workspace"]
+    assert by_key["upload"]["depends_on"] == ["draft"]
+    assert proposed["body"] == "The approach."
+
+
+def test_toolsets_fill_refuses_when_nothing_to_fill(env, monkeypatch):
+    client, _state = env
+    slug, _rev = _active_plan(env, [
+        {"key": "a", "title": "A", "toolsets": ["file"]},
+    ])
+    called = []
+    monkeypatch.setattr(
+        projects_api, "_call_step_toolsets_model", lambda p: called.append(p) or "{}"
+    )
+    resp = client.post(f"/api/registry/projects/{slug}/playbook/toolsets")
+    assert resp.status_code == 409
+    assert "already has a tool list" in resp.json()["detail"]
+    assert called == []
+
+
+def test_toolsets_fill_without_usable_suggestion_saves_nothing(env, monkeypatch):
+    client, _state = env
+    slug, rev = _active_plan(env, [{"key": "a", "title": "A"}])
+    monkeypatch.setattr(
+        projects_api.projects_run, "_enabled_toolsets_for_profile",
+        lambda profile: ["file"],
+    )
+    monkeypatch.setattr(
+        projects_api, "_call_step_toolsets_model",
+        lambda p: json.dumps({"toolsets": {"a": ["browser"]}}),
+    )
+    resp = client.post(f"/api/registry/projects/{slug}/playbook/toolsets")
+    assert resp.status_code == 502
+    revs = client.get(f"/api/registry/projects/{slug}/playbook").json()["revisions"]
+    assert [r["rev"] for r in revs] == [rev]

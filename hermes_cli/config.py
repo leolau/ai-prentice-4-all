@@ -1675,8 +1675,8 @@ DEFAULT_CONFIG = {
         # cost. A different model can't reuse the main prompt cache anyway, so
         # the fork automatically replays a compact digest instead of the full
         # transcript when routed (minimises the cold-write). Same model = full
-        # replay; different model = digest. Quality holds (memory capture
-        # identical, skill near-identical in benchmarks).
+        # replay up to digest_above_tokens; different model = digest. Quality
+        # holds (memory capture identical, skill near-identical in benchmarks).
         "background_review": {
             "provider": "auto",
             "model": "",
@@ -1684,6 +1684,10 @@ DEFAULT_CONFIG = {
             "api_key": "",
             "timeout": 120,
             "extra_body": {},
+            # Same-model reviews of a conversation larger than this (rough
+            # tokens) replay the compact digest instead of the full
+            # transcript. 0 = always replay in full.
+            "digest_above_tokens": 100000,
         },
         "moa_reference": {
             "provider": "auto",
