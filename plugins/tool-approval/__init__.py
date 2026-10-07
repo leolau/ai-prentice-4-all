@@ -155,7 +155,7 @@ def _block_message(tool_name: str, reason: str) -> str:
             "credential). Call kanban_block with kind=\"needs_input\" and a "
             f"reason that starts \"Approval needed: {tool_name}\" and says what "
             "you want it for, then stop. Once the user approves it on the "
-            "project page the card runs again and the call will go through."
+            "card, it runs again and the call will go through."
         )
     if reason in ("no_surface", "undeliverable", "error"):
         detail = {

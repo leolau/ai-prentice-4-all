@@ -21,10 +21,14 @@ export function CardActions({
   slug,
   taskId,
   status,
+  awaitingApproval = false,
 }: {
   slug: string;
   taskId: string;
   status: string;
+  /** A blocked card waiting on an approval is released by answering it,
+   * not by Make ready (its worker would only ask again). */
+  awaitingApproval?: boolean;
 }) {
   // One lock for the card: busy from the click until the refreshed page
   // has rendered.
@@ -74,7 +78,7 @@ export function CardActions({
           </ActionButton>
         </BusyRegion>
       ) : null}
-      {status === "blocked" ? (
+      {status === "blocked" && !awaitingApproval ? (
         <BusyRegion busy={busy === "ready"} label="Making ready…">
           <ActionButton
             busy={busy === "ready"}

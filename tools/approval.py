@@ -180,7 +180,7 @@ def _card_command_block(verdict: str, description: str) -> dict:
             f"on your card. {no_workaround} Call kanban_block with "
             "kind=\"needs_input\" and a reason that starts \"Approval needed:\" "
             "and says what it is for, then stop. Once the user approves it on "
-            "the project page the card runs again and it will go through."
+            "the card, it runs again and it will go through."
         )
         outcome = "pending"
     else:

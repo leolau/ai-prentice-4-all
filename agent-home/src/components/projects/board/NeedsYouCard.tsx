@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 
 import { ActionButton } from "@/components/projects/ActionButton";
+import { ApprovalDetail } from "@/components/projects/CardApprovals";
 import { CardTile, cardHref } from "@/components/projects/board/CardTile";
 import {
   isTaskRow,
@@ -188,9 +189,9 @@ export function NeedsYouCard({
         >
           <div className="font-medium">Waiting on you: allow {approval.label}?</div>
           {approval.detail ? (
-            <details className="mt-0.5 text-[var(--color-muted)]">
-              <summary className="cursor-pointer">What it wants to run</summary>
-              <pre className="mt-1 max-h-40 overflow-auto whitespace-pre-wrap break-all">{approval.detail}</pre>
+            <details className="mt-0.5">
+              <summary className="cursor-pointer text-[var(--color-muted)]">What it wants to do</summary>
+              <ApprovalDetail approval={approval} />
             </details>
           ) : null}
           {canAct ? (

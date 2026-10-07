@@ -463,3 +463,25 @@ def test_approval_refusals_and_gates(env):
     state["actor"] = VIEWER_P
     assert client.post(url, json={"key": "mcp_canva_x", "decision": "approve"}).status_code == 403
     assert _status(card) == "blocked"
+
+
+def test_card_page_shows_what_a_blocked_card_waits_to_be_allowed(env):
+    client, _state = env
+    project = _project(env)
+    slug = project["slug"]
+    card = _blocked_card(env, slug)
+    assert client.get(f"{PREFIX}/{slug}/cards/{card}").json()["pending_approvals"] == []
+    _ask_approval(card, "mcp_canva_export_design")
+    _ask_approval(card, "script execution via -e/-c flag")
+    pending = client.get(f"{PREFIX}/{slug}/cards/{card}").json()["pending_approvals"]
+    assert [p["key"] for p in pending] == [
+        "mcp_canva_export_design",
+        "script execution via -e/-c flag",
+    ]
+    assert pending[0]["detail"] == "mcp_canva_export_design {}"
+    client.post(
+        f"{PREFIX}/{slug}/cards/{card}/approvals",
+        json={"key": "mcp_canva_export_design", "decision": "approve"},
+    )
+    pending = client.get(f"{PREFIX}/{slug}/cards/{card}").json()["pending_approvals"]
+    assert [p["key"] for p in pending] == ["script execution via -e/-c flag"]
