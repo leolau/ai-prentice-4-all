@@ -4098,6 +4098,56 @@ class TestRunConversation:
         assert hook_checks == {"pre_api_request": 1, "post_api_request": 1}
         assert payload_counts == {"request": 0, "response": 0}
 
+    def test_api_call_logged_even_without_hook_listeners(self, agent, monkeypatch):
+        """Models ▸ Performance reads api_call_log — the ledger write is
+        unconditional, not gated on a plugin subscribing to
+        post_api_request."""
+        self._setup_agent(agent)
+        agent.client.chat.completions.create.return_value = _mock_response(
+            content="Done", finish_reason="stop",
+        )
+        monkeypatch.setattr("hermes_cli.plugins.has_hook", lambda name: False)
+
+        import hermes_state
+
+        with (
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation("hello")
+
+        assert result["final_response"] == "Done"
+        db = hermes_state.api_metrics_db()
+        assert db is not None
+        rows = db._conn.execute("SELECT * FROM api_call_log").fetchall()
+        assert len(rows) == 1
+        row = rows[0]
+        assert row["status"] == "ok" and row["caller"] == "main"
+        assert row["duration_ms"] is not None and row["duration_ms"] >= 0
+        assert row["model"]
+
+    def test_api_error_logged_even_without_hook_listeners(self, agent, monkeypatch):
+        """The error funnel records the failed attempt before checking
+        whether any plugin wants the hook."""
+        import hermes_state
+
+        monkeypatch.setattr("hermes_cli.plugins.has_hook", lambda name: False)
+        agent._invoke_api_request_error_hook(
+            task_id="t1", turn_id="turn1", api_request_id="turn1:api:0",
+            api_call_count=1, api_start_time=__import__("time").time() - 0.5,
+            api_kwargs={"messages": []},
+            error_type="RateLimitError", error_message="quota",
+            status_code=429, retry_count=1,
+        )
+        db = hermes_state.api_metrics_db()
+        rows = db._conn.execute("SELECT * FROM api_call_log").fetchall()
+        assert len(rows) == 1
+        row = rows[0]
+        assert row["status"] == "error"
+        assert row["error_type"] == "RateLimitError"
+        assert row["status_code"] == 429
+
     def test_content_with_tool_calls_stays_silent_for_non_cli_quiet_mode(self, agent):
         self._setup_agent(agent)
         agent.platform = None

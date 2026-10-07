@@ -769,6 +769,38 @@ CREATE TABLE IF NOT EXISTS sessions (
     FOREIGN KEY (parent_session_id) REFERENCES sessions(id)
 );
 
+-- Per-API-call ledger feeding the Models page Performance section. One row
+-- per provider request ATTEMPT (a retried request logs one row per try —
+-- request_id is shared across its retries, retry_count distinguishes them).
+-- Sessions carry per-session totals; this table is the only place latency
+-- and failure data live. Written fire-and-forget from the conversation loop
+-- and the auxiliary client; pruned past api_call_log retention.
+CREATE TABLE IF NOT EXISTS api_call_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    request_id TEXT,
+    ts REAL NOT NULL,
+    started_at REAL,
+    session_id TEXT,
+    task_id TEXT,
+    platform TEXT,
+    caller TEXT,
+    model TEXT,
+    provider TEXT,
+    duration_ms INTEGER,
+    status TEXT NOT NULL DEFAULT 'ok',
+    finish_reason TEXT,
+    error_type TEXT,
+    status_code INTEGER,
+    retry_count INTEGER,
+    input_tokens INTEGER NOT NULL DEFAULT 0,
+    output_tokens INTEGER NOT NULL DEFAULT 0,
+    cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+    reasoning_tokens INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS idx_api_call_log_ts ON api_call_log(ts);
+CREATE INDEX IF NOT EXISTS idx_api_call_log_model_ts ON api_call_log(model, ts);
+
 CREATE TABLE IF NOT EXISTS messages (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     session_id TEXT NOT NULL REFERENCES sessions(id),
@@ -2171,6 +2203,96 @@ class SessionDB:
                 "clear_compression_failure_cooldown(%s) failed: %s",
                 session_id, exc,
             )
+
+    # ──────────────────────────────────────────────────────────────────────
+    # API call ledger (Models page Performance section)
+    # ──────────────────────────────────────────────────────────────────────
+
+    #: api_call_log rows older than this are pruned — the Performance page
+    #: aggregates to a year of history; raw attempts past that are dead weight.
+    API_CALL_LOG_RETENTION_SECONDS = 370 * 86400
+
+    def record_api_call(
+        self,
+        *,
+        request_id: Optional[str] = None,
+        ts: Optional[float] = None,
+        started_at: Optional[float] = None,
+        session_id: Optional[str] = None,
+        task_id: Optional[str] = None,
+        platform: Optional[str] = None,
+        caller: Optional[str] = None,
+        model: Optional[str] = None,
+        provider: Optional[str] = None,
+        duration_ms: Optional[float] = None,
+        status: str = "ok",
+        finish_reason: Optional[str] = None,
+        error_type: Optional[str] = None,
+        status_code: Optional[int] = None,
+        retry_count: Optional[int] = None,
+        usage: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Append one provider-call attempt to ``api_call_log``.
+
+        Fire-and-forget telemetry: every failure is logged and swallowed —
+        a telemetry write must never break the call it is measuring.
+        ``usage`` accepts the same shape the ``post_api_request`` hook gets
+        (``input_tokens``/``output_tokens``/``cache_read_tokens``/…).
+        """
+        usage = usage or {}
+
+        def _do(conn):
+            conn.execute(
+                "INSERT INTO api_call_log ("
+                "request_id, ts, started_at, session_id, task_id, platform,"
+                " caller, model, provider, duration_ms, status, finish_reason,"
+                " error_type, status_code, retry_count, input_tokens,"
+                " output_tokens, cache_read_tokens, reasoning_tokens"
+                ") VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    request_id,
+                    ts if ts is not None else time.time(),
+                    started_at,
+                    session_id,
+                    task_id,
+                    platform,
+                    caller,
+                    model,
+                    provider,
+                    int(duration_ms) if duration_ms is not None else None,
+                    status,
+                    finish_reason,
+                    error_type,
+                    status_code,
+                    retry_count,
+                    int(usage.get("input_tokens") or 0),
+                    int(usage.get("output_tokens") or 0),
+                    int(usage.get("cache_read_tokens") or 0),
+                    int(usage.get("reasoning_tokens") or 0),
+                ),
+            )
+
+        try:
+            self._execute_write(_do)
+        except Exception as exc:  # noqa: BLE001 — telemetry must never raise
+            logger.debug("record_api_call failed: %s", exc)
+
+    def prune_api_call_log(self, *, now: Optional[float] = None) -> int:
+        """Drop api_call_log rows past retention; returns rows removed."""
+        cutoff = (now if now is not None else time.time()) - (
+            self.API_CALL_LOG_RETENTION_SECONDS
+        )
+
+        def _do(conn):
+            return conn.execute(
+                "DELETE FROM api_call_log WHERE ts < ?", (cutoff,)
+            ).rowcount
+
+        try:
+            return int(self._execute_write(_do) or 0)
+        except sqlite3.Error as exc:
+            logger.warning("prune_api_call_log failed: %s", exc)
+            return 0
     # ──────────────────────────────────────────────────────────────────────
     # Compression locks
     # ──────────────────────────────────────────────────────────────────────
@@ -6363,3 +6485,59 @@ class AsyncSessionDB:
             return await asyncio.to_thread(attr, *args, **kwargs)
 
         return _offloaded
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# API-call metrics (Models ▸ Performance) — the writers are hot paths with
+# no SessionDB in scope (auxiliary calls, error funnels), so this caches one
+# instance per HERMES_HOME. Profile-scoped workers/turns swap HERMES_HOME,
+# so the cache keys on the resolved path, not the process.
+# ─────────────────────────────────────────────────────────────────────────
+
+_METRICS_DBS: Dict[str, "SessionDB"] = {}
+_METRICS_DBS_LOCK = threading.Lock()
+#: Bounded so per-test/per-profile homes can't accumulate open DBs forever.
+_METRICS_DBS_MAX = 8
+
+
+def api_metrics_db(explicit: Optional["SessionDB"] = None) -> Optional["SessionDB"]:
+    """The SessionDB to record API-call metrics into.
+
+    ``explicit`` wins (an agent already holding its store); otherwise a
+    cached instance for the current ``HERMES_HOME`` is returned. ``None``
+    when the DB can't be opened — telemetry never blocks a call.
+    """
+    if explicit is not None:
+        return explicit
+    try:
+        path = str(Path(get_hermes_home()) / "state.db")
+    except Exception:
+        return None
+    db = _METRICS_DBS.get(path)
+    if db is None:
+        with _METRICS_DBS_LOCK:
+            db = _METRICS_DBS.get(path)
+            if db is None:
+                try:
+                    db = SessionDB(db_path=Path(path))
+                except Exception:
+                    logger.debug("api_metrics_db: open %s failed", path, exc_info=True)
+                    return None
+                while len(_METRICS_DBS) >= _METRICS_DBS_MAX:
+                    _evicted = _METRICS_DBS.pop(next(iter(_METRICS_DBS)))
+                    try:
+                        _evicted.close()
+                    except Exception:
+                        pass
+                _METRICS_DBS[path] = db
+    return db
+
+
+def record_api_call(explicit_db: Optional["SessionDB"] = None, **kwargs) -> None:
+    """One provider-call attempt into ``api_call_log`` — never raises."""
+    try:
+        db = api_metrics_db(explicit_db)
+        if db is not None:
+            db.record_api_call(**kwargs)
+    except Exception:  # noqa: BLE001 — telemetry must never raise
+        logger.debug("record_api_call dropped", exc_info=True)

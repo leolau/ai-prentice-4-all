@@ -2448,6 +2448,30 @@ class AIAgent:
             interaction_trace_id = current_trace_id() or ""
         except Exception:
             interaction_trace_id = ""
+        # Always-on per-call ledger (Models ▸ Performance) — runs whether or
+        # not a plugin subscribes to api_request_error. Fire-and-forget.
+        try:
+            ended = time.time()
+            from hermes_state import record_api_call as _record_api_call
+            _record_api_call(
+                getattr(self, "_session_db", None),
+                request_id=api_request_id,
+                started_at=api_start_time,
+                ts=ended,
+                session_id=self.session_id or "",
+                task_id=task_id,
+                platform=self.platform or "",
+                caller="main",
+                model=self.model,
+                provider=self.provider,
+                duration_ms=(ended - api_start_time) * 1000,
+                status="error",
+                error_type=error_type,
+                status_code=status_code,
+                retry_count=retry_count,
+            )
+        except Exception:
+            pass
         # Lazy module import (not from-import) so tests that
         # ``monkeypatch.setattr("hermes_cli.plugins.has_hook", ...)`` still
         # take effect on this call site. After first call the import is a

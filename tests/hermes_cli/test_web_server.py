@@ -4239,6 +4239,108 @@ class TestNewEndpoints:
         assert row["api_calls"] == 9
         assert row["avg_tokens_per_session"] == 13_550
 
+    def test_models_performance_summarizes_attempts(self):
+        """The Performance section's 7-day summary: per-model calls,
+        failure stats, min/avg/p95/max latency, tokens, caller roles."""
+        import time as _time
+        from hermes_state import SessionDB
+
+        now = _time.time()
+        db = SessionDB()
+        try:
+            # 3 ok calls + 1 error for the main model, 2 ok aux calls.
+            for i, ms in enumerate((800, 4200, 12000)):
+                db.record_api_call(
+                    request_id=f"r{i}", ts=now - i * 3600,
+                    model="claude-sonnet-4-6", provider="anthropic",
+                    caller="main", duration_ms=ms, status="ok",
+                    usage={"input_tokens": 1000, "output_tokens": 100},
+                )
+            db.record_api_call(
+                request_id="r-err", ts=now, model="claude-sonnet-4-6",
+                provider="anthropic", caller="main", duration_ms=30000,
+                status="error", error_type="RateLimitError", status_code=429,
+            )
+            for i in range(2):
+                db.record_api_call(
+                    request_id=f"aux{i}", ts=now - i * 3600,
+                    model="gpt-5-mini", provider="openai",
+                    caller="aux:compression", duration_ms=900, status="ok",
+                    usage={"input_tokens": 400, "output_tokens": 40},
+                )
+        finally:
+            db.close()
+
+        resp = self.client.get("/api/analytics/models/performance?days=7")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["collecting"] is False
+        models = {m["model"]: m for m in data["models"]}
+        sonnet = models["claude-sonnet-4-6"]
+        assert sonnet["calls"] == 4 and sonnet["failures"] == 1
+        assert 0 < sonnet["success_rate"] < 1
+        assert sonnet["latency_ms"]["min"] == 800
+        assert sonnet["latency_ms"]["max"] == 30000
+        assert sonnet["latency_ms"]["avg"] == (800 + 4200 + 12000 + 30000) // 4
+        assert sonnet["latency_ms"]["p95"] == 30000
+        assert sonnet["tokens"]["input"] == 3000
+        assert sonnet["caller_roles"] == ["main"]
+        assert sonnet["daily"]  # per-day buckets populated
+        mini = models["gpt-5-mini"]
+        assert mini["calls"] == 2 and mini["failures"] == 0
+        assert mini["success_rate"] == 1.0
+        assert mini["caller_roles"] == ["compression"]
+
+    def test_models_performance_monthly_backfills_from_sessions(self):
+        """Months predating the ledger still show calls/tokens from the
+        sessions table; latency/failures stay null until log data exists."""
+        import time as _time
+        from hermes_state import SessionDB
+
+        old = _time.time() - 60 * 86400  # ~2 months ago
+        db = SessionDB()
+        try:
+            db.create_session(
+                session_id="old-sess", source="cli",
+                model="old-model-x",
+            )
+            db.update_token_counts(
+                "old-sess", input_tokens=5000, output_tokens=500,
+                api_call_count=7,
+            )
+            db._conn.execute(
+                "UPDATE sessions SET started_at = ? WHERE id = 'old-sess'",
+                (old,),
+            )
+            db._conn.commit()
+            db.record_api_call(
+                ts=_time.time(), model="fresh-model", status="ok",
+                duration_ms=1500, usage={"input_tokens": 10},
+            )
+        finally:
+            db.close()
+
+        data = self.client.get(
+            "/api/analytics/models/performance?days=7&months=6"
+        ).json()
+        monthly = {(m["month"], m["model"]): m for m in data["monthly"]}
+        old_month = next(
+            (m for m in data["monthly"] if m["model"] == "old-model-x"), None
+        )
+        fresh_month = next(
+            (m for m in data["monthly"] if m["model"] == "fresh-model"), None
+        )
+        assert old_month is not None and old_month["calls"] == 7
+        assert old_month["tokens"] == 5500
+        assert old_month["avg_ms"] is None and old_month["failures"] is None
+        assert fresh_month is not None and fresh_month["avg_ms"] == 1500
+        assert fresh_month["failures"] == 0
+
+    def test_models_performance_empty_is_collecting(self):
+        data = self.client.get("/api/analytics/models/performance").json()
+        assert data["collecting"] is True
+        assert data["models"] == []
+
     def test_analytics_usage_includes_skill_breakdown(self):
         from hermes_state import SessionDB
 
