@@ -485,3 +485,54 @@ def test_card_page_shows_what_a_blocked_card_waits_to_be_allowed(env):
     )
     pending = client.get(f"{PREFIX}/{slug}/cards/{card}").json()["pending_approvals"]
     assert [p["key"] for p in pending] == ["script execution via -e/-c flag"]
+
+
+def test_card_page_totals_its_workers_model_calls(env):
+    """A card's page shows its workers' calls: main-model totals across
+    attempts, and one row per attempt/caller/model labelled with how the
+    attempt ended. Calls from other cards never leak in."""
+    import os
+    from pathlib import Path
+
+    from hermes_state import SessionDB
+
+    client, _state = env
+    project = _project(env)
+    slug = project["slug"]
+    card = _card(env, slug, "Verify each page")
+    assert client.get(f"{PREFIX}/{slug}/cards/{card}").json()["model_calls"] is None
+    with kanban_db.connect_closing() as bconn:
+        with kanban_db.write_txn(bconn):
+            first = bconn.execute(
+                "INSERT INTO task_runs (task_id, status, outcome, started_at)"
+                " VALUES (?, 'done', 'crashed', 100)", (card,),
+            ).lastrowid
+            second = bconn.execute(
+                "INSERT INTO task_runs (task_id, status, outcome, started_at)"
+                " VALUES (?, 'done', 'completed', 200)", (card,),
+            ).lastrowid
+    db = SessionDB(Path(os.environ["HERMES_HOME"]) / "state.db")
+    try:
+        db.record_api_call(model="ds", caller="main", duration_ms=2100,
+                           kanban_task_id=card, kanban_run_id=first)
+        for ms in (3200, 316400):
+            db.record_api_call(model="ds", caller="main", duration_ms=ms,
+                               kanban_task_id=card, kanban_run_id=second)
+        db.record_api_call(model="ds", caller="main", status="error",
+                           kanban_task_id=card, kanban_run_id=second)
+        db.record_api_call(model="qwen", caller="aux:vision", status="error",
+                           duration_ms=120000, kanban_task_id=card,
+                           kanban_run_id=second)
+        db.record_api_call(model="ds", caller="main", duration_ms=1,
+                           kanban_task_id="t_someone_else")
+    finally:
+        db.close()
+
+    calls = client.get(f"{PREFIX}/{slug}/cards/{card}").json()["model_calls"]
+    assert calls["main"]["calls"] == 4 and calls["main"]["failures"] == 1
+    assert calls["main"]["min_ms"] == 2100 and calls["main"]["max_ms"] == 316400
+    rows = {(r["attempt"], r["caller"]): r for r in calls["rows"]}
+    assert set(rows) == {(1, "main"), (2, "main"), (2, "aux:vision")}
+    assert rows[(1, "main")]["run_outcome"] == "crashed"
+    assert rows[(2, "main")]["calls"] == 3 and rows[(2, "main")]["failures"] == 1
+    assert rows[(2, "aux:vision")]["failures"] == 1

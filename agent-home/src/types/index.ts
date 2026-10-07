@@ -1890,6 +1890,35 @@ export interface ProjectCardDetail extends ProjectBoardTask {
    * collected).
    */
   worker_log_tail?: string | null;
+  /** Provider-call stats for this card's workers; null when none recorded. */
+  model_calls?: CardModelCalls | null;
+}
+
+export interface CardCallStats {
+  calls: number;
+  failures: number;
+  min_ms: number | null;
+  avg_ms: number | null;
+  max_ms: number | null;
+}
+
+/** One (attempt, caller, model) slice of a card's calls. */
+export interface CardModelCallRow extends CardCallStats {
+  run_id: number | null;
+  /** 1-based attempt number; null when the call couldn't be tied to a run. */
+  attempt: number | null;
+  /** How that run ended (`completed`, `crashed`…) or its live status. */
+  run_outcome: string | null;
+  /** `main`, or `aux:<task>` (e.g. `aux:vision` for image checks). */
+  caller: string;
+  model: string;
+  provider: string;
+}
+
+export interface CardModelCalls {
+  /** Main-model totals across every attempt; null before the first call. */
+  main: CardCallStats | null;
+  rows: CardModelCallRow[];
 }
 
 export interface ProjectBoardView {
@@ -2149,6 +2178,8 @@ export interface ModelPerfMonth {
   calls: number;
   tokens: number;
   avg_ms: number | null;
+  min_ms?: number | null;
+  max_ms?: number | null;
   failures: number | null;
 }
 

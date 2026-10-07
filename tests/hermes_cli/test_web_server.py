@@ -4336,6 +4336,28 @@ class TestNewEndpoints:
         assert fresh_month is not None and fresh_month["avg_ms"] == 1500
         assert fresh_month["failures"] == 0
 
+    def test_models_performance_monthly_has_failures_and_min_max(self):
+        """Ledger months report failed calls and min/avg/max response time
+        (failed attempts without a duration don't skew the timings)."""
+        import time as _time
+        from hermes_state import SessionDB
+
+        now = _time.time()
+        db = SessionDB()
+        try:
+            for ms in (1500, 316400):
+                db.record_api_call(ts=now, model="ds", status="ok",
+                                   duration_ms=ms)
+            db.record_api_call(ts=now, model="ds", status="error",
+                               duration_ms=None, error_type="APIConnectionError")
+        finally:
+            db.close()
+        data = self.client.get("/api/analytics/models/performance").json()
+        month = next(m for m in data["monthly"] if m["model"] == "ds")
+        assert month["calls"] == 3 and month["failures"] == 1
+        assert month["min_ms"] == 1500 and month["max_ms"] == 316400
+        assert month["avg_ms"] == (1500 + 316400) // 2
+
     def test_models_performance_empty_is_collecting(self):
         data = self.client.get("/api/analytics/models/performance").json()
         assert data["collecting"] is True

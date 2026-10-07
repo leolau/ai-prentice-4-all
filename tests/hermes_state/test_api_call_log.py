@@ -166,3 +166,82 @@ def test_api_metrics_db_caches_per_home(tmp_path, monkeypatch):
             except Exception:
                 pass
         hermes_state._METRICS_DBS.clear()
+
+
+def test_card_worker_calls_are_tagged_with_their_card(db, monkeypatch):
+    """A board worker's env names its card and run; every call it records
+    carries both, so the card page can total that card's calls."""
+    monkeypatch.setenv("HERMES_KANBAN_TASK", "t_abc123")
+    monkeypatch.setenv("HERMES_KANBAN_RUN_ID", "218")
+    db.record_api_call(model="m", status="ok", duration_ms=10)
+    monkeypatch.delenv("HERMES_KANBAN_TASK")
+    monkeypatch.delenv("HERMES_KANBAN_RUN_ID")
+    db.record_api_call(model="m", status="ok", duration_ms=10)
+    tagged, plain = _rows(db)
+    assert tagged["kanban_task_id"] == "t_abc123"
+    assert tagged["kanban_run_id"] == 218
+    assert plain["kanban_task_id"] is None and plain["kanban_run_id"] is None
+
+
+def test_explicit_empty_card_id_means_no_card(db, monkeypatch):
+    monkeypatch.setenv("HERMES_KANBAN_TASK", "t_from_env")
+    db.record_api_call(model="m", kanban_task_id="")
+    assert _rows(db)[0]["kanban_task_id"] is None
+
+
+def test_kanban_task_call_stats_totals_main_and_splits_rows(tmp_path):
+    from hermes_state import kanban_task_call_stats
+
+    db = SessionDB(tmp_path / "state.db")
+    try:
+        for ms in (2000, 4000):
+            db.record_api_call(model="ds", provider="og", caller="main",
+                               duration_ms=ms, kanban_task_id="t_1",
+                               kanban_run_id=1)
+        db.record_api_call(model="ds", provider="og", caller="main",
+                           status="error", duration_ms=None,
+                           kanban_task_id="t_1", kanban_run_id=2)
+        db.record_api_call(model="ds", provider="og", caller="main",
+                           duration_ms=9000, kanban_task_id="t_1",
+                           kanban_run_id=2)
+        db.record_api_call(model="qwen", provider="og", caller="aux:vision",
+                           status="error", duration_ms=120000,
+                           kanban_task_id="t_1", kanban_run_id=2)
+        db.record_api_call(model="ds", caller="main", duration_ms=1,
+                           kanban_task_id="t_other")
+    finally:
+        db.close()
+
+    stats = kanban_task_call_stats(tmp_path / "state.db", "t_1")
+    assert stats["main"] == {"calls": 4, "failures": 1, "min_ms": 2000,
+                             "avg_ms": 5000, "max_ms": 9000}
+    rows = {(r["run_id"], r["caller"]): r for r in stats["rows"]}
+    assert set(rows) == {(1, "main"), (2, "main"), (2, "aux:vision")}
+    assert rows[(1, "main")]["calls"] == 2 and rows[(1, "main")]["failures"] == 0
+    assert rows[(2, "main")]["failures"] == 1
+    assert rows[(2, "aux:vision")]["max_ms"] == 120000
+    assert kanban_task_call_stats(tmp_path / "state.db", "t_none") == {
+        "main": None, "rows": []
+    }
+    assert kanban_task_call_stats(tmp_path / "missing.db", "t_1") is None
+
+
+def test_legacy_ledger_gains_card_columns(tmp_path):
+    """A state.db from the build before card tagging upgrades in place."""
+    import sqlite3
+
+    path = tmp_path / "state.db"
+    SessionDB(path).close()
+    conn = sqlite3.connect(path)
+    conn.execute("DROP INDEX IF EXISTS idx_api_call_log_kanban_task")
+    conn.execute("ALTER TABLE api_call_log DROP COLUMN kanban_run_id")
+    conn.execute("ALTER TABLE api_call_log DROP COLUMN kanban_task_id")
+    conn.commit()
+    conn.close()
+    db = SessionDB(path)
+    try:
+        db.record_api_call(model="m", kanban_task_id="t_9", kanban_run_id=3)
+        row = _rows(db)[0]
+        assert row["kanban_task_id"] == "t_9" and row["kanban_run_id"] == 3
+    finally:
+        db.close()

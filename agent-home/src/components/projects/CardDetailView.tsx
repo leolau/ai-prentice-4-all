@@ -6,6 +6,7 @@ import { useEffect, useState } from "react";
 import { CardActions } from "@/components/projects/CardActions";
 import { CardApprovals } from "@/components/projects/CardApprovals";
 import { CardEditor } from "@/components/projects/CardEditor";
+import { CardModelCalls } from "@/components/projects/CardModelCalls";
 import { agoLabel, dateTimeLabel, durationLabel } from "@/components/projects/format";
 import { useCardLive } from "@/components/projects/useCardLive";
 import { Spinner } from "@/components/ui/Spinner";
@@ -252,6 +253,10 @@ export function CardDetailView({
             {card.latest_summary ?? card.result}
           </p>
         </section>
+      ) : null}
+
+      {isRunning || (card.model_calls?.rows.length ?? 0) > 0 ? (
+        <CardModelCalls data={card.model_calls} />
       ) : null}
 
       {comments.length > 0 ? (

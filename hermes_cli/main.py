@@ -12241,6 +12241,19 @@ def cmd_logs(args):
         list_logs()
         return
 
+    if log_name == "backfill-calls":
+        from hermes_cli.api_call_backfill import backfill
+
+        res = backfill(dry_run=getattr(args, "dry_run", False))
+        verb = "Would insert" if getattr(args, "dry_run", False) else "Inserted"
+        print(
+            f"{verb} {res.inserted} model calls into api_call_log"
+            f" ({res.card_calls} from board cards). Parsed {res.parsed};"
+            f" skipped {res.skipped_existing} already backfilled,"
+            f" {res.skipped_after_cutoff} already in the live ledger."
+        )
+        return
+
     tail_log(
         log_name,
         num_lines=getattr(args, "lines", 50),

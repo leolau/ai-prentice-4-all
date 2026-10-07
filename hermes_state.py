@@ -16,6 +16,7 @@ Key design decisions:
 
 import asyncio
 import json
+import os
 import logging
 import random
 import re
@@ -795,7 +796,11 @@ CREATE TABLE IF NOT EXISTS api_call_log (
     input_tokens INTEGER NOT NULL DEFAULT 0,
     output_tokens INTEGER NOT NULL DEFAULT 0,
     cache_read_tokens INTEGER NOT NULL DEFAULT 0,
-    reasoning_tokens INTEGER NOT NULL DEFAULT 0
+    reasoning_tokens INTEGER NOT NULL DEFAULT 0,
+    -- Board card (and its run) whose worker made the call — read from the
+    -- worker's HERMES_KANBAN_TASK / HERMES_KANBAN_RUN_ID; NULL elsewhere.
+    kanban_task_id TEXT,
+    kanban_run_id INTEGER
 );
 
 CREATE INDEX IF NOT EXISTS idx_api_call_log_ts ON api_call_log(ts);
@@ -883,6 +888,8 @@ CREATE INDEX IF NOT EXISTS idx_sessions_handoff_state
 -- _reconcile_columns() backfills on legacy databases that predate it.
 CREATE INDEX IF NOT EXISTS idx_sessions_archived_started
     ON sessions(archived, started_at DESC);
+CREATE INDEX IF NOT EXISTS idx_api_call_log_kanban_task
+    ON api_call_log(kanban_task_id, ts);
 """
 
 FTS_SQL = """
@@ -2231,6 +2238,8 @@ class SessionDB:
         status_code: Optional[int] = None,
         retry_count: Optional[int] = None,
         usage: Optional[Dict[str, Any]] = None,
+        kanban_task_id: Optional[str] = None,
+        kanban_run_id: Optional[int] = None,
     ) -> None:
         """Append one provider-call attempt to ``api_call_log``.
 
@@ -2240,6 +2249,13 @@ class SessionDB:
         (``input_tokens``/``output_tokens``/``cache_read_tokens``/…).
         """
         usage = usage or {}
+        if kanban_task_id is None:
+            kanban_task_id = os.environ.get("HERMES_KANBAN_TASK") or None
+            if kanban_task_id and kanban_run_id is None:
+                try:
+                    kanban_run_id = int(os.environ.get("HERMES_KANBAN_RUN_ID") or "")
+                except ValueError:
+                    kanban_run_id = None
 
         def _do(conn):
             conn.execute(
@@ -2247,8 +2263,9 @@ class SessionDB:
                 "request_id, ts, started_at, session_id, task_id, platform,"
                 " caller, model, provider, duration_ms, status, finish_reason,"
                 " error_type, status_code, retry_count, input_tokens,"
-                " output_tokens, cache_read_tokens, reasoning_tokens"
-                ") VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                " output_tokens, cache_read_tokens, reasoning_tokens,"
+                " kanban_task_id, kanban_run_id"
+                ") VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     request_id,
                     ts if ts is not None else time.time(),
@@ -2269,6 +2286,8 @@ class SessionDB:
                     int(usage.get("output_tokens") or 0),
                     int(usage.get("cache_read_tokens") or 0),
                     int(usage.get("reasoning_tokens") or 0),
+                    kanban_task_id or None,
+                    kanban_run_id,
                 ),
             )
 
@@ -6541,3 +6560,77 @@ def record_api_call(explicit_db: Optional["SessionDB"] = None, **kwargs) -> None
             db.record_api_call(**kwargs)
     except Exception:  # noqa: BLE001 — telemetry must never raise
         logger.debug("record_api_call dropped", exc_info=True)
+
+
+def kanban_task_call_stats(
+    db_path: Path, kanban_task_id: str
+) -> Optional[Dict[str, Any]]:
+    """Per-card model-call stats from ``api_call_log``, read-only.
+
+    Returns ``{"main": {...} | None, "rows": [...]}`` — ``main`` totals the
+    card's main-model calls across all its runs; ``rows`` break every call
+    down by run, caller and model. ``None`` when the store or ledger isn't
+    there (an older build, or a profile that never made a call).
+    """
+    if not Path(db_path).exists():
+        return None
+    try:
+        conn = sqlite3.connect(
+            f"file:{db_path}?mode=ro", uri=True, timeout=2.0
+        )
+    except sqlite3.Error:
+        return None
+    try:
+        conn.row_factory = sqlite3.Row
+        cols = {
+            r["name"]
+            for r in conn.execute("PRAGMA table_info(api_call_log)").fetchall()
+        }
+        if "kanban_task_id" not in cols:
+            return None
+        stat_cols = (
+            "COUNT(*) AS calls, COALESCE(SUM(status = 'error'), 0) AS failures,"
+            " MIN(duration_ms) AS min_ms, AVG(duration_ms) AS avg_ms,"
+            " MAX(duration_ms) AS max_ms"
+        )
+        main = conn.execute(
+            f"SELECT {stat_cols} FROM api_call_log"
+            " WHERE kanban_task_id = ? AND caller = 'main'",
+            (kanban_task_id,),
+        ).fetchone()
+        rows = conn.execute(
+            f"SELECT kanban_run_id AS run_id, caller, model, provider,"
+            f" {stat_cols}, MIN(ts) AS first_ts FROM api_call_log"
+            " WHERE kanban_task_id = ?"
+            " GROUP BY kanban_run_id, caller, model, provider"
+            " ORDER BY first_ts DESC",
+            (kanban_task_id,),
+        ).fetchall()
+    except sqlite3.Error:
+        logger.debug("kanban_task_call_stats failed", exc_info=True)
+        return None
+    finally:
+        conn.close()
+
+    def _stats(r: sqlite3.Row) -> Dict[str, Any]:
+        return {
+            "calls": int(r["calls"] or 0),
+            "failures": int(r["failures"] or 0),
+            "min_ms": None if r["min_ms"] is None else int(r["min_ms"]),
+            "avg_ms": None if r["avg_ms"] is None else int(r["avg_ms"]),
+            "max_ms": None if r["max_ms"] is None else int(r["max_ms"]),
+        }
+
+    return {
+        "main": _stats(main) if main is not None and main["calls"] else None,
+        "rows": [
+            {
+                "run_id": r["run_id"],
+                "caller": r["caller"] or "",
+                "model": r["model"] or "",
+                "provider": r["provider"] or "",
+                **_stats(r),
+            }
+            for r in rows
+        ],
+    }
