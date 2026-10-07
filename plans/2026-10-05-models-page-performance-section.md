@@ -1,6 +1,6 @@
 # Models page — Performance section (agent-home)
 
-Status: **implemented** (branch pending PR)
+Status: **shipped** — PR #514, deployed `5cf3b159d`
 
 ## Implementation status
 
