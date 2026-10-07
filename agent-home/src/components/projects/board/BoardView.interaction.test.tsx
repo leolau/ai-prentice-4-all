@@ -280,6 +280,60 @@ describe("Unblock / Assign / Archive", () => {
     expect(b.laneIds("waiting")).toContain("rev");
   });
 
+  it("a card waiting on an approval offers Allow / Deny instead of a bare Unblock", async () => {
+    const reply = deferred();
+    const fetchMock = vi.fn(() => reply.promise);
+    vi.stubGlobal("fetch", fetchMock);
+    const waiting = card("apv", "blocked", {
+      title: "Build the deck",
+      block_kind: "needs_input",
+      created_by: "leo",
+      pending_approvals: [
+        {
+          key: "mcp_canva_create_upload_url",
+          label: "mcp_canva_create_upload_url",
+          detail: '{"name": "logo.png"}',
+          requested_at: 1,
+        },
+      ],
+    });
+    const b = renderBoard({ board: boardOf([...TASKS, waiting]) });
+    const tile = b.tile("apv")!;
+    expect(within(tile).getByText("Waiting on you: allow mcp_canva_create_upload_url?")).toBeTruthy();
+    expect(within(tile).queryByText("Unblock")).toBeNull();
+    // The plain blocked card keeps its Unblock.
+    expect(within(b.tile("blk")!).getByText("Unblock")).toBeTruthy();
+
+    const allow = within(tile).getByText("Allow on this card");
+    fireEvent.click(allow);
+    fireEvent.click(allow);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(sent(fetchMock.mock.calls[0] as unknown[])).toMatchObject({
+      url: "/api/projects/mous/cards/apv/approvals",
+      method: "POST",
+      body: { key: "mcp_canva_create_upload_url", decision: "approve" },
+    });
+    expect(b.laneIds("up_next")).toContain("apv");
+    await act(async () => {
+      reply.resolve(json(200, { ...waiting, status: "ready", pending_approvals: [] }));
+    });
+    await waitFor(() => expect(b.tile("apv")).toBeNull());
+  });
+
+  it("a refused Deny puts the approval back with the reason", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(json(409, { detail: "nothing is waiting for that approval" })));
+    const waiting = card("apv", "blocked", {
+      title: "Build the deck",
+      pending_approvals: [{ key: "k", label: "publish the design", detail: null, requested_at: 1 }],
+    });
+    const b = renderBoard({ board: boardOf([...TASKS, waiting]) });
+    fireEvent.click(within(b.tile("apv")!).getByText("Deny"));
+    const alert = await within(b.tile("apv")!).findByRole("alert");
+    expect(alert.textContent).toContain("Couldn't deny it");
+    expect(b.tile("apv")!.getAttribute("data-status")).toBe("blocked");
+    expect(within(b.tile("apv")!).getByText("Waiting on you: allow publish the design?")).toBeTruthy();
+  });
+
   it("Review opens the card page", () => {
     const b = renderBoard();
     expect(within(b.tile("rev")!).getByText("Review").getAttribute("href")).toBe(

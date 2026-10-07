@@ -12411,6 +12411,22 @@ def _should_background_mcp_startup(args) -> bool:
     return args.command in {None, "chat", "rl"}
 
 
+def _mcp_toolset_scope(args) -> Optional[list[str]]:
+    """The toolsets that bound MCP startup, or ``None`` for every server.
+
+    Only a one-shot ``chat -q --toolsets …`` run (the kanban worker shape)
+    is bounded: it can never widen its toolsets, so servers outside them
+    would only cost startup time and memory. Interactive sessions can
+    change toolsets later and keep connecting every server.
+    """
+    parsed = vars(args)
+    if parsed.get("command") != "chat" or not parsed.get("query"):
+        return None
+    names = [name.strip() for name in str(parsed.get("toolsets") or "").split(",")]
+    names = [name for name in names if name]
+    return names or None
+
+
 def _prepare_agent_startup(args) -> None:
     """Discover plugins/MCP/hooks for commands that can run an agent turn."""
     _sub_attr, _sub_set = _AGENT_SUBCOMMANDS.get(args.command, (None, None))
@@ -12447,6 +12463,7 @@ def _prepare_agent_startup(args) -> None:
             start_background_mcp_discovery(
                 logger=logger,
                 thread_name="cli-mcp-discovery",
+                only_toolsets=_mcp_toolset_scope(args),
             )
         except Exception:
             logger.debug(

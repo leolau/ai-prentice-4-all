@@ -1341,6 +1341,25 @@ CREATE TABLE IF NOT EXISTS kanban_notify_subs (
     PRIMARY KEY (task_id, platform, chat_id, thread_id)
 );
 
+-- An approval a card's worker could not get in-process (no human on its
+-- stdin): the worker records it here and blocks the card, and the project
+-- page answers it. ``approval_key`` is what the approval gates match on —
+-- a tool name for ``approvals.tools``, a pattern key for a dangerous
+-- command. ``status`` is ``pending`` until a human answers, then
+-- ``approved`` (the next worker's call goes through) or ``denied``.
+CREATE TABLE IF NOT EXISTS task_approvals (
+    task_id      TEXT NOT NULL,
+    approval_key TEXT NOT NULL,
+    label        TEXT NOT NULL,
+    detail       TEXT,
+    status       TEXT NOT NULL DEFAULT 'pending',
+    run_id       INTEGER,
+    requested_at INTEGER NOT NULL,
+    decided_at   INTEGER,
+    decided_by   TEXT,
+    PRIMARY KEY (task_id, approval_key)
+);
+
 CREATE INDEX IF NOT EXISTS idx_tasks_assignee_status ON tasks(assignee, status);
 CREATE INDEX IF NOT EXISTS idx_tasks_status          ON tasks(status);
 CREATE INDEX IF NOT EXISTS idx_links_child           ON task_links(child_id);
@@ -3162,6 +3181,126 @@ def add_comment(
         )
         _append_event(conn, task_id, "commented", {"author": author, "len": len(body)})
         return int(cur.lastrowid or 0)
+
+
+TASK_APPROVAL_STATUSES = ("pending", "approved", "denied")
+
+
+def request_task_approval(
+    conn: sqlite3.Connection,
+    task_id: str,
+    items: list[tuple[str, str]],
+    *,
+    detail: Optional[str] = None,
+    run_id: Optional[int] = None,
+) -> str:
+    """Look up, or record, a card-scoped approval for ``items``.
+
+    ``items`` is ``[(approval_key, label), ...]`` — every key one call needs.
+    Returns ``"denied"`` when a human denied any of them on this card,
+    ``"approved"`` when a human approved all of them, else records the
+    missing ones as ``pending`` (refreshing ``detail`` on a repeat ask) and
+    returns ``"pending"``.
+    """
+    keys = [key for key, _label in items if key]
+    if not keys:
+        raise ValueError("an approval needs at least one key")
+    now = int(time.time())
+    with write_txn(conn):
+        if not conn.execute(
+            "SELECT 1 FROM tasks WHERE id = ?", (task_id,)
+        ).fetchone():
+            raise ValueError(f"unknown task {task_id}")
+        marks = ",".join("?" for _ in keys)
+        known = {
+            r["approval_key"]: r["status"]
+            for r in conn.execute(
+                f"SELECT approval_key, status FROM task_approvals "
+                f"WHERE task_id = ? AND approval_key IN ({marks})",
+                (task_id, *keys),
+            )
+        }
+        if any(status == "denied" for status in known.values()):
+            return "denied"
+        if all(known.get(key) == "approved" for key in keys):
+            return "approved"
+        for key, label in items:
+            if not key or known.get(key) == "approved":
+                continue
+            conn.execute(
+                "INSERT INTO task_approvals "
+                "(task_id, approval_key, label, detail, status, run_id, requested_at) "
+                "VALUES (?, ?, ?, ?, 'pending', ?, ?) "
+                "ON CONFLICT(task_id, approval_key) DO UPDATE SET "
+                "label = excluded.label, detail = excluded.detail, "
+                "run_id = excluded.run_id, requested_at = excluded.requested_at",
+                (task_id, key, label or key, detail, run_id, now),
+            )
+        _append_event(
+            conn, task_id, "approval_requested",
+            {"keys": keys, "run_id": run_id},
+        )
+        return "pending"
+
+
+def list_task_approvals(
+    conn: sqlite3.Connection,
+    task_ids: Iterable[str],
+    *,
+    status: str = "pending",
+) -> dict[str, list[dict[str, Any]]]:
+    """``{task_id: [approval, ...]}`` for ``task_ids`` in ``status``, oldest first."""
+    if status not in TASK_APPROVAL_STATUSES:
+        raise ValueError(f"status must be one of {TASK_APPROVAL_STATUSES}")
+    out: dict[str, list[dict[str, Any]]] = {}
+    ids = [t for t in task_ids if t]
+    for start in range(0, len(ids), 500):
+        chunk = ids[start:start + 500]
+        marks = ",".join("?" for _ in chunk)
+        for r in conn.execute(
+            f"SELECT task_id, approval_key, label, detail, requested_at "
+            f"FROM task_approvals WHERE status = ? AND task_id IN ({marks}) "
+            f"ORDER BY requested_at ASC, approval_key ASC",
+            (status, *chunk),
+        ):
+            out.setdefault(r["task_id"], []).append({
+                "key": r["approval_key"],
+                "label": r["label"],
+                "detail": r["detail"],
+                "requested_at": r["requested_at"],
+            })
+    return out
+
+
+def decide_task_approval(
+    conn: sqlite3.Connection,
+    task_id: str,
+    approval_key: str,
+    *,
+    approve: bool,
+    actor: str,
+) -> Optional[str]:
+    """Answer a pending approval; return its label, or ``None`` if none was pending."""
+    now = int(time.time())
+    status = "approved" if approve else "denied"
+    with write_txn(conn):
+        row = conn.execute(
+            "SELECT label FROM task_approvals WHERE task_id = ? "
+            "AND approval_key = ? AND status = 'pending'",
+            (task_id, approval_key),
+        ).fetchone()
+        if row is None:
+            return None
+        conn.execute(
+            "UPDATE task_approvals SET status = ?, decided_at = ?, decided_by = ? "
+            "WHERE task_id = ? AND approval_key = ?",
+            (status, now, actor, task_id, approval_key),
+        )
+        _append_event(
+            conn, task_id, f"approval_{status}",
+            {"key": approval_key, "by": actor},
+        )
+        return str(row["label"])
 
 
 def list_comments(conn: sqlite3.Connection, task_id: str) -> list[Comment]:

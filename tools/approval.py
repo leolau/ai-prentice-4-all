@@ -27,6 +27,8 @@ from utils import env_var_enabled, is_truthy_value
 
 logger = logging.getLogger(__name__)
 
+_CARD_APPROVAL_DETAIL_MAX = 2_000
+
 # Freeze YOLO mode at module import time. Reading os.environ on every call
 # would allow any skill running inside the process to set this variable and
 # instantly bypass all approval checks — a prompt-injection escalation path.
@@ -104,8 +106,97 @@ def _has_interactive_prompt_surface() -> bool:
 
     Without this, ``input()`` on a daemonised process reads EOF and the prompt
     resolves to a denial in microseconds — a refusal nobody made.
+
+    A dispatcher-spawned kanban worker inherits ``HERMES_INTERACTIVE`` from
+    ``hermes chat -q`` but runs with stdin on ``/dev/null``: nobody is there.
     """
+    if os.environ.get("HERMES_KANBAN_TASK") and not _stdin_is_a_tty():
+        return False
     return _is_interactive_cli() or _stdin_is_a_tty()
+
+
+def _kanban_card_task(session_key: str) -> str:
+    """The card id when this is a kanban worker no human can prompt in-process.
+
+    Dispatcher-spawned workers carry ``HERMES_KANBAN_TASK`` and run with
+    stdin on ``/dev/null`` and no gateway notifier, so an approval prompt has
+    nowhere to go. Their approvals are asked on the card instead.
+    """
+    task_id = os.environ.get("HERMES_KANBAN_TASK", "")
+    if not task_id or _stdin_is_a_tty():
+        return ""
+    with _lock:
+        if _gateway_notify_cbs.get(session_key):
+            return ""
+    return task_id
+
+
+def _card_approval(task_id: str, items: list[tuple[str, str]], detail: str) -> str:
+    """Ask the card for ``items``: ``approved`` / ``denied`` / ``pending`` / ``error``."""
+    from agent.redact import redact_sensitive_text
+
+    run_raw = os.environ.get("HERMES_KANBAN_RUN_ID", "")
+    run_id = int(run_raw) if run_raw.isdigit() else None
+    try:
+        from hermes_cli import kanban_db
+
+        with kanban_db.connect_closing() as conn:
+            verdict = kanban_db.request_task_approval(
+                conn,
+                task_id,
+                items,
+                detail=redact_sensitive_text(detail)[:_CARD_APPROVAL_DETAIL_MAX],
+                run_id=run_id,
+            )
+    except Exception as exc:
+        logger.error(
+            "Card approval for %s on %s failed: %s",
+            [key for key, _ in items], task_id, exc, exc_info=True,
+        )
+        return "error"
+    logger.info(
+        "Card approval for %s on %s: %s", [key for key, _ in items], task_id, verdict,
+    )
+    return verdict
+
+
+def _card_command_block(verdict: str, description: str) -> dict:
+    """The guard result for a card worker's command the card has not approved."""
+    no_workaround = (
+        "Do NOT retry it or get the same effect another way (a different "
+        "command, a script, or a saved credential)."
+    )
+    if verdict == "denied":
+        message = (
+            f"BLOCKED: the user denied this on this card ({description}). "
+            f"{no_workaround} Finish without it, or block the card and say "
+            "what cannot be done without it."
+        )
+        outcome = "denied"
+    elif verdict == "pending":
+        message = (
+            f"BLOCKED: this needs the user's approval ({description}), and a "
+            "card worker cannot ask them directly. The request is now recorded "
+            f"on your card. {no_workaround} Call kanban_block with "
+            "kind=\"needs_input\" and a reason that starts \"Approval needed:\" "
+            "and says what it is for, then stop. Once the user approves it on "
+            "the project page the card runs again and it will go through."
+        )
+        outcome = "pending"
+    else:
+        message = (
+            f"BLOCKED: this needs the user's approval ({description}) and the "
+            "card approval could not be recorded. The user was NOT asked and "
+            "did NOT decline. Block the card and say the approval request failed."
+        )
+        outcome = "error"
+    return {
+        "approved": False,
+        "message": message,
+        "description": description,
+        "outcome": outcome,
+        "user_consent": False,
+    }
 
 
 def _fire_approval_hook(hook_name: str, **kwargs) -> None:
@@ -2537,6 +2628,17 @@ def check_all_command_guards(command: str, env_type: str,
     all_keys = [key for key, _, _ in warnings]
     has_tirith = any(is_t for _, _, is_t in warnings)
 
+    card_task = _kanban_card_task(session_key)
+    if card_task:
+        verdict = _card_approval(
+            card_task,
+            [(key, desc or key) for key, desc, _ in warnings if key],
+            command,
+        )
+        if verdict == "approved":
+            return {"approved": True, "message": None, "card_approved": True}
+        return _card_command_block(verdict, combined_desc)
+
     # Gateway/async approval — block the agent thread until the user
     # responds with /approve or /deny, mirroring the CLI's synchronous
     # input() flow.  The agent never sees "approval_required"; it either
@@ -2825,6 +2927,15 @@ def check_execute_code_guard(code: str, env_type: str,
             }
         # verdict == "escalate" → fall through to manual approval
 
+    card_task = _kanban_card_task(session_key)
+    if card_task:
+        verdict = _card_approval(card_task, [(pattern_key, description)], code)
+        if verdict == "approved":
+            return {"approved": True, "message": None, "card_approved": True}
+        result = _card_command_block(verdict, display_description)
+        result["pattern_key"] = pattern_key
+        return result
+
     notify_cb = None
     with _lock:
         notify_cb = _gateway_notify_cbs.get(session_key)
@@ -2966,6 +3077,8 @@ def request_elicitation_consent_detailed(
     ``timeout``        the user was asked and never answered
     ``undeliverable``  we tried to ask and the prompt did not reach them
     ``no_surface``     there was nobody to ask on this session at all
+    ``card_pending``   a kanban worker recorded the ask on its card; the
+                       user answers it there and the card runs again
     ``error``          the approval machinery itself failed
 
     Only the first three describe a decision the user made.  The rest are our
@@ -2976,6 +3089,17 @@ def request_elicitation_consent_detailed(
         session_key = get_current_session_key()
     except Exception as exc:  # pragma: no cover -- defensive
         logger.warning("Elicitation consent: session lookup failed: %s", exc)
+        return "decline", "error"
+
+    card_task = _kanban_card_task(session_key) if persist_key else ""
+    if card_task and persist_key:
+        verdict = _card_approval(card_task, [(persist_key, persist_key)], message)
+        if verdict == "approved":
+            return "accept", "approved"
+        if verdict == "denied":
+            return "decline", "user_denied"
+        if verdict == "pending":
+            return "decline", "card_pending"
         return "decline", "error"
 
     if _is_gateway_approval_context():

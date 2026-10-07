@@ -222,3 +222,83 @@ def test_init_agent_waits_for_mcp_discovery_before_agent_build(monkeypatch):
     monkeypatch.setattr(cli_mod, "AIAgent", _fake_agent)
 
     assert cli._init_agent() is True
+
+
+# ---------------------------------------------------------------------------
+# A one-shot run only starts the MCP servers its toolsets reach
+# ---------------------------------------------------------------------------
+
+_SERVERS = {
+    "canva": {"url": "https://mcp.canva.com/mcp"},
+    "google-workspace": {"command": "uvx"},
+    "figma": {"command": "npx"},
+    "aws-api": {"command": "uvx"},
+}
+
+
+def test_mcp_servers_for_toolsets_matches_name_or_mcp_toolset():
+    from tools.mcp_tool import mcp_servers_for_toolsets
+
+    card = ["canva", "file", "kanban", "terminal", "clarify", "todo"]
+    assert set(mcp_servers_for_toolsets(_SERVERS, card)) == {"canva"}
+    assert set(mcp_servers_for_toolsets(_SERVERS, ["mcp-figma", "web"])) == {"figma"}
+    assert mcp_servers_for_toolsets(_SERVERS, ["file", "web"]) == {}
+    assert set(mcp_servers_for_toolsets(_SERVERS, ["all"])) == set(_SERVERS)
+
+
+def test_discover_mcp_tools_connects_only_the_scoped_servers(monkeypatch):
+    from tools import mcp_tool
+
+    connected = []
+    monkeypatch.setattr(mcp_tool, "_MCP_AVAILABLE", True)
+    monkeypatch.setattr(mcp_tool, "_load_mcp_config", lambda: dict(_SERVERS))
+    monkeypatch.setattr(
+        mcp_tool,
+        "register_mcp_servers",
+        lambda servers: connected.append(sorted(servers)) or [],
+    )
+    mcp_tool.discover_mcp_tools(["canva", "file", "kanban"])
+    mcp_tool.discover_mcp_tools()
+    assert connected == [["canva"], sorted(_SERVERS)]
+
+
+def test_worker_launch_argv_scopes_mcp_to_its_toolsets():
+    """The real kanban worker argv, through the real parser."""
+    from hermes_cli._parser import build_top_level_parser
+
+    parser, _subparsers, _chat_parser = build_top_level_parser()
+    worker = parser.parse_args([
+        "--accept-hooks", "chat", "-q", "work kanban task t_1",
+        "--toolsets", "canva,file,kanban,terminal,clarify,todo",
+    ])
+    assert main_mod._mcp_toolset_scope(worker) == [
+        "canva", "file", "kanban", "terminal", "clarify", "todo",
+    ]
+    interactive = parser.parse_args(["chat", "--toolsets", "canva,file"])
+    assert main_mod._mcp_toolset_scope(interactive) is None
+    unrestricted = parser.parse_args(["chat", "-q", "hello"])
+    assert main_mod._mcp_toolset_scope(unrestricted) is None
+
+
+def test_prepare_agent_startup_passes_the_worker_scope(monkeypatch):
+    scopes = []
+    monkeypatch.setitem(
+        sys.modules,
+        "hermes_cli.plugins",
+        types.SimpleNamespace(discover_plugins=lambda: None),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "agent.shell_hooks",
+        types.SimpleNamespace(register_from_config=lambda *_a, **_k: None),
+    )
+    monkeypatch.setattr(
+        mcp_startup,
+        "start_background_mcp_discovery",
+        lambda *, logger, thread_name, only_toolsets=None: scopes.append(only_toolsets),
+    )
+    main_mod._prepare_agent_startup(
+        _agent_args(query="work kanban task t_1", toolsets="canva,file")
+    )
+    main_mod._prepare_agent_startup(_agent_args(query=None, toolsets=None))
+    assert scopes == [["canva", "file"], None]

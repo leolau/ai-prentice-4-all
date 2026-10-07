@@ -1797,6 +1797,16 @@ export interface ProjectToolsResolution {
   skills_truncated: boolean;
 }
 
+/** One approval a card worker could not get in-process: `key` is what the
+ * approval gate matches (a tool name, or a dangerous-command pattern),
+ * `label` what to show, `detail` the call or command it wanted to run. */
+export interface ProjectCardApproval {
+  key: string;
+  label: string;
+  detail: string | null;
+  requested_at: number;
+}
+
 /** A task row on the project board, as `kanban_view.task_dict` returns it. */
 export interface ProjectBoardTask {
   id: string;
@@ -1815,6 +1825,10 @@ export interface ProjectBoardTask {
   /** Why a `blocked` card stopped (`kanban_db.VALID_BLOCK_KINDS`), or
    * `null` for a legacy/un-typed block. Absent for every other status. */
   block_kind?: "needs_input" | "capability" | "transient" | null;
+  /** Approvals this card's worker asked for and nobody has answered yet
+   * (`kanban_db.list_task_approvals`). Only filled on `blocked` cards by
+   * the project board read. */
+  pending_approvals?: ProjectCardApproval[];
   /** Pinned model for this card's worker (`-m` at dispatch) — the card
    * ignores the main model while this is set. Null/absent = follows main. */
   model_override?: string | null;
