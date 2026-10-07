@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useEffect, useState } from "react";
 
 import { CardActions } from "@/components/projects/CardActions";
+import { CardApprovals } from "@/components/projects/CardApprovals";
 import { CardEditor } from "@/components/projects/CardEditor";
 import { agoLabel, dateTimeLabel, durationLabel } from "@/components/projects/format";
 import { useCardLive } from "@/components/projects/useCardLive";
@@ -81,6 +82,8 @@ export function CardDetailView({
   const heartbeat = card.latest_heartbeat ?? null;
   const comments = card.comments ?? [];
   const logTail = card.worker_log_tail ?? null;
+  const approvals =
+    card.status === "blocked" ? (card.pending_approvals ?? []) : [];
 
   // A ticking clock, only while running (matches the chat pane's own
   // elapsed-time pattern) — the one thing that can always be shown, even
@@ -146,17 +149,33 @@ export function CardDetailView({
             <p className="mt-1 whitespace-pre-wrap text-sm">
               {blockReasonText(card)}
             </p>
-            {!archived ? (
+            <CardApprovals
+              slug={slug}
+              taskId={card.id}
+              approvals={approvals}
+              canAct={!archived}
+            />
+            {archived ? null : approvals.length > 0 ? (
+              <p className="mt-2 text-xs text-[var(--color-muted)]">
+                Review each request above and allow or deny it. The card runs
+                again once nothing is left waiting.
+              </p>
+            ) : (
               <p className="mt-2 text-xs text-[var(--color-muted)]">
                 Use Edit card below to answer or adjust the brief, then Make
                 ready to let the agent pick it back up.
               </p>
-            ) : null}
+            )}
           </div>
         ) : null}
         {!archived ? (
           <>
-            <CardActions slug={slug} taskId={card.id} status={card.status} />
+            <CardActions
+              slug={slug}
+              taskId={card.id}
+              status={card.status}
+              awaitingApproval={approvals.length > 0}
+            />
             <CardEditor slug={slug} card={card} profiles={profiles} />
           </>
         ) : null}

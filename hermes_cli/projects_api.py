@@ -1971,6 +1971,10 @@ def _card_payload(bconn, project: projects_db.Project, task_id: str, *, principa
     payload["worker_log_tail"] = kanban_db.worker_log_plain_tail(
         task_id, board=project.board_slug or None
     )
+    if task.status == "blocked":
+        payload["pending_approvals"] = kanban_db.list_task_approvals(
+            bconn, [task_id]
+        ).get(task_id, [])
     return payload
 
 
