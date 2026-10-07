@@ -34,13 +34,20 @@ Examples:
     hermes logs --since 1h         Lines from the last hour
     hermes logs --since 30m -f     Follow, starting from 30 min ago
     hermes logs list               List available log files with sizes
+    hermes logs backfill-calls     Load past model calls from agent.log into
+                                   the Models ▸ Performance ledger (once)
 """,
     )
     logs_parser.add_argument(
         "log_name",
         nargs="?",
         default="agent",
-        help="Log to view: agent (default), errors, gateway, gui, or 'list' to show available files",
+        help="Log to view: agent (default), errors, gateway, gui, 'list' to show available files, or 'backfill-calls'",
+    )
+    logs_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="With backfill-calls: count what would be inserted, write nothing",
     )
     logs_parser.add_argument(
         "-n",

@@ -16052,13 +16052,15 @@ async def get_models_performance(
             monthly[(r["month"], r["model"])] = {
                 "month": r["month"], "model": r["model"],
                 "calls": r["calls"] or 0, "tokens": r["tokens"] or 0,
-                "avg_ms": None, "failures": None,
+                "avg_ms": None, "min_ms": None, "max_ms": None,
+                "failures": None,
             }
         cur = db._conn.execute(
             """
             SELECT strftime('%Y-%m', ts, 'unixepoch') AS month, model,
                    COUNT(*) AS calls, SUM(status = 'error') AS failures,
-                   AVG(duration_ms) AS avg_ms,
+                   AVG(duration_ms) AS avg_ms, MIN(duration_ms) AS min_ms,
+                   MAX(duration_ms) AS max_ms,
                    SUM(input_tokens + output_tokens + cache_read_tokens
                        + reasoning_tokens) AS tokens
             FROM api_call_log
@@ -16076,6 +16078,8 @@ async def get_models_performance(
             entry["calls"] = max(entry["calls"], r["calls"] or 0)
             entry["tokens"] = max(entry["tokens"], r["tokens"] or 0)
             entry["failures"] = r["failures"] or 0
+            entry["min_ms"] = r["min_ms"]
+            entry["max_ms"] = r["max_ms"]
             entry["avg_ms"] = (
                 round(r["avg_ms"]) if r["avg_ms"] is not None else None
             )

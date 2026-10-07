@@ -49,6 +49,7 @@ import logging
 import re
 import threading
 import time
+from pathlib import Path
 from typing import Any, Callable, Optional
 
 from fastapi import APIRouter, HTTPException, Request
@@ -61,6 +62,8 @@ from hermes_cli import (
     projects_schedule,
     run_activity,
 )
+from hermes_cli.profiles import normalize_profile_name, resolve_profile_env
+from hermes_state import kanban_task_call_stats
 
 logger = logging.getLogger(__name__)
 
@@ -1975,7 +1978,31 @@ def _card_payload(bconn, project: projects_db.Project, task_id: str, *, principa
         payload["pending_approvals"] = kanban_db.list_task_approvals(
             bconn, [task_id]
         ).get(task_id, [])
+    payload["model_calls"] = _card_model_calls(bconn, task)
     return payload
+
+
+def _card_model_calls(bconn, task) -> Optional[dict]:
+    """The card's provider-call stats, from its worker profile's ledger.
+
+    Workers run under ``-p <assignee>``, so their calls land in that
+    profile's ``state.db``. Each row is labelled with its attempt number
+    (1-based, in start order) and how that run ended.
+    """
+    try:
+        home = resolve_profile_env(normalize_profile_name(task.assignee or "default"))
+    except (FileNotFoundError, ValueError):
+        return None
+    stats = kanban_task_call_stats(Path(home) / "state.db", task.id)
+    if stats is None:
+        return None
+    runs = kanban_db.list_runs(bconn, task.id)
+    attempt = {r.id: (i + 1, r.outcome or r.status) for i, r in enumerate(runs)}
+    for row in stats["rows"]:
+        num, outcome = attempt.get(row["run_id"], (None, None))
+        row["attempt"] = num
+        row["run_outcome"] = outcome
+    return stats
 
 
 @router.get("/{slug}/cards/{task_id}")

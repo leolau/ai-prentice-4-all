@@ -26,7 +26,7 @@ const PERF: ModelsPerformanceResponse = {
   monthly: [
     { month: "2026-09", model: "claude-sonnet-4-6", calls: 900, tokens: 1_800_000, avg_ms: 4000, failures: 4 },
     { month: "2026-10", model: "claude-sonnet-4-6", calls: 1286, tokens: 2_286_000, avg_ms: 4100, failures: 13 },
-    { month: "2026-10", model: "gpt-5-mini", calls: 88, tokens: 90_000, avg_ms: 1800, failures: 3 },
+    { month: "2026-10", model: "gpt-5-mini", calls: 88, tokens: 90_000, avg_ms: 1800, min_ms: 900, max_ms: 316_400, failures: 3 },
   ],
   collecting: false,
 };
@@ -79,5 +79,14 @@ describe("ModelPerformance", () => {
     );
     expect(html).toContain("ModelPerfCard");
     expect(html).not.toContain("ModelPerfHistory");
+  });
+
+  it("offers failed and response-time history and a monthly table", () => {
+    const html = renderToStaticMarkup(<ModelPerformance perf={PERF} />);
+    expect(html).toContain(">failed<");
+    expect(html).toContain(">response time<");
+    expect(html).toContain('data-component="ModelPerfMonthly"');
+    // gpt-5-mini Oct row: calls, failures, min/avg/max.
+    expect(html).toMatch(/gpt-5-mini<\/td>.*?88<\/td>.*?3<\/td>.*?900ms<\/td>.*?1\.8s<\/td>.*?5m 16s<\/td>/);
   });
 });

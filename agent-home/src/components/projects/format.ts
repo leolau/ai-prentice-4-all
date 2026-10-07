@@ -46,3 +46,12 @@ export function agoLabel(epochSeconds: number | null): string {
   }
   return `${days}d ago`;
 }
+
+/** One model call's response time: "820ms", "4.1s", "5m 16s". */
+export function callDurationLabel(ms: number | null | undefined): string {
+  if (ms == null) return "—";
+  if (ms < 1000) return `${Math.round(ms)}ms`;
+  if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`;
+  const seconds = Math.round(ms / 1000);
+  return `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
+}

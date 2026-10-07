@@ -2,8 +2,13 @@
 
 import { useMemo, useState } from "react";
 
+import { callDurationLabel } from "@/components/projects/format";
 import { Pill } from "@/components/ui/Pill";
-import type { ModelPerformanceEntry, ModelsPerformanceResponse } from "@/types";
+import type {
+  ModelPerfMonth,
+  ModelPerformanceEntry,
+  ModelsPerformanceResponse,
+} from "@/types";
 
 /** Distinct stack colors per model in the monthly history chart. The first
  * tracks the theme accent so the busiest model reads as the page's own. */
@@ -29,11 +34,25 @@ function formatCost(n: number): string {
   return "$0";
 }
 
-/** "4.1s" / "820ms" — latency labels for the stat grid. */
-function formatMs(ms: number | null): string {
-  if (ms == null) return "—";
-  if (ms >= 1000) return `${(ms / 1000).toFixed(1)}s`;
-  return `${Math.round(ms)}ms`;
+/** "4.1s" / "820ms" / "5m 16s" — latency labels for the stat grid. */
+const formatMs = callDurationLabel;
+
+type HistoryMetric = "tokens" | "calls" | "failed" | "response time";
+const HISTORY_METRICS: HistoryMetric[] = ["tokens", "calls", "failed", "response time"];
+
+/** The stacked-bar value of one month×model cell for `metric`. */
+function cellValue(m: ModelPerfMonth | undefined, metric: HistoryMetric): number {
+  if (!m) return 0;
+  if (metric === "tokens") return m.tokens;
+  if (metric === "calls") return m.calls;
+  if (metric === "failed") return m.failures ?? 0;
+  return m.avg_ms ?? 0;
+}
+
+function formatMetric(v: number, metric: HistoryMetric): string {
+  if (metric === "tokens") return formatTokens(v);
+  if (metric === "response time") return `avg ${formatMs(v)}`;
+  return v.toLocaleString();
 }
 
 function roleLabel(role: string): string {
@@ -183,7 +202,12 @@ function ModelPerfCard({ entry }: { entry: ModelPerformanceEntry }) {
   );
 }
 
-/** Stacked per-model bars per month; metric toggles tokens ↔ calls. */
+/**
+ * Per-model bars per month. Tokens, calls and failed calls stack; response
+ * time puts each model's monthly average side by side (averages don't add).
+ * The table under the chart has every month×model's calls, failures and
+ * min/avg/max response time.
+ */
 function HistoryChart({
   monthly,
   months,
@@ -191,7 +215,8 @@ function HistoryChart({
   monthly: ModelsPerformanceResponse["monthly"];
   months: number;
 }) {
-  const [metric, setMetric] = useState<"tokens" | "calls">("tokens");
+  const [metric, setMetric] = useState<HistoryMetric>("tokens");
+  const grouped = metric === "response time";
   const monthKeys = useMemo(() => {
     const keys = [...new Set(monthly.map((m) => m.month))].sort();
     return keys.slice(-months);
@@ -216,13 +241,16 @@ function HistoryChart({
       map.set(
         key,
         models.reduce(
-          (sum, { model }) => sum + (cell.get(`${key}${model}`)?.[metric] ?? 0),
+          (sum, { model }) => {
+            const v = cellValue(cell.get(`${key}${model}`), metric);
+            return grouped ? Math.max(sum, v) : sum + v;
+          },
           0,
         ),
       );
     }
     return map;
-  }, [monthKeys, models, cell, metric]);
+  }, [monthKeys, models, cell, metric, grouped]);
   const maxTotal = Math.max(1, ...monthTotals.values());
   if (monthKeys.length === 0) return null;
   return (
@@ -232,10 +260,11 @@ function HistoryChart({
           History · past {monthKeys.length} {monthKeys.length === 1 ? "month" : "months"}
         </h2>
         <div className="ml-auto flex overflow-hidden rounded-full border border-[var(--color-border)] text-[11px]">
-          {(["tokens", "calls"] as const).map((m) => (
+          {HISTORY_METRICS.map((m) => (
             <button
               key={m}
               type="button"
+              aria-pressed={metric === m}
               onClick={() => setMetric(m)}
               className={`px-2.5 py-0.5 ${metric === m
                   ? "bg-[var(--color-surface-2)] text-[var(--color-fg)]"
@@ -255,20 +284,42 @@ function HistoryChart({
         >
           {monthKeys.map((key) => {
             const total = monthTotals.get(key) ?? 0;
+            if (grouped) {
+              return (
+                <div key={key} className="flex h-full min-w-0 flex-1 items-end gap-0.5">
+                  {models.map(({ model, color }) => {
+                    const m = cell.get(`${key}${model}`);
+                    const v = cellValue(m, metric);
+                    if (!v) return null;
+                    return (
+                      <div
+                        key={model}
+                        title={`${key} · ${model}: avg ${formatMs(v)} · min ${formatMs(m?.min_ms ?? null)} · max ${formatMs(m?.max_ms ?? null)}`}
+                        className="min-w-0 flex-1 rounded-sm"
+                        style={{
+                          backgroundColor: color,
+                          height: `${Math.max((v / maxTotal) * 100, 4)}%`,
+                        }}
+                      />
+                    );
+                  })}
+                </div>
+              );
+            }
             return (
               <div
                 key={key}
-                title={`${key} — ${metric === "tokens" ? formatTokens(total) : total.toLocaleString()} ${metric}`}
+                title={`${key} — ${formatMetric(total, metric)} ${metric}`}
                 className="flex min-w-0 flex-1 flex-col-reverse overflow-hidden rounded-sm"
                 style={{ height: `${Math.max((total / maxTotal) * 100, total ? 4 : 1)}%` }}
               >
                 {models.map(({ model, color }) => {
-                  const v = cell.get(`${key}${model}`)?.[metric] ?? 0;
+                  const v = cellValue(cell.get(`${key}${model}`), metric);
                   if (!v) return null;
                   return (
                     <div
                       key={model}
-                      title={`${model}: ${metric === "tokens" ? formatTokens(v) : v.toLocaleString()}`}
+                      title={`${model}: ${formatMetric(v, metric)}`}
                       style={{
                         backgroundColor: color,
                         height: `${(v / total) * 100}%`,
@@ -298,8 +349,57 @@ function HistoryChart({
             </span>
           ))}
         </div>
+        <MonthlyTable monthly={monthly} monthKeys={monthKeys} />
       </div>
     </section>
+  );
+}
+
+/** Month×model rows, newest month first; "—" where no per-call data exists. */
+function MonthlyTable({
+  monthly,
+  monthKeys,
+}: {
+  monthly: ModelPerfMonth[];
+  monthKeys: string[];
+}) {
+  const shown = new Set(monthKeys);
+  const rows = monthly
+    .filter((m) => shown.has(m.month))
+    .sort((a, b) => b.month.localeCompare(a.month) || b.calls - a.calls);
+  return (
+    <div className="mt-3 overflow-x-auto">
+      <table data-component="ModelPerfMonthly" className="w-full text-left text-[12px]">
+        <thead className="text-[11px] text-[var(--color-muted)]">
+          <tr>
+            <th className="py-1 pr-3 font-normal">Month</th>
+            <th className="py-1 pr-3 font-normal">Model</th>
+            <th className="py-1 pr-3 text-right font-normal">Calls</th>
+            <th className="py-1 pr-3 text-right font-normal">Failed</th>
+            <th className="py-1 pr-3 text-right font-normal">Min</th>
+            <th className="py-1 pr-3 text-right font-normal">Avg</th>
+            <th className="py-1 text-right font-normal">Max</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((m) => (
+            <tr key={`${m.month}${m.model}`} className="border-t border-[var(--color-border)]">
+              <td className="py-1 pr-3">{monthLabel(m.month)} {m.month.slice(0, 4)}</td>
+              <td className="py-1 pr-3">{m.model}</td>
+              <td className="py-1 pr-3 text-right">{m.calls.toLocaleString()}</td>
+              <td
+                className={`py-1 pr-3 text-right ${(m.failures ?? 0) > 0 ? "text-[var(--color-warn-text)]" : ""}`}
+              >
+                {m.failures == null ? "—" : m.failures.toLocaleString()}
+              </td>
+              <td className="py-1 pr-3 text-right">{formatMs(m.min_ms ?? null)}</td>
+              <td className="py-1 pr-3 text-right">{formatMs(m.avg_ms)}</td>
+              <td className="py-1 text-right">{formatMs(m.max_ms ?? null)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
   );
 }
 
