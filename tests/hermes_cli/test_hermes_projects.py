@@ -128,6 +128,50 @@ def test_outputs_add_and_list(env, tmp_path, capsys):
     assert "Sample archive (optional)" in out
 
 
+def test_outputs_deliver_from_a_card_records_the_card(env, tmp_path, capsys, monkeypatch):
+    """Run inside a kanban worker, `outputs deliver` files the delivery
+    under the worker's own card and profile — the worker never has to know
+    its ids."""
+    from hermes_cli import projects_db
+
+    run, _capsys = env
+    slug = _create(run, capsys, tmp_path)
+    with projects_db.connect_closing() as conn:
+        project = projects_db.get_project(conn, slug)
+        oid = projects_db.get_project_outputs(conn, project.id)[0]["id"]
+
+    monkeypatch.setenv("HERMES_KANBAN_TASK", "t_card123")
+    monkeypatch.setenv("HERMES_PROFILE", "default")
+    assert run(
+        "outputs", slug, "deliver", oid, "--ref", "https://docs.example/d/1"
+    ) == 0
+    assert f"Delivered output {oid}." in capsys.readouterr().out
+
+    with projects_db.connect_closing() as conn:
+        rows = projects_db.get_output_deliveries(conn, output_id=oid)
+    assert len(rows) == 1
+    assert rows[0]["task_id"] == "t_card123"
+    assert rows[0]["profile"] == "default"
+    assert rows[0]["link_kind"] == "url"
+
+
+def test_outputs_deliver_outside_a_card_sends_no_card(env, tmp_path, capsys, monkeypatch):
+    from hermes_cli import projects_db
+
+    run, _capsys = env
+    slug = _create(run, capsys, tmp_path)
+    with projects_db.connect_closing() as conn:
+        project = projects_db.get_project(conn, slug)
+        oid = projects_db.get_project_outputs(conn, project.id)[0]["id"]
+
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    assert run("outputs", slug, "deliver", oid, "--ref", "~/out/report.md") == 0
+    with projects_db.connect_closing() as conn:
+        rows = projects_db.get_output_deliveries(conn, output_id=oid)
+    assert rows[0]["task_id"] is None
+    assert rows[0]["run_id"] is None
+
+
 def test_guidance_add_says_next_run(env, tmp_path, capsys):
     run, _capsys = env
     slug = _create(run, capsys, tmp_path)

@@ -8201,12 +8201,14 @@ def _default_spawn(
         if task.toolsets
         else _resolve_worker_cli_toolsets(env.get("HERMES_HOME"))
     )
-    if worker_toolsets:
-        cmd.extend(["--toolsets", ",".join(worker_toolsets)])
     cmd.extend([
         "chat",
         "-q", prompt,
     ])
+    # After ``chat``: the subcommand's own ``--toolsets`` is the one the
+    # worker reads.
+    if worker_toolsets:
+        cmd.extend(["--toolsets", ",".join(worker_toolsets)])
     # Redirect output to a per-task log under <board-root>/logs/.
     # Anchored at the board root (not the shared kanban root), so
     # `hermes kanban log` on a specific board reads its own file and

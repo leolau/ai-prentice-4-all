@@ -486,6 +486,33 @@ def test_doctor_ignores_a_closed_run_regardless_of_age(stores):
     assert "run_stalled" not in codes
 
 
+def test_doctor_names_a_card_waiting_on_you(stores):
+    project = _repeatable_project(cron_job_id="real", schedule="every 1d")
+    _activate(project.id)
+    with kanban_db.connect_closing() as bconn:
+        tid = kanban_db.create_task(
+            bconn, title="Connect Folder Bridge", project_id=project.id
+        )
+        bconn.execute("UPDATE tasks SET status = 'running' WHERE id = ?", (tid,))
+        bconn.commit()
+        kanban_db.block_task(bconn, tid, reason="live session", kind="needs_input")
+    stale = _running_run_row(started_at=NOW - 3 * 3600)
+    with projects_db.connect_closing() as conn:
+        rid = projects_db.open_project_run(
+            conn, project_id=project.id, trigger="schedule", profile="research",
+        )["id"]
+        projects_db.link_run_card(conn, rid, tid, step_key="one")
+    stale["id"] = rid
+    findings = {f["code"]: f for f in _findings(
+        project, cron_job={"id": "real"}, runs=[stale]
+    )}
+    assert "waiting_on_you" in findings
+    assert "Connect Folder Bridge" in findings["waiting_on_you"]["detail"]
+    assert "Scheduled runs are skipped" in findings["waiting_on_you"]["detail"]
+    # Waiting on a person is not an orphaned run.
+    assert "run_stalled" not in findings
+
+
 def test_health_ladder_for_a_stale_running_run(stores):
     """attention past the threshold, stalled past 4x it — mirrors the
     existing 'stalled outranks attention' precedent for schedule silence."""

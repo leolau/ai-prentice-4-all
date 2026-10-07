@@ -182,3 +182,36 @@ class TestAcceptHooksOnAgentSubparsers:
             f"stderr: {result.stderr[:300]}"
         )
         assert "unrecognized arguments" not in result.stderr
+
+
+class TestValueFlagsBeforeChat:
+    """`hermes -m X --provider P --toolsets Y chat` (the kanban worker spawn
+    shape) must keep the values parsed before the subcommand; the chat
+    subparser's own copy of the flag must not overwrite them with None."""
+
+    def _parse(self, argv):
+        from hermes_cli._parser import build_top_level_parser
+
+        parser, _subparsers, _chat_parser = build_top_level_parser()
+        return parser.parse_args(argv)
+
+    def test_toolsets_before_chat_survives(self):
+        args = self._parse(["--toolsets", "file,vision", "chat", "-q", "hi"])
+        assert args.toolsets == "file,vision"
+
+    def test_toolsets_after_chat_still_works(self):
+        args = self._parse(["chat", "--toolsets", "file,vision", "-q", "hi"])
+        assert args.toolsets == "file,vision"
+
+    def test_model_and_provider_before_chat_survive(self):
+        args = self._parse(
+            ["-m", "some/model", "--provider", "openrouter", "chat", "-q", "hi"]
+        )
+        assert args.model == "some/model"
+        assert args.provider == "openrouter"
+
+    def test_absent_flags_default_to_none(self):
+        args = self._parse(["chat", "-q", "hi"])
+        assert args.toolsets is None
+        assert args.model is None
+        assert args.provider is None

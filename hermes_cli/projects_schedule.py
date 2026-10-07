@@ -460,9 +460,34 @@ def _stalest_open_run(pconn, project, runs: List[dict], *, now: int) -> Optional
         age = now - last
         if age <= threshold:
             continue
+        if _run_waits_on_human(pconn, project, run):
+            continue  # waiting on a person is not a stall
         if worst is None or age > worst["age"]:
             worst = {"run": run, "age": age}
     return worst
+
+
+def _run_waits_on_human(pconn, project, run: dict) -> bool:
+    """Fail-open: an unreadable board reads as "not waiting"."""
+    try:
+        from hermes_cli import kanban_db, projects_run
+
+        task_ids = [rc["task_id"] for rc in projects_db.get_run_cards(pconn, run["id"])]
+        with kanban_db.connect_closing(board=project.board_slug or None) as bconn:
+            return bool(projects_run.run_human_waits(bconn, task_ids))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _project_human_waits(project) -> List[dict]:
+    """Fail-open: an unreadable board reads as "nothing waiting"."""
+    try:
+        from hermes_cli import kanban_db, projects_run
+
+        with kanban_db.connect_closing(board=project.board_slug or None) as bconn:
+            return projects_run.project_human_waits(bconn, project)
+    except Exception:  # noqa: BLE001
+        return []
 
 
 def derive_health(
@@ -569,6 +594,7 @@ _SEVERITY = {
     "one_off_overdue": "attention",
     "board_missing": "attention",
     "run_stalled": "attention",
+    "waiting_on_you": "attention",
 }
 
 
@@ -686,5 +712,18 @@ def doctor_findings(
             f"run {stalled_run['run'].get('run_no')} has shown no "
             f"card/session activity for {hours}h — likely orphaned",
         )
+
+    waits = _project_human_waits(project)
+    if waits:
+        first = waits[0]
+        detail = (
+            f"\"{first.get('title') or first['task_id']}\" is waiting on you — "
+            "answer or unblock it"
+        )
+        if len(waits) > 1:
+            detail += f" (and {len(waits) - 1} more card(s))"
+        if cadence == "repeatable" and getattr(project, "cron_job_id", None):
+            detail += ". Scheduled runs are skipped until then"
+        _add("waiting_on_you", detail)
 
     return findings

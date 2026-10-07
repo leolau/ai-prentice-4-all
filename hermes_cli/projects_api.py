@@ -2950,7 +2950,13 @@ def _run_payload(
     payload["completion_percent"] = _run_completion_percent(run, cards)
     blocked = _run_blocked_tasks(bconn, cards)
     payload["blocked_tasks"] = blocked
-    payload["stalled"] = _run_stalled(run, cards, blocked)
+    waiting = (
+        projects_run.run_human_waits(bconn, [c["task_id"] for c in cards])
+        if run.get("status") == "running"
+        else []
+    )
+    payload["waiting_on_you"] = waiting
+    payload["stalled"] = not waiting and _run_stalled(run, cards, blocked)
     checkpoint_wait = _checkpoint_wait_payload(conn, bconn, project, run, cards)
     payload["awaiting_continue"] = checkpoint_wait is not None
     payload["checkpoint_wait"] = checkpoint_wait
@@ -3047,7 +3053,9 @@ async def start_run_route(request: Request) -> dict[str, Any]:
                         triggered_by=principal.user_id,
                         playbook_rev=body.get("playbook_rev"),
                     )
-                except projects_db.RunAlreadyOpen as exc:
+                except (
+                    projects_db.RunAlreadyOpen, projects_run.ScheduledRunSkipped
+                ) as exc:
                     raise HTTPException(status_code=409, detail=str(exc))
                 except ValueError as exc:
                     detail = str(exc)

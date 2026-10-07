@@ -239,6 +239,16 @@ export function liveState(
     );
   }
 
+  const humanWait = detail?.waiting_on_you?.[0];
+  if (humanWait && !busy) {
+    return make(
+      "needs_you",
+      `answer “${humanWait.title ?? humanWait.task_id}” so run ${open.run_no} can continue.`,
+      { kind: "stop_all", runNo: open.run_no },
+      true,
+    );
+  }
+
   if (busy) {
     const next = detail?.awaiting_continue
       ? `review the checkpoint${checkpoint ? ` “${checkpoint}”` : ""}, then continue run ${open.run_no}.`
