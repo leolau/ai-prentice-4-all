@@ -409,6 +409,16 @@ export function RunView({
             text: "This run stopped before finishing. Tap Resume to continue from exactly where it left off — nothing already done gets redone. \u201cStart over\u201d instead runs the whole method again from scratch.",
           };
     }
+    const humanWait = live ? run.waiting_on_you?.[0] : undefined;
+    if (humanWait) {
+      return {
+        tone: "action",
+        text: `"${humanWait.title ?? humanWait.task_id}" is waiting on you. This run continues once you answer or unblock it; scheduled runs are skipped until then.`,
+        detail: humanWait.reason ?? undefined,
+        href: `/projects/${encodeURIComponent(slug)}/cards/${encodeURIComponent(humanWait.task_id)}`,
+        hrefLabel: "Open the card",
+      };
+    }
     if (stalled) {
       return {
         tone: "attention",

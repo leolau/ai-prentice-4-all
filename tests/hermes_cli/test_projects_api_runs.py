@@ -298,6 +298,28 @@ def test_run_pins_its_rev_so_activation_mid_flight_is_safe(env):
     assert resp.json()["run"]["playbook_rev"] == 2
 
 
+def test_scheduled_run_is_a_409_while_a_card_waits_on_you(env):
+    project = _active_project(env)
+    client, _state = env
+    _save_and_activate_playbook(env, project)
+    with kanban_db.connect_closing() as bconn:
+        tid = kanban_db.create_task(
+            bconn, title="Connect Folder Bridge", project_id=project["id"]
+        )
+        bconn.execute("UPDATE tasks SET status = 'running' WHERE id = ?", (tid,))
+        bconn.commit()
+        kanban_db.block_task(bconn, tid, reason="needs a live session", kind="needs_input")
+
+    slug = project["slug"]
+    resp = client.post(f"/api/registry/projects/{slug}/runs", json={"trigger": "schedule"})
+    assert resp.status_code == 409
+    assert "Connect Folder Bridge" in resp.json()["detail"]
+    assert client.get(f"/api/registry/projects/{slug}/runs").json()["runs"] == []
+
+    resp = client.post(f"/api/registry/projects/{slug}/runs", json={})
+    assert resp.status_code == 200, resp.text
+
+
 @pytest.mark.parametrize(
     ("held", "phrase"),
     [("running", "is still running"), ("waiting", "is waiting for you")],

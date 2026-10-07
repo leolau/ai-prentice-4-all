@@ -711,6 +711,60 @@ def test_outcome_delivered_partial_and_no_output(stores):
     assert "2" in outcome
 
 
+def test_delivery_from_a_run_card_counts_for_that_run(stores):
+    """A delivery made from one of a run's cards (task id only — what a
+    worker's `hermes projects outputs deliver` sends) is filed under the
+    card's run, so the run's outcome counts it instead of reporting that
+    nothing required was delivered."""
+    project, oid = _make_project()
+    _save_playbook(project.id, [{"key": "one", "title": "One"}])
+    with projects_db.connect_closing() as conn:
+        projects_db.activate_playbook_rev(conn, project.id, 1)
+    result = _start(project.id)
+    run = result["run"]
+    card_id = result["cards"]["one"]
+
+    with projects_db.connect_closing() as conn:
+        did = projects_db.record_output_delivery(
+            conn, output_id=oid, task_id=card_id, link_ref="https://docs.example/d/1"
+        )
+        row = conn.execute(
+            "SELECT run_id, task_id, link_kind FROM project_output_deliveries WHERE id = ?",
+            (did,),
+        ).fetchone()
+        status, _outcome = projects_run.derive_run_outcome(
+            conn, project_id=project.id, run_id=run["id"]
+        )
+    assert row["run_id"] == run["id"]
+    assert row["task_id"] == card_id
+    assert row["link_kind"] == "url"
+    assert status == "delivered"
+
+
+def test_delivery_never_borrows_another_projects_run(stores):
+    """A card id that belongs to a different project's run is kept as the
+    task id but never files the delivery under that foreign run."""
+    project, oid = _make_project()
+    _save_playbook(project.id, [{"key": "one", "title": "One"}])
+    with projects_db.connect_closing() as conn:
+        projects_db.activate_playbook_rev(conn, project.id, 1)
+    result = _start(project.id)
+    card_id = result["cards"]["one"]
+
+    other, other_oid = _make_project()
+    with projects_db.connect_closing() as conn:
+        did = projects_db.record_output_delivery(
+            conn, output_id=other_oid, task_id=card_id, link_ref="ref"
+        )
+        row = conn.execute(
+            "SELECT run_id, task_id FROM project_output_deliveries WHERE id = ?",
+            (did,),
+        ).fetchone()
+    assert other.id != project.id
+    assert row["run_id"] is None
+    assert row["task_id"] == card_id
+
+
 def test_close_run_derives_outcome_and_keeps_the_prelude(stores):
     project, oid = _make_project(toolsets=["terminal"])  # → recorded drop
     _save_playbook(project.id, [{"key": "one", "title": "One"}])
@@ -1291,6 +1345,78 @@ def test_a_project_holds_one_open_run_at_a_time(stores, held):
         assert nxt["run"]["run_no"] >= 2
         with projects_db.connect_closing() as conn:
             projects_db.update_project_run(conn, nxt["run"]["id"], status="done")
+
+
+def _human_blocked_card(project_id, title="Connect the Folder Bridge session"):
+    """A project card blocked on a person (needs_input), as a worker leaves it."""
+    with kanban_db.connect_closing() as bconn:
+        tid = kanban_db.create_task(bconn, title=title, project_id=project_id)
+        bconn.execute("UPDATE tasks SET status = 'running' WHERE id = ?", (tid,))
+        bconn.commit()
+        assert kanban_db.block_task(
+            bconn, tid, reason="Open a live Folder Bridge browser session",
+            kind="needs_input",
+        )
+    return tid
+
+
+def test_scheduled_run_is_skipped_while_a_card_waits_on_a_person(stores):
+    """Folder Bridge: every daily run stalled on the same human-only card.
+    The schedule now skips (409-style refusal + one deduped approval)
+    instead of opening another run that will hit the same wait — and a run
+    started by hand still runs."""
+    project, _ = _make_project()
+    _save_playbook(project.id, [{"key": "one", "title": "One"}])
+    with projects_db.connect_closing() as conn:
+        projects_db.activate_playbook_rev(conn, project.id, 1)
+    first = _start(project.id)
+    with projects_db.connect_closing() as conn:
+        projects_run.close_run(
+            conn, run=first["run"], status="failed", outcome="stalled",
+        )
+    tid = _human_blocked_card(project.id)
+    APPROVALS.calls.clear()
+
+    with pytest.raises(projects_run.ScheduledRunSkipped) as excinfo:
+        _start(project.id, trigger="schedule")
+    assert excinfo.value.wait["task_id"] == tid
+    assert "Connect the Folder Bridge session" in str(excinfo.value)
+    assert "waiting on you" in str(excinfo.value)
+    with projects_db.connect_closing() as conn:
+        assert [r["run_no"] for r in projects_db.list_project_runs(conn, project.id)] == [1]
+    assert len(APPROVALS.calls) == 1
+    assert "A scheduled run was skipped" in APPROVALS.calls[0]["body"]
+    assert "Open a live Folder Bridge browser session" in APPROVALS.calls[0]["body"]
+
+    manual = _start(project.id, trigger="manual")
+    assert manual["run"]["run_no"] == 2
+
+
+def test_scheduled_run_starts_once_the_wait_is_answered(stores):
+    project, _ = _make_project()
+    _save_playbook(project.id, [{"key": "one", "title": "One"}])
+    with projects_db.connect_closing() as conn:
+        projects_db.activate_playbook_rev(conn, project.id, 1)
+    tid = _human_blocked_card(project.id)
+    with pytest.raises(projects_run.ScheduledRunSkipped):
+        _start(project.id, trigger="schedule")
+
+    with kanban_db.connect_closing() as bconn:
+        assert kanban_db.unblock_task(bconn, tid)
+    assert _start(project.id, trigger="schedule")["run"]["run_no"] == 1
+
+
+def test_a_dependency_or_transient_block_does_not_skip_the_schedule(stores):
+    project, _ = _make_project()
+    _save_playbook(project.id, [{"key": "one", "title": "One"}])
+    with projects_db.connect_closing() as conn:
+        projects_db.activate_playbook_rev(conn, project.id, 1)
+    with kanban_db.connect_closing() as bconn:
+        tid = kanban_db.create_task(bconn, title="Flaky API", project_id=project.id)
+        bconn.execute("UPDATE tasks SET status = 'running' WHERE id = ?", (tid,))
+        bconn.commit()
+        assert kanban_db.block_task(bconn, tid, reason="429", kind="transient")
+    assert _start(project.id, trigger="schedule")["run"]["run_no"] == 1
 
 
 def test_resume_refuses_while_another_run_is_open(stores):

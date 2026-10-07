@@ -306,6 +306,47 @@ def test_reconcile_never_fails_a_run_whose_checkpoint_card_is_blocked(stores):
     assert "s2" in info["held_step_keys"]
 
 
+def test_reconcile_holds_a_run_waiting_on_a_human_only_card(stores):
+    """Folder Bridge: a run's card depends on a card only a person can
+    clear (needs_input — "connect the browser session"). The sweep used to
+    fail the run as stalled after the threshold, then the next schedule
+    opened another run that hit the same wait. It must stay open, waiting
+    on the human, with an approval naming the card."""
+    project = _make_project(autonomy="autonomous", max_in_progress=1)
+    _save_playbook(project.id, [{"key": "s0", "title": "Import the listing"}])
+    with projects_db.connect_closing() as conn:
+        projects_db.activate_playbook_rev(conn, project.id, 1)
+    result = _start(project.id)
+    run = result["run"]
+    s0_id = result["cards"]["s0"]
+
+    with kanban_db.connect_closing() as bconn:
+        gate = kanban_db.create_task(
+            bconn, title="Connect the Folder Bridge session", project_id=project.id,
+        )
+        bconn.execute("UPDATE tasks SET status = 'running' WHERE id = ?", (gate,))
+        bconn.commit()
+        assert kanban_db.block_task(
+            bconn, gate, reason="needs a live browser session", kind="needs_input",
+        )
+        kanban_db.link_tasks(bconn, gate, s0_id)
+        bconn.execute("UPDATE tasks SET status = 'todo' WHERE id = ?", (s0_id,))
+        bconn.commit()
+    APPROVALS.calls.clear()
+
+    future = int(run["started_at"]) + 3 * 3600
+    results = projects_reconcile.reconcile_all_open_runs(now=future)
+
+    with projects_db.connect_closing() as conn:
+        assert projects_db.get_project_run_by_id(conn, run["id"])["status"] == "running"
+    assert any(
+        r.get("action") == "waiting_on_human" and r.get("task_id") == gate
+        for r in results
+    )
+    assert len(APPROVALS.calls) == 1
+    assert "Connect the Folder Bridge session" in APPROVALS.calls[0]["body"]
+
+
 def test_checkpoint_wait_info_is_not_masked_by_a_second_still_open_checkpoint(stores):
     """Regression for the regression (2026-09-14, second recurrence on the
     real project): `checkpoint_wait_info` used to require EVERY checkpoint

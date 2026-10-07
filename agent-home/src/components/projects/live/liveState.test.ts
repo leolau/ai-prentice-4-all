@@ -143,6 +143,18 @@ describe("liveState", () => {
     expect(s.kind).toBe("needs_you");
   });
 
+  it("is Needs you when a card only a person can clear holds the run", () => {
+    const s = liveState(PROJECT(), BOARD(CARD({ status: "blocked" })), {
+      run: RUN({
+        waiting_on_you: [
+          { task_id: "g", title: "Connect Folder Bridge", block_kind: "needs_input", reason: null },
+        ],
+      }),
+    });
+    expect(s.kind).toBe("needs_you");
+    expect(s.nextForYou).toContain("Connect Folder Bridge");
+  });
+
   it("is Stalled on the server's stall signal, and says what to unstick", () => {
     const s = liveState(
       PROJECT(),

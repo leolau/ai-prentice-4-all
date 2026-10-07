@@ -615,6 +615,15 @@ def _cmd_outputs(api: _Api, args) -> int:
         body = {"link_ref": args.ref}
         if args.note:
             body["note"] = args.note
+        # Run inside a kanban worker, the delivery belongs to that card (and
+        # through it, to the card's run).
+        task_id = args.task or os.environ.get("HERMES_KANBAN_TASK")
+        if task_id:
+            body["task_id"] = task_id
+        if args.run:
+            body["run_id"] = args.run
+        if os.environ.get("HERMES_KANBAN_TASK") and os.environ.get("HERMES_PROFILE"):
+            body["profile"] = os.environ["HERMES_PROFILE"]
         resp = api.request(
             "POST", f"/{slug}/outputs/{output_id}/deliver", json_body=body
         )
@@ -1251,6 +1260,14 @@ def register_projects_subparser(
     outputs.add_argument("--recurring", action="store_true")
     outputs.add_argument("--ref", default=None, help="Delivery pointer")
     outputs.add_argument("--note", default=None)
+    outputs.add_argument(
+        "--task", default=None,
+        help="Card that produced it (default: $HERMES_KANBAN_TASK)",
+    )
+    outputs.add_argument(
+        "--run", default=None,
+        help="Run id it belongs to (default: the card's run)",
+    )
     outputs.add_argument("--json", **json_flag)
 
     contacts = sub.add_parser("contacts", help="People the work involves")

@@ -214,3 +214,48 @@ toolsets:
 
     pinned = captured["cmd"][captured["cmd"].index("--toolsets") + 1].split(",")
     assert "web" in pinned and "terminal" in pinned and "file" in pinned
+
+
+def test_spawned_worker_argv_parses_to_stamped_toolsets(monkeypatch, tmp_path):
+    """The real CLI parser, fed the exact argv the dispatcher spawns, must
+    hand the worker its stamped toolsets (and model override) — not None,
+    which silently falls back to the profile's full tool surface."""
+    root = tmp_path / ".hermes"
+    profile = root / "profiles" / "elias"
+    profile.mkdir(parents=True)
+    profile.joinpath("config.yaml").write_text(
+        "platform_toolsets:\n  cli:\n    - file\n    - web\n", encoding="utf-8"
+    )
+    monkeypatch.setenv("HERMES_HOME", str(root))
+
+    from hermes_cli import kanban_db as kb
+    from hermes_cli._parser import build_top_level_parser
+
+    monkeypatch.setattr(kb, "_resolve_hermes_argv", lambda: ["hermes"])
+    captured = {}
+
+    class FakeProc:
+        pid = 4242
+
+    def fake_popen(cmd, *args, **kwargs):
+        captured["cmd"] = list(cmd)
+        return FakeProc()
+
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    task = _make_task(kb, assignee="elias")
+    task.toolsets = ["file", "vision", "kanban"]
+    task.model_override = "some/model"
+    kb._default_spawn(task, str(workspace))
+
+    argv = captured["cmd"][1:]
+    # `-p <profile>` is consumed by _apply_profile_override() before argparse.
+    i = argv.index("-p")
+    del argv[i:i + 2]
+    parser, _subparsers, _chat_parser = build_top_level_parser()
+    args = parser.parse_args(argv)
+    assert args.command == "chat"
+    assert args.toolsets.split(",") == ["file", "vision", "kanban"]
+    assert args.model == "some/model"

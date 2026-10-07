@@ -255,6 +255,21 @@ def _reconcile_one_run(
                     "project": project.slug, "run_no": run.get("run_no"),
                     "action": "awaiting_continue",
                 }
+            # A card only a person can clear (needs_input / capability) is
+            # holding the run: waiting on a human, not orphaned (§7.1).
+            waits = projects_run.run_human_waits(
+                bconn, [rc["task_id"] for rc in run_cards]
+            )
+            if waits:
+                projects_run.notify_waiting_on_you(
+                    project, run, waits[0],
+                    lead=f"Run {run.get('run_no')} is paused:",
+                )
+                return {
+                    "project": project.slug, "run_no": run.get("run_no"),
+                    "action": "waiting_on_human",
+                    "task_id": waits[0]["task_id"],
+                }
     if in_flight:
         return None
 

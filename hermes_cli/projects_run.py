@@ -1049,6 +1049,21 @@ def start_run(
             "project may run"
         )
 
+    if trigger == "schedule":
+        waits = project_human_waits(bconn, project)
+        if waits:
+            last = projects_db.list_project_runs(pconn, project.id, limit=1)
+            if last:
+                notify_waiting_on_you(
+                    project, last[0], waits[0],
+                    lead="A scheduled run was skipped:",
+                )
+            log.info(
+                "projects: scheduled run of %s skipped — card %s waits on a person",
+                project.slug, waits[0]["task_id"],
+            )
+            raise ScheduledRunSkipped(waits[0])
+
     playbook = projects_db.get_playbook(pconn, project.id, rev=playbook_rev)
     if playbook is None:
         raise ValueError(
@@ -1433,6 +1448,91 @@ def maybe_close_completed_run(
     if not run_cards_all_settled(cards):
         return None
     return close_run(pconn, run=run)
+
+
+#: Block kinds only a person can clear (kanban_db.VALID_BLOCK_KINDS).
+HUMAN_BLOCK_KINDS = ("needs_input", "capability")
+
+
+class ScheduledRunSkipped(ValueError):
+    """A scheduled run would only hit a card that is already waiting on a
+    person — starting it changes nothing but adds another run that stalls on
+    the same wait."""
+
+    def __init__(self, wait: dict):
+        self.wait = wait
+        super().__init__(
+            f"scheduled run skipped — \"{wait.get('title') or wait['task_id']}\" "
+            f"({wait['task_id']}) is waiting on you. Answer or unblock it; "
+            "scheduled runs resume after that. A run started by hand still runs."
+        )
+
+
+def _human_wait(bconn, task) -> dict:
+    return {
+        "task_id": task.id,
+        "title": task.title,
+        "block_kind": task.block_kind,
+        "reason": _latest_card_note(bconn, task.id),
+    }
+
+
+def project_human_waits(bconn, project: projects_db.Project) -> List[dict]:
+    """Every card of this project blocked on a person, oldest first."""
+    rows = bconn.execute(
+        "SELECT id FROM tasks WHERE project_id = ? AND status = 'blocked' "
+        "AND block_kind IN (?, ?) ORDER BY created_at, id",
+        (project.id, *HUMAN_BLOCK_KINDS),
+    ).fetchall()
+    waits = []
+    for row in rows:
+        task = kanban_db.get_task(bconn, row["id"])
+        if task is not None:
+            waits.append(_human_wait(bconn, task))
+    return waits
+
+
+def run_human_waits(bconn, task_ids: List[str]) -> List[dict]:
+    """Cards blocked on a person anywhere in a run's dependency tree — the
+    run's own cards, or a card they (transitively) depend on."""
+    seen: set = set()
+    stack = list(task_ids)
+    while stack:
+        node = stack.pop()
+        if node in seen:
+            continue
+        seen.add(node)
+        stack.extend(kanban_db.parent_ids(bconn, node))
+    waits = []
+    for task_id in sorted(seen):
+        task = kanban_db.get_task(bconn, task_id)
+        if (
+            task is not None
+            and task.status == "blocked"
+            and task.block_kind in HUMAN_BLOCK_KINDS
+        ):
+            waits.append(_human_wait(bconn, task))
+    return waits
+
+
+def notify_waiting_on_you(
+    project: projects_db.Project, run: dict, wait: dict, *, lead: str
+) -> None:
+    """One approval per waiting card (deduped by card), never raises."""
+    reason = f"{lead} \"{wait.get('title') or wait['task_id']}\" is waiting on you."
+    if wait.get("reason"):
+        reason = f"{reason}\n\n{wait['reason']}"
+    try:
+        raise_approval(
+            project, run, reason, kind="waiting_on_you",
+            dedupe_suffix=wait["task_id"],
+            url=f"/projects/{project.slug}/cards/{wait['task_id']}",
+        )
+    except Exception:  # noqa: BLE001 — the skip/hold itself still stands
+        log.warning(
+            "projects: could not raise waiting-on-you approval for %s",
+            project.slug, exc_info=True,
+        )
 
 
 def notify_if_awaiting_checkpoint(

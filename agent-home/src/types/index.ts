@@ -1544,6 +1544,15 @@ export interface ProjectRunBlockedTask {
   error: string | null;
 }
 
+/** A card in the run's dependency tree that only a person can clear. */
+export interface ProjectRunHumanWait {
+  task_id: string;
+  title: string | null;
+  block_kind: string;
+  /** The card's latest note — what it is asking for. */
+  reason: string | null;
+}
+
 /**
  * What a supervised run's checkpoint hold is actually waiting on (§7.1,
  * §12 push edition) — the checkpoint card's own comment, not just a
@@ -1587,6 +1596,12 @@ export interface ProjectRun {
   /** Joined fields — present on the detail read. */
   cards?: ProjectRunCard[];
   blocked_tasks?: ProjectRunBlockedTask[];
+  /**
+   * Server-derived: cards blocked on a person (needs input / capability)
+   * holding this run. A run waiting on you is never `stalled`, and scheduled
+   * runs are skipped until these are answered.
+   */
+  waiting_on_you?: ProjectRunHumanWait[];
   cost?: number | null;
   cost_recorded?: boolean;
   duration_seconds?: number;

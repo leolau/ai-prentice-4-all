@@ -1865,16 +1865,27 @@ def record_output_delivery(
 ) -> str:
     """One delivery row per produced output (§6.1). Recurring outputs
     accumulate one row per run. A web link recorded without a kind is a
-    ``url`` delivery."""
+    ``url`` delivery. A delivery made from a run's card (``task_id`` set,
+    ``run_id`` not) is filed under that card's run, so the run's outcome
+    counts it."""
     if not link_kind and link_ref and urlparse(link_ref).scheme in ("http", "https"):
         link_kind = "url"
     did = _new_row_id("d")
     with write_txn(conn):
-        exists = conn.execute(
-            "SELECT 1 FROM project_outputs WHERE id = ?", (output_id,)
+        output = conn.execute(
+            "SELECT project_id FROM project_outputs WHERE id = ?", (output_id,)
         ).fetchone()
-        if exists is None:
+        if output is None:
             raise ValueError(f"unknown output: {output_id!r}")
+        if task_id and not run_id:
+            owner = conn.execute(
+                "SELECT r.id FROM project_run_cards c "
+                "JOIN project_runs r ON r.id = c.run_id "
+                "WHERE c.task_id = ? AND r.project_id = ?",
+                (task_id, output["project_id"]),
+            ).fetchone()
+            if owner is not None:
+                run_id = owner["id"]
         conn.execute(
             """INSERT INTO project_output_deliveries
                (id, output_id, run_id, task_id, link_kind, link_ref, profile,
