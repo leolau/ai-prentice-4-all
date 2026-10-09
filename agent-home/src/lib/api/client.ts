@@ -49,6 +49,7 @@ import type {
   ModelInfo,
   ModelOptionsResponse,
   ModelSetResponse,
+  ModelTestResponse,
   ModelsAnalyticsResponse,
   ModelsPerformanceResponse,
   AuxiliaryModelsResponse,
@@ -2368,6 +2369,17 @@ export class HermesApiClient {
     return this.request(
       `/api/analytics/models/performance?days=${days}&months=${months}`,
     );
+  }
+
+  /** Fire one real completion against a slot or ad-hoc provider+model —
+   *  proves the config works end-to-end (key, endpoint, model id). */
+  async testModel(body: {
+    scope: string;
+    task?: string;
+    provider?: string;
+    model?: string;
+  }): Promise<ModelTestResponse> {
+    return this.request("/api/model/test", { method: "POST", json: body });
   }
 
   /** Live-probe a provider credential before persisting it. */

@@ -2097,6 +2097,20 @@ export interface AuxiliaryModelsResponse {
   main: { provider: string; model: string };
 }
 
+/** `POST /api/model/test` — one real completion against a slot or ad-hoc
+ * provider+model. `ok:false` carries `error`/`error_type`; `ok:true` carries
+ * `latency_ms` and a short `reply` excerpt. */
+export interface ModelTestResponse {
+  ok: boolean;
+  provider?: string;
+  model?: string;
+  latency_ms?: number;
+  reply?: string;
+  error?: string;
+  error_type?: string;
+  detail?: string;
+}
+
 /** `POST /api/model/set` response — `confirm_required` means resend with `confirm_expensive_model`. */
 export interface ModelSetResponse {
   ok: boolean;

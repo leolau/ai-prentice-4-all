@@ -4358,6 +4358,106 @@ class TestNewEndpoints:
         assert month["min_ms"] == 1500 and month["max_ms"] == 316400
         assert month["avg_ms"] == (1500 + 316400) // 2
 
+    def test_model_test_endpoint_reports_roundtrip(self):
+        """POST /api/model/test fires one real completion against the saved
+        main config and reports latency + reply; a provider failure comes
+        back as ok:false with the error, never an HTTP 5xx."""
+        import types
+        from unittest.mock import patch
+
+        class _Completions:
+            def create(self, **kw):
+                assert kw["model"] in ("m-1", "m-9")
+                return types.SimpleNamespace(
+                    choices=[types.SimpleNamespace(
+                        message=types.SimpleNamespace(content="OK"))],
+                    usage=types.SimpleNamespace(input_tokens=4, output_tokens=1),
+                )
+
+        fake_client = types.SimpleNamespace(
+            chat=types.SimpleNamespace(completions=_Completions()))
+
+        with patch(
+            "agent.auxiliary_client.resolve_provider_client",
+            return_value=(fake_client, "m-1"),
+        ) as rpc:
+            data = self.client.post(
+                "/api/model/test", json={"scope": "main"}).json()
+
+        assert data["ok"] is True and data["latency_ms"] >= 0
+        assert data["reply"] == "OK" and data["model"] == "m-1"
+        # ad-hoc selection path: explicit provider+model skips config lookup
+        with patch(
+            "agent.auxiliary_client.resolve_provider_client",
+            return_value=(fake_client, "m-9"),
+        ) as rpc2:
+            data2 = self.client.post(
+                "/api/model/test",
+                json={"scope": "main", "provider": "openai", "model": "m-9"},
+            ).json()
+        assert data2["ok"] is True and data2["model"] == "m-9"
+        assert rpc2.call_args[0][0] == "openai"
+
+        # provider down → ok:false + error fields
+        def _boom(**kw):
+            raise RuntimeError("connection refused")
+        fake_client.chat.completions.create = _boom
+        with patch(
+            "agent.auxiliary_client.resolve_provider_client",
+            return_value=(fake_client, "m-1"),
+        ):
+            data3 = self.client.post(
+                "/api/model/test", json={"scope": "main"}).json()
+        assert data3["ok"] is False
+        assert data3["error_type"] == "RuntimeError"
+        assert "connection refused" in data3["error"]
+
+    def test_model_test_auxiliary_scope_uses_task_client(self):
+        """scope=auxiliary resolves through get_text_auxiliary_client so the
+        saved task role (not the main model) is what gets exercised."""
+        import types
+        from unittest.mock import patch
+
+        class _Completions:
+            def create(self, **kw):
+                return types.SimpleNamespace(
+                    choices=[types.SimpleNamespace(
+                        message=types.SimpleNamespace(content="OK"))],
+                    usage=None,
+                )
+
+        fake_client = types.SimpleNamespace(
+            chat=types.SimpleNamespace(completions=_Completions()))
+
+        with patch(
+            "agent.auxiliary_client._resolve_task_provider_model",
+            return_value=("openai", "gpt-5-mini", None, None, None),
+        ), patch(
+            "agent.auxiliary_client.get_text_auxiliary_client",
+            return_value=(fake_client, "gpt-5-mini"),
+        ) as getter:
+            data = self.client.post(
+                "/api/model/test",
+                json={"scope": "auxiliary", "task": "compression"},
+            ).json()
+        getter.assert_called_once_with("compression")
+        assert data["ok"] is True and data["model"] == "gpt-5-mini"
+
+        # unconfigured slot → actionable error, not a crash
+        with patch(
+            "agent.auxiliary_client._resolve_task_provider_model",
+            return_value=(None, None, None, None, None),
+        ), patch(
+            "agent.auxiliary_client.get_text_auxiliary_client",
+            return_value=(None, None),
+        ):
+            data2 = self.client.post(
+                "/api/model/test",
+                json={"scope": "auxiliary", "task": "vision"},
+            ).json()
+        assert data2["ok"] is False
+        assert data2["error_type"] == "ProviderNotConfigured"
+
     def test_models_performance_empty_is_collecting(self):
         data = self.client.get("/api/analytics/models/performance").json()
         assert data["collecting"] is True
