@@ -7,7 +7,7 @@ import { ModelPerformance } from "@/components/models/ModelPerformance";
 import { ModelPickerSheet } from "@/components/models/ModelPickerSheet";
 import { Pill } from "@/components/ui/Pill";
 import { Spinner } from "@/components/ui/Spinner";
-import { withProfileQuery } from "@/lib/chat/profile";
+import { withProfileBody, withProfileQuery } from "@/lib/chat/profile";
 import type {
   AuxTaskAssignment,
   ModelsOverviewResponse,
@@ -99,6 +99,44 @@ export function ModelsView({
   const [error, setError] = useState<string | null>(null);
   const [pinned, setPinned] = useState<PinnedModelCard[] | null>(null);
   const [perf, setPerf] = useState<ModelsPerformanceResponse | null>(null);
+  const [testing, setTesting] = useState(false);
+  const [testResult, setTestResult] = useState<{ ok: boolean; text: string } | null>(null);
+
+  const testMain = useCallback(async () => {
+    if (testing) return;
+    setTesting(true);
+    setTestResult(null);
+    try {
+      const res = await fetch("/api/models/test", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(withProfileBody({ scope: "main" }, profile)),
+      });
+      const body = (await res.json()) as {
+        ok?: boolean;
+        model?: string;
+        latency_ms?: number;
+        reply?: string;
+        error?: string;
+        detail?: string;
+      };
+      if (!res.ok) {
+        setTestResult({ ok: false, text: body.detail ?? "Test request failed." });
+      } else if (body.ok) {
+        const secs = ((body.latency_ms ?? 0) / 1000).toFixed(1);
+        setTestResult({
+          ok: true,
+          text: `${body.model ?? "model"} replied in ${secs}s${body.reply ? ` — “${body.reply}”` : ""}`,
+        });
+      } else {
+        setTestResult({ ok: false, text: body.error ?? "Test failed." });
+      }
+    } catch {
+      setTestResult({ ok: false, text: "Couldn't reach the test endpoint." });
+    } finally {
+      setTesting(false);
+    }
+  }, [profile, testing]);
 
   // Lazy: the per-call ledger read is additive — it loads after first
   // paint so the config sections never wait on it.
@@ -200,13 +238,36 @@ export function ModelsView({
           {caps.supports_reasoning ? <Pill tone="success">reasoning</Pill> : null}
           {caps.model_family ? <Pill tone="muted">{caps.model_family}</Pill> : null}
         </div>
-        <button
-          type="button"
-          onClick={() => setSlot({ kind: "main" })}
-          className="mt-3 rounded-full border border-[var(--color-border)] bg-[var(--color-surface-2)] px-3.5 py-1.5 text-xs"
-        >
-          Change
-        </button>
+        <div className="mt-3 flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => setSlot({ kind: "main" })}
+            className="rounded-full border border-[var(--color-border)] bg-[var(--color-surface-2)] px-3.5 py-1.5 text-xs"
+          >
+            Change
+          </button>
+          <button
+            type="button"
+            onClick={() => void testMain()}
+            disabled={testing}
+            className="inline-flex items-center gap-1.5 rounded-full border border-[var(--color-border)] bg-[var(--color-surface-2)] px-3.5 py-1.5 text-xs disabled:opacity-60"
+          >
+            {testing ? <Spinner /> : null}
+            {testing ? "Testing…" : "Test"}
+          </button>
+        </div>
+        {testResult ? (
+          <p
+            className={`mt-2 rounded-lg px-3 py-1.5 text-xs ${
+              testResult.ok
+                ? "bg-[var(--color-surface-2)] text-[var(--color-muted)]"
+                : "bg-red-500/10 text-red-300"
+            }`}
+          >
+            {testResult.ok ? "✓ " : "✗ "}
+            {testResult.text}
+          </p>
+        ) : null}
       </section>
 
       {/* ── Task roles ── */}

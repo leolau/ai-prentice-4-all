@@ -6770,6 +6770,137 @@ def _denormalize_config_from_web(config: Dict[str, Any]) -> Dict[str, Any]:
     return config
 
 
+class ModelTestRequest(BaseModel):
+    """Payload for POST /api/model/test — fire one real minimal completion
+    to prove a slot's config works.
+
+    scope="main"      → saved main provider/model (or an ad-hoc
+                        provider+model pair, for testing a picker
+                        selection before saving it)
+    scope="auxiliary" → a task role resolved via get_text_auxiliary_client
+    """
+    scope: str = "main"
+    task: str = ""
+    provider: str = ""
+    model: str = ""
+    profile: Optional[str] = None
+
+
+@app.post("/api/model/test")
+async def test_model_call(body: ModelTestRequest):
+    """Round-trip the configured model: one "say OK" completion, timed.
+
+    Never raises — the point is to surface *why* a config fails. The
+    provider SDK call is sync and can block, so it runs in a worker thread
+    with an overall timeout."""
+    scope = (body.scope or "main").strip().lower()
+    task = (body.task or "").strip().lower()
+    provider = (body.provider or "").strip()
+    model = (body.model or "").strip()
+    if scope not in {"main", "auxiliary"}:
+        raise HTTPException(status_code=400, detail="scope must be 'main' or 'auxiliary'")
+    try:
+        return await asyncio.wait_for(
+            asyncio.to_thread(
+                _run_model_test_sync, scope, task, provider, model, body.profile
+            ),
+            timeout=90.0,
+        )
+    except asyncio.TimeoutError:
+        return {
+            "ok": False,
+            "provider": provider,
+            "model": model,
+            "error": "Timed out after 90s — the provider is reachable but not answering.",
+            "error_type": "TimeoutError",
+        }
+
+
+def _run_model_test_sync(
+    scope: str, task: str, provider: str, model: str, profile: Optional[str]
+):
+    """Worker-thread body of POST /api/model/test."""
+    import time as _time
+
+    started = _time.time()
+
+    def _fail(error, error_type, provider=provider, model=model):
+        return {
+            "ok": False,
+            "provider": provider,
+            "model": model,
+            "latency_ms": round((_time.time() - started) * 1000),
+            "error": str(error)[:400],
+            "error_type": error_type,
+        }
+
+    try:
+        with _profile_scope(profile):
+            if scope == "auxiliary":
+                from agent.auxiliary_client import (
+                    _resolve_task_provider_model,
+                    get_text_auxiliary_client,
+                )
+
+                rp, rm, *_ = _resolve_task_provider_model(task or None)
+                client, resolved = get_text_auxiliary_client(task)
+                provider = provider or rp or ""
+                model = resolved or rm or model
+            else:
+                cfg = load_config()
+                model_cfg = cfg.get("model") if isinstance(cfg.get("model"), dict) else {}
+                if provider and model:
+                    # Ad-hoc picker selection — the saved base_url/api_key
+                    # belong to the saved provider, not this one.
+                    base_url = api_key = None
+                else:
+                    provider = provider or model_cfg.get("provider", "")
+                    model = model or model_cfg.get("default") or model_cfg.get("name", "")
+                    base_url = model_cfg.get("base_url") or None
+                    api_key = model_cfg.get("api_key") or None
+                from agent.auxiliary_client import resolve_provider_client
+
+                client, resolved = resolve_provider_client(
+                    provider,
+                    model,
+                    explicit_base_url=base_url,
+                    explicit_api_key=api_key,
+                )
+                model = resolved or model
+
+            if client is None:
+                return _fail(
+                    "Could not build a client — the provider is not configured "
+                    "(missing credentials or endpoint).",
+                    "ProviderNotConfigured",
+                )
+            if not model:
+                return _fail("No model selected.", "NoModel")
+
+            from agent.auxiliary_client import auxiliary_max_tokens_param
+
+            resp = client.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": "Reply with exactly: OK"}],
+                temperature=0,
+                **auxiliary_max_tokens_param(16, model=model),
+            )
+            text = ""
+            try:
+                text = (resp.choices[0].message.content or "")[:200]
+            except (AttributeError, IndexError, TypeError):
+                pass
+            return {
+                "ok": True,
+                "provider": provider,
+                "model": model,
+                "latency_ms": round((_time.time() - started) * 1000),
+                "reply": text,
+            }
+    except Exception as exc:
+        return _fail(exc, type(exc).__name__)
+
+
 @app.put("/api/config")
 async def update_config(body: ConfigUpdate, profile: Optional[str] = None):
     try:

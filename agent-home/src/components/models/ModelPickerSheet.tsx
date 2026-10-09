@@ -64,6 +64,8 @@ export function ModelPickerSheet({
   const [customKey, setCustomKey] = useState("");
   const [customModel, setCustomModel] = useState("");
   const [busy, setBusy] = useState<"set" | "key" | "reset" | "disconnect" | null>(null);
+  const [testing, setTesting] = useState(false);
+  const [showChangeKey, setShowChangeKey] = useState(false);
   const [note, setNote] = useState<string | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
 
@@ -223,7 +225,9 @@ export function ModelPickerSheet({
 
   async function saveKey() {
     if (!provider?.key_env || busy) return;
-    if (needsEndpoint && !endpointUrl.trim()) {
+    // Only first-time connect must supply the endpoint URL — when changing
+    // the key on an already-connected provider the env var is on disk.
+    if (!authenticated && needsEndpoint && !endpointUrl.trim()) {
       setNote(`${provider.name} needs its endpoint URL too.`);
       return;
     }
@@ -254,6 +258,7 @@ export function ModelPickerSheet({
       };
       if (!res.ok) throw new Error(body.detail ?? "Couldn't save the key.");
       setKeyValue("");
+      setShowChangeKey(false);
       setNote(
         body.verified
           ? "Key saved and verified."
@@ -266,6 +271,50 @@ export function ModelPickerSheet({
       setNote(err instanceof Error ? err.message : "Couldn't save the key.");
     } finally {
       setBusy(null);
+    }
+  }
+
+  /** Fire one real completion against the selected provider+model —
+   *  proves the choice works before (or without) saving it. */
+  async function testSelection() {
+    const model = typedModel.trim() || selectedModel;
+    if (!provider || !model || busy || testing) return;
+    setTesting(true);
+    setNote(null);
+    try {
+      const res = await fetch("/api/models/test", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(
+          withProfileBody(
+            { scope: "main", provider: provider.slug, model },
+            profile,
+          ),
+        ),
+      });
+      const body = (await res.json()) as {
+        ok?: boolean;
+        model?: string;
+        latency_ms?: number;
+        reply?: string;
+        error?: string;
+        detail?: string;
+      };
+      if (!res.ok) {
+        setNote(body.detail ?? "Test request failed.");
+      } else if (body.ok) {
+        const secs = ((body.latency_ms ?? 0) / 1000).toFixed(1);
+        setNote(
+          `✓ ${body.model ?? model} replied in ${secs}s` +
+            (body.reply ? ` — “${body.reply}”` : ""),
+        );
+      } else {
+        setNote(`✗ ${body.error ?? "Test failed."}`);
+      }
+    } catch {
+      setNote("Couldn't reach the test endpoint.");
+    } finally {
+      setTesting(false);
     }
   }
 
@@ -566,7 +615,7 @@ export function ModelPickerSheet({
                   {slot.kind === "aux" ? (
                     <button
                       type="button"
-                      disabled={busy !== null}
+                      disabled={busy !== null || testing}
                       onClick={() => void resetToAuto()}
                       className="inline-flex items-center gap-2 rounded-full border border-[var(--color-border)] px-4 py-1.5 text-xs disabled:opacity-60"
                     >
@@ -576,23 +625,62 @@ export function ModelPickerSheet({
                   ) : null}
                   <button
                     type="button"
-                    disabled={(!selectedModel && !typedModel.trim()) || busy !== null}
+                    disabled={(!selectedModel && !typedModel.trim()) || busy !== null || testing}
+                    onClick={() => void testSelection()}
+                    className="ml-auto inline-flex items-center gap-2 rounded-full border border-[var(--color-border)] px-4 py-1.5 text-xs disabled:opacity-60"
+                  >
+                    {testing ? <Spinner /> : null}
+                    {testing ? "Testing…" : "Test"}
+                  </button>
+                  <button
+                    type="button"
+                    disabled={(!selectedModel && !typedModel.trim()) || busy !== null || testing}
                     onClick={() => void setModel(false)}
-                    className="ml-auto inline-flex items-center gap-2 rounded-full bg-[var(--color-accent)] px-4 py-1.5 text-xs font-semibold text-[var(--color-accent-fg)] disabled:opacity-60"
+                    className="inline-flex items-center gap-2 rounded-full bg-[var(--color-accent)] px-4 py-1.5 text-xs font-semibold text-[var(--color-accent-fg)] disabled:opacity-60"
                   >
                     {busy === "set" ? <Spinner /> : null}
                     Set model
                   </button>
                 </div>
                 {authenticated && keyBased ? (
-                  <button
-                    type="button"
-                    disabled={busy !== null}
-                    onClick={() => setPhase({ kind: "confirm-disconnect" })}
-                    className="mt-3 border-t border-[var(--color-border)] pt-3 text-left text-xs text-red-300"
-                  >
-                    Disconnect {provider?.name} — remove its key from .env
-                  </button>
+                  <div className="mt-3 space-y-2 border-t border-[var(--color-border)] pt-3">
+                    <button
+                      type="button"
+                      onClick={() => setShowChangeKey((v) => !v)}
+                      className="block text-left text-xs text-[var(--color-muted)]"
+                    >
+                      {showChangeKey ? "Hide key editor" : `Change ${provider?.name} API key…`}
+                    </button>
+                    {showChangeKey ? (
+                      <div className="flex gap-2">
+                        <input
+                          type="password"
+                          value={keyValue}
+                          onChange={(e) => setKeyValue(e.target.value)}
+                          placeholder={provider?.key_env ?? "API key"}
+                          autoComplete="off"
+                          className="min-w-0 flex-1 rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 font-mono text-xs"
+                        />
+                        <button
+                          type="button"
+                          disabled={!keyValue.trim() || busy !== null}
+                          onClick={() => void saveKey()}
+                          className="inline-flex items-center gap-1.5 rounded-full border border-[var(--color-border)] px-3.5 py-2 text-xs disabled:opacity-60"
+                        >
+                          {busy === "key" ? <Spinner /> : null}
+                          Save
+                        </button>
+                      </div>
+                    ) : null}
+                    <button
+                      type="button"
+                      disabled={busy !== null}
+                      onClick={() => setPhase({ kind: "confirm-disconnect" })}
+                      className="block text-left text-xs text-red-300"
+                    >
+                      Disconnect {provider?.name} — remove its key from .env
+                    </button>
+                  </div>
                 ) : null}
               </>
             )}

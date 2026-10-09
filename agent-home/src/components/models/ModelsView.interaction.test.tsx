@@ -4,7 +4,7 @@
  * after paint, renders one row per overriding card linking to its card
  * page, and stays hidden entirely when nothing is pinned.
  */
-import { cleanup, render, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { ModelsView } from "@/components/models/ModelsView";
@@ -100,6 +100,55 @@ describe("ModelsView pinned cards", () => {
     await waitFor(() => expect(fetchMock).toHaveBeenCalled());
     await waitFor(() =>
       expect(container.textContent).not.toContain("Pinned cards"),
+    );
+  });
+});
+
+describe("ModelsView test button", () => {
+  function testFetch(testBody: unknown) {
+    return vi.fn().mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/models/test")) {
+        return Promise.resolve(jsonResponse(200, testBody));
+      }
+      return Promise.resolve(jsonResponse(200, EMPTY_PERF));
+    });
+  }
+
+  it("posts scope:main and shows the round-trip result", async () => {
+    const fetchMock = testFetch({
+      ok: true,
+      model: "glm-5.2",
+      latency_ms: 2100,
+      reply: "OK",
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { container, findByText } = render(<ModelsView initial={OVERVIEW} />);
+    fireEvent.click(await findByText("Test"));
+
+    await waitFor(() =>
+      expect(container.textContent).toContain("glm-5.2 replied in 2.1s"),
+    );
+    const call = fetchMock.mock.calls.find((c) =>
+      String(c[0]).includes("/api/models/test"),
+    );
+    expect(JSON.parse(String(call?.[1]?.body))).toMatchObject({ scope: "main" });
+  });
+
+  it("surfaces a failed round-trip as an error, not a crash", async () => {
+    const fetchMock = testFetch({
+      ok: false,
+      error: "401 Unauthorized — bad key",
+      error_type: "AuthenticationError",
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { container, findByText } = render(<ModelsView initial={OVERVIEW} />);
+    fireEvent.click(await findByText("Test"));
+
+    await waitFor(() =>
+      expect(container.textContent).toContain("401 Unauthorized — bad key"),
     );
   });
 });
