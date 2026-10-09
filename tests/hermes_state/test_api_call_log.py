@@ -5,6 +5,7 @@ failed retry); writes are fire-and-forget so telemetry can never break the
 call it measures; rows past retention prune cleanly.
 """
 import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -102,52 +103,193 @@ def test_module_helper_swallows_a_broken_db():
     record_api_call(BrokenDB(), model="m")  # must not raise
 
 
-def test_aux_call_llm_wrapper_records_attempts(tmp_path, monkeypatch):
-    """call_llm is a telemetry shell over _call_llm_impl — aux-role calls
-    (vision, compression, …) land in the ledger with their caller role."""
+class _FakeResp:
+    model = "gpt-5-mini"
+
+    class usage:
+        input_tokens = 120
+        output_tokens = 30
+
+
+class _FakeCompletions:
+    def __init__(self, fn):
+        self._fn = fn
+
+    def create(self, **kw):
+        return self._fn(**kw)
+
+
+class _FakeClient:
+    def __init__(self, fn):
+        self.chat = SimpleNamespace(completions=_FakeCompletions(fn))
+
+
+def test_logged_create_shim_records(tmp_path, monkeypatch):
+    """_ensure_logged_create wraps chat.completions.create — the row lands
+    with caller 'aux:<ctx task>' or bare 'aux'."""
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     import hermes_state
     hermes_state._METRICS_DBS.clear()
 
     import agent.auxiliary_client as aux
 
-    class _Resp:
-        model = "gpt-5-mini"
+    client = _FakeClient(lambda **kw: _FakeResp())
+    aux._ensure_logged_create(client, provider_hint="openai",
+                              model_hint="gpt-5-mini")
+    aux._ensure_logged_create(client)  # idempotent — no double record
 
-        class usage:
-            input_tokens = 120
-            output_tokens = 30
-
-    def fake_impl(task, **kw):
-        assert task == "compression"
-        return _Resp()
-
-    monkeypatch.setattr(aux, "_call_llm_impl", fake_impl)
-    monkeypatch.setattr(
-        aux, "_resolve_task_provider_model",
-        lambda *a, **k: ("openai", "gpt-5-mini", None, None, None),
-    )
-    out = aux.call_llm("compression", messages=[{"role": "user", "content": "x"}])
-    assert out is _Resp or isinstance(out, _Resp)
+    client.chat.completions.create(messages=[])  # ctx unset → passthrough
+    token = aux._AUX_TASK_CTX.set("compression")
+    try:
+        client.chat.completions.create(messages=[])
+    finally:
+        aux._AUX_TASK_CTX.reset(token)
 
     db = api_metrics_db()
-    rows = db._conn.execute("SELECT * FROM api_call_log").fetchall()
-    assert len(rows) == 1
+    rows = db._conn.execute("SELECT * FROM api_call_log ORDER BY id").fetchall()
+    assert len(rows) == 1  # unscoped calls record nothing (main-path guard)
     assert rows[0]["caller"] == "aux:compression"
-    assert rows[0]["status"] == "ok"
-    assert rows[0]["input_tokens"] == 120
+    assert rows[0]["status"] == "ok" and rows[0]["input_tokens"] == 120
+    assert rows[0]["model"] == "gpt-5-mini" and rows[0]["provider"] == "openai"
+    hermes_state._METRICS_DBS.clear()
 
-    def boom(task, **kw):
+
+def test_logged_create_error_and_stream(tmp_path, monkeypatch):
+    """Errors record at raise time; streams record when consumed."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    import hermes_state
+    hermes_state._METRICS_DBS.clear()
+    import agent.auxiliary_client as aux
+
+    def create(**kw):
+        if kw.get("stream"):
+            return iter([SimpleNamespace(usage=None),
+                         SimpleNamespace(usage={"input_tokens": 7})])
         raise RuntimeError("provider down")
 
-    monkeypatch.setattr(aux, "_call_llm_impl", boom)
+    client = _FakeClient(create)
+    aux._ensure_logged_create(client, provider_hint="openai")
+
+    token = aux._AUX_TASK_CTX.set("compression")
     try:
-        aux.call_llm("compression", messages=[])
-    except RuntimeError:
-        pass
-    rows = db._conn.execute("SELECT * FROM api_call_log").fetchall()
+        with pytest.raises(RuntimeError):
+            client.chat.completions.create(messages=[])
+        stream = client.chat.completions.create(messages=[], stream=True)
+        list(stream)  # consume → record fires on exhaustion
+    finally:
+        aux._AUX_TASK_CTX.reset(token)
+
+    rows = api_metrics_db()._conn.execute(
+        "SELECT * FROM api_call_log ORDER BY id").fetchall()
     assert len(rows) == 2
-    assert rows[1]["status"] == "error" and rows[1]["error_type"] == "RuntimeError"
+    assert rows[0]["status"] == "error" and rows[0]["error_type"] == "RuntimeError"
+    assert rows[1]["status"] == "ok" and rows[1]["input_tokens"] == 7
+    hermes_state._METRICS_DBS.clear()
+
+
+def test_task_scoped_client_labels_calls(tmp_path, monkeypatch):
+    """Getter-level proxy: a shared underlying client records the proxy's
+    task label at call time — not the label it was built with."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    import hermes_state
+    hermes_state._METRICS_DBS.clear()
+    import agent.auxiliary_client as aux
+
+    inner = _FakeClient(lambda **kw: _FakeResp())
+    scoped = aux._task_scoped_client(inner, "triage_specifier", "openai", "m")
+    assert scoped.chat.completions.create(messages=[]) is not None
+
+    rows = api_metrics_db()._conn.execute(
+        "SELECT caller FROM api_call_log").fetchall()
+    assert [r["caller"] for r in rows] == ["aux:triage_specifier"]
+    hermes_state._METRICS_DBS.clear()
+
+
+def test_call_llm_sets_task_context(tmp_path, monkeypatch):
+    """call_llm scopes _AUX_TASK_CTX around the impl so create() calls it
+    makes are labelled — and produce exactly one ledger row."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    import hermes_state
+    hermes_state._METRICS_DBS.clear()
+    import agent.auxiliary_client as aux
+
+    def fake_impl(task, **kw):
+        assert aux._AUX_TASK_CTX.get() == "compression"
+        client = _FakeClient(lambda **k: _FakeResp())
+        aux._ensure_logged_create(client, provider_hint="openai")
+        client.chat.completions.create(messages=[])
+        return _FakeResp()
+
+    monkeypatch.setattr(aux, "_call_llm_impl", fake_impl)
+    aux.call_llm("compression", messages=[{"role": "user", "content": "x"}])
+
+    rows = api_metrics_db()._conn.execute(
+        "SELECT caller, status FROM api_call_log").fetchall()
+    assert len(rows) == 1
+    assert rows[0]["caller"] == "aux:compression" and rows[0]["status"] == "ok"
+    # ContextVar must not leak out of the call
+    assert aux._AUX_TASK_CTX.get() is None
+    hermes_state._METRICS_DBS.clear()
+
+
+def test_logged_create_shim_records_async(tmp_path, monkeypatch):
+    """Async clients: _to_async_client mints a FRESH AsyncOpenAI/adapter —
+    the conversion decorator must carry the log-wrap across, and coroutine
+    creates record exactly like sync ones."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    import hermes_state
+    hermes_state._METRICS_DBS.clear()
+    import agent.auxiliary_client as aux
+
+    class _AsyncCompletions:
+        async def create(self, **kw):
+            return _FakeResp()
+
+    class _AsyncClient:
+        def __init__(self):
+            self.chat = SimpleNamespace(completions=_AsyncCompletions())
+
+    # Simulate the _to_async_client output path: conversion result is wrapped.
+    async_client = _AsyncClient()
+    aux._ensure_logged_create(async_client, provider_hint="openai",
+                              model_hint="gpt-5-mini")
+
+    async def _run():
+        token = aux._AUX_TASK_CTX.set("compression")
+        try:
+            return await async_client.chat.completions.create(messages=[])
+        finally:
+            aux._AUX_TASK_CTX.reset(token)
+
+    import asyncio
+    resp = asyncio.new_event_loop().run_until_complete(_run())
+    assert resp is not None
+
+    rows = api_metrics_db()._conn.execute(
+        "SELECT caller, status, input_tokens, provider FROM api_call_log"
+    ).fetchall()
+    assert len(rows) == 1
+    assert rows[0]["caller"] == "aux:compression"
+    assert rows[0]["status"] == "ok" and rows[0]["input_tokens"] == 120
+    hermes_state._METRICS_DBS.clear()
+
+
+def test_logged_create_unscoped_is_passthrough(tmp_path, monkeypatch):
+    """A wrapped client invoked with no aux task in context records nothing —
+    main-path code that shares a client shape must not double-log."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    import hermes_state
+    hermes_state._METRICS_DBS.clear()
+    import agent.auxiliary_client as aux
+
+    calls = []
+    client = _FakeClient(lambda **kw: calls.append(kw) or _FakeResp())
+    aux._ensure_logged_create(client, provider_hint="openai")
+
+    client.chat.completions.create(messages=[])
+    assert len(calls) == 1  # underlying create ran
+    rows = api_metrics_db()._conn.execute("SELECT * FROM api_call_log").fetchall()
+    assert rows == []
     hermes_state._METRICS_DBS.clear()
 
 

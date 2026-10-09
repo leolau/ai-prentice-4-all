@@ -41,7 +41,9 @@ Payment / credit exhaustion fallback:
 """
 
 import contextlib
+import contextvars
 import functools
+import inspect
 import json
 import logging
 import os
@@ -3919,6 +3921,19 @@ def _resolve_auto(
 # below — never look up auth env vars ad-hoc.
 
 
+def _logged_async_conversion(fn):
+    """``_to_async_client`` mints a FRESH AsyncOpenAI/adapter client — the
+    wrap on the source sync client does not carry over, so log-wrap the
+    result. Aux-internal: every caller is an auxiliary path.
+    ``_ensure_logged_create`` resolves at call time (defined below)."""
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        client, model = fn(*args, **kwargs)
+        return _ensure_logged_create(client, model_hint=model), model
+    return wrapper
+
+
+@_logged_async_conversion
 def _to_async_client(sync_client, model: str, is_vision: bool = False):
     """Convert a sync client to its async counterpart, preserving Codex routing.
 
@@ -4003,7 +4018,7 @@ def _normalize_resolved_model(model_name: Optional[str], provider: str) -> Optio
         return model_name
 
 
-def resolve_provider_client(
+def _resolve_provider_client_impl(
     provider: str,
     model: str = None,
     async_mode: bool = False,
@@ -4708,6 +4723,40 @@ def resolve_provider_client(
     return None, None
 
 
+def resolve_provider_client(
+    provider: str,
+    model: str = None,
+    async_mode: bool = False,
+    raw_codex: bool = False,
+    explicit_base_url: str = None,
+    explicit_api_key: str = None,
+    api_mode: str = None,
+    main_runtime: Optional[Dict[str, Any]] = None,
+    is_vision: bool = False,
+    task: Optional[str] = None,
+) -> Tuple[Optional[Any], Optional[str]]:
+    """See ``_resolve_provider_client_impl``. Thin wrapper adding per-call
+    telemetry: when ``task`` is set (aux-context callers), the returned
+    client's ``chat.completions.create`` is wrapped so calls land in
+    ``api_call_log`` — Models ▸ Performance. Main-path construction passes
+    no task and stays unwrapped (the conversation loop logs those rows)."""
+    client, resolved = _resolve_provider_client_impl(
+        provider,
+        model,
+        async_mode,
+        raw_codex=raw_codex,
+        explicit_base_url=explicit_base_url,
+        explicit_api_key=explicit_api_key,
+        api_mode=api_mode,
+        main_runtime=main_runtime,
+        is_vision=is_vision,
+        task=task,
+    )
+    if client is not None and task:
+        _ensure_logged_create(client, provider_hint=provider, model_hint=resolved)
+    return client, resolved
+
+
 # ── Public API ──────────────────────────────────────────────────────────────
 
 def get_text_auxiliary_client(
@@ -4725,7 +4774,7 @@ def get_text_auxiliary_client(
     (e.g. auxiliary.compression.model, auxiliary.web_extract.model).
     """
     provider, model, base_url, api_key, api_mode = _resolve_task_provider_model(task or None)
-    return resolve_provider_client(
+    client, final_model = resolve_provider_client(
         provider,
         model=model,
         explicit_base_url=base_url,
@@ -4733,6 +4782,7 @@ def get_text_auxiliary_client(
         api_mode=api_mode,
         main_runtime=main_runtime,
     )
+    return _task_scoped_client(client, task, provider, final_model), final_model
 
 
 def get_async_text_auxiliary_client(task: str = "", *, main_runtime: Optional[Dict[str, Any]] = None):
@@ -4743,7 +4793,7 @@ def get_async_text_auxiliary_client(task: str = "", *, main_runtime: Optional[Di
     Returns (None, None) when no provider is available.
     """
     provider, model, base_url, api_key, api_mode = _resolve_task_provider_model(task or None)
-    return resolve_provider_client(
+    client, final_model = resolve_provider_client(
         provider,
         model=model,
         async_mode=True,
@@ -4752,6 +4802,7 @@ def get_async_text_auxiliary_client(task: str = "", *, main_runtime: Optional[Di
         api_mode=api_mode,
         main_runtime=main_runtime,
     )
+    return _task_scoped_client(client, task, provider, final_model), final_model
 
 
 _VISION_AUTO_PROVIDER_ORDER = (
@@ -4847,7 +4898,7 @@ def get_available_vision_backends() -> List[str]:
     return available
 
 
-def resolve_vision_provider_client(
+def _resolve_vision_provider_client_impl(
     provider: Optional[str] = None,
     model: Optional[str] = None,
     *,
@@ -5014,6 +5065,25 @@ def resolve_vision_provider_client(
     return requested, client, final_model
 
 
+def resolve_vision_provider_client(
+    provider: Optional[str] = None,
+    model: Optional[str] = None,
+    *,
+    base_url: Optional[str] = None,
+    api_key: Optional[str] = None,
+    async_mode: bool = False,
+) -> Tuple[Optional[str], Optional[Any], Optional[str]]:
+    """See ``_resolve_vision_provider_client_impl``. Wrapper returning a
+    task-scoped client so vision calls land in ``api_call_log`` labelled
+    ``aux:vision``."""
+    resolved_provider, client, final_model = _resolve_vision_provider_client_impl(
+        provider, model, base_url=base_url, api_key=api_key, async_mode=async_mode,
+    )
+    if client is not None:
+        client = _task_scoped_client(client, "vision", resolved_provider, final_model)
+    return resolved_provider, client, final_model
+
+
 def get_auxiliary_extra_body() -> dict:
     """Return extra_body kwargs for auxiliary API calls.
     
@@ -5150,6 +5220,7 @@ def _refresh_nous_auxiliary_client(
         main_runtime=main_runtime,
         is_vision=is_vision,
     )
+    _ensure_logged_create(client, provider_hint=cache_provider, model_hint=final_model)
     _store_cached_client(cache_key, client, final_model, bound_loop=current_loop)
     return client, final_model
 
@@ -5386,6 +5457,10 @@ def _get_cached_client(
                 _client_cache[cache_key] = (client, default_model, bound_loop)
             else:
                 client, default_model, _ = _client_cache[cache_key]
+    # Every aux client through this funnel gets a per-call ledger shim
+    # (Models ▸ Performance); idempotent, no-op when already wrapped.
+    if client is not None:
+        _ensure_logged_create(client, provider, model or default_model)
     return client, model or default_model
 
 
@@ -6945,15 +7020,23 @@ async def _async_call_llm_impl(
 
 
 # ─────────────────────────────────────────────────────────────────────────
-# Public entry points — thin telemetry shells over the implementations
-# above. Every auxiliary provider call lands in the per-profile
-# ``api_call_log`` (Models ▸ Performance) so aux-role models show their real
-# latency/failure rates; the impl functions own request lifecycle unchanged.
+# Per-call telemetry (Models ▸ Performance). ``_ensure_logged_create`` puts a
+# shim on ``client.chat.completions.create`` so EVERY aux consumer — call_llm,
+# the getters below, and future raw-client users — lands in ``api_call_log``.
+#
+# The caller label is read from ``_AUX_TASK_CTX`` at create() time, not bound
+# to the client: cache entries are shared across tasks for explicit providers
+# (``task`` only enters the cache key for "auto"), so a creation-time label
+# would misattribute e.g. compression's client later serving goal_judge.
 # ─────────────────────────────────────────────────────────────────────────
 
-def _aux_usage_dict(response) -> Dict[str, int]:
-    """Normalize an aux response's usage object/dict to api_call_log keys."""
-    usage = getattr(response, "usage", None)
+_AUX_TASK_CTX: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
+    "hermes_aux_task", default=None
+)
+
+
+def _usage_to_dict(usage) -> Dict[str, int]:
+    """Normalize a usage object/dict to api_call_log keys."""
     if usage is None:
         return {}
 
@@ -6978,77 +7061,310 @@ def _aux_usage_dict(response) -> Dict[str, int]:
     }
 
 
-def _aux_telemetry_labels(task, kwargs) -> Tuple[Optional[str], Optional[str]]:
-    """Best-effort (provider, model) for the log row — a config read only,
-    so an error raised mid-resolution still records with what resolved."""
+def _aux_usage_dict(response) -> Dict[str, int]:
+    return _usage_to_dict(getattr(response, "usage", None))
+
+
+def _aux_response_model(response, fallback):
+    if response is None:
+        return fallback
+    return getattr(response, "model", None) or fallback
+
+
+def _aux_finish_reason(response) -> Optional[str]:
     try:
-        provider, model, *_ = _resolve_task_provider_model(
-            task,
-            kwargs.get("provider"),
-            kwargs.get("model"),
-            kwargs.get("base_url"),
-            kwargs.get("api_key"),
-        )
-        return provider, model
-    except Exception:
-        return None, None
+        return response.choices[0].finish_reason
+    except (AttributeError, IndexError, TypeError):
+        return None
 
 
-def _record_aux_api_call(
-    task, started_at: float, status: str,
-    *, provider=None, model=None, response=None, exc: BaseException = None,
-) -> None:
+def _aux_record(caller, provider, model, started, *, status="ok",
+                response=None, exc: BaseException = None, usage=None) -> None:
     """One aux-call attempt into api_call_log — fire-and-forget."""
     try:
         from hermes_state import record_api_call as _record
         _record(
             None,
-            started_at=started_at,
+            started_at=started,
             ts=time.time(),
-            caller=f"aux:{task}" if task else "aux",
-            model=(getattr(response, "model", None) or model) if response else model,
+            caller=caller,
+            model=_aux_response_model(response, model),
             provider=provider,
-            duration_ms=(time.time() - started_at) * 1000,
+            duration_ms=(time.time() - started) * 1000,
             status=status,
+            finish_reason=_aux_finish_reason(response),
             error_type=type(exc).__name__ if exc else None,
             status_code=getattr(exc, "status_code", None) or getattr(exc, "code", None),
-            usage=_aux_usage_dict(response) if response is not None else {},
+            usage=usage if usage is not None else _aux_usage_dict(response),
         )
     except Exception:
         pass
 
 
-@functools.wraps(_call_llm_impl)
-def call_llm(task: str = None, **kwargs) -> Any:
-    """Synchronous auxiliary LLM call — ``_call_llm_impl`` plus api_call_log
-    telemetry. ``stream=True`` responses return unlogged: the iterator is
-    consumed by the caller, so duration here would only measure setup."""
+class _LoggedStream:
+    """Sync stream proxy — records when the stream finishes, fails, or is
+    closed early (an abandoned stream still counts as a call)."""
+
+    def __init__(self, stream, caller, provider, model, started):
+        self._s = stream
+        self._caller = caller
+        self._provider = provider
+        self._model = model
+        self._started = started
+        self._usage = None
+        self._recorded = False
+
+    def _capture(self, chunk):
+        u = getattr(chunk, "usage", None)
+        if u is not None:
+            self._usage = u
+
+    def _finish(self, status="ok", exc=None):
+        if self._recorded:
+            return
+        self._recorded = True
+        _aux_record(self._caller, self._provider, self._model, self._started,
+                    status=status, exc=exc, usage=_usage_to_dict(self._usage))
+
+    def __iter__(self):
+        try:
+            for chunk in self._s:
+                self._capture(chunk)
+                yield chunk
+        except Exception as exc:
+            self._finish(status="error", exc=exc)
+            raise
+        else:
+            self._finish()
+
+    def close(self):
+        try:
+            close = getattr(self._s, "close", None)
+            if callable(close):
+                close()
+        finally:
+            self._finish()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info):
+        self.close()
+        return False
+
+    def __getattr__(self, name):
+        return getattr(self._s, name)
+
+
+class _LoggedAsyncStream:
+    """Async twin of ``_LoggedStream``."""
+
+    def __init__(self, stream, caller, provider, model, started):
+        self._s = stream
+        self._caller = caller
+        self._provider = provider
+        self._model = model
+        self._started = started
+        self._usage = None
+        self._recorded = False
+
+    def _capture(self, chunk):
+        u = getattr(chunk, "usage", None)
+        if u is not None:
+            self._usage = u
+
+    def _finish(self, status="ok", exc=None):
+        if self._recorded:
+            return
+        self._recorded = True
+        _aux_record(self._caller, self._provider, self._model, self._started,
+                    status=status, exc=exc, usage=_usage_to_dict(self._usage))
+
+    async def _gen(self):
+        try:
+            async for chunk in self._s:
+                self._capture(chunk)
+                yield chunk
+        except Exception as exc:
+            self._finish(status="error", exc=exc)
+            raise
+        else:
+            self._finish()
+
+    def __aiter__(self):
+        return self._gen()
+
+    async def aclose(self):
+        try:
+            close = getattr(self._s, "aclose", None) or getattr(self._s, "close", None)
+            if callable(close):
+                out = close()
+                if inspect.isawaitable(out):
+                    await out
+        finally:
+            self._finish()
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc_info):
+        await self.aclose()
+        return False
+
+    def __getattr__(self, name):
+        return getattr(self._s, name)
+
+
+def _logged_create_sync(orig, kwargs, provider, model_hint):
+    task = _AUX_TASK_CTX.get()
+    if task is None:
+        # Not an aux call — e.g. a wrapped client that reached main-path code
+        # (the conversation loop records those attempts itself).
+        return orig(**kwargs)
+    caller = f"aux:{task}"
+    model = kwargs.get("model") or model_hint
     started = time.time()
-    provider, model = _aux_telemetry_labels(task, kwargs)
     try:
-        response = _call_llm_impl(task, **kwargs)
+        resp = orig(**kwargs)
     except Exception as exc:
-        _record_aux_api_call(task, started, "error",
-                             provider=provider, model=model, exc=exc)
+        _aux_record(caller, provider, model, started, status="error", exc=exc)
         raise
     if kwargs.get("stream"):
-        return response
-    _record_aux_api_call(task, started, "ok",
-                         provider=provider, model=model, response=response)
-    return response
+        return _LoggedStream(resp, caller, provider, model, started)
+    _aux_record(caller, provider, model, started, response=resp)
+    return resp
+
+
+async def _logged_create_async(orig, kwargs, provider, model_hint):
+    task = _AUX_TASK_CTX.get()
+    if task is None:
+        return await orig(**kwargs)
+    caller = f"aux:{task}"
+    model = kwargs.get("model") or model_hint
+    started = time.time()
+    try:
+        resp = await orig(**kwargs)
+    except Exception as exc:
+        _aux_record(caller, provider, model, started, status="error", exc=exc)
+        raise
+    if kwargs.get("stream"):
+        return _LoggedAsyncStream(resp, caller, provider, model, started)
+    _aux_record(caller, provider, model, started, response=resp)
+    return resp
+
+
+def _ensure_logged_create(client, provider_hint=None, model_hint=None):
+    """Idempotently wrap ``client.chat.completions.create`` so calls land in
+    api_call_log. Every aux client shape — OpenAI, AsyncOpenAI, Codex/
+    Anthropic adapter shims — exposes that attribute path. A later call may
+    upgrade empty provider/model hints (e.g. an async conversion wraps before
+    the cache funnel learns the provider)."""
+    try:
+        completions = getattr(getattr(client, "chat", None), "completions", None)
+        orig = getattr(completions, "create", None)
+        if completions is None or orig is None:
+            return client
+        if getattr(orig, "_call_log_bound", False):
+            if provider_hint and not getattr(orig, "_provider_hint", None):
+                orig._provider_hint = provider_hint
+            if model_hint and not getattr(orig, "_model_hint", None):
+                orig._model_hint = model_hint
+            return client
+        if inspect.iscoroutinefunction(orig):
+            @functools.wraps(orig)
+            async def _logged(**kwargs):
+                return await _logged_create_async(
+                    orig, kwargs, _logged._provider_hint, _logged._model_hint)
+        else:
+            @functools.wraps(orig)
+            def _logged(**kwargs):
+                return _logged_create_sync(
+                    orig, kwargs, _logged._provider_hint, _logged._model_hint)
+        _logged._call_log_bound = True
+        _logged._provider_hint = provider_hint
+        _logged._model_hint = model_hint
+        completions.create = _logged
+    except Exception:
+        pass
+    return client
+
+
+class _TaskScopedCompletions:
+    """Binds an aux task label around ``create`` so the logged shim reads the
+    right ``aux:<task>`` even when the underlying client is cache-shared."""
+
+    def __init__(self, completions, task):
+        self._c = completions
+        self._task = task
+        orig = completions.create
+        if inspect.iscoroutinefunction(orig):
+            async def create(**kwargs):
+                token = _AUX_TASK_CTX.set(self._task)
+                try:
+                    return await orig(**kwargs)
+                finally:
+                    _AUX_TASK_CTX.reset(token)
+        else:
+            def create(**kwargs):
+                token = _AUX_TASK_CTX.set(self._task)
+                try:
+                    return orig(**kwargs)
+                finally:
+                    _AUX_TASK_CTX.reset(token)
+        self.create = create
+
+    def __getattr__(self, name):
+        return getattr(self._c, name)
+
+
+class _TaskScopedChat:
+    def __init__(self, chat, task):
+        self._chat = chat
+        self.completions = _TaskScopedCompletions(chat.completions, task)
+
+    def __getattr__(self, name):
+        return getattr(self._chat, name)
+
+
+class _TaskScopedClient:
+    def __init__(self, client, task):
+        self._client = client
+        self.chat = _TaskScopedChat(client.chat, task)
+
+    def __getattr__(self, name):
+        return getattr(self._client, name)
+
+
+def _task_scoped_client(client, task, provider=None, model_hint=None):
+    """Return a proxy binding ``task`` into ``_AUX_TASK_CTX`` around create()
+    calls; the inner create is log-wrapped first (idempotent)."""
+    if client is None:
+        return None
+    _ensure_logged_create(client, provider, model_hint)
+    if not task:
+        return client
+    return _TaskScopedClient(client, task)
+
+
+# ── Public entry points ──────────────────────────────────────────────────
+
+@functools.wraps(_call_llm_impl)
+def call_llm(task: str = None, **kwargs) -> Any:
+    """Synchronous auxiliary LLM call. Sets the aux-task context so the
+    create-shim labels ledger rows ``aux:<task>``; recording itself lives in
+    ``_ensure_logged_create`` (covers raw-client consumers too)."""
+    token = _AUX_TASK_CTX.set(task)
+    try:
+        return _call_llm_impl(task, **kwargs)
+    finally:
+        _AUX_TASK_CTX.reset(token)
 
 
 @functools.wraps(_async_call_llm_impl)
 async def async_call_llm(task: str = None, **kwargs) -> Any:
-    """Async twin of ``call_llm`` — same telemetry shell."""
-    started = time.time()
-    provider, model = _aux_telemetry_labels(task, kwargs)
+    """Async twin of ``call_llm`` — same task-context scoping."""
+    token = _AUX_TASK_CTX.set(task)
     try:
-        response = await _async_call_llm_impl(task, **kwargs)
-    except Exception as exc:
-        _record_aux_api_call(task, started, "error",
-                             provider=provider, model=model, exc=exc)
-        raise
-    _record_aux_api_call(task, started, "ok",
-                         provider=provider, model=model, response=response)
-    return response
+        return await _async_call_llm_impl(task, **kwargs)
+    finally:
+        _AUX_TASK_CTX.reset(token)

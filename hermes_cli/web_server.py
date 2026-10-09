@@ -26,6 +26,7 @@ import os
 import re
 import secrets
 import shutil
+import sqlite3
 import stat
 import subprocess
 import sys
@@ -15887,6 +15888,47 @@ def _percentile(sorted_vals: List[float], pct: float) -> Optional[float]:
     return sorted_vals[rank]
 
 
+def _perf_source_conns(profile: Optional[str]) -> List[Any]:
+    """Read-only sqlite conns to every ``state.db`` feeding the performance
+    read. ``profile=None`` → the default home plus every
+    ``profiles/<name>/state.db`` so kanban workers and profile-scoped runs
+    count too ("all fronts"); a named profile scopes to that one home.
+    """
+    homes: List[Path] = []
+    if profile:
+        _name, home = _cron_profile_home(profile)
+        homes = [Path(home)]
+    else:
+        default_home = Path(get_hermes_home())
+        homes.append(default_home)
+        profiles_dir = default_home / "profiles"
+        if profiles_dir.is_dir():
+            homes.extend(
+                sorted(p for p in profiles_dir.iterdir() if p.is_dir())
+            )
+    conns = []
+    for home in homes:
+        db_path = home / "state.db"
+        if not db_path.exists():
+            continue
+        try:
+            conn = sqlite3.connect(
+                f"file:{db_path}?mode=ro", uri=True, timeout=2.0
+            )
+        except sqlite3.Error:
+            continue
+        conn.row_factory = sqlite3.Row
+        conns.append(conn)
+    return conns
+
+
+def _has_table(conn, name: str) -> bool:
+    return conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+        (name,),
+    ).fetchone() is not None
+
+
 @app.get("/api/analytics/models/performance")
 async def get_models_performance(
     days: int = 7, months: int = 6, profile: Optional[str] = None
@@ -15897,136 +15939,164 @@ async def get_models_performance(
     summary: call counts, failure stats, min/avg/p95/max latency, tokens.
     The ``months`` series joins it with the ``sessions`` table so months
     that predate the ledger still show calls/tokens — ``avg_ms``/
-    ``failures`` stay ``null`` where no attempt rows exist yet.
+    ``failures`` stay ``null`` where no attempt rows exist yet. With no
+    ``profile`` filter the read unions every home's ledger (default plus
+    ``profiles/*``) so profile-scoped workers count too.
     """
     days = max(1, min(int(days), 30))
     months = max(1, min(int(months), 24))
-    db = _open_session_db_for_profile(profile)
+    conns = _perf_source_conns(profile)
     try:
         now = time.time()
         day_cutoff = now - days * 86400
         month_cutoff = now - months * 31 * 86400
 
-        # ── Last-N-days summary per (model, provider) ────────────────
-        cur = db._conn.execute(
-            """
-            SELECT model, provider, COUNT(*) AS calls,
-                   SUM(status = 'error') AS failures,
-                   MIN(duration_ms) AS min_ms, AVG(duration_ms) AS avg_ms,
-                   MAX(duration_ms) AS max_ms,
-                   SUM(input_tokens) AS input_tokens,
-                   SUM(output_tokens) AS output_tokens,
-                   SUM(cache_read_tokens) AS cache_read_tokens,
-                   SUM(reasoning_tokens) AS reasoning_tokens
-            FROM api_call_log
-            WHERE ts >= ? AND model IS NOT NULL AND model != ''
-            GROUP BY model, provider
-            ORDER BY COUNT(*) DESC
-            """,
-            (day_cutoff,),
-        )
-        summaries = [dict(r) for r in cur.fetchall()]
+        # One bounded read per home (ledger rows since month_cutoff); all
+        # aggregation is Python so the per-DB result sets merge uniformly.
+        attempts: List[sqlite3.Row] = []
+        for conn in conns:
+            if not _has_table(conn, "api_call_log"):
+                continue
+            try:
+                attempts.extend(conn.execute(
+                    """
+                    SELECT ts, model, provider, duration_ms, status, caller,
+                           date(ts, 'unixepoch') AS day,
+                           strftime('%Y-%m', ts, 'unixepoch') AS month,
+                           input_tokens, output_tokens,
+                           cache_read_tokens, reasoning_tokens
+                    FROM api_call_log
+                    WHERE ts >= ? AND model IS NOT NULL AND model != ''
+                    """,
+                    (month_cutoff,),
+                ).fetchall())
+            except sqlite3.Error:
+                _log.debug("models/performance: ledger read failed", exc_info=True)
 
-        # p95 + daily buckets need the per-attempt rows — a bounded read
-        # (days ≤ 30) taken once and grouped in Python.
-        cur = db._conn.execute(
-            """
-            SELECT model, provider, duration_ms, status,
-                   date(ts, 'unixepoch') AS day,
-                   input_tokens + output_tokens + cache_read_tokens
-                       + reasoning_tokens AS tokens
-            FROM api_call_log
-            WHERE ts >= ? AND model IS NOT NULL AND model != ''
-            """,
-            (day_cutoff,),
-        )
-        durations: Dict[str, List[float]] = {}
-        daily: Dict[str, Dict[str, Dict[str, Any]]] = {}
-        for r in cur.fetchall():
+        sess_month_rows: List[sqlite3.Row] = []
+        sess_cost_rows: List[sqlite3.Row] = []
+        for conn in conns:
+            if not _has_table(conn, "sessions"):
+                continue
+            try:
+                sess_month_rows.extend(conn.execute(
+                    """
+                    SELECT strftime('%Y-%m', started_at, 'unixepoch') AS month,
+                           model,
+                           SUM(COALESCE(api_call_count, 0)) AS calls,
+                           SUM(input_tokens + output_tokens + cache_read_tokens
+                               + COALESCE(reasoning_tokens, 0)) AS tokens
+                    FROM sessions
+                    WHERE started_at >= ? AND model IS NOT NULL AND model != ''
+                    GROUP BY month, model
+                    """,
+                    (month_cutoff,),
+                ).fetchall())
+                sess_cost_rows.extend(conn.execute(
+                    """
+                    SELECT model,
+                           SUM(COALESCE(actual_cost_usd, estimated_cost_usd))
+                               AS cost_usd
+                    FROM sessions
+                    WHERE started_at >= ? AND model IS NOT NULL AND model != ''
+                    GROUP BY model
+                    """,
+                    (day_cutoff,),
+                ).fetchall())
+            except sqlite3.Error:
+                _log.debug("models/performance: sessions read failed", exc_info=True)
+
+        # ── Aggregate attempts in Python ─────────────────────────────
+        per_model: Dict[str, Dict[str, Any]] = {}
+        monthly_ledger: Dict[tuple, Dict[str, Any]] = {}
+        for r in attempts:
             key = f"{r['model']}\t{r['provider'] or ''}"
+            tokens = (r["input_tokens"] or 0) + (r["output_tokens"] or 0) + (
+                r["cache_read_tokens"] or 0) + (r["reasoning_tokens"] or 0)
+
+            m = monthly_ledger.setdefault(
+                (r["month"], r["model"]),
+                {"calls": 0, "failures": 0, "tokens": 0, "durations": []},
+            )
+            m["calls"] += 1
+            m["failures"] += 1 if r["status"] == "error" else 0
+            m["tokens"] += tokens
             if r["duration_ms"] is not None:
-                durations.setdefault(key, []).append(r["duration_ms"])
-            bucket = daily.setdefault(key, {})
-            d = bucket.setdefault(
+                m["durations"].append(r["duration_ms"])
+
+            if r["ts"] < day_cutoff:
+                continue
+            e = per_model.setdefault(key, {
+                "model": r["model"], "provider": r["provider"] or "",
+                "calls": 0, "failures": 0, "durations": [],
+                "input": 0, "output": 0, "cache": 0, "reasoning": 0,
+                "roles": set(), "daily": {},
+            })
+            e["calls"] += 1
+            e["failures"] += 1 if r["status"] == "error" else 0
+            if r["duration_ms"] is not None:
+                e["durations"].append(r["duration_ms"])
+            e["input"] += r["input_tokens"] or 0
+            e["output"] += r["output_tokens"] or 0
+            e["cache"] += r["cache_read_tokens"] or 0
+            e["reasoning"] += r["reasoning_tokens"] or 0
+            if r["caller"]:
+                e["roles"].add(r["caller"])
+            d = e["daily"].setdefault(
                 r["day"], {"date": r["day"], "calls": 0, "failures": 0,
                            "tokens": 0, "durations": []}
             )
             d["calls"] += 1
             d["failures"] += 1 if r["status"] == "error" else 0
-            d["tokens"] += r["tokens"] or 0
+            d["tokens"] += tokens
             if r["duration_ms"] is not None:
                 d["durations"].append(r["duration_ms"])
 
-        # Which caller roles each model serves ('main' / 'aux:<task>').
-        cur = db._conn.execute(
-            """
-            SELECT model, provider, caller, COUNT(*) AS n
-            FROM api_call_log
-            WHERE ts >= ? AND caller IS NOT NULL AND caller != ''
-            GROUP BY model, provider, caller
-            """,
-            (day_cutoff,),
-        )
-        roles: Dict[str, set] = {}
-        for r in cur.fetchall():
-            roles.setdefault(f"{r['model']}\t{r['provider'] or ''}", set()).add(
-                r["caller"]
+        cost_by_model: Dict[str, float] = {}
+        for r in sess_cost_rows:
+            cost_by_model[r["model"]] = (
+                cost_by_model.get(r["model"], 0) + (r["cost_usd"] or 0)
             )
-
-        # Session-table cost over the same window — keyed by model (the
-        # ledger's `provider` label doesn't always equal billing_provider).
-        cur = db._conn.execute(
-            """
-            SELECT model,
-                   SUM(COALESCE(actual_cost_usd, estimated_cost_usd)) AS cost_usd
-            FROM sessions
-            WHERE started_at >= ? AND model IS NOT NULL AND model != ''
-            GROUP BY model
-            """,
-            (day_cutoff,),
-        )
-        cost_by_model = {r["model"]: r["cost_usd"] or 0 for r in cur.fetchall()}
         _cost_claimed: set = set()
 
         models = []
-        for row in summaries:
-            key = f"{row['model']}\t{row['provider'] or ''}"
-            ds = sorted(durations.get(key, []))
+        for e in sorted(per_model.values(), key=lambda x: -x["calls"]):
+            ds = sorted(e["durations"])
             daily_rows = []
-            for day in sorted(daily.get(key, {})):
-                d = daily[key][day]
+            for day in sorted(e["daily"]):
+                d = e["daily"][day]
                 durs = sorted(d.pop("durations"))
                 d["avg_ms"] = round(sum(durs) / len(durs)) if durs else None
                 daily_rows.append(d)
-            calls = row["calls"] or 0
-            failures = row["failures"] or 0
+            calls = e["calls"]
+            failures = e["failures"]
             # A model split across provider rows reports its session cost
             # once, on the first row — splitting would invent a breakdown.
             cost = 0.0
-            if row["model"] not in _cost_claimed:
-                cost = float(cost_by_model.get(row["model"]) or 0)
-                _cost_claimed.add(row["model"])
+            if e["model"] not in _cost_claimed:
+                cost = float(cost_by_model.get(e["model"]) or 0)
+                _cost_claimed.add(e["model"])
             models.append({
-                "model": row["model"],
-                "provider": row["provider"] or "",
+                "model": e["model"],
+                "provider": e["provider"],
                 "caller_roles": sorted(
                     c[len("aux:"):] if c.startswith("aux:") else c
-                    for c in roles.get(key, ())
+                    for c in e["roles"]
                 ),
                 "calls": calls,
                 "failures": failures,
                 "success_rate": (calls - failures) / calls if calls else None,
                 "latency_ms": {
-                    "min": row["min_ms"],
-                    "avg": round(row["avg_ms"]) if row["avg_ms"] is not None else None,
+                    "min": ds[0] if ds else None,
+                    "avg": round(sum(ds) / len(ds)) if ds else None,
                     "p95": _percentile(ds, 95),
-                    "max": row["max_ms"],
+                    "max": ds[-1] if ds else None,
                 },
                 "tokens": {
-                    "input": row["input_tokens"] or 0,
-                    "output": row["output_tokens"] or 0,
-                    "cache_read": row["cache_read_tokens"] or 0,
-                    "reasoning": row["reasoning_tokens"] or 0,
+                    "input": e["input"],
+                    "output": e["output"],
+                    "cache_read": e["cache"],
+                    "reasoning": e["reasoning"],
                 },
                 "cost_usd": cost,
                 "daily": daily_rows,
@@ -16035,54 +16105,30 @@ async def get_models_performance(
         # ── Monthly history: ledger months get latency/failures, older
         #    months still show calls/tokens from the sessions table. ────
         monthly: Dict[tuple, Dict[str, Any]] = {}
-        cur = db._conn.execute(
-            """
-            SELECT strftime('%Y-%m', started_at, 'unixepoch') AS month,
-                   model,
-                   SUM(COALESCE(api_call_count, 0)) AS calls,
-                   SUM(input_tokens + output_tokens + cache_read_tokens
-                       + COALESCE(reasoning_tokens, 0)) AS tokens
-            FROM sessions
-            WHERE started_at >= ? AND model IS NOT NULL AND model != ''
-            GROUP BY month, model
-            """,
-            (month_cutoff,),
-        )
-        for r in cur.fetchall():
-            monthly[(r["month"], r["model"])] = {
-                "month": r["month"], "model": r["model"],
-                "calls": r["calls"] or 0, "tokens": r["tokens"] or 0,
-                "avg_ms": None, "min_ms": None, "max_ms": None,
-                "failures": None,
-            }
-        cur = db._conn.execute(
-            """
-            SELECT strftime('%Y-%m', ts, 'unixepoch') AS month, model,
-                   COUNT(*) AS calls, SUM(status = 'error') AS failures,
-                   AVG(duration_ms) AS avg_ms, MIN(duration_ms) AS min_ms,
-                   MAX(duration_ms) AS max_ms,
-                   SUM(input_tokens + output_tokens + cache_read_tokens
-                       + reasoning_tokens) AS tokens
-            FROM api_call_log
-            WHERE ts >= ? AND model IS NOT NULL AND model != ''
-            GROUP BY month, model
-            """,
-            (month_cutoff,),
-        )
-        for r in cur.fetchall():
+        for r in sess_month_rows:
             entry = monthly.setdefault(
                 (r["month"], r["model"]),
                 {"month": r["month"], "model": r["model"],
                  "calls": 0, "tokens": 0},
             )
-            entry["calls"] = max(entry["calls"], r["calls"] or 0)
-            entry["tokens"] = max(entry["tokens"], r["tokens"] or 0)
-            entry["failures"] = r["failures"] or 0
-            entry["min_ms"] = r["min_ms"]
-            entry["max_ms"] = r["max_ms"]
-            entry["avg_ms"] = (
-                round(r["avg_ms"]) if r["avg_ms"] is not None else None
+            entry["calls"] += r["calls"] or 0
+            entry["tokens"] += r["tokens"] or 0
+            entry.setdefault("avg_ms", None)
+            entry.setdefault("min_ms", None)
+            entry.setdefault("max_ms", None)
+            entry.setdefault("failures", None)
+        for (month, model), m in monthly_ledger.items():
+            entry = monthly.setdefault(
+                (month, model),
+                {"month": month, "model": model, "calls": 0, "tokens": 0},
             )
+            entry["calls"] = max(entry["calls"], m["calls"])
+            entry["tokens"] = max(entry["tokens"], m["tokens"])
+            entry["failures"] = m["failures"]
+            mds = sorted(m["durations"])
+            entry["min_ms"] = mds[0] if mds else None
+            entry["max_ms"] = mds[-1] if mds else None
+            entry["avg_ms"] = round(sum(mds) / len(mds)) if mds else None
 
         return {
             "period": {"days": days, "months": months},
@@ -16093,7 +16139,8 @@ async def get_models_performance(
             "collecting": not models,
         }
     finally:
-        db.close()
+        for conn in conns:
+            conn.close()
 
 
 # ---------------------------------------------------------------------------

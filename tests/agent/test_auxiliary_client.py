@@ -3822,7 +3822,7 @@ class TestVisionAutoSkipsKimiCoding:
 
         provider, client, model = resolve_vision_provider_client()
         assert provider == "openrouter"
-        assert client is fake_or_client
+        assert getattr(client, "_client", client) is fake_or_client
         assert model == "google/gemini-3-flash-preview"
 
     def test_kimi_coding_cn_skipped_too(self, monkeypatch):
@@ -3849,7 +3849,7 @@ class TestVisionAutoSkipsKimiCoding:
 
         provider, client, _ = resolve_vision_provider_client()
         assert provider == "openrouter"
-        assert client is fake_or_client
+        assert getattr(client, "_client", client) is fake_or_client
 
     def test_explicit_override_to_kimi_coding_still_honored(self, monkeypatch):
         """When a user *explicitly* requests kimi-coding for vision (e.g.
@@ -3870,7 +3870,7 @@ class TestVisionAutoSkipsKimiCoding:
             provider="kimi-coding",
         )
         assert provider == "kimi-coding"
-        assert client is fake_kimi_client
+        assert getattr(client, "_client", client) is fake_kimi_client
         gcc_mock.assert_called_once()
 
     def test_skip_set_covers_exactly_known_entries(self):
