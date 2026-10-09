@@ -4363,6 +4363,48 @@ class TestNewEndpoints:
         assert data["collecting"] is True
         assert data["models"] == []
 
+    def test_models_performance_unions_profile_homes(self):
+        """Default view aggregates every home: the default ledger plus
+        profiles/*/state.db where kanban workers (-p <assignee>) write."""
+        import time as _time
+        from hermes_state import SessionDB
+        from hermes_constants import get_hermes_home
+
+        now = _time.time()
+        db = SessionDB()
+        try:
+            db.record_api_call(
+                ts=now, model="claude-sonnet-4-6", provider="anthropic",
+                caller="main", duration_ms=1000, status="ok",
+            )
+        finally:
+            db.close()
+
+        worker_home = get_hermes_home() / "profiles" / "builder"
+        worker_home.mkdir(parents=True)
+        wdb = SessionDB(db_path=worker_home / "state.db")
+        try:
+            for _ in range(3):
+                wdb.record_api_call(
+                    ts=now, model="deepseek-v4.1-flash", provider="opencode-go",
+                    caller="main", duration_ms=9400, status="ok",
+                    usage={"output_tokens": 700},
+                )
+            wdb.record_api_call(
+                ts=now, model="deepseek-v4.1-flash", provider="opencode-go",
+                caller="aux:compression", duration_ms=800, status="ok",
+            )
+        finally:
+            wdb.close()
+
+        data = self.client.get("/api/analytics/models/performance").json()
+        models = {m["model"]: m for m in data["models"]}
+        ds = models["deepseek-v4.1-flash"]
+        # The profile home's 4 rows fold into the default view.
+        assert ds["calls"] == 4
+        assert sorted(ds["caller_roles"]) == ["compression", "main"]
+        assert models["claude-sonnet-4-6"]["calls"] == 1
+
     def test_analytics_usage_includes_skill_breakdown(self):
         from hermes_state import SessionDB
 
