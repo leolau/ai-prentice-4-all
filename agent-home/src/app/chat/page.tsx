@@ -2,7 +2,6 @@ import { ChatHeaderActions } from "@/components/chat/ChatHeaderActions";
 import { ChatPane } from "@/components/chat/ChatPane";
 import { MobileShell } from "@/components/MobileShell";
 import { apiClientForRequest, requirePrincipal } from "@/lib/auth/principal";
-import { CHAT_SESSION_LIST_LIMIT } from "@/lib/chat/session-limits";
 import { storageConfigured } from "@/lib/env";
 import type { ChatMessage, ProfileSummary, SessionSummary } from "@/types";
 
@@ -54,27 +53,12 @@ export default async function Page({
       // default: the list is what the picker offers, and an unknown name
       // 404s upstream.
       client.profiles().catch(() => ({ profiles: [] })),
-      client.sessions({
-        order: "recent",
-        // Fast first paint for the strip — see CHAT_SESSION_LIST_LIMIT's
-        // doc comment.
-        limit: CHAT_SESSION_LIST_LIMIT,
-      }),
+      // Every conversation: the strip groups them into categories, and a
+      // recent-first page cap would empty the older end of each category.
+      client.allSessions({ order: "recent" }),
     ]);
     profiles = profilesResult.profiles;
     sessions = list.sessions;
-    if (requested && !sessions.some((s) => s.id === requested)) {
-      // A memory can cite a session older than CHAT_SESSION_LIST_LIMIT (now
-      // the backend's own 200-row ceiling, so this only matters once total
-      // history exceeds that): fetch again and prepend it rather than
-      // silently opening another conversation instead.
-      const all = await client.sessions({
-        order: "recent",
-        limit: CHAT_SESSION_LIST_LIMIT,
-      });
-      const match = all.sessions.find((s) => s.id === requested);
-      if (match) sessions = [match, ...sessions];
-    }
     if (requested && sessions.some((s) => s.id === requested)) {
       sessionId = requested;
     } else if (sessions.length > 0) {

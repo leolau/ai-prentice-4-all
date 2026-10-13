@@ -30,8 +30,8 @@ function titleOf(s: SessionSummary): string {
  * a separate "All conversations" modal). Both predecessors are gone: the
  * stacked-rows version wasted vertical space showing every category at
  * once even though only one is usually relevant; the dropdown shows
- * exactly one row's worth of chips, so a wide session fetch (see
- * `CHAT_SESSION_LIST_LIMIT`) no longer means a taller page — it's fine for
+ * exactly one row's worth of chips, so fetching every session (see
+ * `HermesApiClient.allSessions`) doesn't mean a taller page — it's fine for
  * the selected category's row to be long, since it's the only row.
  *
  * Categories with zero conversations aren't offered in the dropdown at

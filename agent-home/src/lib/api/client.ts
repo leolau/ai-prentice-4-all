@@ -163,6 +163,11 @@ export interface HermesApiClientOptions {
   profile?: string;
 }
 
+/** Rows per `GET /api/sessions` page when reading a whole conversation list. */
+export const SESSION_PAGE_SIZE = 200;
+/** Upper bound on pages `allSessions` reads (10,000 conversations). */
+const SESSION_PAGE_MAX_PAGES = 50;
+
 /**
  * A thin, typed `fetch` wrapper around the Python API. Construct one per
  * request from the bridged session token; methods return parsed JSON typed to
@@ -488,6 +493,7 @@ export class HermesApiClient {
       source?: string;
       excludeSources?: string;
       limit?: number;
+      offset?: number;
       order?: "created" | "recent";
       archived?: "exclude" | "only" | "include";
       tags?: string;
@@ -499,12 +505,38 @@ export class HermesApiClient {
     if (opts.source) params.set("source", opts.source);
     if (opts.excludeSources) params.set("exclude_sources", opts.excludeSources);
     params.set("limit", String(opts.limit ?? 30));
+    if (opts.offset) params.set("offset", String(opts.offset));
     params.set("order", opts.order ?? "recent");
     if (opts.archived) params.set("archived", opts.archived);
     if (opts.tags) params.set("tags", opts.tags);
     if (opts.excludeTags) params.set("exclude_tags", opts.excludeTags);
     if (opts.tagMatch) params.set("tag_match", opts.tagMatch);
     return this.request(`/api/sessions?${params.toString()}`);
+  }
+
+  /**
+   * Every conversation matching `opts`, read page by page. Pages advance by
+   * the upstream's unfiltered `total` because tag filters are applied after
+   * paging, so a filtered page can be short or empty mid-list.
+   */
+  async allSessions(
+    opts: Omit<Parameters<HermesApiClient["sessions"]>[0], "limit" | "offset"> = {},
+  ): Promise<SessionsResponse> {
+    const seen = new Set<string>();
+    const sessions: SessionsResponse["sessions"] = [];
+    let total = 0;
+    for (let page = 0; page < SESSION_PAGE_MAX_PAGES; page += 1) {
+      const offset = page * SESSION_PAGE_SIZE;
+      const res = await this.sessions({ ...opts, limit: SESSION_PAGE_SIZE, offset });
+      total = res.total ?? 0;
+      for (const s of res.sessions) {
+        if (seen.has(s.id)) continue;
+        seen.add(s.id);
+        sessions.push(s);
+      }
+      if (offset + SESSION_PAGE_SIZE >= total) break;
+    }
+    return { sessions, total, limit: sessions.length, offset: 0 };
   }
 
   /**

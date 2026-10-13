@@ -1164,6 +1164,25 @@ class TestWebServerEndpoints:
         row = next(s for s in self.client.get("/api/sessions").json()["sessions"] if s["id"] == "bool-arch")
         assert row["archived"] is False
 
+    def test_get_sessions_omits_system_prompt_and_pages_by_offset(self):
+        from hermes_state import SessionDB
+
+        db = SessionDB()
+        try:
+            for i in range(3):
+                sid = f"page-{i}"
+                db.create_session(session_id=sid, source="cli", system_prompt="x" * 5000)
+                db.append_message(session_id=sid, role="user", content=f"hi {i}")
+        finally:
+            db.close()
+
+        first = self.client.get("/api/sessions?limit=2&offset=0").json()
+        rest = self.client.get("/api/sessions?limit=2&offset=2").json()
+        rows = first["sessions"] + rest["sessions"]
+        assert first["total"] == 3
+        assert sorted(r["id"] for r in rows) == ["page-0", "page-1", "page-2"]
+        assert all("system_prompt" not in r for r in rows)
+
     def test_rename_response_omits_archived_when_not_set(self):
         """Title-only PATCH keeps its legacy {ok, title} response shape."""
         from hermes_state import SessionDB

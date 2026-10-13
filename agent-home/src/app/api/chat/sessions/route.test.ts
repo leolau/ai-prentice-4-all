@@ -13,10 +13,11 @@ import type { Principal } from "@/types";
 
 const getPrincipal = vi.fn<() => Promise<Principal | null>>();
 const sessions = vi.fn(async () => ({ sessions: [] }));
+const allSessions = vi.fn(async () => ({ sessions: [] }));
 
 vi.mock("@/lib/auth/principal", () => ({
   getPrincipal: () => getPrincipal(),
-  apiClientForRequest: async () => ({ sessions }),
+  apiClientForRequest: async () => ({ sessions, allSessions }),
 }));
 
 const principal: Principal = {
@@ -59,6 +60,21 @@ describe("GET /api/chat/sessions", () => {
     await GET(new Request("http://x/api/chat/sessions?limit=200"));
     expect(sessions).toHaveBeenCalledWith(
       expect.objectContaining({ limit: 200 }),
+    );
+  });
+
+  it("reads every page for limit=all, keeping the filters", async () => {
+    await GET(
+      new Request("http://x/api/chat/sessions?limit=all&exclude_sources=&tags=a&tag_match=all"),
+    );
+    expect(sessions).not.toHaveBeenCalled();
+    expect(allSessions).toHaveBeenCalledWith(
+      expect.objectContaining({
+        excludeSources: undefined,
+        order: "recent",
+        tags: "a",
+        tagMatch: "all",
+      }),
     );
   });
 

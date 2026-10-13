@@ -9,6 +9,9 @@
  * include everything — `ChatPane`'s own refresh does this now that the
  * session strip groups cron sessions into their own "Scheduled" row instead
  * of hiding them.
+ *
+ * `limit` is capped at one 200-row page; `limit=all` reads every page, which
+ * is what the strip uses so no category silently loses its older entries.
  */
 import { NextResponse } from "next/server";
 
@@ -23,7 +26,7 @@ export async function GET(request: Request): Promise<NextResponse> {
   }
   const url = new URL(request.url);
   const raw = url.searchParams.get("archived");
-  const archived =
+  const archived: "exclude" | "only" | "include" | undefined =
     raw === "only" || raw === "include" || raw === "exclude" ? raw : undefined;
   // `Number(null)` is 0, which would clamp to a one-session list — a refresh
   // without an explicit limit must not truncate to the current session.
@@ -37,17 +40,20 @@ export async function GET(request: Request): Promise<NextResponse> {
   const rawExcludeSources = url.searchParams.get("exclude_sources");
   const excludeSources =
     rawExcludeSources === null ? "cron" : rawExcludeSources || undefined;
+  const filters = {
+    excludeSources,
+    order: "recent" as const,
+    archived,
+    tags: url.searchParams.get("tags") ?? undefined,
+    excludeTags: url.searchParams.get("exclude_tags") ?? undefined,
+    tagMatch: url.searchParams.get("tag_match") ?? undefined,
+  };
   try {
     const client = await apiClientForRequest({ profile: profileFromUrl(request.url) });
-    const data = await client.sessions({
-      excludeSources,
-      order: "recent",
-      limit,
-      archived,
-      tags: url.searchParams.get("tags") ?? undefined,
-      excludeTags: url.searchParams.get("exclude_tags") ?? undefined,
-      tagMatch: url.searchParams.get("tag_match") ?? undefined,
-    });
+    const data =
+      rawLimit === "all"
+        ? await client.allSessions(filters)
+        : await client.sessions({ ...filters, limit });
     return NextResponse.json(data);
   } catch (err) {
     if (err instanceof HermesApiError) {
