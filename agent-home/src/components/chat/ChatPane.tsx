@@ -19,6 +19,7 @@ import {
   type ChatActivity,
 } from "@/components/chat/StatusIndicator";
 import { TagFilterBar } from "@/components/chat/TagFilterBar";
+import { useFollowLatest } from "@/components/chat/useFollowLatest";
 import {
   categorizeSession,
   categoryOverrideTagName,
@@ -27,7 +28,6 @@ import {
 } from "@/lib/chat/categorize";
 import { chatHeaderActionsRef } from "@/lib/chat/header-actions";
 import { markSessionRead } from "@/lib/chat/last-read";
-import { CHAT_SESSION_LIST_LIMIT } from "@/lib/chat/session-limits";
 import {
   setLastAssistantContent,
   withLiveTurn,
@@ -159,6 +159,7 @@ export function ChatPane({
   const [now, setNow] = useState(() => Date.now());
   const [resolvingApproval, setResolvingApproval] = useState(false);
   const threadRef = useRef<HTMLDivElement | null>(null);
+  const followRef = useFollowLatest(threadRef);
   // Mirrors the selected session for use inside async stream callbacks, and
   // buffers turns whose session is not currently on screen.
   const selectedRef = useRef<string | null>(sessionId);
@@ -286,16 +287,17 @@ export function ChatPane({
     hasOutput: !assistantIsEmpty(messages),
   });
 
-  // Keep the thread pinned to the bottom as content grows: streamed text, the
-  // status indicator, an approval card, or the decision note. A double rAF lets
-  // late-laid-out nodes (the approval card renders below the scroll box) settle
-  // before we measure, so the newest content is always in view.
+  // Keep the thread pinned to the bottom as content grows (streamed text, the
+  // status indicator, an approval card, or the decision note) while the reader
+  // is following it; a reader who scrolled up to read older messages stays put.
+  // A double rAF lets late-laid-out nodes (the approval card renders below the
+  // scroll box) settle before we measure, so the newest content is in view.
   useEffect(() => {
     let raf1 = 0;
     let raf2 = 0;
     const pin = () => {
       const el = threadRef.current;
-      if (el) el.scrollTop = el.scrollHeight;
+      if (el && followRef.current) el.scrollTop = el.scrollHeight;
     };
     raf1 = requestAnimationFrame(() => {
       pin();
@@ -305,7 +307,7 @@ export function ChatPane({
       cancelAnimationFrame(raf1);
       cancelAnimationFrame(raf2);
     };
-  }, [messages, sendingKeys, selApproval, selDecision, loadingThread, liveActivity]);
+  }, [messages, sendingKeys, selApproval, selDecision, loadingThread, liveActivity, followRef]);
 
   const removeSending = (k: string) =>
     setSendingKeys((prev) => prev.filter((x) => x !== k));
@@ -320,6 +322,7 @@ export function ChatPane({
     // Switching is allowed at any time — a turn in another session keeps
     // streaming into its own buffer and is overlaid when you return to it.
     if (id === sessionId) return;
+    followRef.current = true;
     setSessionId(id);
     selectedRef.current = id;
     setError(null);
@@ -378,6 +381,7 @@ export function ChatPane({
   }
 
   function startNewConversation() {
+    followRef.current = true;
     setSessionId(null);
     selectedRef.current = null;
     setMessages(withLiveTurn([], liveRef.current.get(NEW_KEY)));
@@ -499,6 +503,7 @@ export function ChatPane({
     setError(null);
     setApprovals((prev) => dropKey(prev, turnKey));
     setDecisions((prev) => dropKey(prev, turnKey));
+    followRef.current = true;
     setSendingKeys((prev) => [...prev, turnKey]);
     // Buffer this turn so it survives session switches; the buffer's assistant
     // text is the single source of truth for accumulated deltas.
@@ -652,9 +657,9 @@ export function ChatPane({
   async function refreshSessions() {
     try {
       const params = new URLSearchParams();
-      // Match the first-paint fetch: a refresh must not shrink the picker to
-      // the upstream's default page size.
-      params.set("limit", String(CHAT_SESSION_LIST_LIMIT));
+      // Every conversation, like the first paint: a page cap would drop the
+      // oldest entries of whichever categories the newest rows crowd out.
+      params.set("limit", "all");
       // The strip groups cron sessions into their own "Scheduled" row
       // instead of hiding them — opt in to seeing them (see the BFF
       // route's doc comment for the empty-string-vs-absent distinction).

@@ -5563,6 +5563,9 @@ async def get_sessions(
                 # SQLite stores the flag as 0/1; expose a real JSON boolean.
                 s["archived"] = bool(s.get("archived"))
                 s["tags"] = tags_by_session.get(s["id"], [])
+                # Tens of KB per row and unused by list views; a whole list
+                # would otherwise weigh tens of MB.
+                s.pop("system_prompt", None)
             return {"sessions": sessions, "total": total, "limit": limit, "offset": offset}
         finally:
             db.close()
