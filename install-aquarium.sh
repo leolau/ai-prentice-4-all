@@ -126,7 +126,8 @@ git config --system --add safe.directory "$APP" 2>/dev/null || true
 log "Python dependencies"
 cd "$APP"
 [ -x .venv/bin/python ] || uv venv -q .venv --python 3.11
-uv pip install -q --python .venv/bin/python -e ".[all]" -e ./app-mcp
+# app-mcp runs from its folder (python -m app_mcp.server) on this venv; install only its deps.
+uv pip install -q --python .venv/bin/python -e ".[all]" "mcp>=1.26,<2" "websockets>=15,<16"
 
 log "Node dependencies and builds (agent-home, dashboard)"
 npm ci --no-audit --no-fund --silent
@@ -138,7 +139,9 @@ chmod +x agent-home/deploy/start.sh
 log "Supabase (self-hosted, Docker Compose)"
 if [ ! -f "$SUPA/docker-compose.yml" ]; then
   rm -rf "$ROOT/supabase/src"
-  git clone -q --depth 1 --branch "$SUPABASE_REF" https://github.com/supabase/supabase "$ROOT/supabase/src"
+  git clone -q --depth 1 --filter=blob:none --sparse --branch "$SUPABASE_REF" \
+    https://github.com/supabase/supabase "$ROOT/supabase/src"
+  git -C "$ROOT/supabase/src" sparse-checkout set docker
   mkdir -p "$SUPA" && cp -a "$ROOT/supabase/src/docker/." "$SUPA/"
   cp "$SUPA/.env.example" "$SUPA/.env"
 fi
