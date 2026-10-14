@@ -285,7 +285,8 @@ asyncio.run(main())
 PY
 sudo -u hermes -H HERMES_APP_READ_DB_PASSWORD="$READ_DB_PASSWORD" \
   bash -c 'set -a; . "$0"; set +a; exec "$@"' "$APP_ENV" "$APP/.venv/bin/hermes" owner read-role
-hermes_db owner show >/dev/null 2>&1 || hermes_db owner init "$OWNER_ID" --display "$OWNER_ID"
+# `owner show` exits 0 even when no owner is set, so test its output.
+hermes_db owner show 2>/dev/null | grep -q "^Owner:" || hermes_db owner init "$OWNER_ID" --display "$OWNER_ID"
 hermes_db owner alias "$OWNER_ID" >/dev/null 2>&1 || true
 
 # ---------------------------------------------------------------- 7. embedding service
