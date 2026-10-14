@@ -226,6 +226,9 @@ cat > "$APP_ENV" <<ENV
 DATABASE_URL=$DATABASE_URL
 SUPABASE_URL=http://127.0.0.1:8000
 SUPABASE_SERVICE_ROLE_KEY=$SERVICE_KEY
+# Member logins: the dashboard "supabase" auth provider verifies GoTrue tokens with these.
+SUPABASE_ANON_KEY=$ANON_KEY
+SUPABASE_JWT_SECRET=$JWT_SECRET
 HERMES_HOME=$HERMES_HOME_DIR
 ENV
 umask 022
