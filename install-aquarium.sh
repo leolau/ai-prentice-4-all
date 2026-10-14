@@ -14,7 +14,7 @@
 #
 # Settings (environment variables, all optional):
 #   AQUARIUM_HOME_DOMAIN       public hostname for agent-home (the app). Unset = no Caddy/TLS,
-#                              services stay on 127.0.0.1 (useful for a test VM).
+#                              only SSH is reachable from outside (useful for a test VM).
 #   AQUARIUM_DASHBOARD_DOMAIN  public hostname for the operator dashboard.
 #   AQUARIUM_OWNER_ID          login name of the first owner            (default: admin)
 #   AQUARIUM_OWNER_PASSWORD    owner password; generated when unset and saved in the secrets file
