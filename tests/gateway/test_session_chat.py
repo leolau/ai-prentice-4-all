@@ -164,3 +164,26 @@ def test_api_server_create_agent_delegates_to_shared_builder(monkeypatch):
     assert calls["session_id"] == "abc"
     assert calls["gateway_session_key"] == "k"
     assert calls["session_db"] is adapter._session_db
+
+
+def test_build_session_agent_runs_as_the_logged_in_principal(stub_runtime):
+    """Without the caller's identity the agent's memory/RAG reads fall back to
+    the owner, so an agent-home member would read everyone's private data."""
+    from gateway.session_chat import run_session_turn_sync
+
+    mia = SimpleNamespace(user_id="mia", display="Mia", role="member")
+    run_session_turn_sync(
+        session_db=object(), user_message="hi", conversation_history=[], principal=mia
+    )
+    kw = stub_runtime["_kwargs"]
+    assert kw["internal_user_id"] == "mia"
+    assert kw["internal_user_role"] == "member"
+    assert kw["user_id"] == "mia" and kw["user_name"] == "Mia"
+
+
+def test_build_session_agent_without_principal_adds_no_identity(stub_runtime):
+    from gateway.session_chat import build_session_agent
+
+    build_session_agent(session_db=object(), session_id="s1")
+    kw = stub_runtime["_kwargs"]
+    assert "internal_user_id" not in kw and "user_id" not in kw
