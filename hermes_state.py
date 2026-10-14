@@ -1904,6 +1904,10 @@ class SessionDB:
         a persisted, now-inactive row belongs to the caller's chat/thread before
         switching to it (IDOR scoping — without them the ``sessions`` table has
         no chat/thread to compare).
+
+        A child row (compression continuation, branch, subagent) with no
+        explicit ``user_id`` inherits its parent's, so a conversation keeps one
+        owner for its whole chain (see :meth:`session_owner_user_id`).
         """
         def _do(conn):
             conn.execute(
@@ -1911,8 +1915,10 @@ class SessionDB:
                    id, source, user_id, session_key, chat_id, chat_type, thread_id,
                    model, model_config, system_prompt, parent_session_id, cwd, started_at
                 )
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   VALUES (?, ?, COALESCE(?, (SELECT p.user_id FROM sessions p WHERE p.id = ?)),
+                           ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT(id) DO UPDATE SET
+                       user_id = COALESCE(sessions.user_id, excluded.user_id),
                        model = COALESCE(sessions.model, excluded.model),
                        model_config = COALESCE(sessions.model_config, excluded.model_config),
                        system_prompt = COALESCE(sessions.system_prompt, excluded.system_prompt),
@@ -1926,6 +1932,7 @@ class SessionDB:
                     session_id,
                     source,
                     user_id,
+                    parent_session_id,
                     session_key,
                     chat_id,
                     chat_type,
@@ -2727,6 +2734,29 @@ class SessionDB:
             row = cursor.fetchone()
         return dict(row) if row else None
 
+    def session_owner_user_id(self, session_id: str) -> Optional[str]:
+        """The ``user_id`` that owns *session_id*'s conversation, or ``None``.
+
+        Walks ``parent_session_id`` to the first row carrying a ``user_id`` so
+        continuation/branch rows written before owners were inherited still
+        resolve to their conversation's owner.
+        """
+        with self._lock:
+            row = self._conn.execute(
+                """WITH RECURSIVE chain(id, parent_session_id, user_id, depth) AS (
+                       SELECT id, parent_session_id, user_id, 0
+                       FROM sessions WHERE id = ?
+                       UNION ALL
+                       SELECT p.id, p.parent_session_id, p.user_id, chain.depth + 1
+                       FROM sessions p JOIN chain ON p.id = chain.parent_session_id
+                       WHERE chain.user_id IS NULL AND chain.depth < 1000
+                   )
+                   SELECT user_id FROM chain WHERE user_id IS NOT NULL
+                   ORDER BY depth LIMIT 1""",
+                (session_id,),
+            ).fetchone()
+        return row[0] if row else None
+
     def resolve_session_id(self, session_id_or_prefix: str) -> Optional[str]:
         """Resolve an exact or uniquely prefixed session ID to the full ID.
 
@@ -3122,8 +3152,11 @@ class SessionDB:
         include_archived: bool = False,
         archived_only: bool = False,
         id_query: str = None,
+        user_id: str = None,
     ) -> List[Dict[str, Any]]:
         """List sessions with preview (first user message) and last active timestamp.
+
+        ``user_id`` restricts the list to conversations that user owns.
 
         Returns dicts with keys: id, source, model, title, started_at, ended_at,
         message_count, preview (first 60 chars of first user message),
@@ -3171,6 +3204,9 @@ class SessionDB:
             where_clauses.append(_LISTABLE_CHILD_SQL)
             where_clauses.append(f"{_delegate_from_json('s.model_config')} IS NULL")
 
+        if user_id:
+            where_clauses.append("s.user_id = ?")
+            params.append(user_id)
         if source:
             where_clauses.append("s.source = ?")
             params.append(source)
@@ -5152,6 +5188,7 @@ class SessionDB:
         query: str,
         limit: int = 20,
         include_archived: bool = True,
+        user_id: str = None,
     ) -> List[Dict[str, Any]]:
         """Search surfaced sessions by exact/prefix/substring session id.
 
@@ -5177,6 +5214,7 @@ class SessionDB:
             include_archived=include_archived,
             order_by_last_active=True,
             id_query=needle,
+            user_id=user_id,
         )
 
         def score(row: Dict[str, Any]) -> int:
@@ -5243,6 +5281,7 @@ class SessionDB:
         archived_only: bool = False,
         exclude_children: bool = False,
         exclude_sources: List[str] = None,
+        user_id: str = None,
     ) -> int:
         """Count sessions, optionally filtered by source.
 
@@ -5267,6 +5306,9 @@ class SessionDB:
             # children (parent ended with end_reason='branched').
             where_clauses.append(_LISTABLE_CHILD_SQL)
             where_clauses.append(f"{_delegate_from_json('s.model_config')} IS NULL")
+        if user_id:
+            where_clauses.append("s.user_id = ?")
+            params.append(user_id)
         if source:
             where_clauses.append("s.source = ?")
             params.append(source)
