@@ -371,7 +371,9 @@ if [ -n "$HOME_DOMAIN$DASH_DOMAIN" ]; then
 $HOME_DOMAIN {
     $sse
     handle @sse {
-        reverse_proxy 127.0.0.1:3100 { flush_interval -1 }
+        reverse_proxy 127.0.0.1:3100 {
+            flush_interval -1
+        }
     }
     @app_mcp_ws path /app-mcp/ws /app-mcp/folders/ws
     handle @app_mcp_ws {
@@ -387,7 +389,9 @@ CADDY
 $DASH_DOMAIN {
     $sse
     handle @sse {
-        reverse_proxy 127.0.0.1:9119 { flush_interval -1 }
+        reverse_proxy 127.0.0.1:9119 {
+            flush_interval -1
+        }
     }
     handle {
         encode zstd gzip
