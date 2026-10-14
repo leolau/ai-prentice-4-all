@@ -71,6 +71,8 @@ apt-get install -y -q ca-certificates curl gnupg git build-essential python3-dev
   docker.io docker-compose-v2
 systemctl enable --now docker
 # Only SSH and the Caddy ports are public; everything else listens on 127.0.0.1.
+# The dashboard binds 0.0.0.0 so its login gate is on (as in prod); ufw keeps :9119 closed.
+ufw default deny incoming >/dev/null
 ufw allow OpenSSH >/dev/null && ufw allow 80/tcp >/dev/null && ufw allow 443/tcp >/dev/null
 ufw --force enable >/dev/null
 
@@ -171,6 +173,8 @@ open(f, "w").write("\n".join(f"{k}={v}" if l.startswith(k + "=") else l for l in
 PY
   else echo "$k=$v" >> "$f"; fi
 }
+# Upstream .env pins COMPOSE_FILE, which stops Compose auto-loading the loopback override.
+set_env "$SUPA/.env" COMPOSE_FILE docker-compose.yml:docker-compose.override.yml
 set_env "$SUPA/.env" POSTGRES_PASSWORD "$PG_PASSWORD"
 set_env "$SUPA/.env" JWT_SECRET "$JWT_SECRET"
 set_env "$SUPA/.env" ANON_KEY "$ANON_KEY"
@@ -331,7 +335,7 @@ if [ "${AQUARIUM_SKIP_EMBED_MODEL:-0}" = 1 ]; then sed -i 's/ --offline//' $UNIT
 for svc in dashboard gateway; do
   if [ $svc = dashboard ]; then
     desc="Aquarium dashboard API (:9119, agent-home auth bridge)"
-    cmd="$APP/.venv/bin/hermes dashboard --skip-build --host 127.0.0.1 --port 9119 --no-open"
+    cmd="$APP/.venv/bin/hermes dashboard --skip-build --host 0.0.0.0 --port 9119 --no-open"
   else
     desc="Aquarium messaging gateway"
     cmd="$APP/.venv/bin/hermes gateway run"
