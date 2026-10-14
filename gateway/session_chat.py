@@ -33,6 +33,7 @@ def build_session_agent(
     tool_complete_callback=None,
     gateway_session_key: Optional[str] = None,
     platform: str = "api_server",
+    principal: Any = None,
 ) -> Any:
     """Create an :class:`AIAgent` for a persisted session.
 
@@ -42,6 +43,9 @@ def build_session_agent(
     provided ``session_db`` so the turn is persisted to the same store every
     other surface reads. Does not mutate prior context or the system prompt —
     prompt caching / strict alternation are preserved by the agent loop.
+
+    *principal* is the logged-in person the turn runs for (C1). Without it the
+    agent has no identity and its memory/RAG reads fall back to the owner.
     """
     from run_agent import AIAgent
     from gateway.run import (
@@ -70,6 +74,15 @@ def build_session_agent(
     max_iterations = _current_max_iterations()
     fallback_model = GatewayRunner._load_fallback_model()
 
+    identity: dict = {}
+    if principal is not None:
+        identity = {
+            "user_id": principal.user_id,
+            "user_name": getattr(principal, "display", None) or None,
+            "internal_user_id": principal.user_id,
+            "internal_user_role": getattr(principal, "role", None),
+        }
+
     return AIAgent(
         model=model,
         **runtime_kwargs,
@@ -89,6 +102,7 @@ def build_session_agent(
         fallback_model=fallback_model,
         reasoning_config=reasoning_config,
         gateway_session_key=gateway_session_key,
+        **identity,
     )
 
 
@@ -107,6 +121,7 @@ def run_session_turn_sync(
     tool_complete_callback=None,
     platform: str = "api_server",
     on_agent_ready=None,
+    principal: Any = None,
 ) -> Tuple[dict, dict]:
     """Run one synchronous one-brain turn for a persisted session.
 
@@ -131,6 +146,7 @@ def run_session_turn_sync(
         tool_complete_callback=tool_complete_callback,
         gateway_session_key=gateway_session_key,
         platform=platform,
+        principal=principal,
     )
     t1 = time.monotonic()
     if on_agent_ready is not None:

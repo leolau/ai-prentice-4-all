@@ -10814,6 +10814,7 @@ async def session_chat(session_id: str, request: Request):
                         user_message=user_message,
                         conversation_history=history,
                         session_id=sid,
+                        principal=principal,
                     )
             finally:
                 run_db.close()
@@ -11307,6 +11308,7 @@ async def session_chat_stream(session_id: str, request: Request):
                         tool_start_callback=_tool_start,
                         tool_complete_callback=_tool_complete,
                         on_agent_ready=_agent_ready,
+                        principal=principal,
                     )
             finally:
                 run_db.close()

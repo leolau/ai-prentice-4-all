@@ -257,13 +257,24 @@ def _read_session(db, session_id: str, head: int = 20, tail: int = 10) -> str:
     return json.dumps(response, ensure_ascii=False)
 
 
-def _list_recent_sessions(db, limit: int, current_session_id: str = None) -> str:
+def owner_scope_for(user_id: Optional[str], role: Optional[str]) -> Optional[str]:
+    """Whose chats an agent may recall: ``None`` (every chat) for the owner or
+    a session with no resolved person (CLI, cron), else that person's own."""
+    if not user_id or role == "owner":
+        return None
+    return user_id
+
+
+def _list_recent_sessions(
+    db, limit: int, current_session_id: str = None, user_id: str = None
+) -> str:
     """Return metadata for the most recent sessions (no LLM calls, no FTS5)."""
     try:
         sessions = db.list_sessions_rich(
             limit=limit + 5,
             exclude_sources=list(_HIDDEN_SESSION_SOURCES),
             order_by_last_active=True,
+            user_id=user_id,
         )  # fetch extra so we can skip current
 
         current_root = _resolve_to_parent(db, current_session_id) if current_session_id else None
@@ -503,6 +514,7 @@ def _discover(
     limit: int,
     sort: Optional[str],
     current_session_id: str = None,
+    owner_user_id: str = None,
 ) -> str:
     """Discovery shape: FTS5 + anchored window + bookends per hit. Single call."""
     role_list = role_filter if role_filter else ["user", "assistant"]
@@ -529,6 +541,18 @@ def _discover(
     # top `limit` results (#19434). Stable — preserves BM25/recency order
     # within each class.
     raw_results = _order_for_recall(raw_results)
+
+    if owner_user_id is not None:
+        owners: Dict[str, Optional[str]] = {}
+
+        def _owned(sid: str) -> bool:
+            if sid not in owners:
+                owners[sid] = db.session_owner_user_id(sid)
+            return owners[sid] == owner_user_id
+
+        raw_results = [r for r in raw_results if _owned(r["session_id"])]
+        if title_result and not _owned(title_result["session_id"]):
+            title_result = None
 
     if not raw_results and not title_result:
         return json.dumps({
@@ -630,6 +654,8 @@ def session_search(
     sort: str = None,
     # Cross-profile (any shape)
     profile: str = None,
+    # Only this person's chats are visible (None = every chat)
+    owner_user_id: str = None,
 ) -> str:
     """Single-shape tool. Mode inferred from which args are set.
 
@@ -675,8 +701,13 @@ def session_search(
             db = profile_db
             current_session_id = None
 
+    def _visible(sid: str) -> bool:
+        return owner_user_id is None or db.session_owner_user_id(sid) == owner_user_id
+
     # Scroll shape takes precedence — explicit anchor beats any query.
     if (isinstance(session_id, str) and session_id.strip()) and around_message_id is not None:
+        if not _visible(session_id.strip()):
+            return tool_error(f"session_id not found: {session_id}", success=False)
         return _scroll(
             db=db,
             session_id=session_id,
@@ -688,6 +719,8 @@ def session_search(
     # Read shape: a session_id with no anchor → dump the whole session.
     if isinstance(session_id, str) and session_id.strip():
         sid = session_id.strip()
+        if not _visible(sid):
+            return tool_error(f"session_id not found: {sid}", success=False)
         result = _read_session(db, sid)
         if json.loads(result).get("success"):
             return result
@@ -695,6 +728,8 @@ def session_search(
         # Miss in the target profile — the model may have dropped the owning
         # profile from the link. Scan every profile and read it from wherever
         # it lives, tagging the profile it was found in.
+        if owner_user_id is not None:
+            return result
         located, owner = _locate_session_db(sid)
         if located is not None:
             try:
@@ -716,7 +751,7 @@ def session_search(
 
     # Browse shape: no query → recent sessions.
     if not query or not isinstance(query, str) or not query.strip():
-        return _list_recent_sessions(db, limit, current_session_id)
+        return _list_recent_sessions(db, limit, current_session_id, user_id=owner_user_id)
 
     # Parse role_filter
     role_list: Optional[List[str]] = None
@@ -737,6 +772,7 @@ def session_search(
         limit=limit,
         sort=sort_norm,
         current_session_id=current_session_id,
+        owner_user_id=owner_user_id,
     )
 
 

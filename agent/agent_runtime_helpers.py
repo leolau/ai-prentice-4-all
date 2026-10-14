@@ -2092,6 +2092,7 @@ def invoke_tool(agent, function_name: str, function_args: dict, effective_task_i
             if not session_db:
                 from hermes_state import format_session_db_unavailable
                 return _finish_agent_tool(json.dumps({"success": False, "error": format_session_db_unavailable()}), next_args)
+            from tools.session_search_tool import owner_scope_for as _owner_scope_for
             from tools.session_search_tool import session_search as _session_search
             return _finish_agent_tool(
                 _session_search(
@@ -2104,6 +2105,10 @@ def invoke_tool(agent, function_name: str, function_args: dict, effective_task_i
                     sort=next_args.get("sort"),
                     db=session_db,
                     current_session_id=agent.session_id,
+                    owner_user_id=_owner_scope_for(
+                        getattr(agent, "_internal_user_id", None),
+                        getattr(agent, "_internal_user_role", None),
+                    ),
                 ),
                 next_args,
             )
