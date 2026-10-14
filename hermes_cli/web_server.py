@@ -3234,6 +3234,61 @@ async def _comms_resolve_principal(request: "Request", *, allow_as: bool = False
         raise _CommsNotConfigured(str(exc)) from exc
 
 
+def _chat_scope_for(principal) -> Optional[str]:
+    """The ``user_id`` whose chats *principal* is limited to, or ``None`` for all.
+
+    A chat is private to the person who started it; only the owner sees every
+    conversation in the profile.
+    """
+    return None if getattr(principal, "is_owner", False) else principal.user_id
+
+
+async def _chat_scope(request: "Request") -> Optional[str]:
+    """Dependency: the chat-visibility scope of the calling login.
+
+    A caller with no interactive login (the operator dashboard, the desktop app,
+    an internal service) keeps full access, as does a single-user install with
+    no multi-user datastore; an enrolled login is scoped by
+    :func:`_chat_scope_for`.
+    """
+    if not _comms_session_subject(request):
+        return None
+    try:
+        principal = await _comms_resolve_principal(request)
+    except _CommsNotConfigured:
+        return None
+    return _chat_scope_for(principal)
+
+
+def _require_chat_access(db, session_id: Optional[str], scope: Optional[str]) -> None:
+    """404 unless *scope* may see *session_id* (a ``None`` scope sees all)."""
+    if scope is None:
+        return
+    if not session_id or db.session_owner_user_id(session_id) != scope:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+
+def _require_chat_access_by_id(
+    session_id: str, profile: Optional[str], scope: Optional[str]
+) -> None:
+    if scope is None:
+        return
+    db = _open_session_db_for_profile(profile)
+    try:
+        _require_chat_access(db, db.resolve_session_id(session_id), scope)
+    finally:
+        db.close()
+
+
+def _require_all_chats(scope: Optional[str]) -> None:
+    """403 for a caller limited to their own chats (profile-wide session ops)."""
+    if scope is not None:
+        raise HTTPException(
+            status_code=403,
+            detail="Only the owner can manage every conversation in this profile.",
+        )
+
+
 def _comms_unconfigured_payload(key: str) -> dict:
     return {"configured": False, key: [], "principal": None}
 
@@ -5473,8 +5528,12 @@ async def get_sessions(
     tags: str = None,
     exclude_tags: str = None,
     tag_match: str = "any",
+    scope: Optional[str] = Depends(_chat_scope),
 ):
     """List sessions.
+
+    A login limited to its own chats (see :func:`_chat_scope`) only lists the
+    conversations it owns.
 
     ``archived`` controls how soft-archived sessions are treated:
     ``exclude`` (default) hides them, ``only`` returns just the archived ones
@@ -5533,6 +5592,7 @@ async def get_sessions(
                 include_archived=include_archived,
                 archived_only=archived_only,
                 order_by_last_active=order == "recent",
+                user_id=scope,
             )
             if filtered_ids is not None:
                 id_set = set(filtered_ids)
@@ -5545,6 +5605,7 @@ async def get_sessions(
                 include_archived=include_archived,
                 archived_only=archived_only,
                 exclude_children=True,
+                user_id=scope,
             )
             now = time.time()
             # Bulk-attach each row's tags (one query for the whole page, not
@@ -5586,6 +5647,7 @@ def get_profiles_sessions(
     profile: str = "all",
     source: str = None,
     exclude_sources: str = None,
+    scope: Optional[str] = Depends(_chat_scope),
 ):
     """Unified, read-only session list aggregated across ALL profiles.
 
@@ -5596,6 +5658,7 @@ def get_profiles_sessions(
     interacts (sends a message). A user with a single (default) profile gets the
     same rows as ``/api/sessions``, just tagged ``profile="default"``.
     """
+    _require_all_chats(scope)
     if archived not in ("exclude", "only", "include"):
         raise HTTPException(status_code=400, detail="archived must be one of: exclude, only, include")
     if order not in ("created", "recent"):
@@ -5696,7 +5759,12 @@ def get_profiles_sessions(
 
 
 @app.get("/api/sessions/search")
-async def search_sessions(q: str = "", limit: int = 20, profile: Optional[str] = None):
+async def search_sessions(
+    q: str = "",
+    limit: int = 20,
+    profile: Optional[str] = None,
+    scope: Optional[str] = Depends(_chat_scope),
+):
     """Search sessions by ID plus full-text message content using FTS5.
 
     Direct session-id matches are surfaced first, then FTS message-content
@@ -5789,9 +5857,17 @@ async def search_sessions(q: str = "", limit: int = 20, profile: Optional[str] =
             # same logical conversation collapse to a single result. The first
             # hit for a lineage wins; ID matches run first and take priority.
             seen: dict = {}
+            owner_cache: dict = {}
+
+            def visible(raw_sid: str) -> bool:
+                if scope is None:
+                    return True
+                if raw_sid not in owner_cache:
+                    owner_cache[raw_sid] = db.session_owner_user_id(raw_sid)
+                return owner_cache[raw_sid] == scope
 
             def add_lineage_result(raw_sid: str, payload: dict) -> None:
-                if not raw_sid:
+                if not raw_sid or not visible(raw_sid):
                     return
                 root = compression_root(raw_sid)
                 if root in seen or len(seen) >= safe_limit:
@@ -5805,7 +5881,9 @@ async def search_sessions(q: str = "", limit: int = 20, profile: Optional[str] =
             # logs, or another Hermes surface. FTS can't find those unless the
             # id happens to appear in message text. search_sessions_by_id is
             # SQL-bounded, so this stays cheap even with thousands of sessions.
-            for row in db.search_sessions_by_id(q, limit=safe_limit, include_archived=True):
+            for row in db.search_sessions_by_id(
+                q, limit=safe_limit, include_archived=True, user_id=scope
+            ):
                 sid = row.get("id")
                 preview = (row.get("preview") or "").strip()
                 snippet = preview or f"Session ID: {sid}"
@@ -10152,7 +10230,9 @@ class BulkDeleteSessions(BaseModel):
 
 
 @app.post("/api/sessions/bulk-delete")
-async def bulk_delete_sessions_endpoint(body: BulkDeleteSessions):
+async def bulk_delete_sessions_endpoint(
+    body: BulkDeleteSessions, scope: Optional[str] = Depends(_chat_scope)
+):
     """Delete every session in ``body.ids`` in a single DB transaction.
 
     Backs the dashboard's bulk-select-and-delete flow on the sessions
@@ -10195,20 +10275,26 @@ async def bulk_delete_sessions_endpoint(body: BulkDeleteSessions):
         )
     db = _open_session_db_for_profile(body.profile)
     try:
-        deleted = db.delete_sessions(body.ids)
+        ids = body.ids
+        if scope is not None:
+            ids = [i for i in ids if db.session_owner_user_id(i) == scope]
+        deleted = db.delete_sessions(ids)
         return {"ok": True, "deleted": deleted}
     finally:
         db.close()
 
 
 @app.get("/api/sessions/empty/count")
-async def count_empty_sessions_endpoint(profile: Optional[str] = None):
+async def count_empty_sessions_endpoint(
+    profile: Optional[str] = None, scope: Optional[str] = Depends(_chat_scope)
+):
     """Return the number of empty, ended, non-archived sessions.
 
     Drives the dashboard's "Delete empty (N)" button — when N is 0 the
     UI hides the affordance so users aren't presented with a button
     that does nothing. Cheap, single-COUNT query.
     """
+    _require_all_chats(scope)
     db = _open_session_db_for_profile(profile)
     try:
         return {"count": db.count_empty_sessions()}
@@ -10217,7 +10303,9 @@ async def count_empty_sessions_endpoint(profile: Optional[str] = None):
 
 
 @app.delete("/api/sessions/empty")
-async def delete_empty_sessions_endpoint(profile: Optional[str] = None):
+async def delete_empty_sessions_endpoint(
+    profile: Optional[str] = None, scope: Optional[str] = Depends(_chat_scope)
+):
     """Delete every empty (``message_count == 0``), ended,
     non-archived session in a single transaction.
 
@@ -10236,6 +10324,7 @@ async def delete_empty_sessions_endpoint(profile: Optional[str] = None):
     prune-on-startup pass. Matching that pre-existing trade-off keeps
     the two delete endpoints' DB-vs-disk behaviour consistent.
     """
+    _require_all_chats(scope)
     db = _open_session_db_for_profile(profile)
     try:
         deleted = db.delete_empty_sessions()
@@ -10245,12 +10334,15 @@ async def delete_empty_sessions_endpoint(profile: Optional[str] = None):
 
 
 @app.get("/api/sessions/stats")
-async def get_session_stats(profile: Optional[str] = None):
+async def get_session_stats(
+    profile: Optional[str] = None, scope: Optional[str] = Depends(_chat_scope)
+):
     """Session-store statistics for the Sessions page (mirrors `hermes sessions stats`).
 
     Registered before ``/api/sessions/{session_id}`` so the literal ``stats``
     path isn't captured as a session id by the parameterized route.
     """
+    _require_all_chats(scope)
     db = _open_session_db_for_profile(profile)
     try:
         total = db.session_count(include_archived=True)
@@ -10358,9 +10450,10 @@ async def get_lead_session(request: Request, profile: Optional[str] = None):
     db = _open_session_db_for_profile(profile)
     try:
         sid = lead_session_id(principal.user_id)
-        created = db.get_session(sid) is None
-        if created:
-            db.ensure_session(sid, source="agent_home")
+        existing = db.get_session(sid)
+        created = existing is None
+        if created or not existing.get("user_id"):
+            db.ensure_session(sid, source="agent_home", user_id=principal.user_id)
         return {
             "session_id": sid,
             "resume_session_id": db.resolve_resume_session_id(sid),
@@ -10414,13 +10507,18 @@ async def delete_session_tag(tag_id: str, profile: Optional[str] = None):
 
 
 @app.get("/api/sessions/{session_id}")
-async def get_session_detail(session_id: str, profile: Optional[str] = None):
+async def get_session_detail(
+    session_id: str,
+    profile: Optional[str] = None,
+    scope: Optional[str] = Depends(_chat_scope),
+):
     db = _open_session_db_for_profile(profile)
     try:
         sid = db.resolve_session_id(session_id)
         session = db.get_session(sid) if sid else None
         if not session:
             raise HTTPException(status_code=404, detail="Session not found")
+        _require_chat_access(db, sid, scope)
         if profile:
             session["profile"] = _cron_profile_home(profile)[0]
         return session
@@ -10430,7 +10528,10 @@ async def get_session_detail(session_id: str, profile: Optional[str] = None):
 
 
 @app.get("/api/sessions/{session_id}/latest-descendant")
-async def get_session_latest_descendant(session_id: str):
+async def get_session_latest_descendant(
+    session_id: str, scope: Optional[str] = Depends(_chat_scope)
+):
+    _require_chat_access_by_id(session_id, None, scope)
     latest, path = _session_latest_descendant(session_id)
     if not latest:
         raise HTTPException(status_code=404, detail="Session not found")
@@ -10448,6 +10549,7 @@ async def get_session_messages(
     visible: bool = False,
     limit: Optional[int] = None,
     before: Optional[int] = None,
+    scope: Optional[str] = Depends(_chat_scope),
 ):
     """Return a session transcript.
 
@@ -10460,6 +10562,7 @@ async def get_session_messages(
         sid = db.resolve_session_id(session_id)
         if not sid:
             raise HTTPException(status_code=404, detail="Session not found")
+        _require_chat_access(db, sid, scope)
         sid = db.resolve_resume_session_id(sid)
         if not visible and limit is None and before is None:
             messages = db.get_messages(sid)
@@ -10480,11 +10583,16 @@ async def get_session_messages(
 # Per-session tag endpoints
 # ---------------------------------------------------------------------------
 @app.get("/api/sessions/{session_id}/tags")
-async def get_session_tags(session_id: str, profile: Optional[str] = None):
+async def get_session_tags(
+    session_id: str,
+    profile: Optional[str] = None,
+    scope: Optional[str] = Depends(_chat_scope),
+):
     """Return tags attached to *session_id*."""
     db = _open_session_db_for_profile(profile)
     try:
         sid = db.resolve_session_id(session_id) or session_id
+        _require_chat_access(db, sid, scope)
         return {"tags": db.get_session_tags(sid)}
     finally:
         db.close()
@@ -10495,6 +10603,7 @@ async def add_session_tag(
     session_id: str,
     request: Request,
     profile: Optional[str] = None,
+    scope: Optional[str] = Depends(_chat_scope),
 ):
     """Attach an existing-or-new tag to *session_id*.
 
@@ -10508,6 +10617,7 @@ async def add_session_tag(
     db = _open_session_db_for_profile(profile)
     try:
         sid = db.resolve_session_id(session_id) or session_id
+        _require_chat_access(db, sid, scope)
         tag = db.add_tag_to_session(sid, name, color=color, source="manual")
         return {"tag": tag}
     finally:
@@ -10519,11 +10629,13 @@ async def remove_session_tag(
     session_id: str,
     tag_id: str,
     profile: Optional[str] = None,
+    scope: Optional[str] = Depends(_chat_scope),
 ):
     """Detach *tag_id* from *session_id*."""
     db = _open_session_db_for_profile(profile)
     try:
         sid = db.resolve_session_id(session_id) or session_id
+        _require_chat_access(db, sid, scope)
         removed = db.remove_tag_from_session(sid, tag_id)
         return {"ok": removed}
     finally:
@@ -10535,6 +10647,7 @@ async def suggest_session_tags(
     session_id: str,
     request: Request,
     profile: Optional[str] = None,
+    scope: Optional[str] = Depends(_chat_scope),
 ):
     """Use an LLM to suggest tags for this session.
 
@@ -10544,6 +10657,7 @@ async def suggest_session_tags(
     db = _open_session_db_for_profile(profile)
     try:
         sid = db.resolve_session_id(session_id) or session_id
+        _require_chat_access(db, sid, scope)
         messages = db.get_messages(sid)
         existing_tags = [t["name"] for t in db.list_tags()]
     finally:
@@ -10660,6 +10774,7 @@ async def session_chat(session_id: str, request: Request):
         sid = db.resolve_session_id(session_id)
         if not sid:
             raise HTTPException(status_code=404, detail="Session not found")
+        _require_chat_access(db, sid, _chat_scope_for(principal))
         sid = db.resolve_resume_session_id(sid)
         history = db.get_messages_as_conversation(sid)
     finally:
@@ -11065,6 +11180,7 @@ async def session_chat_stream(session_id: str, request: Request):
         sid = db.resolve_session_id(session_id)
         if not sid:
             raise HTTPException(status_code=404, detail="Session not found")
+        _require_chat_access(db, sid, _chat_scope_for(principal))
         sid = db.resolve_resume_session_id(sid)
         history = db.get_messages_as_conversation(sid)
     finally:
@@ -11083,6 +11199,7 @@ async def session_chat_stream(session_id: str, request: Request):
         # covers a stop that lands before the agent is built.
         "agent": None,
         "cancel_requested": False,
+        "profile": profile,
     }
     _CHAT_RUNS[run_id] = run_entry
     trace, ledger = _agent_home_trace(principal, sid)
@@ -11300,7 +11417,8 @@ async def active_chat_run(
     """The in-flight turn for this session, if any — a reloaded page (or a
     second device) asks this first and then attaches to the stream to resume
     live rendering."""
-    await _comms_resolve_principal(request)
+    principal = await _comms_resolve_principal(request)
+    _require_chat_access_by_id(session_id, profile, _chat_scope_for(principal))
     resolved = _resolved_chat_session_id(session_id, profile)
     for run_id, entry in _CHAT_RUNS.items():
         if not entry["done"] and entry["session_id"] in (session_id, resolved):
@@ -11317,11 +11435,14 @@ async def session_chat_stream_attach(session_id: str, request: Request):
     (``_chat_run_publish``), so the snapshot index and the queue hand off
     without a gap or a duplicate.
     """
-    await _comms_resolve_principal(request)
+    principal = await _comms_resolve_principal(request)
     try:
         body = await request.json()
     except Exception:
         body = {}
+    _require_chat_access_by_id(
+        session_id, (body or {}).get("profile"), _chat_scope_for(principal)
+    )
     run_id = str((body or {}).get("run_id", "")).strip()
     entry = _CHAT_RUNS.get(run_id)
     if entry is not None and entry["session_id"] != session_id:
@@ -11376,11 +11497,14 @@ async def session_chat_stream_cancel(session_id: str, request: Request):
     winds down and persists whatever it produced, and every attached stream
     receives ``run.cancelled`` followed by the normal completion frames.
     """
-    await _comms_resolve_principal(request)
+    principal = await _comms_resolve_principal(request)
     try:
         body = await request.json()
     except Exception:
         body = {}
+    _require_chat_access_by_id(
+        session_id, (body or {}).get("profile"), _chat_scope_for(principal)
+    )
     run_id = str((body or {}).get("run_id", "")).strip()
     entry = _CHAT_RUNS.get(run_id)
     if entry is not None and entry["session_id"] != session_id:
@@ -11411,7 +11535,13 @@ async def resolve_run_approval(run_id: str, request: Request):
     explicit choice. Owner-attributed like the other write endpoints — the
     endpoint forwards the user's decision, it does not itself decide consent.
     """
-    await _comms_resolve_principal(request)
+    principal = await _comms_resolve_principal(request)
+    scope = _chat_scope_for(principal)
+    if scope is not None:
+        entry = _CHAT_RUNS.get(run_id)
+        if entry is None:
+            raise HTTPException(status_code=404, detail="no such run")
+        _require_chat_access_by_id(entry["session_id"], entry.get("profile"), scope)
     try:
         body = await request.json()
     except Exception:
@@ -11440,7 +11570,7 @@ async def create_session_endpoint(request: Request):
     endpoints. The first ``/chat`` turn then populates it; the session is the
     same row every other surface (gateway, Telegram, desktop) reads.
     """
-    await _comms_resolve_principal(request)
+    principal = await _comms_resolve_principal(request)
     try:
         body = await request.json()
     except Exception:
@@ -11459,14 +11589,18 @@ async def create_session_endpoint(request: Request):
     try:
         if db.get_session(session_id):
             raise HTTPException(status_code=409, detail="Session already exists")
-        db.ensure_session(session_id, source="agent_home")
+        db.ensure_session(session_id, source="agent_home", user_id=principal.user_id)
     finally:
         db.close()
     return {"session_id": session_id, "source": "agent_home"}
 
 
 @app.delete("/api/sessions/{session_id}")
-async def delete_session_endpoint(session_id: str, profile: Optional[str] = None):
+async def delete_session_endpoint(
+    session_id: str,
+    profile: Optional[str] = None,
+    scope: Optional[str] = Depends(_chat_scope),
+):
     # ``profile`` deletes a session belonging to another (local) profile by
     # opening its state.db directly. Remote profiles never reach here — the
     # desktop routes their DELETE to the remote backend. Omit for current/default.
@@ -11484,6 +11618,7 @@ async def delete_session_endpoint(session_id: str, profile: Optional[str] = None
         sid = db.resolve_session_id(session_id)
         if not sid:
             return {"ok": True, "already_absent": True}
+        _require_chat_access(db, sid, scope)
         db.delete_session(sid)
         return {"ok": True}
     finally:
@@ -11499,7 +11634,9 @@ class SessionRename(BaseModel):
 
 
 @app.patch("/api/sessions/{session_id}")
-async def rename_session_endpoint(session_id: str, body: SessionRename):
+async def rename_session_endpoint(
+    session_id: str, body: SessionRename, scope: Optional[str] = Depends(_chat_scope)
+):
     """Update a session: rename (or clear its title) and/or archive it.
 
     ``title`` renames (empty/null clears the title); ``archived`` soft-hides or
@@ -11511,6 +11648,7 @@ async def rename_session_endpoint(session_id: str, body: SessionRename):
         sid = db.resolve_session_id(session_id)
         if not sid:
             raise HTTPException(status_code=404, detail="Session not found")
+        _require_chat_access(db, sid, scope)
         if body.title is None and body.archived is None:
             raise HTTPException(
                 status_code=400,
@@ -11533,13 +11671,18 @@ async def rename_session_endpoint(session_id: str, body: SessionRename):
 
 
 @app.get("/api/sessions/{session_id}/export")
-async def export_session_endpoint(session_id: str, profile: Optional[str] = None):
+async def export_session_endpoint(
+    session_id: str,
+    profile: Optional[str] = None,
+    scope: Optional[str] = Depends(_chat_scope),
+):
     """Export a single session (metadata + messages) as JSON."""
     db = _open_session_db_for_profile(profile)
     try:
         sid = db.resolve_session_id(session_id)
         if not sid:
             raise HTTPException(status_code=404, detail="Session not found")
+        _require_chat_access(db, sid, scope)
         data = db.export_session(sid)
         if data is None:
             raise HTTPException(status_code=404, detail="Session not found")
@@ -11555,8 +11698,11 @@ class SessionPrune(BaseModel):
 
 
 @app.post("/api/sessions/prune")
-async def prune_sessions_endpoint(body: SessionPrune):
+async def prune_sessions_endpoint(
+    body: SessionPrune, scope: Optional[str] = Depends(_chat_scope)
+):
     """Delete ended sessions older than N days (mirrors `hermes sessions prune`)."""
+    _require_all_chats(scope)
     if body.older_than_days < 1:
         raise HTTPException(status_code=400, detail="older_than_days must be >= 1")
     profile_home = _cron_profile_home(body.profile)[1] if body.profile else get_hermes_home()

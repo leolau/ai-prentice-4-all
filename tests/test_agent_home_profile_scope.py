@@ -83,7 +83,7 @@ def _drive_chat(
     monkeypatch.setattr(
         web_server,
         "_comms_resolve_principal",
-        _async(SimpleNamespace(user_id="root", display="Root")),
+        _async(SimpleNamespace(user_id="root", display="Root", role="owner", is_owner=True)),
     )
     monkeypatch.setattr(web_server, "_agent_home_trace", lambda *a, **k: (None, None))
 
@@ -131,7 +131,7 @@ def _drive_chat_stream(monkeypatch: pytest.MonkeyPatch, profile: str | None) -> 
     monkeypatch.setattr(
         web_server,
         "_comms_resolve_principal",
-        _async(SimpleNamespace(user_id="root", display="Root")),
+        _async(SimpleNamespace(user_id="root", display="Root", role="owner", is_owner=True)),
     )
     monkeypatch.setattr(web_server, "_agent_home_trace", lambda *a, **k: (None, None))
     monkeypatch.setattr(web_server, "_flush_agent_home_trace", _async(None))
