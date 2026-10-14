@@ -45,6 +45,13 @@ die()  { printf '\033[1;31mERROR: %s\033[0m\n' "$*" >&2; exit 1; }
 trap 'die "failed at line $LINENO: $BASH_COMMAND"' ERR
 as_hermes() { sudo -u hermes -H env HERMES_HOME="$HERMES_HOME_DIR" "$@"; }
 rand() { openssl rand -hex "${1:-24}"; }
+# uv-managed Pythons must live outside /root so the hermes account can run the venvs.
+export UV_PYTHON_INSTALL_DIR=/usr/local/share/uv/python
+mkvenv() {  # mkvenv DIR: (re)create a 3.11 venv the hermes account can execute
+  if ! { [ -x "$1/bin/python" ] && sudo -u hermes "$1/bin/python" -V >/dev/null 2>&1; }; then
+    rm -rf "$1" && uv venv -q "$1" --python 3.11
+  fi
+}
 
 # ---------------------------------------------------------------- 0. preflight
 [ "$(id -u)" -eq 0 ] || die "run as root (sudo)"
@@ -128,7 +135,7 @@ git config --system --add safe.directory "$APP" 2>/dev/null || true
 
 log "Python dependencies"
 cd "$APP"
-[ -x .venv/bin/python ] || uv venv -q .venv --python 3.11
+mkvenv "$APP/.venv"
 # app-mcp runs from its folder (python -m app_mcp.server) on this venv; install only its deps.
 # Extras + pins match the production venv (it carried ~30 packages beyond the lock).
 uv pip install -q --python .venv/bin/python \
@@ -262,7 +269,7 @@ hermes_db owner alias "$OWNER_ID" >/dev/null 2>&1 || true
 # ---------------------------------------------------------------- 7. embedding service
 log "Embedding service ($EMBED_MODEL)"
 install -d -o hermes -g hermes "$EMBED" "$EMBED/models"
-[ -x "$EMBED/venv/bin/python" ] || uv venv -q "$EMBED/venv" --python 3.11
+mkvenv "$EMBED/venv"
 uv pip install -q --python "$EMBED/venv/bin/python" --index-url https://download.pytorch.org/whl/cpu torch==2.13.0
 uv pip install -q --python "$EMBED/venv/bin/python" sentence-transformers==5.7.0 transformers==5.15.1 \
   fastapi==0.141.1 uvicorn==0.52.4 huggingface-hub==1.28.0
