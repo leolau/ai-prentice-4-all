@@ -60,9 +60,12 @@ log "System packages"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -q
 apt-get install -y -q ca-certificates curl gnupg git build-essential python3-dev \
-  openssl jq rsync sudo debian-keyring debian-archive-keyring apt-transport-https \
+  openssl jq rsync sudo ufw tesseract-ocr debian-keyring debian-archive-keyring apt-transport-https \
   docker.io docker-compose-v2
 systemctl enable --now docker
+# Only SSH and the Caddy ports are public; everything else listens on 127.0.0.1.
+ufw allow OpenSSH >/dev/null && ufw allow 80/tcp >/dev/null && ufw allow 443/tcp >/dev/null
+ufw --force enable >/dev/null
 
 if ! command -v node >/dev/null || [ "$(node -p 'process.versions.node.split(".")[0]')" -lt 22 ]; then
   curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
@@ -127,7 +130,11 @@ log "Python dependencies"
 cd "$APP"
 [ -x .venv/bin/python ] || uv venv -q .venv --python 3.11
 # app-mcp runs from its folder (python -m app_mcp.server) on this venv; install only its deps.
-uv pip install -q --python .venv/bin/python -e ".[all]" "mcp>=1.26,<2" "websockets>=15,<16"
+# Extras + pins match the production venv (it carried ~30 packages beyond the lock).
+uv pip install -q --python .venv/bin/python \
+  -e ".[all,dev,messaging,app-push,documents,edge-tts,bedrock]" \
+  "mcp>=1.26,<2" "websockets>=15,<16" google-genai==2.13.0 pymupdf==1.28.2 pymysql==1.2.0 \
+  pytesseract==0.3.13 tabulate==0.10.0 tornado==6.5.7 numpy==2.4.3
 
 log "Node dependencies and builds (agent-home, dashboard)"
 npm ci --no-audit --no-fund --silent
@@ -174,6 +181,17 @@ set_env "$SUPA/.env" SITE_URL "https://${HOME_DOMAIN:-localhost}"
 set_env "$SUPA/.env" API_EXTERNAL_URL "http://127.0.0.1:8000"
 set_env "$SUPA/.env" SUPABASE_PUBLIC_URL "http://127.0.0.1:8000"
 set_env "$SUPA/.env" DISABLE_SIGNUP true
+# Docker-published ports bypass ufw, so keep the API gateway and pooler on loopback.
+cat > "$SUPA/docker-compose.override.yml" <<'YML'
+services:
+  api-gw:
+    ports: !override
+      - 127.0.0.1:${API_GW_HTTP_PORT:-${KONG_HTTP_PORT:-8000}}:8000/tcp
+  supavisor:
+    ports: !override
+      - 127.0.0.1:${POSTGRES_PORT}:5432
+      - 127.0.0.1:${POOLER_PROXY_PORT_TRANSACTION}:6543
+YML
 (cd "$SUPA" && docker compose pull -q && docker compose up -d)
 log "Waiting for Postgres"
 for _ in $(seq 1 90); do
@@ -183,8 +201,11 @@ docker exec supabase-db pg_isready -U postgres -h localhost >/dev/null || die "s
 DB_PORT=$(sed -n 's/^POSTGRES_PORT=//p' "$SUPA/.env"); DB_PORT=${DB_PORT:-5432}
 DATABASE_URL="postgresql://postgres.$TENANT:$PG_PASSWORD@127.0.0.1:$DB_PORT/postgres"
 for _ in $(seq 1 60); do
-  "$APP/.venv/bin/python" -c "import asyncio,asyncpg,sys;asyncio.run(asyncpg.connect(sys.argv[1]))" "$DATABASE_URL" 2>/dev/null && break; sleep 5
+  db_ok=0
+  "$APP/.venv/bin/python" -c "import asyncio,asyncpg,sys;asyncio.run(asyncpg.connect(sys.argv[1]))" "$DATABASE_URL" 2>/dev/null && db_ok=1 && break
+  sleep 5
 done
+[ "$db_ok" = 1 ] || die "cannot connect to Postgres through the Supabase pooler"
 
 # ---------------------------------------------------------------- 5. Hermes home + config
 log "Agent home and config.yaml"
@@ -242,8 +263,9 @@ hermes_db owner alias "$OWNER_ID" >/dev/null 2>&1 || true
 log "Embedding service ($EMBED_MODEL)"
 install -d -o hermes -g hermes "$EMBED" "$EMBED/models"
 [ -x "$EMBED/venv/bin/python" ] || uv venv -q "$EMBED/venv" --python 3.11
-uv pip install -q --python "$EMBED/venv/bin/python" --index-url https://download.pytorch.org/whl/cpu torch
-uv pip install -q --python "$EMBED/venv/bin/python" sentence-transformers fastapi uvicorn huggingface_hub
+uv pip install -q --python "$EMBED/venv/bin/python" --index-url https://download.pytorch.org/whl/cpu torch==2.13.0
+uv pip install -q --python "$EMBED/venv/bin/python" sentence-transformers==5.7.0 transformers==5.15.1 \
+  fastapi==0.141.1 uvicorn==0.52.4 huggingface-hub==1.28.0
 if [ "${AQUARIUM_SKIP_EMBED_MODEL:-0}" != 1 ]; then
   sudo -u hermes -H "$EMBED/venv/bin/python" -c "
 from huggingface_hub import snapshot_download
