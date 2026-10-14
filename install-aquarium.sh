@@ -258,8 +258,22 @@ chown -R hermes:hermes "$HERMES_HOME_DIR"
 # ---------------------------------------------------------------- 6. database roles + first owner
 log "Database roles and first owner"
 # Run `hermes` as the service account with the app env (DATABASE_URL etc.) loaded.
-hermes_db() { sudo -u hermes -H bash -c 'set -a; . "$0"; set +a; exec "$@"' "$APP_ENV" "$APP/.venv/bin/hermes" "$@"; }
+run_env() { sudo -u hermes -H bash -c 'set -a; . "$0"; set +a; exec "$@"' "$APP_ENV" "$@"; }
+hermes_db() { run_env "$APP/.venv/bin/hermes" "$@"; }
 cd "$APP"
+# A fresh database has no app schema yet; create it and the principal tables first.
+run_env "$APP/.venv/bin/python" - <<'PY'
+import asyncio
+from hermes_cli.access import initialize_access
+from hermes_cli.owner import _prod_app_store
+async def main():
+    connection = await _prod_app_store().connect()
+    try:
+        await initialize_access(connection)
+    finally:
+        await connection.close()
+asyncio.run(main())
+PY
 hermes_db owner db-role
 sudo -u hermes -H HERMES_APP_READ_DB_PASSWORD="$READ_DB_PASSWORD" \
   bash -c 'set -a; . "$0"; set +a; exec "$@"' "$APP_ENV" "$APP/.venv/bin/hermes" owner read-role
@@ -381,6 +395,13 @@ CADDY
   caddy validate --config /etc/caddy/Caddyfile >/dev/null
   systemctl enable -q caddy && systemctl reload-or-restart caddy
 fi
+
+# Services create their tables on first start; the read-only agent-home role only gets
+# SELECT on tables that exist, so grant again now and pick it up.
+sleep 20
+sudo -u hermes -H HERMES_APP_READ_DB_PASSWORD="$READ_DB_PASSWORD" \
+  bash -c 'set -a; . "$0"; set +a; exec "$@"' "$APP_ENV" "$APP/.venv/bin/hermes" owner read-role >/dev/null
+systemctl restart agent-home
 
 # ---------------------------------------------------------------- 11. health checks
 log "Health checks"
