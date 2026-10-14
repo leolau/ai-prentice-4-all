@@ -325,7 +325,9 @@ fix_paths() { sed "s#/opt/data/hermes-agent#$APP#g; s#/opt/data/hermes-embed#$EM
 fix_paths < agent-home/deploy/agent-home.service > $UNIT_DIR/agent-home.service
 fix_paths < app-mcp/deploy/app-mcp.service > $UNIT_DIR/app-mcp.service
 fix_paths < deploy/hermes-embed.service > $UNIT_DIR/hermes-embed.service
-[ "${AQUARIUM_SKIP_EMBED_MODEL:-0}" = 1 ] && sed -i 's/ --offline//' $UNIT_DIR/hermes-embed.service
+# ProtectHome hides ~hermes, so point the Hugging Face cache/token lookups at the model dir.
+sed -i "/^\[Service\]/a Environment=HF_HOME=$EMBED/hf" $UNIT_DIR/hermes-embed.service
+if [ "${AQUARIUM_SKIP_EMBED_MODEL:-0}" = 1 ]; then sed -i 's/ --offline//' $UNIT_DIR/hermes-embed.service; fi
 for svc in dashboard gateway; do
   if [ $svc = dashboard ]; then
     desc="Aquarium dashboard API (:9119, agent-home auth bridge)"
