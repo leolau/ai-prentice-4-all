@@ -809,7 +809,7 @@ secret-isolation tests green on real Postgres; `scripts/run_tests.sh`, `ruff`,
 
 > **[Start here. Nothing gates this FG any more: FG-26 and FG-27 are done,
 > deployed and system-tested, and item 1 of this FG's checklist is closed.]**
-> Repo `leolau/ai-prentice-4-all`, branch off `develop`. Read
+> Repo `leolau/aquarium`, branch off `develop`. Read
 > `docs/design/master-plan/README.md`, `AGENTS.md`, FG-26, FG-27, FG-29 and this
 > doc — including §"Reframing", which supersedes the motivation in §"Summary".
 > Goal: one admin console at one URL where an administrator manages users in

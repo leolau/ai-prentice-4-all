@@ -11,7 +11,7 @@ Folder Bridge feature, requested by Leo)._
 > stale 2026-08-05 version of this file with the current box and this
 > session's work.
 
-Product name: **ai-prentice-4-all** (built on Hermes).
+Product name: **Aquarium** (formerly ai-prentice-4-all; built on Hermes). Repo: `leolau/aquarium`.
 
 ## Live deployment status (verified 2026-09-13/14)
 

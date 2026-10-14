@@ -16,7 +16,7 @@
   <a href="README.es.md"><img src="https://img.shields.io/badge/Lang-Español-orange?style=for-the-badge" alt="Español"></a>
 </p>
 
-> ### ★ ai-prentice-4-all: the main UI is `agent-home`, not the dashboard ★
+> ### ★ Aquarium: the main UI is `agent-home`, not the dashboard ★
 >
 > This fork's **key, main, user-facing UI is [`agent-home/`](agent-home/README.md)** — the mobile-first
 > Next.js app on the three-tier stack (Next.js UI → Python AI layer → Supabase).

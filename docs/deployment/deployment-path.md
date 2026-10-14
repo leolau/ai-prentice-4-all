@@ -31,7 +31,7 @@ dashboard reports healthy.
 repo (public)                       scripts/deploy_state.py     the tooling
                                     deploy/hermes-deploy.sh     the deploy tool
 private state repo                  <deployment>/config.snapshot.yaml
-  ai-prentice-4-all-deploy-state    <deployment>/state.manifest.yaml
+  aquarium-deploy-state    <deployment>/state.manifest.yaml
   on the box: /opt/data/hermes-deploy-state
                                     <deployment>/systemd/*
 box, root-only                      /opt/data/deploy/state-secrets.env
@@ -155,7 +155,7 @@ in place first.
 4. **Clone the private state store** to `$STATE` and restore the secrets file
    to `/opt/data/deploy/state-secrets.env` (`0600`, root):
    ```bash
-   sudo git clone github-hermes-state:<owner>/ai-prentice-4-all-deploy-state.git $STATE
+   sudo git clone github-hermes-state:<owner>/aquarium-deploy-state.git $STATE
    sudo chmod -R a+rX $STATE          # check runs as hermes; no secrets in here
    sudo git config --system --add safe.directory $STATE
    ```

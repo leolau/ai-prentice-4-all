@@ -119,7 +119,7 @@ def register(ctx) -> None:
     """Plugin entry point — called by the Hermes plugin system at startup."""
     ctx.register_platform(
         name="app",
-        label="Agent Home",
+        label="Aquarium",
         adapter_factory=lambda cfg: AppHomeAdapter(cfg),
         check_fn=check_requirements,
         env_enablement_fn=_env_enablement,

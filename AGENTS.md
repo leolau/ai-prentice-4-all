@@ -38,7 +38,7 @@ you find one that doesn't already say so.
 
 ## ★ Primary UI = `agent-home` (not the dashboard) ★
 
-**`agent-home/` is THE key, main, user-facing UI of ai-prentice-4-all.** The
+**`agent-home/` is THE key, main, user-facing UI of Aquarium.** The
 `web/` dashboard is a secondary operator/admin console; the Electron app in
 `apps/desktop/` and the TUI are separate developer/power-user surfaces.
 

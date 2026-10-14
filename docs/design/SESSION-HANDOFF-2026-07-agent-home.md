@@ -23,7 +23,7 @@
 - **Two front-ends coexist** (Decision 3A): `agent-home` = the user/mobile face
   (all Phase-2 user panels); `web/` (served at `leolau.ai-and-i.io`) stays the
   operator/admin console. Both hit the **same** Python API + Supabase.
-- **Repo renamed** `leolau/hermes-agent` → **`leolau/ai-prentice-4-all`** (old
+- **Repo renamed** `leolau/hermes-agent` → **`leolau/aquarium`** (old
   URLs auto-redirect). Local checkout is still `/home/ubuntu/repos/hermes-agent`.
 - **Dashboard owner password was rotated** (the earlier exposed-in-chat item is
   resolved; plaintext never stored — scrypt hash + fresh signing secret).
@@ -44,7 +44,7 @@
 
 ## 1. Where the code is
 
-- **Repo:** `leolau/ai-prentice-4-all` (GitHub auto-redirects the old
+- **Repo:** `leolau/aquarium` (GitHub auto-redirects the old
   `leolau/hermes-agent`). Default working branch: **`develop`**.
 - **Local checkout on the agent VM:** `/home/ubuntu/repos/hermes-agent`
   (directory name intentionally unchanged; the remote is repointed).

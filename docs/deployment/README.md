@@ -81,9 +81,9 @@ Paths, and which of them are reproducible:
 Three git remotes, three separate deploy keys, exactly one of which may write:
 
 ```
-leolau/ai-prentice-4-all                  public   source        read-only key
-leolau/ai-prentice-4-all-deploy-state     private  what the box should look like   read-only key
-leolau/ai-prentice-4-all-deploy-backups   private  age ciphertext                  WRITE key
+leolau/aquarium                  public   source        read-only key
+leolau/aquarium-deploy-state     private  what the box should look like   read-only key
+leolau/aquarium-deploy-backups   private  age ciphertext                  WRITE key
 ```
 
 The state key is read-only deliberately: a box that could push would be able to
@@ -405,7 +405,7 @@ script and is what the deploy commands below use.
 
 - `aliyun` CLI installed and configured (`aliyun configure`) with credentials
   that have ECS RunCommand permission on `cn-hongkong`.
-- Git push access to `leolau/ai-prentice-4-all` (the `develop` branch requires
+- Git push access to `leolau/aquarium` (the `develop` branch requires
   pull requests — a direct `git push origin develop` is rejected by a repository
   rule).
 

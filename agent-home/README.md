@@ -1,6 +1,6 @@
 # agent-home
 
-> **★ This is THE key and main UI of ai-prentice-4-all — not the `web/`
+> **★ This is THE key and main UI of Aquarium — not the `web/`
 > dashboard.** Unless a request explicitly names another surface, **all UI
 > improvements** (new screens, redesigns, UX/mobile/polish, new user-facing
 > features) are done here. `web/` is the secondary operator/admin console.

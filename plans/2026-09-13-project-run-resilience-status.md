@@ -5,11 +5,11 @@ file as work lands — one row per gap, per the plan's §7 breakdown.
 
 | # | Gap | Description | Status | PR / commit | Notes |
 |---|-----|-------------|--------|--------------|-------|
-| 1 | A | `refill_run_cards()` + `projects_reconcile.on_card_settled()` refill hook (kanban_db → projects_reconcile → projects_run on card settle) | **Done** | [#388](https://github.com/leolau/ai-prentice-4-all/pull/388) | See "Gap A implementation notes" below |
+| 1 | A | `refill_run_cards()` + `projects_reconcile.on_card_settled()` refill hook (kanban_db → projects_reconcile → projects_run on card settle) | **Done** | [#388](https://github.com/leolau/aquarium/pull/388) | See "Gap A implementation notes" below |
 | 2 | B | `reconcile_all_open_runs()` + `run_stall_seconds`/`reconcile_interval_seconds` config + gateway watcher wiring + auto-fail stale runs | **Not started** | — | Depends on #1's `reconcile_run()` |
 | 3 | C | `doctor_findings`/`derive_health` `run_stalled` code (all cadences) | **Not started** | — | Read-only, can ship independently |
 | 4 | — | FG-32 §20.2 pointer to this defect + plan doc | **Not started** | — | Do once #2/#3/#7 all land, one pointer covering all of them |
-| 5 | — | Tests (unit: refill, reconcile, doctor; gateway watcher interval; E2E full-run-without-manual-continue) | **Partially done** | [#388](https://github.com/leolau/ai-prentice-4-all/pull/388) | Gap A's tests landed with #388. B/C/D tests still to write |
+| 5 | — | Tests (unit: refill, reconcile, doctor; gateway watcher interval; E2E full-run-without-manual-continue) | **Partially done** | [#388](https://github.com/leolau/aquarium/pull/388) | Gap A's tests landed with #388. B/C/D tests still to write |
 | 6 | — | Production cleanup: orphaned run `run_91b11d845e73` on `ai-professsional-builder-course-ppt` | **Done** | — | Manually unstuck 2026-09-12 — see "Gap D" below for why a code fix alone wouldn't have caught this one |
 | 7 | D (new) | `promote_run_cards()` picks which `triage` card to promote by **task-ID sort order**, not playbook/dependency order — under a `max_in_progress` cap smaller than the playbook width, it can promote a card whose own dependency was never promoted, deadlocking the run permanently (this is what actually broke the production run, not Gap A) | **Not started** | — | See "Gap D details" below |
 
@@ -87,8 +87,8 @@ file as work lands — one row per gap, per the plan's §7 breakdown.
   same 25 tests fail identically on unmodified `develop` (pre-existing
   environment gaps, e.g. a subprocess CLI test needing `asyncpg`, unrelated
   to this change).
-- Shipped as its own PR ([#388](https://github.com/leolau/ai-prentice-4-all/pull/388)),
-  separate from this plan's docs-only PR ([#387](https://github.com/leolau/ai-prentice-4-all/pull/387)),
+- Shipped as its own PR ([#388](https://github.com/leolau/aquarium/pull/388)),
+  separate from this plan's docs-only PR ([#387](https://github.com/leolau/aquarium/pull/387)),
   since #387 was explicitly "docs only, no behavior change."
 
 ## Gap D details (found 2026-09-13, while manually recovering the production run)

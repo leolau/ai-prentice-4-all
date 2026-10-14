@@ -193,7 +193,7 @@ files unrelated to Projects.
 
 - Use the builtin git/PR tools, not `gh pr view` / `gh pr create`.
 - Requesting a reviewer has no builtin, so use the API:
-  `gh api -X POST repos/leolau/ai-prentice-4-all/pulls/<n>/requested_reviewers -f "reviewers[]=leolau"`.
+  `gh api -X POST repos/leolau/aquarium/pulls/<n>/requested_reviewers -f "reviewers[]=leolau"`.
   **`leolau` is requested on every PR.**
 - `fetch_pr_template` before creating a PR.
 - Docs conflicts happen when a block's tick-note lands on the same checklist
@@ -280,7 +280,7 @@ Read these before reviewing the next block: every one of them recurred.
 
 **To review the next implementation block:**
 
-> Review the latest Projects block in `leolau/ai-prentice-4-all` against the
+> Review the latest Projects block in `leolau/aquarium` against the
 > worklist in `docs/reviews/2026-08-17-projects-end-to-end-review.md` (read
 > `docs/projects-feature-handoff.md` first). Verify against the tree, not the
 > implementing agent's claims: read the diff, run the lifecycle test selection
@@ -292,7 +292,7 @@ Read these before reviewing the next block: every one of them recurred.
 **To implement the next block:**
 
 > Implement Block <n> of `docs/reviews/2026-08-17-projects-end-to-end-review.md`
-> in `leolau/ai-prentice-4-all`, branching from `develop`. Read
+> in `leolau/aquarium`, branching from `develop`. Read
 > `docs/projects-feature-handoff.md` §4 (invariants) and §6 (recurring defect
 > classes) first, plus FG-32 §12/§13/§16. Do the items in order, backend before
 > UI. Behaviour contracts, not change-detector tests; real-path tests for the
@@ -303,7 +303,7 @@ Read these before reviewing the next block: every one of them recurred.
 **To execute the UAT:**
 
 > Execute the Projects UAT suite in `docs/testing/projects-uat.md` on the
-> `leolau/ai-prentice-4-all` repo (branch `develop`) against the deployed
+> `leolau/aquarium` repo (branch `develop`) against the deployed
 > systest box. Read that file first and follow it exactly — it is
 > self-contained; do not ask for anything and do not substitute a local server.
 > Read the `testing-hermes-systest-box` skill before your first command. All

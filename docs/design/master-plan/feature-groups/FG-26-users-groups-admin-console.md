@@ -505,7 +505,7 @@ Two findings the run raised for a decision, both since resolved by Leo:
 ## Cloud-agent prompt
 
 > **[Phase-6 Wave B — FG-27 has merged; FG-25 is deferred and NOT a dependency]**
-> Repo `leolau/ai-prentice-4-all`, branch off `develop`. Read
+> Repo `leolau/aquarium`, branch off `develop`. Read
 > `docs/design/master-plan/README.md`, `AGENTS.md`, FG-27, and this doc (FG-26)
 > — including "Removed with FG-25", which lists what deliberately is **not** in
 > scope. Build the **Users admin console** on `agent-home` plus **invitation

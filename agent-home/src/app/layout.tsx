@@ -7,13 +7,13 @@ import { ThemeScript } from "@/components/ThemeScript";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Agent Home",
+  title: "Aquarium",
   description: "Mobile-first face for your Hermes agent.",
   manifest: "/manifest.webmanifest",
   appleWebApp: {
     capable: true,
     statusBarStyle: "black-translucent",
-    title: "Agent Home",
+    title: "Aquarium",
   },
   icons: {
     icon: "/icons/icon-192.png",

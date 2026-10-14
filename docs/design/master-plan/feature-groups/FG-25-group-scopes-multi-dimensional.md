@@ -372,7 +372,7 @@ performance assertion green; no-groups baseline byte-identical;
 ## Cloud-agent prompt
 
 > **[Phase-6 Wave A — may run in parallel with FG-24; blocks FG-26]** Repo
-> `leolau/ai-prentice-4-all`, branch off `develop`. Read
+> `leolau/aquarium`, branch off `develop`. Read
 > `docs/design/master-plan/README.md`, `AGENTS.md`, and this doc (FG-25). Add a
 > **group tier to C2** — `visibility ∈ {shared, group:<group_id>,
 > private:<user_id>}` — as an **extension of the existing predicate, not a new

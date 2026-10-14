@@ -1,7 +1,7 @@
 # Hermes Agent — Web UI (secondary operator/admin console)
 
 > **★ This dashboard is NOT the main UI.** [`agent-home/`](../agent-home/README.md)
-> is the key, main, user-facing UI of ai-prentice-4-all. Unless a request
+> is the key, main, user-facing UI of Aquarium. Unless a request
 > explicitly names the dashboard, **UI improvements belong in `agent-home/`**,
 > not here. Decision **D20** in the
 > [master plan](../docs/design/master-plan/README.md).

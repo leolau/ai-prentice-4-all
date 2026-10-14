@@ -48,7 +48,7 @@ export default async function HomePage() {
   }
 
   return (
-    <MobileShell title="Agent Home">
+    <MobileShell title="Aquarium">
       <section
         data-component="PrincipalCard"
         className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface)] p-4"
