@@ -261,20 +261,24 @@ log "Database roles and first owner"
 run_env() { sudo -u hermes -H bash -c 'set -a; . "$0"; set +a; exec "$@"' "$APP_ENV" "$@"; }
 hermes_db() { run_env "$APP/.venv/bin/hermes" "$@"; }
 cd "$APP"
-# A fresh database has no app schema yet; create it and the principal tables first.
+# A fresh database has no app schema yet; create it and the principal tables, then the
+# non-BYPASSRLS hermes_app role. Membership is skipped: `GRANT hermes_app TO CURRENT_USER`
+# kills the backend on self-hosted Supabase (see ensure_app_role), so agent-home reads
+# through the separate agent_home_app LOGIN role below instead.
 run_env "$APP/.venv/bin/python" - <<'PY'
 import asyncio
-from hermes_cli.access import initialize_access
+from hermes_cli.access import ensure_app_role, initialize_access
 from hermes_cli.owner import _prod_app_store
 async def main():
-    connection = await _prod_app_store().connect()
+    store = _prod_app_store()
+    connection = await store.connect()
     try:
         await initialize_access(connection)
+        await ensure_app_role(connection, store.schema, grant_membership=False)
     finally:
         await connection.close()
 asyncio.run(main())
 PY
-hermes_db owner db-role
 sudo -u hermes -H HERMES_APP_READ_DB_PASSWORD="$READ_DB_PASSWORD" \
   bash -c 'set -a; . "$0"; set +a; exec "$@"' "$APP_ENV" "$APP/.venv/bin/hermes" owner read-role
 hermes_db owner show >/dev/null 2>&1 || hermes_db owner init "$OWNER_ID" --display "$OWNER_ID"
