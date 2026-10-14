@@ -1323,6 +1323,8 @@ def _build_child_agent(
         thinking_callback=child_thinking_cb,
         session_db=getattr(parent_agent, "_session_db", None),
         parent_session_id=getattr(parent_agent, "session_id", None),
+        internal_user_id=getattr(parent_agent, "_internal_user_id", None),
+        internal_user_role=getattr(parent_agent, "_internal_user_role", None),
         providers_allowed=child_providers_allowed,
         providers_ignored=child_providers_ignored,
         providers_order=child_providers_order,

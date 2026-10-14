@@ -2860,6 +2860,8 @@ class TestConcurrentToolExecution:
                 "web_search", {"q": "test"}, "task-1",
                 tool_call_id=None,
                 session_id=agent.session_id,
+                principal_user_id=None,
+                principal_role="member",
                 turn_id="",
                 api_request_id="",
                 enabled_tools=list(agent.valid_tool_names),

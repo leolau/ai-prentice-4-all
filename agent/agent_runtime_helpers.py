@@ -2172,6 +2172,8 @@ def invoke_tool(agent, function_name: str, function_args: dict, effective_task_i
                 function_name, next_args, effective_task_id,
                 tool_call_id=tool_call_id,
                 session_id=agent.session_id or "",
+                principal_user_id=getattr(agent, "_internal_user_id", None),
+                principal_role=getattr(agent, "_internal_user_role", None),
                 turn_id=getattr(agent, "_current_turn_id", "") or "",
                 api_request_id=getattr(agent, "_current_api_request_id", "") or "",
                 enabled_tools=list(agent.valid_tool_names) if agent.valid_tool_names else None,

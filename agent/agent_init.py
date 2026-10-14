@@ -1104,6 +1104,11 @@ def init_agent(
         disabled_toolsets=disabled_toolsets,
         quiet_mode=agent.quiet_mode,
     )
+    from tools.access_policy import denied_tools as _denied_tools
+
+    _denied = _denied_tools(agent._internal_user_id, agent._internal_user_role)
+    if _denied and agent.tools:
+        agent.tools = [t for t in agent.tools if t["function"]["name"] not in _denied]
     
     # Show tool configuration and store valid tool names for validation
     agent.valid_tool_names = set()

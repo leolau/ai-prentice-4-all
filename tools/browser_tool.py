@@ -2724,6 +2724,14 @@ def browser_navigate(url: str, task_id: Optional[str] = None) -> str:
                      "Secrets must not be sent in URLs.",
         })
 
+    from tools.access_policy import current_files_root
+
+    if current_files_root() is not None and urllib.parse.urlsplit(url).scheme.lower() not in ("http", "https"):
+        return json.dumps({
+            "success": False,
+            "error": "Blocked: only http(s) pages can be opened from your account.",
+        })
+
     # SSRF protection — block private/internal addresses before navigating.
     # Skipped for local backends (Camofox, headless Chromium without a cloud
     # provider) because the agent already has full local network access via

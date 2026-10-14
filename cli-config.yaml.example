@@ -1518,3 +1518,19 @@ updates:
 #   HERMES_DASHBOARD_SUPABASE_SERVICE_ROLE_KEY
 #   HERMES_SUPABASE_SERVICE_ROLE_KEY
 #   SUPABASE_SERVICE_ROLE_KEY  /  SUPABASE_SERVICE_KEY
+
+# =============================================================================
+# Per-role tool and file limits (agent-home / gateway users)
+# =============================================================================
+# Owner and admin keep every tool. By default members and viewers can't use the
+# terminal, run code, schedule jobs or edit skills, and their file tools only
+# work inside $HERMES_HOME/workspaces/<user_id>/ (viewers also can't write).
+# Sessions with no logged-in person (CLI, cron) are not limited here.
+# Override per role with tool or toolset names; `deny_tools` replaces the default.
+# access:
+#   roles:
+#     member:
+#       deny_tools: [terminal, process, read_terminal, close_terminal, execute_code, cronjob, skill_manage]
+#       files: own_folder      # or "any"
+#     admin:
+#       deny_tools: []
