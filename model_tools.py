@@ -916,6 +916,7 @@ def handle_function_call(
     tool_call_id: Optional[str] = None,
     session_id: Optional[str] = None,
     principal_user_id: Optional[str] = None,
+    principal_role: Optional[str] = None,
     turn_id: Optional[str] = None,
     api_request_id: Optional[str] = None,
     user_task: Optional[str] = None,
@@ -955,6 +956,12 @@ def handle_function_call(
     if not isinstance(function_args, dict):
         function_args = {}
     _tool_middleware_trace = list(tool_request_middleware_trace or [])
+
+    from tools.access_policy import acting_as as _acting_as
+    from tools.access_policy import blocked_tool_error, denied_tools
+
+    if function_name in denied_tools(principal_user_id, principal_role):
+        return json.dumps({"error": blocked_tool_error(function_name)}, ensure_ascii=False)
 
     # ── Tool Search bridge dispatch ──────────────────────────────────
     # tool_search and tool_describe are pure catalog reads — handle them
@@ -1022,6 +1029,8 @@ def handle_function_call(
                 task_id=task_id,
                 tool_call_id=tool_call_id,
                 session_id=session_id,
+                principal_user_id=principal_user_id,
+                principal_role=principal_role,
                 user_task=user_task,
                 enabled_tools=enabled_tools,
                 skip_pre_tool_call_hook=skip_pre_tool_call_hook,
@@ -1149,22 +1158,24 @@ def handle_function_call(
                 # the parent's tool set via the process-global.
                 sandbox_enabled = enabled_tools if enabled_tools is not None else _last_resolved_tool_names
                 def _dispatch(next_args: Dict[str, Any]) -> Any:
-                    return registry.dispatch(
-                        function_name, next_args,
-                        task_id=task_id,
-                        session_id=session_id,
-                        principal_user_id=principal_user_id,
-                        enabled_tools=sandbox_enabled,
-                    )
+                    with _acting_as(principal_user_id, principal_role):
+                        return registry.dispatch(
+                            function_name, next_args,
+                            task_id=task_id,
+                            session_id=session_id,
+                            principal_user_id=principal_user_id,
+                            enabled_tools=sandbox_enabled,
+                        )
             else:
                 def _dispatch(next_args: Dict[str, Any]) -> Any:
-                    return registry.dispatch(
-                        function_name, next_args,
-                        task_id=task_id,
-                        session_id=session_id,
-                        principal_user_id=principal_user_id,
-                        user_task=user_task,
-                    )
+                    with _acting_as(principal_user_id, principal_role):
+                        return registry.dispatch(
+                            function_name, next_args,
+                            task_id=task_id,
+                            session_id=session_id,
+                            principal_user_id=principal_user_id,
+                            user_task=user_task,
+                        )
             from hermes_cli.middleware import run_tool_execution_middleware
 
             result = run_tool_execution_middleware(

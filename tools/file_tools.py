@@ -5,6 +5,7 @@ import errno
 import json
 import logging
 import os
+import re
 import threading
 from pathlib import Path
 
@@ -289,6 +290,11 @@ def _resolve_base_dir(task_id: str = "default") -> Path:
     outright (rather than anchoring them to the process cwd) and fall through to
     the process cwd only as a last resort, deterministically.
     """
+    from tools.access_policy import current_files_root
+
+    own_root = current_files_root()
+    if own_root is not None:
+        return own_root
     root = _authoritative_workspace_root(task_id)
     if root:
         base = Path(_expand_tilde(root))
@@ -1957,9 +1963,50 @@ SEARCH_FILES_SCHEMA = {
 }
 
 
+_V4A_HEADER_RE = re.compile(
+    r"^\*\*\*\s*(?:Update|Add|Delete)\s+File:\s*(.+?)\s*$"
+    r"|^\*\*\*\s*Move\s+File:\s*(.+?)\s*->\s*(.+?)\s*$",
+    re.MULTILINE,
+)
+
+
+def _own_folder_path(path, task_id: str = "default"):
+    """``(path, None)`` usable by the caller, or ``(None, error)``.
+
+    For a person limited to their own folder the path comes back absolute, so
+    the shell-side file ops can't re-anchor it on the terminal cwd.
+    """
+    from tools.access_policy import check_file_access, current_files_root
+
+    if current_files_root() is None:
+        return path, None
+    resolved = _resolve_path_for_task(path or ".", task_id)
+    err = check_file_access(resolved)
+    return (None, err) if err else (str(resolved), None)
+
+
+def _own_folder_patch_error(patch, task_id: str = "default"):
+    from tools.access_policy import current_files_root
+
+    root = current_files_root()
+    if root is None or not isinstance(patch, str):
+        return None
+    for m in _V4A_HEADER_RE.finditer(patch):
+        for header in (g for g in m.groups() if g):
+            if not Path(_expand_tilde(header)).is_absolute():
+                return f"Use full paths inside your own folder ({root}) in patch headers: {header!r}"
+            _, err = _own_folder_path(header, task_id)
+            if err:
+                return err
+    return None
+
+
 def _handle_read_file(args, **kw):
     tid = kw.get("task_id") or "default"
-    return read_file_tool(path=args.get("path", ""), offset=args.get("offset", 1), limit=args.get("limit", 500), task_id=tid)
+    path, err = _own_folder_path(args.get("path", ""), tid)
+    if err:
+        return tool_error(err)
+    return read_file_tool(path=path, offset=args.get("offset", 1), limit=args.get("limit", 500), task_id=tid)
 
 
 def _handle_write_file(args, **kw):
@@ -1982,8 +2029,11 @@ def _handle_write_file(args, **kw):
             f"write_file: 'content' must be a string, got "
             f"{type(args['content']).__name__}."
         )
+    path, err = _own_folder_path(args["path"], tid)
+    if err:
+        return tool_error(err)
     return write_file_tool(
-        path=args["path"], content=args["content"], task_id=tid,
+        path=path, content=args["content"], task_id=tid,
         cross_profile=bool(args.get("cross_profile", False)),
         session_id=kw.get("session_id"),
     )
@@ -1991,8 +2041,16 @@ def _handle_write_file(args, **kw):
 
 def _handle_patch(args, **kw):
     tid = kw.get("task_id") or "default"
+    path = args.get("path")
+    if path:
+        path, err = _own_folder_path(path, tid)
+        if err:
+            return tool_error(err)
+    err = _own_folder_patch_error(args.get("patch"), tid)
+    if err:
+        return tool_error(err)
     return patch_tool(
-        mode=args.get("mode", "replace"), path=args.get("path"),
+        mode=args.get("mode", "replace"), path=path,
         old_string=args.get("old_string"), new_string=args.get("new_string"),
         replace_all=args.get("replace_all", False), patch=args.get("patch"), task_id=tid,
         cross_profile=bool(args.get("cross_profile", False)),
@@ -2005,8 +2063,11 @@ def _handle_search_files(args, **kw):
     target_map = {"grep": "content", "find": "files"}
     raw_target = args.get("target", "content")
     target = target_map.get(raw_target, raw_target)
+    path, err = _own_folder_path(args.get("path", "."), tid)
+    if err:
+        return tool_error(err)
     return search_tool(
-        pattern=args.get("pattern", ""), target=target, path=args.get("path", "."),
+        pattern=args.get("pattern", ""), target=target, path=path,
         file_glob=args.get("file_glob"), limit=args.get("limit", 50), offset=args.get("offset", 0),
         output_mode=args.get("output_mode", "content"), context=args.get("context", 0), task_id=tid)
 
