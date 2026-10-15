@@ -45,7 +45,7 @@ unit           agent-home.service   active (running) since 2026-07-29, User=root
                EnvironmentFile=/opt/data/agent-home-app/agent-home/agent-home.env
                ExecStart=.../deploy/start.sh          (npm start → next start)
 checkout       /opt/data/agent-home-app  @ db68f7554 (PR #62), branch develop
-               ↑ a SECOND, FULL clone of the same repo (origin leolau/ai-prentice-4-all),
+               ↑ a SECOND, FULL clone of the same repo (origin leolau/aquarium),
                  root:root, created 2026-07-22, 2.2 GB (1.6 GB of it root node_modules).
                  The application itself runs from /opt/data/hermes-agent @ ffabb3b97.
                  Only ONE thing on the box references it: agent-home.service.

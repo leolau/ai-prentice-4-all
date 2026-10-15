@@ -53,7 +53,7 @@ repo). First run clones; later runs fast-forward:
 ```bash
 APP_DIR=/opt/data/agent-home-app
 if [ ! -d "$APP_DIR/.git" ]; then
-  git clone --branch develop https://github.com/leolau/ai-prentice-4-all "$APP_DIR"
+  git clone --branch develop https://github.com/leolau/aquarium "$APP_DIR"
 else
   cd "$APP_DIR" && git fetch origin develop && git checkout develop && git reset --hard origin/develop
 fi

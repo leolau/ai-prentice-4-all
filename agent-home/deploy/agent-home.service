@@ -26,7 +26,7 @@
 
 [Unit]
 Description=agent-home (FG-20 mobile PWA, Next.js) behind Caddy
-Documentation=https://github.com/leolau/ai-prentice-4-all/blob/develop/agent-home/README.md
+Documentation=https://github.com/leolau/aquarium/blob/develop/agent-home/README.md
 After=network-online.target
 Wants=network-online.target
 

@@ -465,7 +465,7 @@ single-profile; it must be fixed by FG-26/FG-28, which own the console.
 ## Cloud-agent prompt
 
 > **[Phase-6 prerequisite — land Layers 3+1 before FG-25/FG-26 add tables. NOTE: all profiles share one Supabase instance, so build order is 3 → 1 → 2 and Layer 3 is the enabling mechanism, not an optimisation]** Repo
-> `leolau/ai-prentice-4-all`, branch off `develop`. Read
+> `leolau/aquarium`, branch off `develop`. Read
 > `docs/design/master-plan/README.md`, `AGENTS.md`, and this doc (FG-27). Close
 > the shared-schema footgun in `hermes_cli/datastore.py`, where `get_store()`
 > hard-codes the app schema to `app_dev`/`app_prod` so two profiles pointed at

@@ -1,7 +1,7 @@
 # Agent-Home Chat — Session Handoff
 
 > Handoff notes for the `agent-home` chat interface work done against
-> `leolau/ai-prentice-4-all` (branch `develop`), deployed to the production
+> `leolau/aquarium` (branch `develop`), deployed to the production
 > `hermes-systest` ECS box. Written so another agent can pick up the work
 > without re-discovering the architecture. "a4all agent" is Leo's short name
 > for the ai-prentice-4-all agent running on that box.

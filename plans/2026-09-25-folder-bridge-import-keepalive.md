@@ -74,7 +74,7 @@ Separate from the code change — installs the service that was missing:
 
 - [x] Implementation
 - [x] Tests pass (27 app-mcp pytest, 38 vitest)
-- [ ] PR merged — [#457](https://github.com/leolau/ai-prentice-4-all/pull/457)
+- [ ] PR merged — [#457](https://github.com/leolau/aquarium/pull/457)
 - [ ] Code deployed
 - [x] app-mcp service installed + wired on the box — unit active, ports
       9220/9221 listening, Caddy `/app-mcp/*` routes added, `mcp_servers.app`

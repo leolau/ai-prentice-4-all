@@ -1,6 +1,6 @@
 {
-  "name": "Agent Home",
-  "short_name": "Agent Home",
+  "name": "Aquarium",
+  "short_name": "Aquarium",
   "description": "Mobile-first face for your Hermes agent.",
   "start_url": "/",
   "scope": "/",

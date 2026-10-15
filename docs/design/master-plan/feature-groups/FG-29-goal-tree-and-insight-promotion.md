@@ -589,7 +589,7 @@ Where the implementation departs from the text above, and why:
 
 ## Cloud-agent prompt
 
-> Repo `leolau/ai-prentice-4-all`, branch off `develop`. Read
+> Repo `leolau/aquarium`, branch off `develop`. Read
 > `docs/design/master-plan/README.md`, `AGENTS.md`, FG-04, FG-09, FG-24, FG-27
 > and this doc.
 >

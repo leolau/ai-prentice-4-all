@@ -6,7 +6,7 @@ production rollout — which is now **complete and verified in production**
 (2026-07-27; see "Production rollout — COMPLETED" below). All five requests
 (a–e) plus the step-7 DB-role hardening are shipped, deployed, and E2E-tested.
 
-- **Repo:** `leolau/ai-prentice-4-all`
+- **Repo:** `leolau/aquarium`
 - **Base branch:** `develop`
 - **Owner deployment (production):** host `hermes-systest`
   - agent-home: `https://home.leolau.ai-and-i.io` (Next.js, local `127.0.0.1:3100`)

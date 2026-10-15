@@ -768,7 +768,7 @@ Two notes that are not defects:
 > §4.2 remains as the specification each task was built against. Read §"Re-read against the shipped implementation" too, for
 > the mistakes already made here so you do not repeat them.
 >
-> Repo `leolau/ai-prentice-4-all`, branch off `develop`. Read
+> Repo `leolau/aquarium`, branch off `develop`. Read
 > `docs/design/master-plan/README.md`, `AGENTS.md`, FG-24 (incl. its amendment),
 > FG-27, FG-28, FG-29 and this doc. Then read, in the code:
 > `hermes_cli/profile_suggestion.py` (the whole thing — it carries the reasons in

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Deploy the tracked branch of leolau/ai-prentice-4-all onto this box.
+# Deploy the tracked branch of leolau/aquarium onto this box.
 #   /opt/data/deploy-hermes.sh [branch]        (default: develop)
 # Idempotent. Aborts on unexpected local modifications so a hotfix is never
 # silently clobbered; ALLOWED_LOCAL_MODS lists the ones we knowingly carry.
