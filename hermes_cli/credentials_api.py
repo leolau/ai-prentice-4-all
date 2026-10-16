@@ -23,8 +23,10 @@ from typing import Any, Optional
 from fastapi import APIRouter, HTTPException, Request
 
 from hermes_cli.credential_store import (
+    CREDENTIAL_KINDS,
     CredentialError,
     default_credential_store,
+    merge_kept_secrets,
 )
 from hermes_cli.google_oauth import (
     GoogleOAuthError,
@@ -101,6 +103,18 @@ def _delete_pending(user_id: str) -> None:
     _pending_path(user_id).unlink(missing_ok=True)
 
 
+async def _own_entry(store: Any, principal: Any, provider: str, name: str):
+    """The caller's own entry (``put``/``delete`` only ever touch those)."""
+    for entry in await store.list(principal):
+        if (
+            entry.provider == provider
+            and entry.name == name
+            and entry.owner_user_id == principal.user_id
+        ):
+            return entry
+    return None
+
+
 @router.get("")
 async def list_credentials(request: Request):
     principal = await _principal(request, allow_as=True)
@@ -125,13 +139,21 @@ async def get_credential(request: Request, provider: str, name: str):
 async def put_credential(request: Request, provider: str, name: str):
     principal = await _principal(request, allow_as=False)
     body = await request.json()
+    store = _store()
+    kind = str(body.get("kind") or "")
+    payload = dict(body.get("payload") or {})
+    spec = CREDENTIAL_KINDS.get(kind)
+    if spec is not None and spec.keep_secrets_on_put:
+        existing = await _own_entry(store, principal, provider, name)
+        if existing is not None and existing.kind == kind:
+            payload = merge_kept_secrets(kind, payload, existing.payload)
     try:
-        entry = await _store().put(
+        entry = await store.put(
             principal,
             provider=provider,
             name=name,
-            kind=str(body.get("kind") or ""),
-            payload=dict(body.get("payload") or {}),
+            kind=kind,
+            payload=payload,
             services=body.get("services"),
             visibility=body.get("visibility"),
         )
@@ -162,7 +184,17 @@ async def patch_credential(request: Request, provider: str, name: str):
 @router.delete("/{provider}/{name}")
 async def delete_credential(request: Request, provider: str, name: str):
     principal = await _principal(request, allow_as=False)
-    deleted = await _store().delete(principal, provider, name)
+    store = _store()
+    from hermes_cli import vpn
+
+    if provider == vpn.PROVIDER:
+        existing = await _own_entry(store, principal, provider, name)
+        if existing is not None and existing.kind == vpn.KIND:
+            try:
+                await vpn.forget(existing)
+            except Exception:  # noqa: BLE001 - deleting must still work
+                logger.warning("VPN disconnect before delete failed", exc_info=True)
+    deleted = await store.delete(principal, provider, name)
     if not deleted:
         raise HTTPException(404, "credential not found")
     return {"deleted": True}

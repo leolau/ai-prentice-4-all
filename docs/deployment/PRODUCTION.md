@@ -223,3 +223,67 @@ curl -s -m 30 -X POST http://127.0.0.1:8791/embed -H 'Content-Type: application/
 - Hetzner billing: hourly with monthly cap; invoice email on the account owner's address.
 - If resizing ever needed: CX53 (16 vCPU/32 GB, €29.49) is the next step up; ARM (CAX) types were out of stock EU-wide as of 2026-08-20.
 - Decommissioned: Alibaba `hermes-systest` (ecs.e-c1m4.xlarge, $103.74/mo) — stop/stop-renew on 2026-08-26 expiry; EIP `47.83.199.25` releasable after confirming nothing still references it.
+
+## 9. Fortinet VPN (Private networks)
+
+Users add Fortinet SSL-VPN logins in agent-home **Settings → In&Out**
+(credential kind `fortinet-vpn`, provider `fortinet`). Agents connect with
+`hermes vpn up "<name>"` (skill `skills/productivity/fortinet-vpn`); the
+dashboard API (`/api/vpn/...`, `hermes_cli/vpn_api.py`) connects/tests/trusts
+for the UI. Both drive one root helper:
+
+| Piece | Where | Notes |
+|---|---|---|
+| Root helper | `/usr/local/sbin/hermes-vpn-helper` (root:root 0755) | copy of `deploy/hermes-vpn-helper`; stdlib Python, validates all input |
+| sudoers | `/etc/sudoers.d/hermes-vpn` (root:root 0440) | `hermes ALL=(root) NOPASSWD: /usr/local/sbin/hermes-vpn-helper` |
+| Tunnel | transient unit `hermes-vpn-<slug>.service` | `openfortivpn -c /run/hermes-vpn/<slug>/openfortivpn.conf` (0600 root, deleted once the tunnel is up) |
+| Idle watchdog | transient timer `hermes-vpn-idle-<slug>.timer` | every 60 s; disconnects after `idle_minutes` with < 4 KiB/min of ppp traffic |
+| Mount | `/opt/data/vpn-files/<slug>` | `cifs` `ro,nosuid,nodev,noexec,uid=hermes,gid=hermes,file_mode=0440,dir_mode=0550,vers=3.0` |
+| Runtime state | `/run/hermes-vpn/<slug>/` (root 0700) | `state.json`, `openfortivpn.log` (no passwords) |
+| UI bookkeeping | `$HERMES_HOME/vpn/state.json` | slug map, last_used, last_check, last error; no secrets |
+
+Routing: split tunnel only. openfortivpn always runs with `set-routes = 0`,
+`set-dns = 0`, `pppd-use-peerdns = 0`, `half-internet-routes = 0`; the helper
+adds just the VPN's validated `routes` (or a `/32` to the file server when
+none are given) on `pppN`. Routes that are broader than /8, reserved, or
+overlap any of the box's addresses/routes (eth0, `172.31.1.1`, docker
+`172.17/16` + `172.18/16`, other VPNs), its DNS servers or the VPN gateway
+itself are refused. The box's DNS is never changed: a file-server name that
+only the office DNS knows is looked up once against the DNS servers
+openfortivpn reports, with the query bound to `pppN`.
+
+Certificates: before the password is sent, the helper fetches the gateway
+certificate; if the system store doesn't trust it and its sha256 isn't the
+stored `trusted_cert`, the VPN goes to `needs_cert` and the user trusts it in
+the UI (`POST /api/vpn/{name}/trust`). FortiToken one-time codes are not
+supported.
+
+### One-time install (as root, after the code is deployed)
+
+```bash
+# 0. backup of what this touches
+mkdir -p /opt/data/backups/vpn-install-$(date +%F) && cp -a /etc/sudoers.d /opt/data/backups/vpn-install-$(date +%F)/
+# 1. packages
+apt-get update && apt-get install -y openfortivpn cifs-utils
+ls -l /dev/ppp /dev/net/tun            # both must exist
+# 2. the mount root must sit on a root-only path (the helper refuses otherwise)
+stat -c '%U:%G %a %n' / /opt /opt/data # each root-owned, no group/other write
+install -d -m 0755 -o root -g root /opt/data/vpn-files
+# 3. helper + sudoers (validate before installing)
+install -m 0755 -o root -g root /opt/data/hermes-agent/deploy/hermes-vpn-helper /usr/local/sbin/hermes-vpn-helper
+install -m 0440 -o root -g root /opt/data/hermes-agent/deploy/sudoers.d/hermes-vpn /root/hermes-vpn.sudoers
+visudo -cf /root/hermes-vpn.sudoers && mv /root/hermes-vpn.sudoers /etc/sudoers.d/hermes-vpn
+# 4. smoke test (expect {"slug": "smoke-test", "state": "disconnected", ...})
+sudo -u hermes sudo -n /usr/local/sbin/hermes-vpn-helper status smoke-test
+```
+
+No service restart is needed for the helper; the `/api/vpn` routes and
+`hermes vpn` arrive with the normal code deploy. `hermes-deploy.sh` prints
+`VPN HELPER STALE` when the installed helper differs from the deployed
+checkout; re-run the `install` line of step 3 then. Rollback:
+`rm /etc/sudoers.d/hermes-vpn /usr/local/sbin/hermes-vpn-helper` (disconnect
+first with `hermes vpn down "<name>"`).
+
+Operate: `systemctl list-units 'hermes-vpn-*'`,
+`cat /run/hermes-vpn/<slug>/openfortivpn.log`,
+`/usr/local/sbin/hermes-vpn-helper status|down <slug>`.

@@ -38,7 +38,7 @@ import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 from urllib.parse import quote
 
 logger = logging.getLogger(__name__)
@@ -49,7 +49,9 @@ CREDENTIALS_TABLE = "credentials"
 #: pollers consume an entry only when the matching flag is set (R5).
 SERVICES: Tuple[str, ...] = ("email", "calendar", "drive", "workspace")
 
-_VALID_NAME = re.compile(r"^[^\s/\\]{1,254}$")
+#: Inner spaces allowed (VPN names like "Office files"); no other whitespace,
+#: no edge spaces, no path separators.
+_VALID_NAME = re.compile(r"^[^\s/\\](?:[^\t\n\r\f\v/\\]{0,252}[^\s/\\])?$")
 
 
 class CredentialError(Exception):
@@ -64,6 +66,99 @@ class KindSpec:
     required: Tuple[str, ...]
     optional: Tuple[str, ...] = ()
     secret_fields: Tuple[str, ...] = ()
+    #: Replacing an existing entry keeps a secret field the caller omitted or
+    #: sent empty, so an edit form need not ask for the password again.
+    keep_secrets_on_put: bool = False
+    #: Copied into ``credentials-materialized/`` for agent terminals. Off for
+    #: kinds only root-side services may read (VPN logins).
+    materialize: bool = True
+    #: Extra per-kind payload checks beyond required/optional/unknown.
+    validator: Optional[Callable[[Mapping[str, Any]], None]] = None
+
+
+_FORTI_HOST = re.compile(
+    r"^(?=.{1,253}$)[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
+    r"(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*\.?$"
+)
+_FORTI_SHA256 = re.compile(r"^[0-9a-f]{64}$")
+_FORTI_REALM = re.compile(r"^[A-Za-z0-9._@-]{1,128}$")
+_FORTI_ACCOUNT = re.compile(r"^[A-Za-z0-9._@ -]{1,128}$")
+_FORTI_SHARE = re.compile(
+    r"^(//|\\\\)[A-Za-z0-9.-]{1,253}[/\\][A-Za-z0-9 ._$-]{1,80}"
+    r"([/\\][^/\\\x00-\x1f\x7f:*?\"<>|,]{1,255})*[/\\]?$"
+)
+_CONTROL = re.compile(r"[\x00-\x1f\x7f]")
+
+
+def _validate_fortinet_vpn(payload: Mapping[str, Any]) -> None:
+    """Shape checks for ``fortinet-vpn``; the root helper re-validates all of
+    it (plus overlap with the box's own networks) before acting."""
+    import ipaddress
+
+    def fail(msg: str) -> None:
+        raise CredentialError(f"fortinet-vpn: {msg}")
+
+    host = str(payload.get("host") or "")
+    try:
+        ipaddress.IPv4Address(host)
+    except ValueError:
+        if not _FORTI_HOST.fullmatch(host) or host.replace(".", "").isdigit():
+            fail("host must be a hostname or IPv4 address")
+    for key in ("username", "password", "share_password"):
+        value = payload.get(key)
+        if value is None or value == "":
+            continue
+        if not isinstance(value, str) or len(value) > 256:
+            fail(f"{key} must be a string of at most 256 characters")
+        if _CONTROL.search(value) or value != value.strip():
+            fail(f"{key} must not contain control characters or edge spaces")
+    port = payload.get("port")
+    if port is not None and (
+        isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535
+    ):
+        fail("port must be an integer 1-65535")
+    realm = payload.get("realm")
+    if realm not in (None, "") and (
+        not isinstance(realm, str) or not _FORTI_REALM.fullmatch(realm)
+    ):
+        fail("realm may only contain letters, digits and ._@-")
+    cert = payload.get("trusted_cert")
+    if cert not in (None, "") and (
+        not isinstance(cert, str) or not _FORTI_SHA256.fullmatch(cert)
+    ):
+        fail("trusted_cert must be a sha256 digest: 64 lowercase hex characters")
+    routes = payload.get("routes")
+    if routes is not None:
+        if not isinstance(routes, list) or len(routes) > 32:
+            fail("routes must be a list of at most 32 IPv4 CIDRs")
+        for route in routes:
+            try:
+                net = ipaddress.IPv4Network(str(route), strict=True)
+            except ValueError as exc:
+                fail(f"route {route!r} is not a valid IPv4 CIDR ({exc})")
+            else:
+                if net.prefixlen < 8:
+                    fail(f"route {route} is too broad (use /8 or longer)")
+    share = payload.get("share_path")
+    if share not in (None, "") and (
+        not isinstance(share, str) or not _FORTI_SHARE.fullmatch(share)
+    ):
+        fail("share_path must look like //server/share or \\\\server\\share")
+    for key in ("share_username", "share_domain"):
+        value = payload.get(key)
+        if value not in (None, "") and (
+            not isinstance(value, str) or not _FORTI_ACCOUNT.fullmatch(value)
+        ):
+            fail(f"{key} may only contain letters, digits, spaces and ._@-")
+    if payload.get("auto_connect") is not None and not isinstance(
+        payload.get("auto_connect"), bool
+    ):
+        fail("auto_connect must be true or false")
+    idle = payload.get("idle_minutes")
+    if idle is not None and (
+        isinstance(idle, bool) or not isinstance(idle, int) or not 0 <= idle <= 1440
+    ):
+        fail("idle_minutes must be an integer 0-1440")
 
 
 CREDENTIAL_KINDS: Dict[str, KindSpec] = {
@@ -88,7 +183,35 @@ CREDENTIAL_KINDS: Dict[str, KindSpec] = {
         required=("username", "password"),
         secret_fields=("password",),
     ),
+    "fortinet-vpn": KindSpec(
+        name="fortinet-vpn",
+        required=("host", "username", "password"),
+        optional=(
+            "port", "realm", "trusted_cert", "routes", "share_path",
+            "share_username", "share_password", "share_domain",
+            "auto_connect", "idle_minutes",
+        ),
+        secret_fields=("password", "share_password"),
+        keep_secrets_on_put=True,
+        materialize=False,
+        validator=_validate_fortinet_vpn,
+    ),
 }
+
+
+def merge_kept_secrets(
+    kind: str, payload: Mapping[str, Any], existing: Optional[Mapping[str, Any]]
+) -> Dict[str, Any]:
+    """``payload`` with omitted/empty secret fields refilled from ``existing``
+    (only for kinds with ``keep_secrets_on_put``)."""
+    merged = dict(payload)
+    spec = CREDENTIAL_KINDS.get(kind)
+    if spec is None or not spec.keep_secrets_on_put or not existing:
+        return merged
+    for key in spec.secret_fields:
+        if merged.get(key) in (None, "") and existing.get(key) not in (None, ""):
+            merged[key] = existing[key]
+    return merged
 
 
 def validate_payload(kind: str, payload: Mapping[str, Any]) -> None:
@@ -109,6 +232,8 @@ def validate_payload(kind: str, payload: Mapping[str, Any]) -> None:
         raise CredentialError(
             f"kind {kind!r} does not accept fields: {', '.join(unknown)}"
         )
+    if spec.validator is not None:
+        spec.validator(payload)
 
 
 def redact_payload(kind: str, payload: Mapping[str, Any]) -> Dict[str, Any]:
@@ -762,6 +887,9 @@ async def materialize_for_mounts(principal: Any = None) -> List[str]:
     shutil.rmtree(root, ignore_errors=True)
     paths: List[str] = []
     for cred in entries:
+        kind_spec = CREDENTIAL_KINDS.get(cred.kind)
+        if kind_spec is not None and not kind_spec.materialize:
+            continue
         rel = (
             Path("credentials-materialized")
             / _sanitize_segment(cred.owner_user_id)
