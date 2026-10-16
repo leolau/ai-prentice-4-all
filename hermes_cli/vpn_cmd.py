@@ -52,7 +52,7 @@ async def _dispatch(args: argparse.Namespace) -> int:
 
     principal = await resolve_owner_principal()
     action = args.vpn_command
-    as_json = bool(getattr(args, "json", False))
+    as_json = bool(args.json)
 
     if action == "list" or (action == "status" and not args.name):
         views = await vpn.list_views(principal)
