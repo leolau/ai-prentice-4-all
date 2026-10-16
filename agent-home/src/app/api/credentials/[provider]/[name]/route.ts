@@ -1,6 +1,7 @@
 /**
- * Per-entry routes for Settings → Connected accounts: detail, toggles
- * (services / visibility), and disconnect. Writes act as the bridged
+ * Per-entry routes for Settings → Connected accounts: detail, create/replace
+ * (PUT — e.g. a Fortinet VPN entry), toggles (services / visibility), and
+ * disconnect. Writes act as the bridged
  * principal; the Python store enforces ownership.
  */
 import { NextResponse } from "next/server";
@@ -35,6 +36,58 @@ export async function GET(
   try {
     const client = await apiClientForRequest();
     return NextResponse.json(await client.credential(provider, name));
+  } catch (err) {
+    return fail(err);
+  }
+}
+
+export async function PUT(
+  req: Request,
+  { params }: RouteParams,
+): Promise<NextResponse> {
+  const principal = await getPrincipal();
+  if (!principal) {
+    return NextResponse.json({ error: "unauthenticated" }, { status: 401 });
+  }
+  const { provider, name } = await params;
+  const body = (await req.json().catch(() => null)) as {
+    kind?: unknown;
+    payload?: unknown;
+    visibility?: unknown;
+    services?: unknown;
+  } | null;
+  if (
+    !body ||
+    typeof body.kind !== "string" ||
+    !body.kind ||
+    !body.payload ||
+    typeof body.payload !== "object" ||
+    Array.isArray(body.payload)
+  ) {
+    return NextResponse.json(
+      { error: "bad_request", detail: "kind and payload are required" },
+      { status: 400 },
+    );
+  }
+  try {
+    const client = await apiClientForRequest();
+    return NextResponse.json(
+      await client.putCredential(provider, name, {
+        kind: body.kind,
+        payload: body.payload as Record<string, unknown>,
+        // The browser doesn't know its own user id; "private" means "private
+        // to me" and is pinned to the caller here.
+        visibility:
+          body.visibility === "private"
+            ? `private:${principal.user_id}`
+            : typeof body.visibility === "string"
+              ? body.visibility
+              : undefined,
+        services: Array.isArray(body.services)
+          ? body.services.filter((s): s is string => typeof s === "string")
+          : undefined,
+      }),
+    );
   } catch (err) {
     return fail(err);
   }
