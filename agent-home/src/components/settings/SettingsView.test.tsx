@@ -36,7 +36,7 @@ describe("SettingsView", () => {
     expect(html).toContain("Connected accounts");
   });
 
-  it("groups Google, WhatsApp and Telegram under In&Out", () => {
+  it("groups Google, VPN, WhatsApp and Telegram under In&Out", () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
       new Response(JSON.stringify({ tags: [], credentials: [] })),
     );
@@ -47,6 +47,10 @@ describe("SettingsView", () => {
     const sectionEnd = html.indexOf('data-section="entity-goal"');
     const inside = html.slice(inOut, sectionEnd);
     expect(inside).toContain('data-component="ConnectedAccounts"');
+    expect(inside).toContain('data-component="VpnConnections"');
+    expect(inside.indexOf('data-component="VpnConnections"')).toBeGreaterThan(
+      inside.indexOf('data-component="ConnectedAccounts"'),
+    );
     expect(inside).toContain('data-component="WhatsAppBridges"');
     expect(inside).toContain('data-component="TelegramLinks"');
     expect(inside).not.toContain('href="/users"');
