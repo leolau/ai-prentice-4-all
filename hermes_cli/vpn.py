@@ -291,6 +291,7 @@ def build_view(
         "since": doc.get("since") if state == "connected" else None,
         "local_ip": doc.get("local_ip") if state == "connected" else None,
         "error": doc.get("error") if state in ("error", "needs_cert") else None,
+        "share_error": doc.get("share_error") if state == "connected" else None,
         "last_used": entry.get("last_used"),
         "last_check": entry.get("last_check"),
     }
@@ -398,7 +399,7 @@ async def test(principal: Any, name: str, *, loose: bool = False) -> Dict[str, A
     cred = await find_vpn(principal, name, loose=loose)
     slug = slug_for(cred)
     doc = await _helper("status", slug)
-    if doc.get("state") != "connected":
+    if doc.get("state") != "connected" or doc.get("share_error"):
         await _connect(cred)
     doc = await _helper("check", slug)
     check = doc.pop("check", None)

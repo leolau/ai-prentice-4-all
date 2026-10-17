@@ -827,6 +827,12 @@ function VpnCard({
         </p>
       )}
 
+      {state === "connected" && status.share_error && (
+        <p className="mt-1 text-red-400">
+          VPN connected, but the files are not available: &ldquo;{status.share_error}&rdquo;
+        </p>
+      )}
+
       {state === "error" && status.error && (
         <p className="mt-1 text-red-400">Last attempt failed: &ldquo;{status.error}&rdquo;</p>
       )}

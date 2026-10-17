@@ -1179,6 +1179,8 @@ export interface VpnStatus {
   since: string | null;
   local_ip: string | null;
   error: string | null;
+  /** Set while connected when the VPN's own file share failed to mount. */
+  share_error?: string | null;
   last_used: string | null;
   last_check: VpnLastCheck | null;
   cert?: VpnCert | null;

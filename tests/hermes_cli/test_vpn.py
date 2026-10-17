@@ -61,7 +61,7 @@ VIEW_KEYS = {
     "trusted_cert",
     "status",
 }
-STATUS_KEYS = {"state", "since", "local_ip", "error", "last_used", "last_check"}
+STATUS_KEYS = {"state", "since", "local_ip", "error", "share_error", "last_used", "last_check"}
 
 
 def run(coro):
@@ -490,6 +490,7 @@ def test_connect_failure_is_200_error_state(client, helper):
         "since": None,
         "local_ip": None,
         "error": "Login failed: wrong username or password",
+        "share_error": None,
         "last_used": None,
         "last_check": None,
     }
@@ -572,6 +573,19 @@ def test_test_connects_then_checks(client, helper):
     assert (
         client.get("/api/vpn").json()["vpns"][0]["status"]["last_check"]["ok"] is True
     )
+
+
+def test_test_retries_up_when_the_share_failed_on_a_live_tunnel(client, helper):
+    put_http(client, PAYLOAD)
+    helper.up_doc = dict(helper.up_doc, share_error="File share login failed")
+    client.post("/api/vpn/Office files/connect")
+    status = client.get("/api/vpn").json()["vpns"][0]["status"]
+    assert status["state"] == "connected" and status["share_error"] == "File share login failed"
+    helper.up_doc = dict(helper.up_doc, share_error=None)
+    helper.calls.clear()
+    status = client.post("/api/vpn/Office files/test").json()["vpn"]["status"]
+    assert helper.commands() == ["status", "up", "check"]
+    assert status["share_error"] is None and status["last_check"]["ok"] is True
 
 
 def test_test_when_connect_fails_records_failed_check(client, helper):

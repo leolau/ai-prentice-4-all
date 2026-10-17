@@ -212,6 +212,23 @@ describe("VpnConnections", () => {
     expect(screen.getByText(/Error/)).toBeTruthy();
   });
 
+  it("shows a share failure on a connected VPN without calling the VPN down", async () => {
+    mockApi([
+      vpn({
+        status: {
+          state: "connected",
+          local_ip: "10.212.134.201",
+          share_error: "File share login failed: check the file share username and password",
+        },
+      }),
+    ]);
+    render(<VpnConnections />);
+    const err = await screen.findByText(/VPN connected, but the files are not available/);
+    expect(err.className).toContain("text-red-400");
+    expect(err.textContent).toContain("File share login failed");
+    expect(screen.queryByText(/Last attempt failed/)).toBeNull();
+  });
+
   it("connects and shows the connecting state", async () => {
     const connecting = vpn({ status: { state: "connecting" } });
     const calls = mockApi([vpn()], {

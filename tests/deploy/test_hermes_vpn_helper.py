@@ -163,6 +163,10 @@ unc, target, opts = args[2], args[3], args[5]
 cred = [o.split("=", 1)[1] for o in opts.split(",") if o.startswith("credentials=")][0]
 with open(cred) as fh:
     jsave("creds-seen.json", {"text": fh.read(), "mode": os.stat(cred).st_mode & 0o777})
+vers = [o.split("=", 1)[1] for o in opts.split(",") if o.startswith("vers=")][0]
+refused = os.path.join(W, "mount-refuse-vers")
+if os.path.exists(refused) and vers in open(refused).read().split():
+    print("mount error(95): Operation not supported", file=sys.stderr); sys.exit(32)
 if os.path.exists(os.path.join(W, "mount-fail")):
     print("mount error(13): Permission denied", file=sys.stderr); sys.exit(32)
 with open(os.path.join(W, "mounts"), "a") as fh:
@@ -448,7 +452,7 @@ def test_up_connects_routes_and_mounts_read_only(h):
         "noexec",
         "file_mode=0440",
         "dir_mode=0550",
-        "vers=3.0",
+        "vers=default",
         "ip=10.20.1.5",
         "uid=hermes",
         "gid=hermes",
@@ -554,13 +558,44 @@ def test_no_routes_routes_only_the_file_server(h):
     ]
 
 
-def test_mount_permission_denied(h):
+def test_mount_permission_denied_keeps_tunnel_up(h):
     (h.world / "mount-fail").touch()
     doc = up(h)
-    assert doc["state"] == "error" and doc["error"].startswith(
-        "File share login failed"
-    )
-    assert json.loads((h.world / "routes.json").read_text()) == []
+    assert doc["state"] == "connected" and doc["mounted"] is False
+    assert doc["error"] is None and doc["share_error"].startswith("File share login failed")
+    assert json.loads((h.world / "routes.json").read_text()) == [["10.20.0.0/16", "ppp0"]]
+    assert not (Path(h.RUN_DIR) / "office-files" / "smb.cred").exists()
+    check = h.cmd_check("office-files")["check"]
+    assert check["ok"] is False and "File share login failed" in check["message"]
+
+
+def test_up_again_retries_a_failed_share_mount(h):
+    (h.world / "mount-fail").touch()
+    up(h)
+    (h.world / "mount-fail").unlink()
+    before = len(calls(h, "mount"))
+    doc = up(h)
+    assert doc["state"] == "connected" and doc["mounted"] is True
+    assert doc["share_error"] is None
+    assert len(calls(h, "mount")) == before + 1
+    assert h.cmd_check("office-files")["check"]["ok"] is True
+
+
+def test_smb2_only_server_falls_back_to_vers_2_0(h):
+    (h.world / "mount-refuse-vers").write_text("default\n")
+    doc = up(h)
+    assert doc["state"] == "connected" and doc["mounted"] is True
+    tried = [c[6].split(",") for c in calls(h, "mount")]
+    assert ["vers=default" in o for o in tried] == [True, False]
+    assert "vers=2.0" in tried[1]
+
+
+def test_smb1_only_server_is_refused_with_a_clear_message(h):
+    (h.world / "mount-refuse-vers").write_text("default 2.0\n")
+    doc = up(h)
+    assert doc["state"] == "connected" and doc["mounted"] is False
+    assert "only offers SMB 1.0" in doc["share_error"]
+    assert not any("vers=1.0" in c[6] for c in calls(h, "mount"))
 
 
 def test_symlinked_mount_root_refused(h, tmp_path):
@@ -844,7 +879,7 @@ def test_mount_folder_through_connected_vpn(h):
         "noexec",
         "file_mode=0440",
         "dir_mode=0550",
-        "vers=3.0",
+        "vers=default",
         "ip=10.20.1.9",
         "uid=hermes",
         "gid=hermes",
@@ -1085,7 +1120,7 @@ def test_main_folder_commands(h, monkeypatch, capsys):
             "was not found on the file server",
         ),
         ("mount error(112): Host is down", "is not reachable through the VPN"),
-        ("mount error(95): Operation not supported", "does not offer SMB 3.0"),
+        ("mount error(95): Operation not supported", "only offers SMB 1.0"),
         ("mount error(22): Invalid argument", "Could not mount //fs01/Projects"),
     ],
 )
