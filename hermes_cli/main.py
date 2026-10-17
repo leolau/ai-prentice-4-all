@@ -12304,7 +12304,7 @@ _BUILTIN_SUBCOMMANDS = frozenset(
         "postinstall", "profile",
         "project", "promote", "proxy",
         "prompt-size",
-        "send", "sessions", "setup", "todos",
+        "send", "sessions", "setup", "todos", "vpn",
         "skills", "slack", "status", "tool", "tools", "uninstall", "update",
         "version", "webhook", "whatsapp", "whatsapp-cloud", "chat", "secrets", "security",
         # Help-ish invocations — plugin commands not being listed in
@@ -13182,6 +13182,14 @@ def main():
     from hermes_cli.todos_cmd import register_todos_subparser
 
     register_todos_subparser(subparsers)
+
+    # =========================================================================
+    # vpn command — Fortinet VPN tunnels + read-only file-share mounts for
+    # agents (rung 2: CLI + skill skills/productivity/fortinet-vpn).
+    # =========================================================================
+    from hermes_cli.vpn_cmd import register_vpn_subparser
+
+    register_vpn_subparser(subparsers)
 
     # =========================================================================
     # projects command — the Projects feature's operator surface (design §14,

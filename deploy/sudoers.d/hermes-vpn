@@ -1,0 +1,4 @@
+# Lets the Hermes runtime (user hermes) drive Fortinet VPN tunnels and their
+# read-only SMB mounts. The helper validates every argument; see
+# docs/deployment/PRODUCTION.md "Fortinet VPN". Install: root:root 0440.
+hermes ALL=(root) NOPASSWD: /usr/local/sbin/hermes-vpn-helper

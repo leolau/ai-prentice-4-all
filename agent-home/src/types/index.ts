@@ -1133,6 +1133,75 @@ export interface CredentialEntry {
   updated_at: string | null;
 }
 
+/** Payload of a `fortinet-vpn` credential (Settings → In&Out → Private
+ *  networks). `password` / `share_password` are secret: never returned, and
+ *  omitted or empty on PUT of an existing entry keeps the stored value. */
+export interface FortinetVpnPayload {
+  host: string;
+  username: string;
+  password?: string;
+  port?: number;
+  realm?: string;
+  trusted_cert?: string;
+  routes?: string[];
+  share_path?: string;
+  share_username?: string;
+  share_password?: string;
+  share_domain?: string;
+  auto_connect?: boolean;
+  idle_minutes?: number;
+}
+
+export type VpnState =
+  | "connected"
+  | "connecting"
+  | "disconnected"
+  | "error"
+  | "needs_cert";
+
+/** The gateway certificate shown for approval when `state == "needs_cert"`. */
+export interface VpnCert {
+  subject: string | null;
+  issuer: string | null;
+  not_after: string | null;
+  sha256: string;
+}
+
+export interface VpnLastCheck {
+  at: string;
+  ok: boolean;
+  message: string;
+  file_count: number | null;
+}
+
+export interface VpnStatus {
+  state: VpnState;
+  since: string | null;
+  local_ip: string | null;
+  error: string | null;
+  last_used: string | null;
+  last_check: VpnLastCheck | null;
+  cert?: VpnCert | null;
+}
+
+/** One saved Fortinet VPN as returned by Hermes `/api/vpn` (no secrets). */
+export interface VpnView {
+  name: string;
+  slug: string;
+  host: string;
+  port: number;
+  realm: string | null;
+  routes: string[];
+  share_path: string | null;
+  mount_path: string | null;
+  auto_connect: boolean;
+  idle_minutes: number;
+  visibility: string;
+  owner_user_id: string;
+  trusted_cert: string | null;
+  status: VpnStatus;
+}
+
 /**
  * One account in the deployment email poller's config — separate axis from
  * the credential's `email` service flag (that one marks the credential as

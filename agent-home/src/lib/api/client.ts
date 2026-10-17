@@ -88,6 +88,7 @@ import type {
   SessionCreateResponse,
   CredentialEntry,
   EmailPollerAccount,
+  VpnView,
   WaBridge,
   SessionTag,
   SessionsResponse,
@@ -2256,6 +2257,50 @@ export class HermesApiClient {
       `/api/credentials/${encodeURIComponent(provider)}/${encodeURIComponent(name)}`,
       { method: "DELETE" },
     );
+  }
+
+  /** Create or replace an entry (`PUT /api/credentials/{provider}/{name}`). */
+  async putCredential(
+    provider: string,
+    name: string,
+    body: {
+      kind: string;
+      payload: Record<string, unknown>;
+      visibility?: string;
+      services?: string[];
+    },
+  ): Promise<{ credential: CredentialEntry }> {
+    return this.request(
+      `/api/credentials/${encodeURIComponent(provider)}/${encodeURIComponent(name)}`,
+      { method: "PUT", json: body },
+    );
+  }
+
+  // -- private networks (Settings → In&Out → Fortinet VPN) -----------------
+
+  /** The caller's readable fortinet-vpn entries with live tunnel status. */
+  async vpns(): Promise<{ vpns: VpnView[] }> {
+    return this.request("/api/vpn");
+  }
+
+  /** Connect / disconnect / test a VPN. Connection failures come back as
+   *  200 with `status.state == "error"`, not as an HTTP error. */
+  async vpnAction(
+    name: string,
+    action: "connect" | "disconnect" | "test",
+  ): Promise<{ vpn: VpnView }> {
+    return this.request(
+      `/api/vpn/${encodeURIComponent(name)}/${action}`,
+      { method: "POST" },
+    );
+  }
+
+  /** Trust the gateway certificate with this SHA-256, then connect. */
+  async trustVpnCert(name: string, sha256: string): Promise<{ vpn: VpnView }> {
+    return this.request(`/api/vpn/${encodeURIComponent(name)}/trust`, {
+      method: "POST",
+      json: { sha256 },
+    });
   }
 
   /** Email-poller account flags (deployment poller config; owner-gated). */

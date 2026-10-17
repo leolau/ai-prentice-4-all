@@ -307,6 +307,7 @@ from hermes_cli.files_api import router as _files_router  # noqa: E402
 from hermes_cli.incomings_api import router as _incomings_router  # noqa: E402
 from hermes_cli.todos_api import router as _todos_router  # noqa: E402
 from hermes_cli.credentials_api import router as _credentials_router  # noqa: E402
+from hermes_cli.vpn_api import router as _vpn_router  # noqa: E402
 from hermes_cli.email_accounts_api import router as _email_accounts_router  # noqa: E402
 from hermes_cli.wa_bridge_api import router as _wa_bridge_router  # noqa: E402
 from hermes_cli.goals_api import router as _goals_router  # noqa: E402
@@ -324,6 +325,7 @@ app.include_router(_files_router)
 app.include_router(_incomings_router)
 app.include_router(_todos_router)
 app.include_router(_credentials_router)
+app.include_router(_vpn_router)
 app.include_router(_email_accounts_router)
 app.include_router(_wa_bridge_router)
 app.include_router(_goals_router)

@@ -1,0 +1,1078 @@
+#!/usr/bin/python3 -I
+"""hermes-vpn-helper: root side of Hermes "Private networks (VPN)".
+
+Installed root:root 0755 at /usr/local/sbin/hermes-vpn-helper; user ``hermes``
+may run it through sudo (deploy/sudoers.d/hermes-vpn). The caller is
+UNTRUSTED: every argument and every spec field is validated here, the
+openfortivpn config is generated from an allowlist, and only validated IPv4
+routes are added on the tunnel interface. The box's default route, DNS and
+local/docker networks are never touched.
+
+    hermes-vpn-helper up <spec.json>   # spec: 0600 file owned by the caller; read, then deleted
+    hermes-vpn-helper down <slug>
+    hermes-vpn-helper status <slug>
+    hermes-vpn-helper check <slug>     # list the mounted share, count files
+    hermes-vpn-helper idle-check <slug>  # run by the per-VPN systemd timer
+
+Output is one JSON object on stdout. Exit 0 = handled (a failed connection is
+``state: error``, not an exit code), 2 = rejected input, 1 = internal failure.
+Python 3 stdlib only.
+"""
+
+import contextlib
+import errno
+import fcntl
+import hashlib
+import ipaddress
+import json
+import os
+import random
+import re
+import shutil
+import socket
+import ssl
+import stat
+import struct
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+from datetime import datetime, timezone
+
+SAFE_PATH = "/usr/sbin:/usr/bin:/sbin:/bin"
+RUN_DIR = "/run/hermes-vpn"
+MOUNT_ROOT = "/opt/data/vpn-files"
+SYS_NET = "/sys/class/net"
+PROC_MOUNTS = "/proc/self/mounts"
+SELF_PATH = "/usr/local/sbin/hermes-vpn-helper"
+MOUNT_USER = "hermes"
+#: Owners allowed on every directory from / down to MOUNT_ROOT.
+TRUSTED_UIDS = (0,)
+RESOLV_FILES = ("/etc/resolv.conf", "/run/systemd/resolve/resolv.conf")
+
+UP_TIMEOUT = 60.0
+CERT_TIMEOUT = 10.0
+MOUNT_TIMEOUT = 45.0
+CHECK_TIMEOUT = 20.0
+CHECK_MAX_ENTRIES = 200_000
+IDLE_CHECK_SECONDS = 60
+#: Bytes per idle-check interval that still count as "no traffic": SMB echo
+#: and PPP LCP keepalives move a few hundred bytes a minute on an idle link.
+IDLE_NOISE_BYTES = 4096
+MAX_ROUTES = 32
+MAX_SPEC_BYTES = 64 * 1024
+
+SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,40}$")
+IFACE_RE = re.compile(r"^ppp[0-9]{1,4}$")
+SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+LABEL = r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
+HOSTNAME_RE = re.compile(rf"^(?=.{{1,253}}$){LABEL}(?:\.{LABEL})*\.?$")
+REALM_RE = re.compile(r"^[A-Za-z0-9._@-]{1,128}$")
+ACCOUNT_RE = re.compile(r"^[A-Za-z0-9._@ -]{1,128}$")
+SHARE_RE = re.compile(r"^[A-Za-z0-9 ._$-]{1,80}$")
+SUBPATH_RE = re.compile(r'^[^/\\\x00-\x1f\x7f:*?"<>|,]{1,255}$')
+SPEC_NAME_RE = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
+CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
+
+SPEC_KEYS = {
+    "slug", "host", "port", "username", "password", "realm", "trusted_cert",
+    "routes", "share_path", "share_username", "share_password", "share_domain",
+    "idle_minutes",
+}
+SECRET_KEYS = ("password", "share_password")
+
+#: Never routed through a VPN, whatever the box's tables say.
+ALWAYS_FORBIDDEN = tuple(
+    ipaddress.IPv4Network(n)
+    for n in (
+        "0.0.0.0/8", "127.0.0.0/8", "169.254.0.0/16", "224.0.0.0/4",
+        "240.0.0.0/4", "172.17.0.0/16", "172.18.0.0/16",
+    )
+)
+
+
+class InputError(Exception):
+    """Rejected caller input (exit 2)."""
+
+
+class HelperError(Exception):
+    """Internal failure (exit 1)."""
+
+
+def now_iso():
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+# ---------------------------------------------------------------------------
+# Validation
+# ---------------------------------------------------------------------------
+
+
+def check_slug(slug):
+    if not isinstance(slug, str) or not SLUG_RE.fullmatch(slug):
+        raise InputError("invalid slug")
+    return slug
+
+
+def _plain(value, field, *, max_len=256, required=True):
+    """A config/credential value: no control chars, no edge whitespace."""
+    if value is None or value == "":
+        if required:
+            raise InputError(f"{field} is required")
+        return None
+    if not isinstance(value, str):
+        raise InputError(f"{field} must be a string")
+    if len(value) > max_len:
+        raise InputError(f"{field} is too long")
+    if CONTROL_RE.search(value):
+        raise InputError(f"{field} contains control characters")
+    if value != value.strip():
+        raise InputError(f"{field} has leading or trailing spaces")
+    return value
+
+
+def check_host(value, field="host"):
+    if not isinstance(value, str) or not value:
+        raise InputError(f"{field} is required")
+    try:
+        ip = ipaddress.IPv4Address(value)
+    except ValueError:
+        ip = None
+    if ip is not None:
+        if ip.is_loopback or ip.is_link_local or ip.is_unspecified or ip.is_multicast:
+            raise InputError(f"{field} {value} is not a usable address")
+        return value
+    if not HOSTNAME_RE.fullmatch(value) or value.replace(".", "").isdigit():
+        raise InputError(f"{field} must be a hostname or IPv4 address")
+    return value.rstrip(".").lower()
+
+
+def check_route(value):
+    if not isinstance(value, str):
+        raise InputError("routes must be IPv4 CIDR strings")
+    try:
+        net = ipaddress.IPv4Network(value, strict=True)
+    except ValueError as exc:
+        raise InputError(f"route {value!r} is not a valid IPv4 CIDR ({exc})")
+    if net.prefixlen < 8:
+        raise InputError(f"route {value} is too broad (prefix must be /8 or longer)")
+    for bad in ALWAYS_FORBIDDEN:
+        if net.overlaps(bad):
+            raise InputError(f"route {value} overlaps reserved network {bad}")
+    return net
+
+
+def parse_share_path(value):
+    """``//server/share[/sub]`` or ``\\\\server\\share[\\sub]`` -> (server, share, [sub])."""
+    if not isinstance(value, str) or CONTROL_RE.search(value):
+        raise InputError("share_path must be like //server/share")
+    path = value.replace("\\", "/")
+    if not path.startswith("//"):
+        raise InputError("share_path must start with //server/share")
+    parts = path[2:].rstrip("/").split("/")
+    if len(parts) < 2 or len(parts) > 18:
+        raise InputError("share_path must be like //server/share[/folder]")
+    server = check_host(parts[0], "share_path server")
+    share = parts[1]
+    if not SHARE_RE.fullmatch(share):
+        raise InputError("share_path has an invalid share name")
+    subs = parts[2:]
+    for sub in subs:
+        if sub in (".", "..") or not SUBPATH_RE.fullmatch(sub):
+            raise InputError("share_path has an invalid folder name")
+    return server, share, subs
+
+
+def validate_spec(raw):
+    if not isinstance(raw, dict):
+        raise InputError("spec must be a JSON object")
+    unknown = sorted(set(raw) - SPEC_KEYS)
+    if unknown:
+        raise InputError(f"spec has unknown fields: {', '.join(unknown)}")
+    spec = {"slug": check_slug(raw.get("slug")), "host": check_host(raw.get("host"))}
+    port = raw.get("port", 443)
+    if port is None:
+        port = 443
+    if isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
+        raise InputError("port must be an integer 1-65535")
+    spec["port"] = port
+    spec["username"] = _plain(raw.get("username"), "username")
+    spec["password"] = _plain(raw.get("password"), "password")
+    realm = raw.get("realm") or None
+    if realm is not None and (not isinstance(realm, str) or not REALM_RE.fullmatch(realm)):
+        raise InputError("realm may only contain letters, digits and ._@-")
+    spec["realm"] = realm
+    cert = raw.get("trusted_cert") or None
+    if cert is not None and (not isinstance(cert, str) or not SHA256_RE.fullmatch(cert)):
+        raise InputError("trusted_cert must be 64 lowercase hex characters")
+    spec["trusted_cert"] = cert
+    routes = raw.get("routes") or []
+    if not isinstance(routes, list) or len(routes) > MAX_ROUTES:
+        raise InputError(f"routes must be a list of at most {MAX_ROUTES} CIDRs")
+    nets = [check_route(r) for r in routes]
+    for i, a in enumerate(nets):
+        for b in nets[i + 1:]:
+            if a.overlaps(b):
+                raise InputError(f"routes {a} and {b} overlap")
+    spec["routes"] = [str(n) for n in nets]
+    share = raw.get("share_path") or None
+    spec["share"] = parse_share_path(share) if share else None
+    spec["share_username"] = raw.get("share_username") or None
+    if spec["share_username"] is not None and (
+        not isinstance(spec["share_username"], str)
+        or not ACCOUNT_RE.fullmatch(spec["share_username"])
+    ):
+        raise InputError("share_username has invalid characters")
+    spec["share_domain"] = raw.get("share_domain") or None
+    if spec["share_domain"] is not None and (
+        not isinstance(spec["share_domain"], str)
+        or not ACCOUNT_RE.fullmatch(spec["share_domain"])
+    ):
+        raise InputError("share_domain has invalid characters")
+    spec["share_password"] = _plain(
+        raw.get("share_password"), "share_password", required=False
+    )
+    idle = raw.get("idle_minutes", 30)
+    if idle is None:
+        idle = 30
+    if isinstance(idle, bool) or not isinstance(idle, int) or not 0 <= idle <= 1440:
+        raise InputError("idle_minutes must be an integer 0-1440")
+    spec["idle_minutes"] = idle
+    return spec
+
+
+def caller_uid():
+    if os.geteuid() == 0 and os.environ.get("SUDO_UID", "").isdigit():
+        return int(os.environ["SUDO_UID"])
+    return os.getuid()
+
+
+def read_spec_file(path):
+    """Read and delete the caller's spec without following any link.
+
+    The file must sit in a directory owned by the caller that nobody else can
+    write, be a regular single-link 0600 file owned by the caller. Opening and
+    unlinking go through the directory fd, so a swapped path can never make
+    root read or delete a file the caller could not touch itself.
+    """
+    if not isinstance(path, str) or not os.path.isabs(path):
+        raise InputError("spec path must be absolute")
+    directory, name = os.path.split(path)
+    if not SPEC_NAME_RE.fullmatch(name):
+        raise InputError("bad spec file name")
+    uid = caller_uid()
+    try:
+        dfd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    except OSError as exc:
+        raise InputError(f"cannot open spec directory ({exc.strerror})")
+    try:
+        dst = os.fstat(dfd)
+        if dst.st_uid != uid or dst.st_mode & 0o022:
+            raise InputError("spec directory must be owned by the caller and not shared")
+        try:
+            fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=dfd)
+        except OSError as exc:
+            raise InputError(f"cannot open spec file ({exc.strerror})")
+        try:
+            st = os.fstat(fd)
+            if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1:
+                raise InputError("spec must be a regular file")
+            if st.st_uid != uid or st.st_mode & 0o077:
+                raise InputError("spec must be a 0600 file owned by the caller")
+            if st.st_size > MAX_SPEC_BYTES:
+                raise InputError("spec is too large")
+            data = os.read(fd, MAX_SPEC_BYTES + 1)
+        finally:
+            os.close(fd)
+        with contextlib.suppress(OSError):
+            os.unlink(name, dir_fd=dfd)
+    finally:
+        os.close(dfd)
+    try:
+        return json.loads(data.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        raise InputError("spec is not valid JSON")
+
+
+# ---------------------------------------------------------------------------
+# Generated files
+# ---------------------------------------------------------------------------
+
+
+def render_openfortivpn_config(spec):
+    """Allowlisted keys only; routing and DNS are always ours, never pppd's."""
+    lines = [
+        f"host = {spec['host']}",
+        f"port = {spec['port']}",
+        f"username = {spec['username']}",
+        f"password = {spec['password']}",
+    ]
+    if spec.get("realm"):
+        lines.append(f"realm = {spec['realm']}")
+    if spec.get("trusted_cert"):
+        lines.append(f"trusted-cert = {spec['trusted_cert']}")
+    lines += [
+        "set-routes = 0",
+        "set-dns = 0",
+        "pppd-use-peerdns = 0",
+        "half-internet-routes = 0",
+    ]
+    for line in lines:
+        if CONTROL_RE.search(line):
+            raise InputError("config value contains control characters")
+    return "\n".join(lines) + "\n"
+
+
+def render_smb_credentials(spec):
+    lines = [
+        f"username={spec.get('share_username') or spec['username']}",
+        f"password={spec.get('share_password') or spec['password']}",
+    ]
+    if spec.get("share_domain"):
+        lines.append(f"domain={spec['share_domain']}")
+    for line in lines:
+        if CONTROL_RE.search(line):
+            raise InputError("share credential contains control characters")
+    return "\n".join(lines) + "\n"
+
+
+def write_private(path, text):
+    with contextlib.suppress(FileNotFoundError):
+        os.unlink(path)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(fd, "w") as fh:
+        fh.write(text)
+
+
+def remove(path):
+    with contextlib.suppress(FileNotFoundError):
+        os.unlink(path)
+
+
+# ---------------------------------------------------------------------------
+# Paths, state, locking
+# ---------------------------------------------------------------------------
+
+
+def slug_dir(slug):
+    os.makedirs(RUN_DIR, mode=0o700, exist_ok=True)
+    os.chmod(RUN_DIR, 0o700)
+    path = os.path.join(RUN_DIR, slug)
+    os.makedirs(path, mode=0o700, exist_ok=True)
+    return path
+
+
+def paths(slug):
+    base = os.path.join(RUN_DIR, slug)
+    return {
+        "dir": base,
+        "state": os.path.join(base, "state.json"),
+        "conf": os.path.join(base, "openfortivpn.conf"),
+        "creds": os.path.join(base, "smb.cred"),
+        "log": os.path.join(base, "openfortivpn.log"),
+        "lock": os.path.join(base, "lock"),
+        "mount": os.path.join(MOUNT_ROOT, slug),
+        "unit": f"hermes-vpn-{slug}.service",
+        "timer": f"hermes-vpn-idle-{slug}",
+    }
+
+
+def load_state(slug):
+    try:
+        with open(paths(slug)["state"], encoding="utf-8") as fh:
+            doc = json.load(fh)
+        return doc if isinstance(doc, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def save_state(slug, doc):
+    slug_dir(slug)
+    target = paths(slug)["state"]
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(target), prefix=".state-")
+    with os.fdopen(fd, "w") as fh:
+        json.dump(doc, fh)
+    os.replace(tmp, target)
+
+
+@contextlib.contextmanager
+def slug_lock(slug, *, blocking=True):
+    slug_dir(slug)
+    fd = os.open(paths(slug)["lock"], os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB))
+        except BlockingIOError:
+            yield False
+            return
+        yield True
+    finally:
+        os.close(fd)
+
+
+def lock_busy(slug):
+    path = paths(slug)["lock"]
+    if not os.path.exists(path):
+        return False
+    fd = os.open(path, os.O_RDWR | os.O_NOFOLLOW)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return False
+    except BlockingIOError:
+        return True
+    finally:
+        os.close(fd)
+
+
+def secure_mount_point(slug):
+    """Create MOUNT_ROOT/<slug> under a chain no non-root user can rewrite."""
+    root = os.path.abspath(MOUNT_ROOT)
+    parent = os.path.dirname(root)
+    current = "/"
+    for part in [p for p in parent.split("/") if p] + [None]:
+        st = os.lstat(current)
+        if stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode):
+            raise HelperError(f"{current} must be a real directory")
+        if st.st_uid not in TRUSTED_UIDS:
+            raise HelperError(f"{current} must be owned by root to host VPN mounts")
+        if st.st_mode & 0o022 and not st.st_mode & stat.S_ISVTX:
+            raise HelperError(f"{current} must not be group/world writable")
+        if part is None:
+            break
+        current = os.path.join(current, part)
+    for path in (root, os.path.join(root, slug)):
+        if not os.path.lexists(path):
+            os.mkdir(path, 0o755)
+        st = os.lstat(path)
+        if stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode):
+            raise HelperError(f"{path} must be a real directory")
+        if st.st_uid not in TRUSTED_UIDS or st.st_mode & 0o022:
+            raise HelperError(f"{path} must be root-owned and not writable by others")
+    return os.path.join(root, slug)
+
+
+# ---------------------------------------------------------------------------
+# System commands and facts
+# ---------------------------------------------------------------------------
+
+
+def bin_path(name):
+    found = shutil.which(name, path=SAFE_PATH)
+    if not found:
+        raise HelperError(f"{name} is not installed")
+    return found
+
+
+def run(argv, *, timeout=30.0, check=False):
+    env = {"PATH": SAFE_PATH, "LANG": "C", "LC_ALL": "C"}
+    try:
+        proc = subprocess.run(
+            argv, capture_output=True, text=True, timeout=timeout, env=env,
+            stdin=subprocess.DEVNULL,
+        )
+    except subprocess.TimeoutExpired:
+        raise HelperError(f"{os.path.basename(argv[0])} timed out")
+    if check and proc.returncode != 0:
+        raise HelperError(
+            f"{os.path.basename(argv[0])} failed: {(proc.stderr or proc.stdout).strip()[:200]}"
+        )
+    return proc
+
+
+def unit_active(unit):
+    out = run([bin_path("systemctl"), "is-active", unit]).stdout.strip()
+    return out in ("active", "activating", "reloading")
+
+
+def ip_json(*args):
+    proc = run([bin_path("ip"), "-j", "-4", *args])
+    try:
+        return json.loads(proc.stdout or "[]")
+    except ValueError:
+        return []
+
+
+def forbidden_networks(exclude_iface=None):
+    """Networks a VPN route may never overlap: the box's own addresses and
+    routes (local, docker, other VPNs), its gateways and DNS servers."""
+    nets = list(ALWAYS_FORBIDDEN)
+    for link in ip_json("addr", "show"):
+        if link.get("ifname") == exclude_iface:
+            continue
+        for info in link.get("addr_info") or []:
+            with contextlib.suppress(ValueError, KeyError):
+                iface = ipaddress.IPv4Interface(f"{info['local']}/{info.get('prefixlen', 32)}")
+                nets += [iface.network, ipaddress.IPv4Network(f"{iface.ip}/32")]
+    for route in ip_json("route", "show", "table", "all"):
+        if route.get("dev") == exclude_iface:
+            continue
+        dst = route.get("dst")
+        if dst and dst != "default":
+            with contextlib.suppress(ValueError):
+                nets.append(ipaddress.IPv4Network(dst, strict=False))
+        if route.get("gateway"):
+            with contextlib.suppress(ValueError):
+                nets.append(ipaddress.IPv4Network(f"{route['gateway']}/32"))
+    for path in RESOLV_FILES:
+        with contextlib.suppress(OSError):
+            with open(path, encoding="utf-8") as fh:
+                for line in fh:
+                    bits = line.split()
+                    if len(bits) >= 2 and bits[0] == "nameserver":
+                        with contextlib.suppress(ValueError):
+                            nets.append(ipaddress.IPv4Network(f"{bits[1]}/32"))
+    return nets
+
+
+def check_routes_against_box(routes, gateway_ips, exclude_iface=None):
+    forbidden = forbidden_networks(exclude_iface)
+    for text in routes:
+        net = ipaddress.IPv4Network(text)
+        for ip in gateway_ips:
+            if ipaddress.IPv4Address(ip) in net:
+                raise InputError(f"route {net} contains the VPN gateway's own address {ip}")
+        for bad in forbidden:
+            if net.overlaps(bad):
+                raise InputError(f"route {net} overlaps this server's network {bad}")
+
+
+def resolve_ipv4(host):
+    try:
+        ipaddress.IPv4Address(host)
+        return [host]
+    except ValueError:
+        pass
+    infos = socket.getaddrinfo(host, None, socket.AF_INET, socket.SOCK_STREAM)
+    return sorted({info[4][0] for info in infos})
+
+
+def dns_query_a(name, server, iface, timeout=3.0):
+    """One A lookup against the VPN's DNS server, bound to the tunnel."""
+    qid = random.randint(0, 0xFFFF)
+    qname = b"".join(
+        bytes([len(label)]) + label.encode("ascii") for label in name.rstrip(".").split(".")
+    ) + b"\0"
+    packet = struct.pack(">HHHHHH", qid, 0x0100, 1, 0, 0, 0) + qname + struct.pack(">HH", 1, 1)
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        sock.setsockopt(
+            socket.SOL_SOCKET, getattr(socket, "SO_BINDTODEVICE", 25), iface.encode() + b"\0"
+        )
+        sock.settimeout(timeout)
+        sock.sendto(packet, (server, 53))
+        data = sock.recv(4096)
+    finally:
+        sock.close()
+    rid, flags, qd, an = struct.unpack(">HHHH", data[:8])
+    if rid != qid or flags & 0x000F:
+        return []
+    pos = 12
+
+    def skip_name(p):
+        while True:
+            length = data[p]
+            if length & 0xC0 == 0xC0:
+                return p + 2
+            if length == 0:
+                return p + 1
+            p += length + 1
+
+    for _ in range(qd):
+        pos = skip_name(pos) + 4
+    found = []
+    for _ in range(an):
+        pos = skip_name(pos)
+        rtype, _cls, _ttl, rdlen = struct.unpack(">HHIH", data[pos:pos + 10])
+        pos += 10
+        if rtype == 1 and rdlen == 4:
+            found.append(socket.inet_ntoa(data[pos:pos + 4]))
+        pos += rdlen
+    return found
+
+
+def _cert_info(der):
+    info = {"sha256": hashlib.sha256(der).hexdigest(), "subject": None,
+            "issuer": None, "not_after": None}
+    decode = getattr(getattr(ssl, "_ssl", None), "_test_decode_cert", None)
+    if decode is None:
+        return info
+    fd, tmp = tempfile.mkstemp(suffix=".pem")
+    try:
+        with os.fdopen(fd, "w") as fh:
+            fh.write(ssl.DER_cert_to_PEM_cert(der))
+        decoded = decode(tmp)
+    except Exception:  # noqa: BLE001 - best-effort display data
+        return info
+    finally:
+        remove(tmp)
+
+    def name_of(rdns):
+        fields = {k: v for rdn in rdns or () for (k, v) in rdn}
+        return fields.get("commonName") or fields.get("organizationName") or (
+            ", ".join(f"{k}={v}" for k, v in fields.items()) or None
+        )
+
+    info["subject"] = name_of(decoded.get("subject"))
+    info["issuer"] = name_of(decoded.get("issuer"))
+    with contextlib.suppress(Exception):
+        seconds = ssl.cert_time_to_seconds(decoded["notAfter"])
+        info["not_after"] = datetime.fromtimestamp(seconds, timezone.utc).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        )
+    return info
+
+
+def fetch_cert(host, ip, port):
+    """(cert_info, system_trusted). Raises OSError when unreachable."""
+    sni = None if host == ip else host
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    with contextlib.suppress(ssl.SSLError):
+        ctx.set_ciphers("DEFAULT:@SECLEVEL=0")
+    with socket.create_connection((ip, port), timeout=CERT_TIMEOUT) as raw:
+        with ctx.wrap_socket(raw, server_hostname=sni) as tls:
+            der = tls.getpeercert(binary_form=True)
+    if not der:
+        raise OSError("gateway sent no certificate")
+    trusted = False
+    verify = ssl.create_default_context()
+    try:
+        with socket.create_connection((ip, port), timeout=CERT_TIMEOUT) as raw:
+            with verify.wrap_socket(raw, server_hostname=host):
+                trusted = True
+    except (ssl.SSLError, ssl.CertificateError, OSError):
+        trusted = False
+    return _cert_info(der), trusted
+
+
+def iface_counters(iface):
+    total = 0
+    for name in ("rx_bytes", "tx_bytes"):
+        with open(os.path.join(SYS_NET, iface, "statistics", name), encoding="utf-8") as fh:
+            total += int(fh.read().strip() or 0)
+    return total
+
+
+def iface_bytes(iface):
+    out = {}
+    for name in ("rx_bytes", "tx_bytes"):
+        try:
+            with open(os.path.join(SYS_NET, iface, "statistics", name), encoding="utf-8") as fh:
+                out[name] = int(fh.read().strip() or 0)
+        except (OSError, ValueError):
+            out[name] = None
+    return out
+
+
+def is_mounted(path):
+    target = os.path.abspath(path)
+    try:
+        with open(PROC_MOUNTS, encoding="utf-8") as fh:
+            for line in fh:
+                bits = line.split()
+                if len(bits) > 1 and bits[1].replace("\\040", " ") == target:
+                    return True
+    except OSError:
+        pass
+    return False
+
+
+# ---------------------------------------------------------------------------
+# openfortivpn log interpretation
+# ---------------------------------------------------------------------------
+
+
+def read_log(slug):
+    try:
+        with open(paths(slug)["log"], encoding="utf-8", errors="replace") as fh:
+            return fh.read()[-65536:]
+    except OSError:
+        return ""
+
+
+def parse_log(text):
+    out = {"up": "Tunnel is up and running." in text, "iface": None, "local_ip": None,
+           "dns": [], "suffix": None}
+    m = re.search(r"Interface (ppp[0-9]{1,4}) is UP\.", text)
+    if m:
+        out["iface"] = m.group(1)
+    m = re.search(r"Got addresses: \[([0-9.]+)\], ns \[([0-9., ]*)\](?:, ns_suffix \[([A-Za-z0-9.-]*)\])?", text)
+    if m:
+        out["local_ip"] = m.group(1)
+        out["dns"] = [d.strip() for d in m.group(2).split(",") if d.strip() not in ("", "0.0.0.0")]
+        out["suffix"] = m.group(3) or None
+    return out
+
+
+def classify_log(text, host, port):
+    """(state, message, cert_sha256) for a failed openfortivpn run."""
+    m = re.search(r"trusted-cert = ([0-9a-f]{64})", text)
+    if "not in the local whitelist" in text or m:
+        return "needs_cert", "The VPN server's certificate is not trusted yet", (m.group(1) if m else None)
+    if "Could not authenticate to gateway" in text:
+        return "error", "Login failed: wrong username or password", None
+    if "Please make sure tunnel mode is allowed" in text:
+        return "error", "Login refused: tunnel mode is not allowed for this account (check the realm)", None
+    if re.search(r"one-time password|No OTP specified|No token specified|FortiToken", text):
+        return "error", "This VPN asks for a one-time code (FortiToken), which is not supported yet", None
+    m = re.search(r"getaddrinfo: (.+)", text)
+    if m:
+        return "error", f"Can't find the VPN server {host}", None
+    m = re.search(r"connect: (.+)", text)
+    if m:
+        return "error", f"Can't reach the VPN server {host}:{port} ({m.group(1).strip()[:80]})", None
+    if "SSL_connect" in text:
+        return "error", f"Secure connection to {host}:{port} failed", None
+    if "Timed out waiting for the ppp interface" in text:
+        return "error", "The VPN tunnel did not come up (ppp timeout)", None
+    errors = [ln.split(":", 1)[1].strip() for ln in text.splitlines() if ln.startswith("ERROR:")]
+    if errors:
+        return "error", f"VPN client failed: {errors[-1][:160]}", None
+    return "error", "VPN client exited unexpectedly", None
+
+
+# ---------------------------------------------------------------------------
+# Commands
+# ---------------------------------------------------------------------------
+
+
+def spec_fingerprint(spec):
+    return hashlib.sha256(json.dumps(spec, sort_keys=True, default=str).encode()).hexdigest()
+
+
+def status_doc(slug):
+    p = paths(slug)
+    state = load_state(slug)
+    active = unit_active(p["unit"]) if state else False
+    iface = state.get("iface")
+    up = bool(active and iface and os.path.isdir(os.path.join(SYS_NET, iface)))
+    doc = {
+        "slug": slug, "state": "disconnected", "since": None, "local_ip": None,
+        "iface": None, "error": state.get("last_error"), "rx_bytes": None,
+        "tx_bytes": None, "mounted": is_mounted(p["mount"]), "mount_path": p["mount"],
+        "routes": state.get("routes") or [], "cert": None,
+        "last_activity": state.get("last_activity"),
+    }
+    phase = state.get("phase")
+    if phase == "needs_cert":
+        doc.update(state="needs_cert", cert=state.get("cert"))
+    elif phase == "connecting" and (lock_busy(slug) or active):
+        doc["state"] = "connecting"
+    elif phase == "connected" and up:
+        doc.update(state="connected", since=state.get("since"), local_ip=state.get("local_ip"),
+                   iface=iface, error=None, **iface_bytes(iface))
+    elif phase == "connected":
+        doc.update(state="error", error="The VPN connection dropped")
+    elif doc["error"]:
+        doc["state"] = "error"
+    return doc
+
+
+def do_down(slug, *, error=None):
+    p = paths(slug)
+    state = load_state(slug)
+    with contextlib.suppress(HelperError):
+        run([bin_path("systemctl"), "stop", f"{p['timer']}.timer"], timeout=20)
+    if is_mounted(p["mount"]):
+        umount = bin_path("umount")
+        try:
+            done = run([umount, p["mount"]], timeout=15).returncode == 0
+        except HelperError:
+            done = False
+        if not done:
+            run([umount, "-l", p["mount"]], timeout=15)
+    iface = state.get("iface")
+    if iface and IFACE_RE.fullmatch(iface):
+        for route in state.get("routes") or []:
+            with contextlib.suppress(HelperError):
+                run([bin_path("ip"), "-4", "route", "del", route, "dev", iface], timeout=10)
+    systemctl = bin_path("systemctl")
+    run([systemctl, "stop", p["unit"]], timeout=30)
+    run([systemctl, "reset-failed", p["unit"]], timeout=10)
+    remove(p["conf"])
+    remove(p["creds"])
+    if os.path.isdir(p["mount"]) and not is_mounted(p["mount"]):
+        with contextlib.suppress(OSError):
+            os.rmdir(p["mount"])
+    save_state(slug, {"phase": "disconnected", "last_error": error})
+
+
+def _fail(slug, message, *, state="error", cert=None):
+    do_down(slug, error=None if state == "needs_cert" else message)
+    if state == "needs_cert":
+        save_state(slug, {"phase": "needs_cert", "cert": cert, "last_error": None})
+    return status_doc(slug)
+
+
+def cmd_up(spec_path):
+    spec = validate_spec(read_spec_file(spec_path))
+    slug = spec["slug"]
+    fp = spec_fingerprint(spec)
+    with slug_lock(slug):
+        current = status_doc(slug)
+        prior = load_state(slug)
+        if current["state"] == "connected" and prior.get("fingerprint") == fp:
+            prior["last_activity"] = now_iso()
+            save_state(slug, prior)
+            return status_doc(slug)
+        do_down(slug)
+        save_state(slug, {"phase": "connecting"})
+        try:
+            gateway_ips = resolve_ipv4(spec["host"])
+        except OSError:
+            return _fail(slug, f"Can't find the VPN server {spec['host']}")
+        check_routes_against_box(spec["routes"], gateway_ips)
+        try:
+            cert, trusted = fetch_cert(spec["host"], gateway_ips[0], spec["port"])
+        except OSError as exc:
+            reason = exc.strerror or str(exc) or "no answer"
+            return _fail(slug, f"Can't reach the VPN server {spec['host']}:{spec['port']} ({reason[:80]})")
+        if not trusted and cert["sha256"] != spec["trusted_cert"]:
+            return _fail(slug, "certificate not trusted", state="needs_cert", cert=cert)
+        p = paths(slug)
+        write_private(p["conf"], render_openfortivpn_config(spec))
+        write_private(p["log"], "")
+        run([
+            bin_path("systemd-run"), f"--unit={p['unit']}", "--collect", "--quiet",
+            f"--property=StandardOutput=append:{p['log']}",
+            f"--property=StandardError=append:{p['log']}",
+            "--", bin_path("openfortivpn"), "-c", p["conf"],
+        ], check=True)
+        deadline = time.monotonic() + UP_TIMEOUT
+        info = parse_log("")
+        while time.monotonic() < deadline:
+            text = read_log(slug)
+            info = parse_log(text)
+            if info["up"] and info["iface"]:
+                break
+            if "ERROR:" in text or not unit_active(p["unit"]):
+                time.sleep(0.5)
+                text = read_log(slug)
+                kind, message, digest = classify_log(text, spec["host"], spec["port"])
+                if kind == "needs_cert":
+                    cert = dict(cert, sha256=digest or cert["sha256"])
+                    return _fail(slug, message, state="needs_cert", cert=cert)
+                return _fail(slug, message)
+            time.sleep(0.5)
+        else:
+            return _fail(slug, f"Timed out after {int(UP_TIMEOUT)}s waiting for the VPN tunnel")
+        remove(p["conf"])
+        iface = info["iface"]
+        if not IFACE_RE.fullmatch(iface or ""):
+            return _fail(slug, "VPN client reported an unexpected interface")
+        state = {"phase": "connecting", "iface": iface, "routes": [], "fingerprint": fp}
+        save_state(slug, state)
+        routes = list(spec["routes"])
+        share_ip = None
+        if spec["share"]:
+            server = spec["share"][0]
+            try:
+                share_ip = resolve_ipv4(server)[0]
+            except (OSError, IndexError):
+                names = [server] + ([f"{server}.{info['suffix']}"] if info["suffix"] and "." not in server else [])
+                for name in names:
+                    for ns in info["dns"]:
+                        with contextlib.suppress(OSError, struct.error, IndexError, UnicodeError):
+                            found = dns_query_a(name, ns, iface)
+                            if found:
+                                share_ip = found[0]
+                                break
+                    if share_ip:
+                        break
+            if not share_ip:
+                return _fail(slug, f"Can't find the file server {server} (not in public or VPN DNS)")
+            if not routes:
+                routes = [f"{share_ip}/32"]
+                check_route(routes[0])
+            if not any(ipaddress.IPv4Address(share_ip) in ipaddress.IPv4Network(r) for r in routes):
+                return _fail(slug, f"File server {server} ({share_ip}) is outside the VPN routes {', '.join(routes)}")
+        try:
+            check_routes_against_box(routes, gateway_ips, exclude_iface=iface)
+        except InputError as exc:
+            return _fail(slug, str(exc))
+        for route in routes:
+            proc = run([bin_path("ip"), "-4", "route", "replace", route, "dev", iface])
+            if proc.returncode != 0:
+                return _fail(slug, f"Could not add route {route}")
+            state["routes"].append(route)
+            save_state(slug, state)
+        if spec["share"]:
+            server, share, subs = spec["share"]
+            try:
+                target = secure_mount_point(slug)
+            except HelperError as exc:
+                return _fail(slug, str(exc))
+            write_private(p["creds"], render_smb_credentials(spec))
+            unc = "//" + "/".join([server, share, *subs])
+            options = ",".join([
+                "ro", "nosuid", "nodev", "noexec", f"uid={MOUNT_USER}", f"gid={MOUNT_USER}",
+                "file_mode=0440", "dir_mode=0550", f"credentials={p['creds']}",
+                "vers=3.0", f"ip={share_ip}",
+            ])
+            try:
+                proc = run([bin_path("mount"), "-t", "cifs", unc, target, "-o", options],
+                           timeout=MOUNT_TIMEOUT)
+            except HelperError:
+                proc = None
+            remove(p["creds"])
+            if proc is None or proc.returncode != 0:
+                detail = ((proc.stderr or proc.stdout) if proc else "timed out").lower()
+                if "permission denied" in detail or "error(13)" in detail:
+                    message = "File share login failed: check the file share username and password"
+                elif "no such file" in detail or "error(2)" in detail:
+                    message = f"Share {unc} was not found on the file server"
+                elif "timed out" in detail or "host is down" in detail or "unreachable" in detail:
+                    message = f"File server {server} is not reachable through the VPN"
+                else:
+                    message = f"Could not mount {unc}"
+                return _fail(slug, message)
+        if spec["idle_minutes"] > 0:
+            run([
+                bin_path("systemd-run"), f"--unit={p['timer']}", "--collect", "--quiet",
+                f"--on-active={IDLE_CHECK_SECONDS}", f"--on-unit-active={IDLE_CHECK_SECONDS}",
+                "--timer-property=AccuracySec=5s", "--", SELF_PATH, "idle-check", slug,
+            ])
+        state.update(
+            phase="connected", since=now_iso(), local_ip=info["local_ip"],
+            idle_minutes=spec["idle_minutes"], last_activity=now_iso(),
+            last_bytes=_safe_counters(iface), last_error=None,
+        )
+        save_state(slug, state)
+        return status_doc(slug)
+
+
+def _safe_counters(iface):
+    try:
+        return iface_counters(iface)
+    except (OSError, ValueError):
+        return None
+
+
+def cmd_down(slug):
+    check_slug(slug)
+    with slug_lock(slug):
+        do_down(slug)
+        return status_doc(slug)
+
+
+def cmd_status(slug):
+    check_slug(slug)
+    return status_doc(slug)
+
+
+def count_files(root, deadline):
+    count = 0
+    stack = [root]
+    while stack:
+        if time.monotonic() > deadline or count >= CHECK_MAX_ENTRIES:
+            return count, True
+        with os.scandir(stack.pop()) as entries:
+            for entry in entries:
+                if entry.is_dir(follow_symlinks=False):
+                    stack.append(entry.path)
+                else:
+                    count += 1
+    return count, False
+
+
+def cmd_check(slug):
+    check_slug(slug)
+    doc = status_doc(slug)
+    at = now_iso()
+    if doc["state"] != "connected":
+        doc["check"] = {"at": at, "ok": False, "file_count": None,
+                        "message": doc["error"] or "VPN is not connected"}
+        return doc
+    with slug_lock(slug):
+        state = load_state(slug)
+        state["last_activity"] = at
+        save_state(slug, state)
+    if not doc["mounted"]:
+        doc["check"] = {"at": at, "ok": True, "file_count": None,
+                        "message": "VPN connected; no file share is configured."}
+        return doc
+    result = {}
+
+    def walk():
+        try:
+            result["count"], result["partial"] = count_files(
+                doc["mount_path"], time.monotonic() + CHECK_TIMEOUT
+            )
+        except OSError as exc:
+            result["error"] = exc.strerror or str(exc)
+
+    worker = threading.Thread(target=walk, daemon=True)
+    worker.start()
+    worker.join(CHECK_TIMEOUT + 5)
+    if worker.is_alive():
+        check = {"ok": False, "file_count": None, "message": "File server is not responding."}
+    elif "error" in result:
+        check = {"ok": False, "file_count": None,
+                 "message": f"File server error: {result['error'][:120]}"}
+    else:
+        n = result["count"]
+        more = "at least " if result["partial"] else ""
+        check = {"ok": True, "file_count": n,
+                 "message": f"File server reachable, {more}{n:,} files listed."}
+    doc["check"] = dict(check, at=at)
+    return doc
+
+
+def cmd_idle_check(slug):
+    check_slug(slug)
+    with slug_lock(slug, blocking=False) as got:
+        if not got:
+            return status_doc(slug)
+        state = load_state(slug)
+        if state.get("phase") != "connected":
+            with contextlib.suppress(HelperError):
+                run([bin_path("systemctl"), "stop", f"{paths(slug)['timer']}.timer"], timeout=20)
+            return status_doc(slug)
+        iface = state.get("iface") or ""
+        if not unit_active(paths(slug)["unit"]) or not os.path.isdir(os.path.join(SYS_NET, iface)):
+            do_down(slug, error="The VPN connection dropped")
+            return status_doc(slug)
+        total = _safe_counters(iface)
+        last = state.get("last_bytes")
+        if total is not None and (last is None or abs(total - last) > IDLE_NOISE_BYTES):
+            state["last_activity"] = now_iso()
+        state["last_bytes"] = total
+        save_state(slug, state)
+        idle = int(state.get("idle_minutes") or 0)
+        try:
+            since = datetime.strptime(state.get("last_activity") or "", "%Y-%m-%dT%H:%M:%SZ")
+            quiet = (datetime.now(timezone.utc) - since.replace(tzinfo=timezone.utc)).total_seconds()
+        except ValueError:
+            quiet = 0
+        if idle and quiet >= idle * 60:
+            do_down(slug)
+        return status_doc(slug)
+
+
+def main(argv=None):
+    argv = list(sys.argv[1:] if argv is None else argv)
+    os.environ["PATH"] = SAFE_PATH
+    os.umask(0o077)
+    commands = {"up": cmd_up, "down": cmd_down, "status": cmd_status,
+                "check": cmd_check, "idle-check": cmd_idle_check}
+    try:
+        if len(argv) != 2 or argv[0] not in commands:
+            raise InputError("usage: hermes-vpn-helper up <spec.json> | down|status|check|idle-check <slug>")
+        if os.geteuid() != 0:
+            raise HelperError("hermes-vpn-helper must run as root (use sudo -n)")
+        doc = commands[argv[0]](argv[1])
+    except InputError as exc:
+        print(json.dumps({"error": str(exc), "bad_input": True}))
+        return 2
+    except (HelperError, OSError) as exc:
+        message = str(exc) if isinstance(exc, HelperError) else f"{exc.strerror or exc}"
+        print(json.dumps({"error": message[:300]}))
+        return 1
+    print(json.dumps(doc))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

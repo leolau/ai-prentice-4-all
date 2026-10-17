@@ -100,6 +100,16 @@ AES-GCM is a documented future option.
 | `telegram-token` | `bot_token` | bot_token | reserved (validates by design) |
 | `whatsapp-session` | `session` | session | implemented (reference session-directory adapter, §B) |
 | `password` | `username, password` | password | reserved |
+| `fortinet-vpn` | `host, username, password` (+ optional `port, realm, trusted_cert, routes, share_path, share_username, share_password, share_domain, auto_connect, idle_minutes`) | password, share_password | implemented (provider `fortinet`; VPN in Settings → In&Out, `hermes_cli/vpn.py`) |
+
+`fortinet-vpn` differs from the other kinds in two ways (`KindSpec` flags):
+`keep_secrets_on_put` — a `PUT` replacing an existing entry keeps a secret
+field the body omits or sends empty, so editing a VPN doesn't need the password
+retyped; and `materialize=False` — its entries are never copied into
+`credentials-materialized/`, so agent terminals can't read the VPN password
+(the root helper `deploy/hermes-vpn-helper` is the only consumer). A
+`KindSpec.validator` adds field-level checks (hostname, port, CIDRs, share
+path, sha256).
 
 `validate_payload(kind, payload)` runs on every `put`, both backends. Adding a kind
 is a data change (schema + secret_fields), not a code path change.

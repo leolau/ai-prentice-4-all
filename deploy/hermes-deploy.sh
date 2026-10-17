@@ -178,6 +178,15 @@ echo "deploy OK ($AFTER)  backup: /opt/data/backups/deploy-$TS"
 # weekly drift timer is what reports it.
 ./.venv/bin/python scripts/deploy_state.py handover || true
 
+# The VPN helper runs as root through sudo, so it must be a root-owned copy —
+# never the hermes-owned checkout. Reported when stale, not auto-installed
+# (one-time install + upgrades: docs/deployment/PRODUCTION.md "Fortinet VPN").
+VPN_HELPER=/usr/local/sbin/hermes-vpn-helper
+if [ -e "$VPN_HELPER" ] && ! cmp -s "$VPN_HELPER" "$REPO/deploy/hermes-vpn-helper"; then
+  echo "VPN HELPER STALE: $VPN_HELPER differs from the reviewed copy at $AFTER. Install it with:"
+  echo "    sudo install -m 755 -o root -g root $REPO/deploy/hermes-vpn-helper $VPN_HELPER"
+fi
+
 # The deploy tool does not deploy itself: /opt/data/deploy-hermes.sh is a copy
 # installed by hand, so a merged fix to this script changes nothing on the box
 # until someone remembers to install it — and the deploy it was supposed to fix
