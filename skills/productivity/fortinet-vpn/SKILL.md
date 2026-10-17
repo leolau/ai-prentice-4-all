@@ -1,7 +1,7 @@
 ---
 name: fortinet-vpn
-description: "hermes vpn CLI: connect a configured Fortinet VPN and read files from the office file share (read-only) under /opt/data/vpn-files."
-version: 1.0.0
+description: "hermes vpn CLI: connect a configured Fortinet VPN and read files from the office file share (read-only) under /opt/data/vpn-files; network folders through folder_bridge_* tools."
+version: 1.1.0
 author: core
 license: MIT
 platforms: [linux]
@@ -25,6 +25,25 @@ it with the normal file tools (`read_file`, `search_files`, `terminal` with
   share", "on the S: drive", "in the company files", or under a path such as
   `\\fileserver01\Shared\...`.
 - A task, card or cron job says the input files are behind a VPN.
+
+## Network folders (Folder Bridge)
+
+The user may also have saved **network folders** in Files → Bridge: one
+folder on an office file server, reached through one of their VPNs. Use the
+Folder Bridge tools for those, not `hermes vpn`:
+
+- `folder_bridge_list_folders` lists them with `kind: "network"` and ids
+  `net-…` (they work with no browser connected).
+- `folder_bridge_list_directory`, `folder_bridge_search_files`,
+  `folder_bridge_read_file`, `folder_bridge_get_file_metadata` with that id
+  connect the VPN and mount the folder on first use (read-only).
+- `folder_bridge_import_file` copies a file into Files when the folder is
+  "trusted for import"; otherwise use `folder_bridge_import_file_approved` so
+  the user approves it in chat.
+
+An error such as `VPN connect failed: …`, `File share login failed …` or
+`… is outside the VPN routes …` means the folder or VPN settings need fixing
+in Files → Bridge or Settings → In&Out; tell the user, don't retry.
 
 ## Commands
 

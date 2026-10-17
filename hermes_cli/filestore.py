@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any, Optional
 
 #: Bucket shared with agent-home, whose ``AGENT_HOME_MEDIA_BUCKET`` names the
 #: same objects. One bucket keeps a file's key stable no matter which surface
@@ -104,6 +104,35 @@ class SupabaseStorage:
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             response = await client.post(
                 self._object_url(path), content=data, headers=headers
+            )
+        if response.status_code >= 400:
+            raise RuntimeError(
+                f"Supabase Storage upload failed ({response.status_code}): "
+                f"{response.text[:200]}"
+            )
+        return path
+
+    async def upload_stream(
+        self,
+        path: str,
+        chunks: Any,
+        *,
+        size: int,
+        content_type: str = "application/octet-stream",
+        upsert: bool = True,
+    ) -> str:
+        """Like :meth:`upload`, streaming ``chunks`` (an async iterator of
+        bytes, ``size`` bytes in total) instead of holding the file in memory."""
+        import httpx
+
+        headers = dict(self._headers)
+        headers["Content-Type"] = content_type or "application/octet-stream"
+        headers["Content-Length"] = str(size)
+        headers["x-upsert"] = "true" if upsert else "false"
+        timeout = httpx.Timeout(self.timeout, write=None, read=max(self.timeout, 300.0))
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.post(
+                self._object_url(path), content=chunks, headers=headers
             )
         if response.status_code >= 400:
             raise RuntimeError(

@@ -80,6 +80,17 @@ FolderBridge (client,   ──WSS──▶     · MCP endpoint 127.0.0.1:9220/mc
 | `folder_bridge_import_file` | Copy a file byte-for-byte into Files (any type) — browser accepts it only for folders the user marked "trusted for import" |
 | `folder_bridge_import_file_approved` | Same, for untrusted folders — **gate this**; the in-chat approval is what lets the browser accept it |
 
+### Network folders
+
+Besides browser folders, `folder_bridge_*` serve **network folders** (ids
+`net-…`, `kind: "network"`): office SMB shares the Hermes server mounts
+read-only through a user's Fortinet VPN at `/opt/data/vpn-files/net-<slug>`.
+app-mcp reads those mounts itself (`app_mcp/netfolders.py`), so they work with
+no browser connected, and asks the Hermes dashboard to mount a folder or
+import a file through `/api/internal/vpn/folders*` with
+`APP_MCP_HERMES_TOKEN` (see `deploy/app-mcp.env.example`). Design:
+`docs/design/folder-bridge.md` "Network folders".
+
 ### Why Folder Bridge reads are recommended-gated
 
 `app_act`/`app_act_destructive` are bounded by what the signed-in user could

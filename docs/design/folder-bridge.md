@@ -173,3 +173,40 @@ Approval is two-tier, decided in the browser:
   the user approves that file in chat. The `approved: true` flag it sends is
   only honoured because the tool is gated — deployments that leave it ungated
   turn it into an unconditional import.
+
+## Network folders (office file shares through a VPN)
+
+A user can also add **network folders** on `/files/bridge`: an SMB path
+(`\\server\share\folder`, `smb://server/share/folder` or
+`//server/share/folder`) reached through one of their saved Fortinet VPNs
+(Settings → In&Out, kind `fortinet-vpn`). Unlike browser folders they live on
+the server, so the agent can use them while the Bridge page is closed (cards,
+scheduled jobs). The agent uses the same `folder_bridge_*` tools; there are no
+new model tools.
+
+| Piece | Where |
+|---|---|
+| Storage | credential kind `smb-folder`, provider `fortinet` (`hermes_cli/credential_store.py`): `vpn`, `share_path` (normalised `//server/share[/sub]`), optional `share_username`/`share_password` (secret, redacted, kept on edit)/`share_domain`, `trusted_for_import`. Never materialized. Private to its owner. |
+| Manager | `hermes_cli/vpn_folders.py`: slugs (`$HERMES_HOME/vpn/state.json` → `folder_slugs`, stable across renames; folder id `net-<slug>`), views, `ensure` (connect the VPN if needed, then mount), test/disconnect/delete, internal list/import |
+| User API | `/api/vpn/folders` (`hermes_cli/vpn_api.py`): `GET`, `POST`, `PUT /{name}`, `DELETE /{name}`, `POST /{name}/test`, `POST /{name}/disconnect`. Caller's own folders only; anyone else's is a 404. The VPN must be readable by the caller. |
+| Mount | root helper `mount <spec>` / `umount` / `fstatus` / `fcheck <folder_slug>` (`deploy/hermes-vpn-helper`): read-only CIFS at `/opt/data/vpn-files/net-<slug>`, same options as the VPN's own share, only through a connected VPN and only to a server inside that VPN's routes. `down`/idle disconnect unmounts the VPN's folders. VPN slugs can't start with `net-`. |
+| Agent side | `app-mcp/app_mcp/netfolders.py`: `net-*` ids are served by app-mcp from the mount (list/search/read/metadata; same shapes as the browser; `..` and symlinks refused). app-mcp runs as `hermes` without sudo, so it asks the dashboard to mount (`POST /api/internal/vpn/folders/ensure {id}`) and to import (`POST /api/internal/vpn/folders/import {id, path, approved}`); `GET /api/internal/vpn/folders` lists every folder on the box. |
+| Internal auth | `Authorization: Bearer $APP_MCP_HERMES_TOKEN` (same value in `app-mcp/app-mcp.env` and the Hermes `.env`), verified by the `app-mcp-internal` token provider through the dashboard's token-auth seam (exact routes; fails closed without a ≥32-char token). Requests carrying `X-Forwarded-For`/`Forwarded` (i.e. via Caddy) are refused. |
+
+Share login: the folder's own login when set, else the VPN entry's
+`share_username`/`share_password`/`share_domain`, else the VPN login.
+
+Visibility: while mounted, any agent on the box may read a network folder
+(box-level, like a VPN's own share), so `folder_bridge_list_folders` lists all
+of them (`kind: "network"`, `trusted` = `trusted_for_import`). Agent calls
+respect a VPN's `auto_connect: false` (the user must connect it); the user's
+"Save & test" connects it.
+
+Import: `folder_bridge_import_file` on a `net-*` folder works only when the
+folder is trusted for import (else `needsApproval: true`), checked by app-mcp
+and again by Hermes; `folder_bridge_import_file_approved` proceeds. Hermes
+(root, holds the Storage key) opens the file without following symlinks,
+hashes it, streams it to Storage under the folder owner's prefix
+(`file_registry.storage_key`), checks the streamed hash matches, and registers
+a `file_assets` row (`surface=agent_home`, `conversation=<folder name>/<path>`)
+owned by the folder's owner. The result has the browser import's shape.

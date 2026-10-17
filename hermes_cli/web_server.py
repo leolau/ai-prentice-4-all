@@ -308,6 +308,8 @@ from hermes_cli.incomings_api import router as _incomings_router  # noqa: E402
 from hermes_cli.todos_api import router as _todos_router  # noqa: E402
 from hermes_cli.credentials_api import router as _credentials_router  # noqa: E402
 from hermes_cli.vpn_api import router as _vpn_router  # noqa: E402
+from hermes_cli.vpn_api import internal_router as _vpn_internal_router  # noqa: E402
+from hermes_cli.vpn_api import install_internal_auth as _vpn_install_internal_auth  # noqa: E402
 from hermes_cli.email_accounts_api import router as _email_accounts_router  # noqa: E402
 from hermes_cli.wa_bridge_api import router as _wa_bridge_router  # noqa: E402
 from hermes_cli.goals_api import router as _goals_router  # noqa: E402
@@ -326,6 +328,8 @@ app.include_router(_incomings_router)
 app.include_router(_todos_router)
 app.include_router(_credentials_router)
 app.include_router(_vpn_router)
+app.include_router(_vpn_internal_router)
+_vpn_install_internal_auth()
 app.include_router(_email_accounts_router)
 app.include_router(_wa_bridge_router)
 app.include_router(_goals_router)
@@ -18623,7 +18627,11 @@ def start_server(
         # provider to be registered, else fail closed — there is no longer an
         # escape hatch that serves the dashboard without authentication.
         from hermes_cli.dashboard_auth import list_providers
-        if not list_providers():
+        from hermes_cli.dashboard_auth.registry import list_session_providers
+
+        # Token-only service credentials (drain, app-mcp-internal) can't log
+        # anyone in, so they don't count as an auth provider here.
+        if not list_session_providers():
             # Surface the *specific* reason any bundled provider declined
             # to register (e.g. missing HERMES_DASHBOARD_OAUTH_CLIENT_ID).
             # Each provider plugin that ships with Hermes Agent exposes a

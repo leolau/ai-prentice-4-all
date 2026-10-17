@@ -284,6 +284,35 @@ checkout; re-run the `install` line of step 3 then. Rollback:
 `rm /etc/sudoers.d/hermes-vpn /usr/local/sbin/hermes-vpn-helper` (disconnect
 first with `hermes vpn down "<name>"`).
 
+### Network folders (Folder Bridge) — upgrade notes
+
+Network folders (`smb-folder` entries, `/api/vpn/folders`, design in
+`docs/design/folder-bridge.md` "Network folders") add helper commands
+`mount`/`umount`/`fstatus`/`fcheck` and mount at
+`/opt/data/vpn-files/net-<slug>`. After the code deploy:
+
+```bash
+# 0. backup
+mkdir -p /opt/data/backups/netfolders-$(date +%F) && cp -a /usr/local/sbin/hermes-vpn-helper /opt/data/hermes-agent/app-mcp/app-mcp.env /opt/data/backups/netfolders-$(date +%F)/
+# 1. the helper MUST be reinstalled (hermes-deploy.sh prints VPN HELPER STALE until it is)
+install -m 0755 -o root -g root /opt/data/hermes-agent/deploy/hermes-vpn-helper /usr/local/sbin/hermes-vpn-helper
+sudo -u hermes sudo -n /usr/local/sbin/hermes-vpn-helper fstatus smoke-test   # {"folder_slug": "smoke-test", "mounted": false, ...}
+# 2. new secret shared by app-mcp and the dashboard (same value in both files)
+TOKEN=$(openssl rand -hex 32)
+echo "APP_MCP_HERMES_TOKEN=$TOKEN" >> /opt/data/hermes-agent/app-mcp/app-mcp.env
+echo "APP_MCP_HERMES_TOKEN=$TOKEN" >> /opt/data/hermes-home-staging/.env   # the .env the dashboard loads ($HERMES_HOME/.env)
+# 3. restart both so they read it (brief dashboard/agent-home API blip; mobile apps unaffected)
+systemctl restart app-mcp.service hermes-dashboard.service
+```
+
+Without `APP_MCP_HERMES_TOKEN` (≥ 32 chars) the internal routes answer 401 and
+`folder_bridge_*` simply shows no network folders. If the dashboard isn't on
+`127.0.0.1:9119`, set `APP_MCP_HERMES_URL` in `app-mcp.env`. app-mcp
+(`ProtectSystem=strict`, runs as `hermes`) reads the mounts directly — they
+propagate into its mount namespace — and never needs sudo. Mobile apps are
+unaffected. Rollback: reinstall the backed-up helper; the old helper ignores
+folder mounts (unmount them first with `hermes-vpn-helper umount <slug>`).
+
 Operate: `systemctl list-units 'hermes-vpn-*'`,
 `cat /run/hermes-vpn/<slug>/openfortivpn.log`,
 `/usr/local/sbin/hermes-vpn-helper status|down <slug>`.

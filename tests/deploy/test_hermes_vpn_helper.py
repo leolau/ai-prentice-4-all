@@ -796,3 +796,281 @@ def test_dns_query_a_parses_answer(tmp_path):
     finally:
         h.socket.socket = original
         server.close()
+
+
+# ---------------------------------------------------------------------------
+# Network folders: mount / umount / fstatus / fcheck
+# ---------------------------------------------------------------------------
+
+
+def folder_spec(**over):
+    spec = {
+        "vpn_slug": "office-files",
+        "folder_slug": "tenders",
+        "share_path": "//10.20.1.9/Projects/Tenders",
+        "share_username": "bob",
+        "share_password": "folder-pw",
+    }
+    spec.update(over)
+    return {k: v for k, v in spec.items() if v is not None}
+
+
+def fmount(h, **over):
+    return h.cmd_mount(write_spec(h, folder_spec(**over), name="spec-folder.json"))
+
+
+def folder_mount_path(h, slug="tenders"):
+    return os.path.join(h.MOUNT_ROOT, f"net-{slug}")
+
+
+def test_mount_folder_through_connected_vpn(h):
+    up(h)
+    doc = fmount(h)
+    assert doc["mounted"] is True and doc["error"] is None, doc
+    assert doc["vpn_slug"] == "office-files"
+    assert doc["mount_path"] == folder_mount_path(h)
+    mount = calls(h, "mount")[-1]
+    assert mount[1:5] == [
+        "-t",
+        "cifs",
+        "//10.20.1.9/Projects/Tenders",
+        folder_mount_path(h),
+    ]
+    opts = mount[6].split(",")
+    for opt in (
+        "ro",
+        "nosuid",
+        "nodev",
+        "noexec",
+        "file_mode=0440",
+        "dir_mode=0550",
+        "vers=3.0",
+        "ip=10.20.1.9",
+        "uid=hermes",
+        "gid=hermes",
+    ):
+        assert opt in opts
+    assert not any(o.startswith(("password", "username")) for o in opts)
+    creds = json.loads((h.world / "creds-seen.json").read_text())
+    assert (
+        creds["mode"] == 0o600 and creds["text"] == "username=bob\npassword=folder-pw\n"
+    )
+    run_dir = Path(h.RUN_DIR) / "office-files"
+    assert not list(run_dir.glob("*.cred"))
+    state = json.loads((run_dir / "state.json").read_text())
+    assert "tenders" in state["folders"]
+    folder_state = (Path(h.RUN_DIR) / "net-tenders" / "state.json").read_text()
+    assert "folder-pw" not in folder_state and "folder-pw" not in json.dumps(state)
+    # the VPN's own share stays mounted alongside
+    assert h.cmd_status("office-files")["mounted"] is True
+
+
+def test_mount_folder_resolves_name_through_vpn_dns(h):
+    up(h)
+    doc = fmount(h, share_path=r"\\fileserver01\Other", share_domain="CORP")
+    assert doc["mounted"] is True, doc
+    assert "ip=10.20.1.5" in calls(h, "mount")[-1][6].split(",")
+    creds = json.loads((h.world / "creds-seen.json").read_text())
+    assert creds["text"].endswith("domain=CORP\n")
+
+
+def test_mount_folder_needs_connected_vpn(h):
+    doc = fmount(h)
+    assert doc["mounted"] is False and doc["error"] == "VPN is not connected"
+    assert calls(h, "mount") == []
+    assert not os.path.exists(folder_mount_path(h))
+
+
+def test_mount_folder_outside_routes_refused(h):
+    up(h)
+    doc = fmount(h, share_path="//10.99.0.5/Projects")
+    assert doc["mounted"] is False
+    assert "outside the VPN routes 10.20.0.0/16" in doc["error"]
+    assert len(calls(h, "mount")) == 1  # only the VPN's own share
+
+
+def test_mount_folder_unknown_server(h):
+    up(h)
+    doc = fmount(h, share_path="//nowhere/Projects")
+    assert (
+        doc["mounted"] is False and "Can't find the file server nowhere" in doc["error"]
+    )
+
+
+def test_mount_folder_login_failure_cleans_creds(h):
+    up(h)
+    (h.world / "mount-fail").touch()
+    doc = fmount(h)
+    assert doc["mounted"] is False and doc["error"].startswith(
+        "File share login failed"
+    )
+    assert not list((Path(h.RUN_DIR) / "office-files").glob("*.cred"))
+    assert not os.path.exists(folder_mount_path(h))
+    # the failure is remembered for fstatus, and the VPN itself stays up
+    assert h.cmd_fstatus("tenders")["error"].startswith("File share login failed")
+    assert h.cmd_status("office-files")["state"] == "connected"
+
+
+def test_mount_folder_is_idempotent_and_remounts_on_change(h):
+    up(h)
+    fmount(h)
+    before = len(calls(h, "mount"))
+    assert fmount(h)["mounted"] is True
+    assert len(calls(h, "mount")) == before
+    assert fmount(h, share_password="rotated")["mounted"] is True
+    assert len(calls(h, "mount")) == before + 1
+    assert calls(h, "umount")[-1][-1] == folder_mount_path(h)
+
+
+def test_down_unmounts_folders(h):
+    up(h)
+    fmount(h)
+    fmount(h, folder_slug="hr", share_path="//10.20.1.9/HR")
+    h.cmd_down("office-files")
+    for slug in ("tenders", "hr"):
+        doc = h.cmd_fstatus(slug)
+        assert doc["mounted"] is False and doc["error"] is None
+        assert doc["vpn_state"] == "disconnected"
+        assert not os.path.exists(folder_mount_path(h, slug))
+
+
+def test_idle_disconnect_unmounts_folders(h):
+    up(h, idle_minutes=5)
+    fmount(h)
+    _age_activity(h, 6)
+    assert h.cmd_idle_check("office-files")["state"] == "disconnected"
+    assert h.cmd_fstatus("tenders")["mounted"] is False
+
+
+def test_reconnect_with_changed_vpn_spec_unmounts_folders(h):
+    up(h)
+    fmount(h)
+    up(h, routes=["10.20.0.0/16", "10.30.0.0/16"])
+    assert h.cmd_fstatus("tenders")["mounted"] is False
+
+
+def test_umount_folder(h):
+    up(h)
+    fmount(h)
+    doc = h.cmd_umount("tenders")
+    assert doc["mounted"] is False and not os.path.exists(folder_mount_path(h))
+    state = json.loads((Path(h.RUN_DIR) / "office-files" / "state.json").read_text())
+    assert "tenders" not in state.get("folders", {})
+    assert h.cmd_status("office-files")["state"] == "connected"
+    assert h.cmd_umount("tenders")["mounted"] is False  # idempotent
+    assert h.cmd_umount("never-seen")["mounted"] is False
+
+
+def test_moving_folder_to_another_vpn_unmounts_old(h):
+    up(h)
+    fmount(h)
+    doc = fmount(h, vpn_slug="other-vpn")
+    assert doc["mounted"] is False and doc["error"] == "VPN is not connected"
+    state = json.loads((Path(h.RUN_DIR) / "office-files" / "state.json").read_text())
+    assert "tenders" not in state.get("folders", {})
+
+
+def test_fstatus_and_fcheck(h):
+    up(h)
+    fmount(h)
+    root = Path(folder_mount_path(h))
+    (root / "2026").mkdir()
+    for name in ("a.pdf", "2026/b.docx"):
+        (root / name).write_text("x")
+    _age_activity(h, 20)
+    doc = h.cmd_fcheck("tenders")
+    assert doc["check"]["ok"] is True and doc["check"]["file_count"] == 2
+    assert doc["vpn_state"] == "connected"
+    state = json.loads((Path(h.RUN_DIR) / "office-files" / "state.json").read_text())
+    age = datetime.now(timezone.utc) - datetime.strptime(
+        state["last_activity"], "%Y-%m-%dT%H:%M:%SZ"
+    ).replace(tzinfo=timezone.utc)
+    assert age < timedelta(minutes=1)
+    status = h.cmd_fstatus("tenders")
+    assert status == {**{k: doc[k] for k in status}}
+
+
+def test_fcheck_when_not_mounted(h):
+    doc = h.cmd_fcheck("tenders")
+    assert doc["check"]["ok"] is False and doc["mounted"] is False
+
+
+@pytest.mark.parametrize(
+    "over",
+    [
+        {"folder_slug": "Tenders"},
+        {"folder_slug": "../etc"},
+        {"folder_slug": "a" * 42},
+        {"folder_slug": None},
+        {"vpn_slug": "net-office"},
+        {"vpn_slug": "../x"},
+        {"share_path": None},
+        {"share_path": "//10.20.1.9"},
+        {"share_path": "//10.20.1.9/Projects/../../etc"},
+        {"share_path": "//10.20.1.9/Pro,jects"},
+        {"share_path": "//127.0.0.1/Projects"},
+        {"share_username": None},
+        {"share_username": "bob\npassword=x"},
+        {"share_username": "bob,uid=0"},
+        {"share_password": "pw\nusername=root"},
+        {"share_password": " pw"},
+        {"share_domain": "CORP%x"},
+        {"host": "vpn.example.com"},
+        {"options": "rw"},
+    ],
+)
+def test_bad_mount_spec_rejected(over):
+    h = load_helper()
+    with pytest.raises(h.InputError):
+        h.validate_mount_spec(folder_spec(**over))
+
+
+def test_mount_spec_symlink_refused(h, tmp_path):
+    target = h.spool / "real.json"
+    target.write_text(json.dumps(folder_spec()))
+    os.chmod(target, 0o600)
+    link = h.spool / "spec-link.json"
+    os.symlink(target, link)
+    with pytest.raises(h.InputError):
+        h.cmd_mount(str(link))
+    assert target.exists()
+
+
+def test_mount_spec_read_then_deleted(h):
+    up(h)
+    path = write_spec(h, folder_spec(), name="spec-del.json")
+    h.cmd_mount(path)
+    assert not os.path.exists(path)
+
+
+@pytest.mark.parametrize("command", ["down", "status", "check", "idle-check"])
+def test_vpn_commands_refuse_folder_prefix(h, command):
+    with pytest.raises(h.InputError):
+        {
+            "down": h.cmd_down,
+            "status": h.cmd_status,
+            "check": h.cmd_check,
+            "idle-check": h.cmd_idle_check,
+        }[command]("net-tenders")
+
+
+def test_up_refuses_folder_prefix_slug():
+    h = load_helper()
+    with pytest.raises(h.InputError):
+        h.validate_spec(base_spec(slug="net-office"))
+
+
+def test_main_folder_commands(h, monkeypatch, capsys):
+    monkeypatch.setattr(h.os, "geteuid", lambda: 0)
+    assert h.main(["fstatus", "Bad/slug"]) == 2
+    capsys.readouterr()
+    assert h.main(["mount", write_spec(h, folder_spec(share_username=""))]) == 2
+    assert "share_username" in json.loads(capsys.readouterr().out)["error"]
+    assert h.main(["up", write_spec(h, base_spec(trusted_cert=GOOD_SHA))]) == 0
+    capsys.readouterr()
+    assert h.main(["mount", write_spec(h, folder_spec())]) == 0
+    assert json.loads(capsys.readouterr().out)["mounted"] is True
+    assert h.main(["fcheck", "tenders"]) == 0
+    assert json.loads(capsys.readouterr().out)["check"]["ok"] is True
+    assert h.main(["umount", "tenders"]) == 0
+    assert json.loads(capsys.readouterr().out)["mounted"] is False

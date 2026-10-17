@@ -13,6 +13,14 @@ local/docker networks are never touched.
     hermes-vpn-helper status <slug>
     hermes-vpn-helper check <slug>     # list the mounted share, count files
     hermes-vpn-helper idle-check <slug>  # run by the per-VPN systemd timer
+    hermes-vpn-helper mount <spec.json>  # network folder: mount one more share through a connected VPN
+    hermes-vpn-helper umount <folder_slug>
+    hermes-vpn-helper fstatus <folder_slug>
+    hermes-vpn-helper fcheck <folder_slug>   # list the mounted folder, count files
+
+Network folders (Folder Bridge) mount at ``MOUNT_ROOT/net-<folder_slug>``; a
+VPN slug may therefore never start with ``net-``. A folder mount belongs to
+the VPN it was mounted through: ``down``/idle disconnect unmount it too.
 
 Output is one JSON object on stdout. Exit 0 = handled (a failed connection is
 ``state: error``, not an exit code), 2 = rejected input, 1 = internal failure.
@@ -81,6 +89,11 @@ SPEC_KEYS = {
     "idle_minutes",
 }
 SECRET_KEYS = ("password", "share_password")
+MOUNT_SPEC_KEYS = {
+    "vpn_slug", "folder_slug", "share_path", "share_username", "share_password",
+    "share_domain",
+}
+FOLDER_PREFIX = "net-"
 
 #: Never routed through a VPN, whatever the box's tables say.
 ALWAYS_FORBIDDEN = tuple(
@@ -113,6 +126,19 @@ def check_slug(slug):
     if not isinstance(slug, str) or not SLUG_RE.fullmatch(slug):
         raise InputError("invalid slug")
     return slug
+
+
+def check_vpn_slug(slug):
+    """A VPN slug: ``net-*`` is reserved for network-folder mount points."""
+    check_slug(slug)
+    if slug.startswith(FOLDER_PREFIX):
+        raise InputError(f"VPN slugs may not start with {FOLDER_PREFIX}")
+    return slug
+
+
+def folder_name(folder_slug):
+    """Run-dir and mount-dir name of a network folder (``net-<slug>``)."""
+    return FOLDER_PREFIX + check_slug(folder_slug)
 
 
 def _plain(value, field, *, max_len=256, required=True):
@@ -190,7 +216,7 @@ def validate_spec(raw):
     unknown = sorted(set(raw) - SPEC_KEYS)
     if unknown:
         raise InputError(f"spec has unknown fields: {', '.join(unknown)}")
-    spec = {"slug": check_slug(raw.get("slug")), "host": check_host(raw.get("host"))}
+    spec = {"slug": check_vpn_slug(raw.get("slug")), "host": check_host(raw.get("host"))}
     port = raw.get("port", 443)
     if port is None:
         port = 443
@@ -240,6 +266,36 @@ def validate_spec(raw):
         raise InputError("idle_minutes must be an integer 0-1440")
     spec["idle_minutes"] = idle
     return spec
+
+
+def _account(value, field, *, required=False):
+    if value is None or value == "":
+        if required:
+            raise InputError(f"{field} is required")
+        return None
+    if not isinstance(value, str) or not ACCOUNT_RE.fullmatch(value):
+        raise InputError(f"{field} has invalid characters")
+    return value
+
+
+def validate_mount_spec(raw):
+    """``mount`` spec: credentials are already resolved by the caller."""
+    if not isinstance(raw, dict):
+        raise InputError("spec must be a JSON object")
+    unknown = sorted(set(raw) - MOUNT_SPEC_KEYS)
+    if unknown:
+        raise InputError(f"spec has unknown fields: {', '.join(unknown)}")
+    share = raw.get("share_path")
+    if not share:
+        raise InputError("share_path is required")
+    return {
+        "vpn_slug": check_vpn_slug(raw.get("vpn_slug")),
+        "folder_slug": check_slug(raw.get("folder_slug")),
+        "share": parse_share_path(share),
+        "share_username": _account(raw.get("share_username"), "share_username", required=True),
+        "share_password": _plain(raw.get("share_password"), "share_password", required=False),
+        "share_domain": _account(raw.get("share_domain"), "share_domain"),
+    }
 
 
 def caller_uid():
@@ -337,6 +393,16 @@ def render_smb_credentials(spec):
     return "\n".join(lines) + "\n"
 
 
+def render_folder_credentials(spec):
+    lines = [f"username={spec['share_username']}", f"password={spec['share_password'] or ''}"]
+    if spec.get("share_domain"):
+        lines.append(f"domain={spec['share_domain']}")
+    for line in lines:
+        if CONTROL_RE.search(line):
+            raise InputError("share credential contains control characters")
+    return "\n".join(lines) + "\n"
+
+
 def write_private(path, text):
     with contextlib.suppress(FileNotFoundError):
         os.unlink(path)
@@ -376,6 +442,11 @@ def paths(slug):
         "unit": f"hermes-vpn-{slug}.service",
         "timer": f"hermes-vpn-idle-{slug}",
     }
+
+
+def folder_paths(folder_slug):
+    name = folder_name(folder_slug)
+    return {"name": name, "mount": os.path.join(MOUNT_ROOT, name)}
 
 
 def load_state(slug):
@@ -742,6 +813,75 @@ def spec_fingerprint(spec):
     return hashlib.sha256(json.dumps(spec, sort_keys=True, default=str).encode()).hexdigest()
 
 
+def lookup_share_ip(server, info, iface):
+    """Public DNS first, then the VPN's DNS servers through the tunnel."""
+    try:
+        return resolve_ipv4(server)[0]
+    except (OSError, IndexError):
+        pass
+    names = [server] + ([f"{server}.{info['suffix']}"] if info.get("suffix") and "." not in server else [])
+    for name in names:
+        for ns in info.get("dns") or []:
+            with contextlib.suppress(OSError, struct.error, IndexError, UnicodeError):
+                found = dns_query_a(name, ns, iface)
+                if found:
+                    return found[0]
+    return None
+
+
+def mount_cifs(share, target, creds_path, share_ip):
+    """Mount read-only; returns None or a user-readable error."""
+    server, share_name, subs = share
+    unc = "//" + "/".join([server, share_name, *subs])
+    options = ",".join([
+        "ro", "nosuid", "nodev", "noexec", f"uid={MOUNT_USER}", f"gid={MOUNT_USER}",
+        "file_mode=0440", "dir_mode=0550", f"credentials={creds_path}",
+        "vers=3.0", f"ip={share_ip}",
+    ])
+    try:
+        proc = run([bin_path("mount"), "-t", "cifs", unc, target, "-o", options],
+                   timeout=MOUNT_TIMEOUT)
+    except HelperError:
+        proc = None
+    if proc is not None and proc.returncode == 0:
+        return None
+    detail = ((proc.stderr or proc.stdout) if proc else "timed out").lower()
+    if "permission denied" in detail or "error(13)" in detail:
+        return "File share login failed: check the file share username and password"
+    if "no such file" in detail or "error(2)" in detail:
+        return f"Share {unc} was not found on the file server"
+    if "timed out" in detail or "host is down" in detail or "unreachable" in detail:
+        return f"File server {server} is not reachable through the VPN"
+    return f"Could not mount {unc}"
+
+
+def unmount(path):
+    """Unmount (lazily if busy) and remove the empty mount point."""
+    if is_mounted(path):
+        umount = bin_path("umount")
+        try:
+            done = run([umount, path], timeout=15).returncode == 0
+        except HelperError:
+            done = False
+        if not done:
+            run([umount, "-l", path], timeout=15)
+    if os.path.isdir(path) and not os.path.islink(path) and not is_mounted(path):
+        with contextlib.suppress(OSError):
+            os.rmdir(path)
+
+
+def folders_of(slug, state):
+    """Folder slugs mounted through VPN ``slug`` (its state + folder states)."""
+    found = {f for f in (state.get("folders") or {}) if isinstance(f, str) and SLUG_RE.fullmatch(f)}
+    with contextlib.suppress(OSError):
+        for name in os.listdir(RUN_DIR):
+            folder = name[len(FOLDER_PREFIX):]
+            if name.startswith(FOLDER_PREFIX) and SLUG_RE.fullmatch(folder):
+                if load_state(name).get("vpn_slug") == slug:
+                    found.add(folder)
+    return sorted(found)
+
+
 def status_doc(slug):
     p = paths(slug)
     state = load_state(slug)
@@ -775,6 +915,10 @@ def do_down(slug, *, error=None):
     state = load_state(slug)
     with contextlib.suppress(HelperError):
         run([bin_path("systemctl"), "stop", f"{p['timer']}.timer"], timeout=20)
+    for folder in folders_of(slug, state):
+        fp = folder_paths(folder)
+        unmount(fp["mount"])
+        save_state(fp["name"], {"vpn_slug": slug, "last_error": error})
     if is_mounted(p["mount"]):
         umount = bin_path("umount")
         try:
@@ -868,19 +1012,7 @@ def cmd_up(spec_path):
         share_ip = None
         if spec["share"]:
             server = spec["share"][0]
-            try:
-                share_ip = resolve_ipv4(server)[0]
-            except (OSError, IndexError):
-                names = [server] + ([f"{server}.{info['suffix']}"] if info["suffix"] and "." not in server else [])
-                for name in names:
-                    for ns in info["dns"]:
-                        with contextlib.suppress(OSError, struct.error, IndexError, UnicodeError):
-                            found = dns_query_a(name, ns, iface)
-                            if found:
-                                share_ip = found[0]
-                                break
-                    if share_ip:
-                        break
+            share_ip = lookup_share_ip(server, info, iface)
             if not share_ip:
                 return _fail(slug, f"Can't find the file server {server} (not in public or VPN DNS)")
             if not routes:
@@ -899,34 +1031,16 @@ def cmd_up(spec_path):
             state["routes"].append(route)
             save_state(slug, state)
         if spec["share"]:
-            server, share, subs = spec["share"]
             try:
                 target = secure_mount_point(slug)
             except HelperError as exc:
                 return _fail(slug, str(exc))
             write_private(p["creds"], render_smb_credentials(spec))
-            unc = "//" + "/".join([server, share, *subs])
-            options = ",".join([
-                "ro", "nosuid", "nodev", "noexec", f"uid={MOUNT_USER}", f"gid={MOUNT_USER}",
-                "file_mode=0440", "dir_mode=0550", f"credentials={p['creds']}",
-                "vers=3.0", f"ip={share_ip}",
-            ])
             try:
-                proc = run([bin_path("mount"), "-t", "cifs", unc, target, "-o", options],
-                           timeout=MOUNT_TIMEOUT)
-            except HelperError:
-                proc = None
-            remove(p["creds"])
-            if proc is None or proc.returncode != 0:
-                detail = ((proc.stderr or proc.stdout) if proc else "timed out").lower()
-                if "permission denied" in detail or "error(13)" in detail:
-                    message = "File share login failed: check the file share username and password"
-                elif "no such file" in detail or "error(2)" in detail:
-                    message = f"Share {unc} was not found on the file server"
-                elif "timed out" in detail or "host is down" in detail or "unreachable" in detail:
-                    message = f"File server {server} is not reachable through the VPN"
-                else:
-                    message = f"Could not mount {unc}"
+                message = mount_cifs(spec["share"], target, p["creds"], share_ip)
+            finally:
+                remove(p["creds"])
+            if message:
                 return _fail(slug, message)
         if spec["idle_minutes"] > 0:
             run([
@@ -951,14 +1065,14 @@ def _safe_counters(iface):
 
 
 def cmd_down(slug):
-    check_slug(slug)
+    check_vpn_slug(slug)
     with slug_lock(slug):
         do_down(slug)
         return status_doc(slug)
 
 
 def cmd_status(slug):
-    check_slug(slug)
+    check_vpn_slug(slug)
     return status_doc(slug)
 
 
@@ -978,7 +1092,7 @@ def count_files(root, deadline):
 
 
 def cmd_check(slug):
-    check_slug(slug)
+    check_vpn_slug(slug)
     doc = status_doc(slug)
     at = now_iso()
     if doc["state"] != "connected":
@@ -993,12 +1107,18 @@ def cmd_check(slug):
         doc["check"] = {"at": at, "ok": True, "file_count": None,
                         "message": "VPN connected; no file share is configured."}
         return doc
+    doc["check"] = dict(walk_check(doc["mount_path"]), at=at)
+    return doc
+
+
+def walk_check(root):
+    """Count files under ``root`` with a deadline; a ``check`` dict (no ``at``)."""
     result = {}
 
     def walk():
         try:
             result["count"], result["partial"] = count_files(
-                doc["mount_path"], time.monotonic() + CHECK_TIMEOUT
+                root, time.monotonic() + CHECK_TIMEOUT
             )
         except OSError as exc:
             result["error"] = exc.strerror or str(exc)
@@ -1016,12 +1136,11 @@ def cmd_check(slug):
         more = "at least " if result["partial"] else ""
         check = {"ok": True, "file_count": n,
                  "message": f"File server reachable, {more}{n:,} files listed."}
-    doc["check"] = dict(check, at=at)
-    return doc
+    return check
 
 
 def cmd_idle_check(slug):
-    check_slug(slug)
+    check_vpn_slug(slug)
     with slug_lock(slug, blocking=False) as got:
         if not got:
             return status_doc(slug)
@@ -1051,15 +1170,151 @@ def cmd_idle_check(slug):
         return status_doc(slug)
 
 
+# ---------------------------------------------------------------------------
+# Network folders (Folder Bridge): extra read-only mounts through a VPN
+# ---------------------------------------------------------------------------
+
+
+def folder_doc(folder_slug):
+    fp = folder_paths(folder_slug)
+    state = load_state(fp["name"])
+    vpn_slug = state.get("vpn_slug")
+    if not (isinstance(vpn_slug, str) and SLUG_RE.fullmatch(vpn_slug)):
+        vpn_slug = None
+    return {
+        "folder_slug": folder_slug, "vpn_slug": vpn_slug,
+        "mounted": is_mounted(fp["mount"]), "mount_path": fp["mount"],
+        "error": state.get("last_error"), "since": state.get("since"),
+    }
+
+
+def _folder_fail(folder_slug, vpn_slug, message):
+    fp = folder_paths(folder_slug)
+    if not is_mounted(fp["mount"]) and os.path.isdir(fp["mount"]) and not os.path.islink(fp["mount"]):
+        with contextlib.suppress(OSError):
+            os.rmdir(fp["mount"])
+    save_state(fp["name"], {"vpn_slug": vpn_slug, "last_error": message})
+    return folder_doc(folder_slug)
+
+
+def cmd_mount(spec_path):
+    spec = validate_mount_spec(read_spec_file(spec_path))
+    vpn_slug, folder = spec["vpn_slug"], spec["folder_slug"]
+    fp = folder_paths(folder)
+    fingerprint = spec_fingerprint(spec)
+    prior = load_state(fp["name"])
+    old_vpn = prior.get("vpn_slug")
+    if (isinstance(old_vpn, str) and old_vpn != vpn_slug and SLUG_RE.fullmatch(old_vpn)
+            and not old_vpn.startswith(FOLDER_PREFIX)):
+        with slug_lock(old_vpn):
+            unmount(fp["mount"])
+            old = load_state(old_vpn)
+            if folder in (old.get("folders") or {}):
+                old["folders"].pop(folder, None)
+                save_state(old_vpn, old)
+    with slug_lock(vpn_slug):
+        vpn = status_doc(vpn_slug)
+        if vpn["state"] != "connected":
+            unmount(fp["mount"])
+            return _folder_fail(folder, vpn_slug, "VPN is not connected")
+        state = load_state(vpn_slug)
+        mounted = is_mounted(fp["mount"])
+        if (mounted and prior.get("fingerprint") == fingerprint
+                and prior.get("vpn_slug") == vpn_slug and folder in (state.get("folders") or {})):
+            state["last_activity"] = now_iso()
+            save_state(vpn_slug, state)
+            return folder_doc(folder)
+        unmount(fp["mount"])
+        iface = state.get("iface") or ""
+        if not IFACE_RE.fullmatch(iface):
+            return _folder_fail(folder, vpn_slug, "VPN is not connected")
+        server = spec["share"][0]
+        share_ip = lookup_share_ip(server, parse_log(read_log(vpn_slug)), iface)
+        if not share_ip:
+            return _folder_fail(folder, vpn_slug, f"Can't find the file server {server} (not in public or VPN DNS)")
+        routes = [r for r in state.get("routes") or [] if isinstance(r, str)]
+        try:
+            inside = any(ipaddress.IPv4Address(share_ip) in ipaddress.IPv4Network(r) for r in routes)
+        except ValueError:
+            inside = False
+        if not inside:
+            return _folder_fail(
+                folder, vpn_slug,
+                f"File server {server} ({share_ip}) is outside the VPN routes {', '.join(routes) or '(none)'}",
+            )
+        try:
+            target = secure_mount_point(fp["name"])
+        except HelperError as exc:
+            return _folder_fail(folder, vpn_slug, str(exc))
+        creds = os.path.join(paths(vpn_slug)["dir"], f"{fp['name']}.cred")
+        write_private(creds, render_folder_credentials(spec))
+        try:
+            message = mount_cifs(spec["share"], target, creds, share_ip)
+        finally:
+            remove(creds)
+        if message:
+            return _folder_fail(folder, vpn_slug, message)
+        at = now_iso()
+        state.setdefault("folders", {})[folder] = {"since": at}
+        state["last_activity"] = at
+        save_state(vpn_slug, state)
+        save_state(fp["name"], {"vpn_slug": vpn_slug, "fingerprint": fingerprint,
+                                "last_error": None, "since": at})
+        return folder_doc(folder)
+
+
+def cmd_umount(folder_slug):
+    fp = folder_paths(folder_slug)
+    vpn_slug = folder_doc(folder_slug)["vpn_slug"]
+    if vpn_slug and not vpn_slug.startswith(FOLDER_PREFIX):
+        with slug_lock(vpn_slug):
+            unmount(fp["mount"])
+            state = load_state(vpn_slug)
+            if folder_slug in (state.get("folders") or {}):
+                state["folders"].pop(folder_slug, None)
+                save_state(vpn_slug, state)
+    else:
+        unmount(fp["mount"])
+    save_state(fp["name"], {"vpn_slug": vpn_slug, "last_error": None})
+    return folder_doc(folder_slug)
+
+
+def cmd_fstatus(folder_slug):
+    doc = folder_doc(folder_slug)
+    doc["vpn_state"] = status_doc(doc["vpn_slug"])["state"] if doc["vpn_slug"] else "disconnected"
+    return doc
+
+
+def cmd_fcheck(folder_slug):
+    doc = cmd_fstatus(folder_slug)
+    at = now_iso()
+    if not doc["mounted"]:
+        doc["check"] = {"at": at, "ok": False, "file_count": None,
+                        "message": doc["error"] or "Network folder is not mounted"}
+        return doc
+    if doc["vpn_slug"]:
+        with slug_lock(doc["vpn_slug"]):
+            state = load_state(doc["vpn_slug"])
+            if state.get("phase") == "connected":
+                state["last_activity"] = at
+                save_state(doc["vpn_slug"], state)
+    doc["check"] = dict(walk_check(doc["mount_path"]), at=at)
+    return doc
+
+
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     os.environ["PATH"] = SAFE_PATH
     os.umask(0o077)
     commands = {"up": cmd_up, "down": cmd_down, "status": cmd_status,
-                "check": cmd_check, "idle-check": cmd_idle_check}
+                "check": cmd_check, "idle-check": cmd_idle_check, "mount": cmd_mount,
+                "umount": cmd_umount, "fstatus": cmd_fstatus, "fcheck": cmd_fcheck}
     try:
         if len(argv) != 2 or argv[0] not in commands:
-            raise InputError("usage: hermes-vpn-helper up <spec.json> | down|status|check|idle-check <slug>")
+            raise InputError(
+                "usage: hermes-vpn-helper up|mount <spec.json> | down|status|check|idle-check <slug>"
+                " | umount|fstatus|fcheck <folder_slug>"
+            )
         if os.geteuid() != 0:
             raise HelperError("hermes-vpn-helper must run as root (use sudo -n)")
         doc = commands[argv[0]](argv[1])
