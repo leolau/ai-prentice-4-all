@@ -2,6 +2,7 @@
 
 import { useEffect, useState, useSyncExternalStore } from "react";
 
+import { NetworkFolders } from "@/components/files/NetworkFolders";
 import { searchFolder } from "@/lib/folder-bridge/fsOps";
 import {
   addFolder,
@@ -150,15 +151,20 @@ export function FolderBridgeView() {
 
   if (supported === null) return null;
 
+  // Network folders live on the server, so they work in any browser and
+  // whether or not the bridge below is connected.
   if (!supported) {
     return (
-      <div
-        data-component="FolderBridgeUnsupported"
-        className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface)] p-4 text-sm text-[var(--color-muted)]"
-      >
-        Folder Bridge needs a browser that can open a folder picker (Safari,
-        Chrome, Edge, Brave or Firefox on a Mac). It is not available in this
-        browser.
+      <div data-component="FolderBridgeView" className="flex flex-col gap-4">
+        <div
+          data-component="FolderBridgeUnsupported"
+          className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface)] p-4 text-sm text-[var(--color-muted)]"
+        >
+          Folders on this device need a browser that can open a folder picker
+          (Safari, Chrome, Edge, Brave or Firefox on a Mac). It is not
+          available in this browser; network folders below still work.
+        </div>
+        <NetworkFolders />
       </div>
     );
   }
@@ -233,7 +239,7 @@ export function FolderBridgeView() {
       <section className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface)] p-4">
         <div className="flex items-center justify-between">
           <h2 className="text-xs uppercase tracking-wide text-[var(--color-muted)]">
-            Folders
+            Folders on this Mac
           </h2>
           <button
             type="button"
@@ -301,13 +307,15 @@ export function FolderBridgeView() {
         ) : null}
       </section>
 
+      <NetworkFolders />
+
       <section className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface)] p-4">
         <h2 className="text-xs uppercase tracking-wide text-[var(--color-muted)]">
           Search
         </h2>
         <p className="mt-1 text-xs text-[var(--color-muted)]">
           Preview what the agent can see: matches by file or folder name
-          across the folders above (substring, or a glob such as{" "}
+          across the folders on this Mac (substring, or a glob such as{" "}
           <code>*.pdf</code>; include a <code>/</code> to match the whole
           path, e.g. <code>2026/*.pdf</code>). Tap a result to peek at its text, then ask the agent about it in
           chat.
