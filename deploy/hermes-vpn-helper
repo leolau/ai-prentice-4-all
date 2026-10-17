@@ -829,31 +829,46 @@ def lookup_share_ip(server, info, iface):
     return None
 
 
+SMB_DIALECTS = ("default", "2.0")
+
+
+def _dialect_refused(detail):
+    return "error(95)" in detail or "operation not supported" in detail
+
+
 def mount_cifs(share, target, creds_path, share_ip):
-    """Mount read-only; returns None or a user-readable error."""
+    """Mount read-only; returns None or a user-readable error.
+
+    ``vers=default`` lets client and server agree on SMB 3.1.1/3.0/2.1; SMB 2.0
+    is tried only when the server refuses those. SMB 1.0 is never used.
+    """
     server, share_name, subs = share
     unc = "//" + "/".join([server, share_name, *subs])
-    options = ",".join([
-        "ro", "nosuid", "nodev", "noexec", f"uid={MOUNT_USER}", f"gid={MOUNT_USER}",
-        "file_mode=0440", "dir_mode=0550", f"credentials={creds_path}",
-        "vers=3.0", f"ip={share_ip}",
-    ])
-    try:
-        proc = run([bin_path("mount"), "-t", "cifs", unc, target, "-o", options],
-                   timeout=MOUNT_TIMEOUT)
-    except HelperError:
-        proc = None
-    if proc is not None and proc.returncode == 0:
-        return None
-    detail = ((proc.stderr or proc.stdout) if proc else "timed out").lower()
+    for vers in SMB_DIALECTS:
+        options = ",".join([
+            "ro", "nosuid", "nodev", "noexec", f"uid={MOUNT_USER}", f"gid={MOUNT_USER}",
+            "file_mode=0440", "dir_mode=0550", f"credentials={creds_path}",
+            f"vers={vers}", f"ip={share_ip}",
+        ])
+        try:
+            proc = run([bin_path("mount"), "-t", "cifs", unc, target, "-o", options],
+                       timeout=MOUNT_TIMEOUT)
+        except HelperError:
+            proc = None
+        if proc is not None and proc.returncode == 0:
+            return None
+        detail = ((proc.stderr or proc.stdout) if proc else "timed out").lower()
+        if not _dialect_refused(detail):
+            break
+    else:
+        return (f"File server {server} only offers SMB 1.0, which is not used because it is "
+                "insecure; ask IT to turn on SMB 2 or 3 on it")
     if "permission denied" in detail or "error(13)" in detail:
         return "File share login failed: check the file share username and password"
     if "no such file" in detail or "error(2)" in detail:
         return f"Share {unc} was not found on the file server"
     if "timed out" in detail or "host is down" in detail or "unreachable" in detail:
         return f"File server {server} is not reachable through the VPN"
-    if "error(95)" in detail or "operation not supported" in detail:
-        return f"File server {server} does not offer SMB 3.0"
     return f"Could not mount {unc}"
 
 
@@ -895,7 +910,7 @@ def status_doc(slug):
         "iface": None, "error": state.get("last_error"), "rx_bytes": None,
         "tx_bytes": None, "mounted": is_mounted(p["mount"]), "mount_path": p["mount"],
         "routes": state.get("routes") or [], "cert": None,
-        "last_activity": state.get("last_activity"),
+        "last_activity": state.get("last_activity"), "share_error": None,
     }
     phase = state.get("phase")
     if phase == "needs_cert":
@@ -904,7 +919,8 @@ def status_doc(slug):
         doc["state"] = "connecting"
     elif phase == "connected" and up:
         doc.update(state="connected", since=state.get("since"), local_ip=state.get("local_ip"),
-                   iface=iface, error=None, **iface_bytes(iface))
+                   iface=iface, error=None, share_error=state.get("share_error"),
+                   **iface_bytes(iface))
     elif phase == "connected":
         doc.update(state="error", error="The VPN connection dropped")
     elif doc["error"]:
@@ -952,6 +968,39 @@ def _fail(slug, message, *, state="error", cert=None):
     return status_doc(slug)
 
 
+def mount_vpn_share(slug, spec, target, share_ip):
+    """Mount the VPN's own share; a failure is returned, not fatal to the tunnel."""
+    p = paths(slug)
+    write_private(p["creds"], render_smb_credentials(spec))
+    try:
+        return mount_cifs(spec["share"], target, p["creds"], share_ip)
+    finally:
+        remove(p["creds"])
+
+
+def retry_vpn_share(slug, spec, state):
+    """Mount the VPN's own share again on a live tunnel; the error or None."""
+    iface = state.get("iface") or ""
+    if not IFACE_RE.fullmatch(iface):
+        return "VPN is not connected"
+    server = spec["share"][0]
+    share_ip = lookup_share_ip(server, parse_log(read_log(slug)), iface)
+    if not share_ip:
+        return f"Can't find the file server {server} (not in public or VPN DNS)"
+    routes = [r for r in state.get("routes") or [] if isinstance(r, str)]
+    try:
+        inside = any(ipaddress.IPv4Address(share_ip) in ipaddress.IPv4Network(r) for r in routes)
+    except ValueError:
+        inside = False
+    if not inside:
+        return f"File server {server} ({share_ip}) is outside the VPN routes {', '.join(routes) or '(none)'}"
+    try:
+        target = secure_mount_point(slug)
+    except HelperError as exc:
+        return str(exc)
+    return mount_vpn_share(slug, spec, target, share_ip)
+
+
 def cmd_up(spec_path):
     spec = validate_spec(read_spec_file(spec_path))
     slug = spec["slug"]
@@ -961,6 +1010,8 @@ def cmd_up(spec_path):
         prior = load_state(slug)
         if current["state"] == "connected" and prior.get("fingerprint") == fp:
             prior["last_activity"] = now_iso()
+            if spec["share"] and not current["mounted"]:
+                prior["share_error"] = retry_vpn_share(slug, spec, prior)
             save_state(slug, prior)
             return status_doc(slug)
         do_down(slug)
@@ -1012,6 +1063,7 @@ def cmd_up(spec_path):
         save_state(slug, state)
         routes = list(spec["routes"])
         share_ip = None
+        share_error = None
         if spec["share"]:
             server = spec["share"][0]
             share_ip = lookup_share_ip(server, info, iface)
@@ -1037,13 +1089,7 @@ def cmd_up(spec_path):
                 target = secure_mount_point(slug)
             except HelperError as exc:
                 return _fail(slug, str(exc))
-            write_private(p["creds"], render_smb_credentials(spec))
-            try:
-                message = mount_cifs(spec["share"], target, p["creds"], share_ip)
-            finally:
-                remove(p["creds"])
-            if message:
-                return _fail(slug, message)
+            share_error = mount_vpn_share(slug, spec, target, share_ip)
         if spec["idle_minutes"] > 0:
             run([
                 bin_path("systemd-run"), f"--unit={p['timer']}", "--collect", "--quiet",
@@ -1053,7 +1099,7 @@ def cmd_up(spec_path):
         state.update(
             phase="connected", since=now_iso(), local_ip=info["local_ip"],
             idle_minutes=spec["idle_minutes"], last_activity=now_iso(),
-            last_bytes=_safe_counters(iface), last_error=None,
+            last_bytes=_safe_counters(iface), last_error=None, share_error=share_error,
         )
         save_state(slug, state)
         return status_doc(slug)
@@ -1105,6 +1151,10 @@ def cmd_check(slug):
         state = load_state(slug)
         state["last_activity"] = at
         save_state(slug, state)
+    if not doc["mounted"] and doc["share_error"]:
+        doc["check"] = {"at": at, "ok": False, "file_count": None,
+                        "message": f"VPN connected, but the file share failed: {doc['share_error']}"}
+        return doc
     if not doc["mounted"]:
         doc["check"] = {"at": at, "ok": True, "file_count": None,
                         "message": "VPN connected; no file share is configured."}
