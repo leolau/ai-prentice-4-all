@@ -1229,7 +1229,7 @@ export interface NetworkFolderView {
   id: string;
   name: string;
   vpn: string;
-  vpn_slug: string;
+  vpn_slug: string | null;
   /** Normalised `//server/share[/sub...]`. */
   share_path: string;
   share_username: string | null;
