@@ -1202,6 +1202,56 @@ export interface VpnView {
   status: VpnStatus;
 }
 
+/** Last "Save & test" / Test result for a network folder. */
+export interface NetworkFolderLastCheck {
+  at: string;
+  ok: boolean;
+  file_count: number | null;
+  message: string;
+}
+
+export interface NetworkFolderStatus {
+  vpn_state: VpnState;
+  mounted: boolean;
+  /** Last mount/connect error, user-readable (never a secret). */
+  error: string | null;
+  last_check: NetworkFolderLastCheck | null;
+}
+
+/**
+ * One "network folder" (credential kind `smb-folder`) as returned by Hermes
+ * `/api/vpn/folders`: an SMB share mounted read-only through one of the
+ * caller's Fortinet VPNs and served to the agent by the Folder Bridge tools.
+ * Never carries the share password.
+ */
+export interface NetworkFolderView {
+  /** Stable `net-<slug>` id, the bridge folderId the agent uses. */
+  id: string;
+  name: string;
+  vpn: string;
+  vpn_slug: string;
+  /** Normalised `//server/share[/sub...]`. */
+  share_path: string;
+  share_username: string | null;
+  has_share_password: boolean;
+  share_domain: string | null;
+  trusted_for_import: boolean;
+  mount_path: string;
+  status: NetworkFolderStatus;
+}
+
+/** Body of POST /api/vpn/folders and PUT /api/vpn/folders/{name}. On PUT an
+ *  omitted or empty `share_password` keeps the stored one. */
+export interface NetworkFolderInput {
+  name: string;
+  vpn: string;
+  share_path: string;
+  share_username?: string | null;
+  share_password?: string;
+  share_domain?: string | null;
+  trusted_for_import?: boolean;
+}
+
 /**
  * One account in the deployment email poller's config — separate axis from
  * the credential's `email` service flag (that one marks the credential as
