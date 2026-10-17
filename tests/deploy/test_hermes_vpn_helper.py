@@ -1074,3 +1074,28 @@ def test_main_folder_commands(h, monkeypatch, capsys):
     assert json.loads(capsys.readouterr().out)["check"]["ok"] is True
     assert h.main(["umount", "tenders"]) == 0
     assert json.loads(capsys.readouterr().out)["mounted"] is False
+
+
+@pytest.mark.parametrize(
+    "stderr, expected",
+    [
+        ("mount error(13): Permission denied", "File share login failed"),
+        (
+            "mount error(2): No such file or directory",
+            "was not found on the file server",
+        ),
+        ("mount error(112): Host is down", "is not reachable through the VPN"),
+        ("mount error(95): Operation not supported", "does not offer SMB 3.0"),
+        ("mount error(22): Invalid argument", "Could not mount //fs01/Projects"),
+    ],
+)
+def test_mount_cifs_error_messages(h, monkeypatch, stderr, expected):
+    class Proc:
+        returncode = 32
+        stdout = ""
+
+    proc = Proc()
+    proc.stderr = stderr
+    monkeypatch.setattr(h, "run", lambda argv, **kw: proc)
+    message = h.mount_cifs(("fs01", "Projects", []), "/x", "/c", "10.20.1.9")
+    assert expected in message

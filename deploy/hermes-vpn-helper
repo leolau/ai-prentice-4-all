@@ -852,6 +852,8 @@ def mount_cifs(share, target, creds_path, share_ip):
         return f"Share {unc} was not found on the file server"
     if "timed out" in detail or "host is down" in detail or "unreachable" in detail:
         return f"File server {server} is not reachable through the VPN"
+    if "error(95)" in detail or "operation not supported" in detail:
+        return f"File server {server} does not offer SMB 3.0"
     return f"Could not mount {unc}"
 
 
