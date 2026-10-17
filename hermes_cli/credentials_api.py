@@ -143,6 +143,14 @@ async def put_credential(request: Request, provider: str, name: str):
     kind = str(body.get("kind") or "")
     payload = dict(body.get("payload") or {})
     spec = CREDENTIAL_KINDS.get(kind)
+    from hermes_cli import vpn
+
+    if provider == vpn.PROVIDER:
+        # VPNs and network folders share provider "fortinet" (and so one name
+        # space per owner): never let one silently replace the other.
+        clash = await _own_entry(store, principal, provider, name)
+        if clash is not None and clash.kind != kind:
+            raise HTTPException(409, f"'{name}' is already used by a {clash.kind} entry")
     if spec is not None and spec.keep_secrets_on_put:
         existing = await _own_entry(store, principal, provider, name)
         if existing is not None and existing.kind == kind:
@@ -188,12 +196,19 @@ async def delete_credential(request: Request, provider: str, name: str):
     from hermes_cli import vpn
 
     if provider == vpn.PROVIDER:
+        from hermes_cli import vpn_folders
+
         existing = await _own_entry(store, principal, provider, name)
         if existing is not None and existing.kind == vpn.KIND:
             try:
                 await vpn.forget(existing)
             except Exception:  # noqa: BLE001 - deleting must still work
                 logger.warning("VPN disconnect before delete failed", exc_info=True)
+        elif existing is not None and existing.kind == vpn_folders.KIND:
+            try:
+                await vpn_folders.forget(existing)
+            except Exception:  # noqa: BLE001 - deleting must still work
+                logger.warning("network folder unmount before delete failed", exc_info=True)
     deleted = await store.delete(principal, provider, name)
     if not deleted:
         raise HTTPException(404, "credential not found")

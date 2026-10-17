@@ -161,6 +161,46 @@ def _validate_fortinet_vpn(payload: Mapping[str, Any]) -> None:
         fail("idle_minutes must be an integer 0-1440")
 
 
+_SMB_PATH = re.compile(
+    r"^//[A-Za-z0-9.-]{1,253}/[A-Za-z0-9 ._$-]{1,80}"
+    r"(/[^/\\\x00-\x1f\x7f:*?\"<>|,]{1,255})*$"
+)
+
+
+def _validate_smb_folder(payload: Mapping[str, Any]) -> None:
+    """Shape checks for ``smb-folder`` (a network folder reached through a
+    ``fortinet-vpn`` entry); the root helper re-validates before mounting."""
+
+    def fail(msg: str) -> None:
+        raise CredentialError(f"smb-folder: {msg}")
+
+    vpn_name = payload.get("vpn")
+    if not isinstance(vpn_name, str) or not _VALID_NAME.fullmatch(vpn_name):
+        fail("vpn must be the name of a saved VPN")
+    share = payload.get("share_path")
+    if (
+        not isinstance(share, str)
+        or not _SMB_PATH.fullmatch(share)
+        or any(part in (".", "..") for part in share[2:].split("/"))
+    ):
+        fail("share_path must look like //server/share[/folder]")
+    password = payload.get("share_password")
+    if password not in (None, ""):
+        if not isinstance(password, str) or len(password) > 256:
+            fail("share_password must be a string of at most 256 characters")
+        if _CONTROL.search(password) or password != password.strip():
+            fail("share_password must not contain control characters or edge spaces")
+    for key in ("share_username", "share_domain"):
+        value = payload.get(key)
+        if value not in (None, "") and (
+            not isinstance(value, str) or not _FORTI_ACCOUNT.fullmatch(value)
+        ):
+            fail(f"{key} may only contain letters, digits, spaces and ._@-")
+    trusted = payload.get("trusted_for_import")
+    if trusted is not None and not isinstance(trusted, bool):
+        fail("trusted_for_import must be true or false")
+
+
 CREDENTIAL_KINDS: Dict[str, KindSpec] = {
     "google-oauth2": KindSpec(
         name="google-oauth2",
@@ -195,6 +235,15 @@ CREDENTIAL_KINDS: Dict[str, KindSpec] = {
         keep_secrets_on_put=True,
         materialize=False,
         validator=_validate_fortinet_vpn,
+    ),
+    "smb-folder": KindSpec(
+        name="smb-folder",
+        required=("vpn", "share_path"),
+        optional=("share_username", "share_password", "share_domain", "trusted_for_import"),
+        secret_fields=("share_password",),
+        keep_secrets_on_put=True,
+        materialize=False,
+        validator=_validate_smb_folder,
     ),
 }
 

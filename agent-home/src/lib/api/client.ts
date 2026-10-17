@@ -88,6 +88,8 @@ import type {
   SessionCreateResponse,
   CredentialEntry,
   EmailPollerAccount,
+  NetworkFolderInput,
+  NetworkFolderView,
   VpnView,
   WaBridge,
   SessionTag,
@@ -2301,6 +2303,47 @@ export class HermesApiClient {
       method: "POST",
       json: { sha256 },
     });
+  }
+
+  // -- network folders (Files → Bridge → through a VPN) ---------------------
+
+  /** The caller's own network folders with mount / VPN status. */
+  async networkFolders(): Promise<{ folders: NetworkFolderView[] }> {
+    return this.request("/api/vpn/folders");
+  }
+
+  async createNetworkFolder(body: NetworkFolderInput): Promise<NetworkFolderView> {
+    return this.request("/api/vpn/folders", { method: "POST", json: body });
+  }
+
+  /** Replace a network folder; `body.name` may rename it. */
+  async updateNetworkFolder(
+    name: string,
+    body: NetworkFolderInput,
+  ): Promise<NetworkFolderView> {
+    return this.request(`/api/vpn/folders/${encodeURIComponent(name)}`, {
+      method: "PUT",
+      json: body,
+    });
+  }
+
+  /** Unmount and delete a network folder. */
+  async deleteNetworkFolder(name: string): Promise<{ ok: boolean }> {
+    return this.request(`/api/vpn/folders/${encodeURIComponent(name)}`, {
+      method: "DELETE",
+    });
+  }
+
+  /** `test` connects the VPN if needed, mounts and counts files (result in
+   *  `status.last_check`); `disconnect` unmounts only, the VPN stays up. */
+  async networkFolderAction(
+    name: string,
+    action: "test" | "disconnect",
+  ): Promise<NetworkFolderView> {
+    return this.request(
+      `/api/vpn/folders/${encodeURIComponent(name)}/${action}`,
+      { method: "POST" },
+    );
   }
 
   /** Email-poller account flags (deployment poller config; owner-gated). */

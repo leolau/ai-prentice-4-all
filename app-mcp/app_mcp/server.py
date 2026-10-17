@@ -21,6 +21,12 @@ Caddy fronts:
   before anything sensitive runs — see README.md "MCP tools" for the full
   recommendation and why reads are gated too.
 
+Network folders (``net-*`` folder ids, SMB shares the Hermes server mounts
+read-only through a user's VPN) are served here, server-side, from their
+mount under ``/opt/data/vpn-files`` — see ``netfolders.py``. They work with
+no browser connected; ``APP_MCP_HERMES_TOKEN`` (+ optional
+``APP_MCP_HERMES_URL``) lets app-mcp ask Hermes to mount/import.
+
 Config via env: ``APP_MCP_TICKET_SECRET`` (required — shared with the
 agent-home BFF's ``AGENT_HOME_APP_MCP_SECRET``), ``APP_MCP_PORT``,
 ``APP_MCP_WS_PORT``, ``APP_MCP_COMMAND_TIMEOUT``,
@@ -39,6 +45,7 @@ from urllib.parse import parse_qs, urlparse
 import websockets
 from mcp.server.fastmcp import FastMCP
 
+from . import netfolders as nf
 from .guard import looks_destructive
 from .help import help_for
 from .hub import Hub, HubError
@@ -58,6 +65,7 @@ FOLDER_COMMAND_TIMEOUT = float(
 hub = Hub(timeout=COMMAND_TIMEOUT)
 folder_hub = Hub(timeout=FOLDER_COMMAND_TIMEOUT)
 mcp = FastMCP("app", host="127.0.0.1", port=MCP_PORT)
+hermes = nf.HermesClient()
 
 SAFE_ACTIONS = {"click", "type", "select", "focus", "read", "scroll", "navigate", "snapshot"}
 DESTRUCTIVE_REFUSAL = (
@@ -308,6 +316,27 @@ async def _folder_command(command: dict[str, Any]) -> dict[str, Any]:
         return {"ok": False, "detail": str(err)}
 
 
+async def _network_folders() -> tuple[list[dict[str, Any]], str | None]:
+    """(records, error) for every network folder on the box."""
+    if not hermes.configured:
+        return [], None
+    try:
+        return [nf.folder_record(v) for v in await hermes.list_folders()], None
+    except nf.NetFolderError as err:
+        return [], str(err)
+
+
+async def _net_call(folder_id: str, fn: Any, *args: Any) -> dict[str, Any]:
+    """Run one filesystem op on a mounted network folder (mounting it first)."""
+    try:
+        root = await nf.ensure_root(hermes, folder_id)
+        return await asyncio.to_thread(fn, root, folder_id, *args)
+    except nf.NetFolderError as err:
+        return {"ok": False, "detail": str(err)}
+    except OSError as err:
+        return {"ok": False, "detail": f"File server error: {err.strerror or err}"}
+
+
 @mcp.tool()
 async def folder_bridge_state() -> dict[str, Any]:
     """Whether a Folder Bridge browser session is connected right now, and
@@ -318,17 +347,42 @@ async def folder_bridge_state() -> dict[str, Any]:
     `active_upload: {bytes_sent, bytes_total, percent}` from the browser's
     live upload progress — useful for reassuring the user a large import
     hasn't stalled without waiting for the (possibly very long) tool call
-    itself to return."""
-    return folder_hub.state_summary()
+    itself to return. `network_folders` counts the server-side network
+    folders (office file shares through a VPN), which work without a
+    browser session."""
+    summary = folder_hub.state_summary()
+    folders, error = await _network_folders()
+    summary["network_folders"] = len(folders)
+    summary["network_folders_mounted"] = sum(1 for f in folders if f["mounted"])
+    if error:
+        summary["network_folders_error"] = error
+    return summary
 
 
 @mcp.tool()
 async def folder_bridge_list_folders() -> dict[str, Any]:
-    """List every folder the user has approved in their current Folder
-    Bridge session: folder id, label, and whether its permission is still
-    active. Use the returned folder ids with the other folder_bridge_*
+    """List every folder the agent can use: the folders the user approved in
+    their current Folder Bridge browser session, plus network folders
+    (`kind: "network"`, ids `net-…`: office file shares reached through a
+    VPN, read-only, available even when no browser is connected; they are
+    mounted on first use). Each has id, label, permission and `trusted`
+    (import without asking). Use the ids with the other folder_bridge_*
     tools."""
-    return await _folder_command({"type": "listFolders"})
+    network, net_error = await _network_folders()
+    browser: dict[str, Any] = {"ok": False, "detail": NOT_CONNECTED_HINT}
+    if folder_hub.connected:
+        browser = await _folder_command({"type": "listFolders"})
+    if not network and not net_error:
+        return browser
+    out: dict[str, Any] = {
+        "ok": True,
+        "folders": list(browser.get("folders") or []) + network,
+    }
+    if not browser.get("ok"):
+        out["browser"] = browser.get("detail")
+    if net_error:
+        out["network_error"] = net_error
+    return out
 
 
 @mcp.tool()
@@ -337,6 +391,8 @@ async def folder_bridge_list_directory(
 ) -> dict[str, Any]:
     """List the contents of a directory inside one approved folder.
     `path` is relative to the folder root (omit or "" for the root)."""
+    if nf.is_net_id(folder_id):
+        return await _net_call(folder_id, nf.list_directory, path or "")
     return await _folder_command(
         {"type": "listDirectory", "folderId": folder_id, "path": path or ""}
     )
@@ -354,16 +410,56 @@ async def folder_bridge_search_files(
     the whole "Folder label/relative/path") plus a short content snippet
     where feasible, across one or more approved folders. `folder_ids` from
     folder_bridge_list_folders; `extensions` optionally narrows to file
-    types (e.g. [".md", ".pdf", ".txt"])."""
-    return await _folder_command(
-        {
-            "type": "searchFiles",
-            "folderIds": folder_ids,
-            "query": query,
-            "extensions": extensions or [],
-            "limit": limit,
-        }
-    )
+    types (e.g. [".md", ".pdf", ".txt"]). Browser and network (`net-…`)
+    folder ids may be mixed."""
+    net_ids = [f for f in folder_ids if nf.is_net_id(f)]
+    browser_ids = [f for f in folder_ids if not nf.is_net_id(f)]
+    matches: list[dict[str, Any]] = []
+    problems: list[str] = []
+    if browser_ids:
+        result = await _folder_command(
+            {
+                "type": "searchFiles",
+                "folderIds": browser_ids,
+                "query": query,
+                "extensions": extensions or [],
+                "limit": limit,
+            }
+        )
+        if not net_ids:
+            return result
+        if result.get("ok"):
+            matches.extend(result.get("matches") or [])
+        else:
+            problems.append(str(result.get("detail")))
+    labels: dict[str, str] = {}
+    if net_ids:
+        network, net_error = await _network_folders()
+        labels = {f["id"]: f["label"] for f in network}
+        if net_error:
+            problems.append(net_error)
+    for fid in net_ids:
+        if len(matches) >= limit:
+            break
+        if fid not in labels:
+            problems.append(f"{fid}: unknown network folder")
+            continue
+        try:
+            root = await nf.ensure_root(hermes, fid)
+            found = await asyncio.to_thread(
+                nf.search_folder, root, fid, labels[fid], query, extensions or [],
+                limit - len(matches),
+            )
+        except (nf.NetFolderError, OSError) as err:
+            problems.append(f"{labels[fid]}: {err}")
+            continue
+        matches.extend(found)
+    if not matches and problems:
+        return {"ok": False, "detail": "; ".join(problems)}
+    out: dict[str, Any] = {"ok": True, "matches": matches[:limit]}
+    if problems:
+        out["warnings"] = problems
+    return out
 
 
 @mcp.tool()
@@ -376,6 +472,8 @@ async def folder_bridge_read_file(
     copies the bytes intact into Files instead of decoding them. This is a
     read of the user's own local files — Hermes recommends gating this tool
     behind approvals.tools so the user sees and approves each read in chat."""
+    if nf.is_net_id(folder_id):
+        return await _net_call(folder_id, nf.read_file, path, max_bytes)
     return await _folder_command(
         {
             "type": "readFile",
@@ -388,6 +486,13 @@ async def folder_bridge_read_file(
 
 
 async def _import_file(folder_id: str, path: str, *, approved: bool) -> dict[str, Any]:
+    if nf.is_net_id(folder_id):
+        # Hermes (which holds the Storage credentials) reads the mount and
+        # enforces "trusted for import" again; bytes never pass through here.
+        try:
+            return await hermes.import_file(folder_id, path, approved)
+        except nf.NetFolderError as err:
+            return {"ok": False, "detail": str(err)}
     return await _folder_command(
         {"type": "importFile", "folderId": folder_id, "path": path, "approved": approved}
     )
@@ -419,6 +524,8 @@ async def folder_bridge_import_file_approved(folder_id: str, path: str) -> dict[
 async def folder_bridge_get_file_metadata(folder_id: str, path: str) -> dict[str, Any]:
     """Get a file's size, last-modified time and path without reading its
     content."""
+    if nf.is_net_id(folder_id):
+        return await _net_call(folder_id, nf.file_metadata, path)
     return await _folder_command(
         {"type": "getFileMetadata", "folderId": folder_id, "path": path}
     )

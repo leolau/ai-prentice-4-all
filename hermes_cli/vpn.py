@@ -78,6 +78,9 @@ def slug_base(name: str) -> str:
     text = re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")[:41].strip("-")
     if not text:
         text = "vpn-" + hashlib.sha256(name.encode()).hexdigest()[:8]
+    if text.startswith("net-"):
+        # ``net-*`` is reserved for network-folder mounts (vpn_folders.py).
+        text = ("vpn-" + text)[:41].rstrip("-")
     return text
 
 
