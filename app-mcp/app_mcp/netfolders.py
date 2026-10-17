@@ -155,7 +155,7 @@ async def ensure_root(client: HermesClient, folder_id: str, *, mounted=is_mounte
 
 def _parts(path: str | None) -> list[str]:
     text = (path or "").replace("\\", "/")
-    parts = [p for p in text.split("/") if p not in ("", ".")]
+    parts: list[str] = [p for p in text.split("/") if p not in ("", ".")]
     if any(p == ".." or "\x00" in p for p in parts):
         raise NetFolderError("Paths must stay inside the folder ('..' is not allowed).")
     return parts
